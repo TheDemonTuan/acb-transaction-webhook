@@ -25,6 +25,7 @@ type BarkConfig struct {
 	Group              string `json:"group,omitempty"`
 	Level              string `json:"level,omitempty"`
 	Sound              string `json:"sound,omitempty"`
+	Icon               string `json:"icon,omitempty"`
 	IncludeBalance     bool   `json:"includeBalance"`
 	IncludeDescription bool   `json:"includeDescription"`
 	DashboardLink      bool   `json:"dashboardLink"`
@@ -60,6 +61,7 @@ func DefaultBarkConfig() BarkConfig {
 		Group:              "ACB",
 		Level:              "timeSensitive",
 		Sound:              "shake",
+		Icon:               "https://api.vietqr.io/img/ACB.png",
 		IncludeBalance:     false,
 		IncludeDescription: true,
 		DashboardLink:      true,
@@ -88,6 +90,12 @@ func ValidateAndNormalizeBarkConfig(cfg *BarkConfig) (BarkConfig, error) {
 				return res, fmt.Errorf("sound name too long (max 64): %s", s)
 			}
 			res.Sound = s
+		}
+		if ic := strings.TrimSpace(cfg.Icon); ic != "" {
+			if len(ic) > 500 {
+				return res, fmt.Errorf("icon URL too long (max 500): %s", ic)
+			}
+			res.Icon = ic
 		}
 		res.IncludeBalance = cfg.IncludeBalance
 		res.IncludeDescription = cfg.IncludeDescription

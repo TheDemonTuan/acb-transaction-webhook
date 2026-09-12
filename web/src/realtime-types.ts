@@ -19,6 +19,7 @@ export type BarkConfig = {
   group?: string;
   level?: 'passive' | 'active' | 'timeSensitive';
   sound?: string;
+  icon?: string;
   includeBalance: boolean;
   includeDescription: boolean;
   dashboardLink: boolean;

@@ -39,11 +39,14 @@ func NewSender(cfg Config, client *http.Client, publicOrigin string) *Sender {
 type pushPayload struct {
 	DeviceKey string `json:"device_key"`
 	Title     string `json:"title"`
+	Subtitle  string `json:"subtitle,omitempty"`
 	Body      string `json:"body"`
 	Group     string `json:"group,omitempty"`
 	Sound     string `json:"sound,omitempty"`
 	Level     string `json:"level,omitempty"`
+	Icon      string `json:"icon,omitempty"`
 	URL       string `json:"url,omitempty"`
+	IsArchive string `json:"isArchive,omitempty"`
 }
 
 type barkResponse struct {
@@ -75,16 +78,19 @@ func (s *Sender) Send(ctx context.Context, req notification.SendRequest) notific
 		}
 	}
 
-	title, body, group, sound, level, linkURL := FormatTransactionNotification(eventData, cfg, s.publicOrigin)
+	title, subtitle, body, group, sound, level, icon, linkURL := FormatTransactionNotification(eventData, cfg, s.publicOrigin)
 
 	payload := pushPayload{
 		DeviceKey: string(req.Target.Secret),
 		Title:     title,
+		Subtitle:  subtitle,
 		Body:      body,
 		Group:     group,
 		Sound:     sound,
 		Level:     level,
+		Icon:      icon,
 		URL:       linkURL,
+		IsArchive: "1",
 	}
 
 	return s.doPush(ctx, payload)
@@ -104,15 +110,18 @@ func (s *Sender) SendTestNotification(ctx context.Context, target storage.Delive
 		cfg = *target.BarkConfig
 	}
 
-	title, body, group, sound, level := FormatTestNotification(cfg)
+	title, subtitle, body, group, sound, level, icon := FormatTestNotification(cfg)
 
 	payload := pushPayload{
 		DeviceKey: string(target.Secret),
 		Title:     title,
+		Subtitle:  subtitle,
 		Body:      body,
 		Group:     group,
 		Sound:     sound,
 		Level:     level,
+		Icon:      icon,
+		IsArchive: "1",
 	}
 
 	return s.doPush(ctx, payload)

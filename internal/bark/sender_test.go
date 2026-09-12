@@ -76,6 +76,12 @@ func TestBarkSenderHappyPath(t *testing.T) {
 	if receivedPayload.DeviceKey != "test_device_key_abc" {
 		t.Fatalf("expected device key received, got: %s", receivedPayload.DeviceKey)
 	}
+	if receivedPayload.Icon != "https://api.vietqr.io/img/ACB.png" {
+		t.Fatalf("expected default ACB icon, got: %s", receivedPayload.Icon)
+	}
+	if receivedPayload.IsArchive != "1" {
+		t.Fatalf("expected isArchive to be 1, got: %s", receivedPayload.IsArchive)
+	}
 	if receivedAuth == "" {
 		t.Fatalf("expected Basic Auth header to be present")
 	}

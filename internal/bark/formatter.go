@@ -47,7 +47,7 @@ func maskSensitiveNumbers(desc string) string {
 	})
 }
 
-func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkConfig, publicOrigin string) (title, body, group, sound, level, linkURL string) {
+func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkConfig, publicOrigin string) (title, subtitle, body, group, sound, level, icon, linkURL string) {
 	creditStr, _ := eventData["credit"].(string)
 	if creditStr == "" {
 		creditStr = "0"
@@ -61,6 +61,16 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 		title = fmt.Sprintf("🕓 ACB +%s (bù dữ liệu)", formattedAmount)
 	} else {
 		title = fmt.Sprintf("💰 ACB +%s", formattedAmount)
+	}
+
+	accMasked, _ := eventData["account"].(string)
+	if accMasked == "" {
+		accMasked, _ = eventData["accountMasked"].(string)
+	}
+	if accMasked != "" {
+		subtitle = fmt.Sprintf("Tài khoản %s • Biến động số dư", accMasked)
+	} else {
+		subtitle = "Biến động số dư tài khoản"
 	}
 
 	var bodyLines []string
@@ -126,6 +136,11 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 		level = "timeSensitive"
 	}
 
+	icon = cfg.Icon
+	if icon == "" {
+		icon = "https://api.vietqr.io/img/ACB.png"
+	}
+
 	if cfg.DashboardLink && publicOrigin != "" {
 		txnID, _ := eventData["transactionId"].(string)
 		if txnID != "" {
@@ -135,12 +150,13 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 		}
 	}
 
-	return title, body, group, sound, level, linkURL
+	return title, subtitle, body, group, sound, level, icon, linkURL
 }
 
-func FormatTestNotification(cfg storage.BarkConfig) (title, body, group, sound, level string) {
+func FormatTestNotification(cfg storage.BarkConfig) (title, subtitle, body, group, sound, level, icon string) {
 	title = "✅ Bark đã kết nối"
-	body = "ACB Transaction Webhook có thể gửi thông báo tới thiết bị này."
+	subtitle = "ACB Transaction Gateway"
+	body = "Hệ thống đã kết nối thành công và có thể gửi thông báo biến động số dư tới iPhone này."
 
 	group = cfg.Group
 	if group == "" {
@@ -157,5 +173,10 @@ func FormatTestNotification(cfg storage.BarkConfig) (title, body, group, sound, 
 		level = "timeSensitive"
 	}
 
-	return title, body, group, sound, level
+	icon = cfg.Icon
+	if icon == "" {
+		icon = "https://api.vietqr.io/img/ACB.png"
+	}
+
+	return title, subtitle, body, group, sound, level, icon
 }

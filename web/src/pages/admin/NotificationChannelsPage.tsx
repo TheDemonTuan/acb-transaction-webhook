@@ -46,6 +46,7 @@ export const NotificationChannelsPage: React.FC = () => {
   const [barkGroup, setBarkGroup] = useState('ACB');
   const [barkLevel, setBarkLevel] = useState<'passive' | 'active' | 'timeSensitive'>('timeSensitive');
   const [barkSound, setBarkSound] = useState('shake');
+  const [barkIcon, setBarkIcon] = useState('https://api.vietqr.io/img/ACB.png');
   const [includeBalance, setIncludeBalance] = useState(false);
   const [includeDescription, setIncludeDescription] = useState(true);
   const [dashboardLink, setDashboardLink] = useState(true);
@@ -73,6 +74,7 @@ export const NotificationChannelsPage: React.FC = () => {
     group: 'ACB',
     level: 'timeSensitive',
     sound: 'shake',
+    icon: 'https://api.vietqr.io/img/ACB.png',
     includeBalance: false,
     includeDescription: true,
     dashboardLink: true,
@@ -130,6 +132,7 @@ export const NotificationChannelsPage: React.FC = () => {
             group: barkGroup.trim() || 'ACB',
             level: barkLevel,
             sound: barkSound.trim() || 'shake',
+            icon: barkIcon.trim() || 'https://api.vietqr.io/img/ACB.png',
             includeBalance,
             includeDescription,
             dashboardLink,
@@ -192,6 +195,7 @@ export const NotificationChannelsPage: React.FC = () => {
         group: 'ACB',
         level: 'timeSensitive',
         sound: 'shake',
+        icon: 'https://api.vietqr.io/img/ACB.png',
         includeBalance: false,
         includeDescription: true,
         dashboardLink: true,
@@ -576,6 +580,28 @@ export const NotificationChannelsPage: React.FC = () => {
                     </select>
                   </div>
 
+                  <div className="sm:col-span-3">
+                    <label htmlFor="bark-icon" className="block text-2xs font-semibold text-stone-700 mb-1">
+                      Icon thông báo (URL ảnh hiển thị trên iPhone)
+                    </label>
+                    <div className="flex items-center gap-2.5">
+                      <img
+                        src={barkIcon || 'https://api.vietqr.io/img/ACB.png'}
+                        alt="Icon preview"
+                        className="w-8 h-8 rounded-lg border border-stone-200 object-contain bg-white shrink-0 p-0.5 shadow-2xs"
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://api.vietqr.io/img/ACB.png'; }}
+                      />
+                      <input
+                        id="bark-icon"
+                        type="url"
+                        value={barkIcon}
+                        onChange={(e) => setBarkIcon(e.target.value)}
+                        placeholder="https://api.vietqr.io/img/ACB.png"
+                        className="w-full px-3 py-2 rounded-lg border border-stone-200 text-xs bg-white focus:outline-none font-mono"
+                      />
+                    </div>
+                  </div>
+
                   <div className="sm:col-span-3 flex flex-wrap gap-6 pt-2 border-t border-stone-200/60">
                     <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
                       <input
@@ -653,6 +679,14 @@ export const NotificationChannelsPage: React.FC = () => {
                 >
                   <div className="space-y-1.5 max-w-xl">
                     <div className="flex flex-wrap items-center gap-2">
+                      {isBark && (
+                        <img
+                          src={ch.barkConfig?.icon || 'https://api.vietqr.io/img/ACB.png'}
+                          alt="Icon"
+                          className="w-5 h-5 rounded-md border border-stone-200 object-contain bg-white shrink-0"
+                          onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://api.vietqr.io/img/ACB.png'; }}
+                        />
+                      )}
                       <span className="font-bold text-sm text-stone-900">{ch.name}</span>
 
                       {/* Provider Badge */}
@@ -835,6 +869,25 @@ export const NotificationChannelsPage: React.FC = () => {
                       <option value="active">active (Bình thường)</option>
                       <option value="passive">passive (Yên lặng)</option>
                     </select>
+                  </div>
+
+                  <div className="col-span-2">
+                    <label className="block text-2xs font-semibold text-stone-700 mb-1">Icon thông báo (URL ảnh)</label>
+                    <div className="flex items-center gap-2">
+                      <img
+                        src={editBarkConfig.icon || 'https://api.vietqr.io/img/ACB.png'}
+                        alt="Icon"
+                        className="w-7 h-7 rounded-md border border-stone-200 object-contain bg-white shrink-0 p-0.5"
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://api.vietqr.io/img/ACB.png'; }}
+                      />
+                      <input
+                        type="url"
+                        value={editBarkConfig.icon || ''}
+                        onChange={(e) => setEditBarkConfig({ ...editBarkConfig, icon: e.target.value })}
+                        placeholder="https://api.vietqr.io/img/ACB.png"
+                        className="w-full px-3 py-1.5 rounded-lg border border-stone-200 text-xs font-mono focus:outline-none"
+                      />
+                    </div>
                   </div>
 
                   <div className="col-span-2 space-y-2 pt-1 border-t border-stone-100">

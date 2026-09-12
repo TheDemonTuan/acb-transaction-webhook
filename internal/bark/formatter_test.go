@@ -44,10 +44,13 @@ func TestFormatTransactionNotificationRealtime(t *testing.T) {
 	cfg.IncludeDescription = true
 	cfg.DashboardLink = true
 
-	title, body, group, sound, level, linkURL := FormatTransactionNotification(eventData, cfg, "https://bank.example.com")
+	title, subtitle, body, group, sound, level, icon, linkURL := FormatTransactionNotification(eventData, cfg, "https://bank.example.com")
 
 	if title != "💰 ACB +2.500.000đ" {
 		t.Fatalf("unexpected title: %s", title)
+	}
+	if !strings.Contains(subtitle, "Biến động số dư") {
+		t.Fatalf("unexpected subtitle: %s", subtitle)
 	}
 	if !strings.Contains(body, "Mô tả:") {
 		t.Fatalf("expected description in body, got: %s", body)
@@ -61,6 +64,9 @@ func TestFormatTransactionNotificationRealtime(t *testing.T) {
 	}
 	if group != "ACB" || sound != "shake" || level != "timeSensitive" {
 		t.Fatalf("unexpected group/sound/level: %s %s %s", group, sound, level)
+	}
+	if icon != "https://api.vietqr.io/img/ACB.png" {
+		t.Fatalf("unexpected icon: %s", icon)
 	}
 	if linkURL != "https://bank.example.com/transactions/txn_123" {
 		t.Fatalf("unexpected linkURL: %s", linkURL)
@@ -81,7 +87,7 @@ func TestFormatTransactionNotificationCatchUp(t *testing.T) {
 	cfg.IncludeBalance = false
 	cfg.IncludeDescription = true
 
-	title, body, _, _, _, _ := FormatTransactionNotification(eventData, cfg, "")
+	title, _, body, _, _, _, _, _ := FormatTransactionNotification(eventData, cfg, "")
 
 	if !strings.Contains(title, "(bù dữ liệu)") {
 		t.Fatalf("expected catch-up marker in title, got: %s", title)
