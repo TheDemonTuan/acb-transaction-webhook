@@ -220,7 +220,7 @@ jobs:
             deploy/smoke-test-bark.sh deploy/README.md \
             "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "chmod 750 '$DEPLOY_PATH/'*.sh"
+            "$VPS_USER@$VPS_HOST" "chmod 755 '$DEPLOY_PATH/'*.sh"
       - name: Deploy immutable image
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}

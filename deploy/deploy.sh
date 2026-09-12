@@ -156,6 +156,11 @@ if [[ ! -f "$bark_pass_file" ]]; then
 fi
 ensure_secret_permissions "$bark_pass_file" "bark_basic_auth_password"
 
+chmod 644 "$bark_user_file" 2>/dev/null || true
+chmod 644 "$bark_pass_file" 2>/dev/null || true
+[[ -f "$script_dir/bark-entrypoint.sh" ]] && chmod 755 "$script_dir/bark-entrypoint.sh" || true
+[[ -f "$script_dir/smoke-test-bark.sh" ]] && chmod 755 "$script_dir/smoke-test-bark.sh" || true
+
 # 1. Execute pre-deployment offline backup
 if [[ -f "$script_dir/data/gateway.db" ]]; then
   printf 'Executing pre-deployment backup with WAL checkpoint...\n'
