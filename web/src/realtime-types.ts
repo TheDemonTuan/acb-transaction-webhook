@@ -4,7 +4,17 @@ export type Status = {
   service: string;
   version: string;
   uptimeSeconds: number;
-  acb: { state: string; coverage: string; accountMasked?: string; generation?: number };
+  acb: {
+    state: string;
+    coverage: string;
+    accountMasked?: string;
+    generation?: number;
+    lastSuccessfulPollAt?: string | null;
+    scheduleMode?: PollMode;
+    scheduleWindow?: string;
+    scheduleMinSeconds?: number;
+    scheduleMaxSeconds?: number;
+  };
   storage: { status: string };
   webhooks: { pending: number; deadLetter: number };
   notifications?: { pending: number; deadLetter: number };

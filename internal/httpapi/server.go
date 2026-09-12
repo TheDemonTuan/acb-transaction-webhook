@@ -232,6 +232,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		acb["accountMasked"] = connection.AccountMasked
 		acb["generation"] = connection.Generation
 		acb["coverage"] = "PENDING_ACB_POC"
+		if poll, pollErr := s.store.LastSuccessfulPoll(r.Context(), connection.ID); pollErr == nil {
+			acb["lastSuccessfulPollAt"] = poll.FinishedAt
+		}
 
 		monSettings, errSettings := s.store.GetMonitorSettings(r.Context())
 		if errSettings == nil {

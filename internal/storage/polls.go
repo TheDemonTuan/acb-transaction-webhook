@@ -20,6 +20,22 @@ type PollRun struct {
 	FinishedAt   string `json:"finishedAt,omitempty"`
 }
 
+func (s *Store) LastSuccessfulPoll(ctx context.Context, connectionID string) (PollRun, error) {
+	var poll PollRun
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id,connection_id,generation,status,classifier,http_status,pages,rows_seen,
+		       COALESCE(sanitized_error,''),started_at,COALESCE(finished_at,'')
+		FROM poll_runs
+		WHERE connection_id=? AND status='SUCCEEDED'
+		ORDER BY finished_at DESC
+		LIMIT 1
+	`, connectionID).Scan(
+		&poll.ID, &poll.ConnectionID, &poll.Generation, &poll.Status, &poll.Classifier,
+		&poll.HTTPStatus, &poll.Pages, &poll.RowsSeen, &poll.Error, &poll.StartedAt, &poll.FinishedAt,
+	)
+	return poll, err
+}
+
 func (s *Store) StartPoll(ctx context.Context) (PollRun, error) {
 	connection, err := s.Connection(ctx)
 	if err != nil {

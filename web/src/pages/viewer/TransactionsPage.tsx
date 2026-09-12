@@ -48,20 +48,29 @@ export const TransactionsPage: React.FC = () => {
   const [copiedId, setCopiedId] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [syncingHistory, setSyncingHistory] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
   const handleSyncHistory = async () => {
-    if (queryParams.from && queryParams.to) {
-      setSyncingHistory(true);
-      try {
-        await ensureHistory({ from: queryParams.from, to: queryParams.to });
-        refetch();
-      } catch (err) {
-        console.error('ensure history failed', err);
-      } finally {
-        setSyncingHistory(false);
-      }
-    } else {
-      refetch();
+    if (!queryParams.from || !queryParams.to) return;
+
+    setSyncingHistory(true);
+    setSyncNotice(null);
+    try {
+      const result = await ensureHistory({ from: queryParams.from, to: queryParams.to });
+      await refetch();
+      setSyncNotice({
+        kind: 'ok',
+        text: result.rowsSeen
+          ? `Đã đồng bộ ${result.rowsSeen} giao dịch từ ACB.`
+          : 'Đã kiểm tra ACB. Không có giao dịch trong khoảng ngày đã chọn.',
+      });
+    } catch (err) {
+      setSyncNotice({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Không thể đồng bộ giao dịch từ ACB.',
+      });
+    } finally {
+      setSyncingHistory(false);
     }
   };
 
@@ -143,28 +152,41 @@ export const TransactionsPage: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {dateRange !== 'all' && (
-            <button
-              type="button"
-              onClick={handleSyncHistory}
-              disabled={syncingHistory || isLoading || isRefetching}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white shadow-2xs hover:bg-stone-800 transition disabled:opacity-50 cursor-pointer"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${syncingHistory ? 'animate-spin' : ''}`} />
-              {syncingHistory ? 'Đang đồng bộ ACB...' : 'Đồng bộ từ ACB'}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleSyncHistory}
+            disabled={syncingHistory || isLoading || isRefetching || !queryParams.from || !queryParams.to}
+            title={dateRange === 'all' ? 'Chọn Hôm nay, 7 ngày hoặc một khoảng ngày để đồng bộ từ ACB' : undefined}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white shadow-2xs hover:bg-stone-800 transition disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingHistory ? 'animate-spin' : ''}`} />
+            {syncingHistory ? 'Đang đồng bộ ACB...' : 'Đồng bộ từ ACB'}
+          </button>
           <button
             type="button"
             onClick={() => refetch()}
             disabled={isLoading || isRefetching}
+            title="Chỉ tải lại dữ liệu đã lưu trên máy chủ"
             className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 shadow-2xs hover:bg-stone-50 text-stone-700 transition disabled:opacity-50 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isRefetching ? 'animate-spin' : ''}`} />
-            Làm mới
+            Tải lại dữ liệu đã lưu
           </button>
         </div>
       </div>
+
+      {syncNotice && (
+        <div
+          role={syncNotice.kind === 'error' ? 'alert' : 'status'}
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            syncNotice.kind === 'error'
+              ? 'border-red-200 bg-red-50 text-red-700'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+          }`}
+        >
+          {syncNotice.text}
+        </div>
+      )}
 
       {/* KPI Stats Grid - Server Aggregate */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

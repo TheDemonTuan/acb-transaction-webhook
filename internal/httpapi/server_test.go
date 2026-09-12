@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +12,47 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
+
+func TestStatusIncludesLastSuccessfulPoll(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "status.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING'`); err != nil {
+		t.Fatal(err)
+	}
+	poll, err := store.StartPoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll.Status = "SUCCEEDED"
+	if err := store.FinishPoll(ctx, poll); err != nil {
+		t.Fatal(err)
+	}
+
+	h := New(config.Config{Timezone: time.UTC, DevelopmentSubject: "owner"}, store).Handler()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/status", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		ACB struct {
+			LastSuccessfulPollAt *string `json:"lastSuccessfulPollAt"`
+		} `json:"acb"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ACB.LastSuccessfulPollAt == nil || *result.ACB.LastSuccessfulPollAt == "" {
+		t.Fatal("expected lastSuccessfulPollAt")
+	}
+}
 
 func TestHealthStatusAndSPARouting(t *testing.T) {
 	t.Parallel()
