@@ -82,5 +82,26 @@ else
   log_warn "Traefik dynamic directory [${TRAEFIK_DYNAMIC_DIR}] does not exist yet (will be created on switch)"
 fi
 
+# 8. Check Cosign Availability (required for signed manifest verification)
+require_cosign="${REQUIRE_COSIGN:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --require-cosign)
+      require_cosign=1
+      ;;
+  esac
+done
+
+if command -v cosign >/dev/null 2>&1; then
+  COSIGN_VER=$(cosign version 2>&1 | head -n 1 || echo "unknown")
+  log_info "Cosign binary: OK (${COSIGN_VER})"
+else
+  log_warn "Cosign binary: NOT FOUND in PATH (required for production release manifest verification)"
+  if [[ "$require_cosign" -eq 1 ]]; then
+    log_error "Cosign binary is required but not found in PATH"
+    exit 1
+  fi
+fi
+
 log_info "=== PREFLIGHT AUDIT COMPLETED ==="
 exit 0

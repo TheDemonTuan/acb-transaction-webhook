@@ -6,6 +6,11 @@ deploy_dir="$script_dir"
 output_file="$deploy_dir/release-manifest.json"
 
 git_sha="${GITHUB_SHA:-}"
+release_id=""
+base_sha=""
+promotion_scope_json=""
+promotion_scope_file=""
+
 gateway_image=""
 worker_image=""
 dbtool_image=""
@@ -18,16 +23,20 @@ usage() {
 Usage: generate-release-manifest.sh [options]
 
 Options:
-  --git-sha <sha>            Git commit SHA (default: HEAD or GITHUB_SHA)
-  --gateway-image <ref>      Exact gateway image digest (required)
-  --worker-image <ref>       Exact worker image digest (required)
-  --dbtool-image <ref>       Exact dbtool image digest (required)
-  --auth-browser-image <ref> Exact auth-browser image digest (required)
-  --tts-image <ref>          Exact tts-gateway image digest (required)
-  --bark-image <ref>         Exact bark image digest (required)
-  --deploy-dir <dir>         Deploy bundle directory (default: deploy/)
-  --output <path>            Output manifest JSON path (default: deploy/release-manifest.json)
-  --help, -h                 Show help
+  --git-sha <sha>               Git commit SHA (default: HEAD or GITHUB_SHA)
+  --release-id <id>             Release ID (default: rel-<sha:12>-<timestamp>)
+  --base-sha <sha>              Base commit SHA to compute promotion scope against
+  --promotion-scope <json>      Explicit promotion scope JSON string
+  --promotion-scope-file <path> Path to computed promotion scope JSON file
+  --gateway-image <ref>         Exact gateway image digest (required)
+  --worker-image <ref>          Exact worker image digest (required)
+  --dbtool-image <ref>          Exact dbtool image digest (required)
+  --auth-browser-image <ref>    Exact auth-browser image digest (required)
+  --tts-image <ref>             Exact tts-gateway image digest (required)
+  --bark-image <ref>            Exact bark image digest (required)
+  --deploy-dir <dir>            Deploy bundle directory (default: deploy/)
+  --output <path>               Output manifest JSON path (default: deploy/release-manifest.json)
+  --help, -h                    Show help
 EOF
 }
 
@@ -35,6 +44,22 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --git-sha)
       git_sha="$2"
+      shift 2
+      ;;
+    --release-id)
+      release_id="$2"
+      shift 2
+      ;;
+    --base-sha)
+      base_sha="$2"
+      shift 2
+      ;;
+    --promotion-scope)
+      promotion_scope_json="$2"
+      shift 2
+      ;;
+    --promotion-scope-file)
+      promotion_scope_file="$2"
       shift 2
       ;;
     --gateway-image)
@@ -95,6 +120,53 @@ if [[ ! "$git_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
   exit 1
 fi
 
+created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+created_epoch="$(date -u +%s)"
+
+if [[ -z "$release_id" ]]; then
+  release_id="rel-${git_sha:0:12}-${created_epoch}"
+fi
+
+# Resolve promotion scope
+tmp_scope_file="$(mktemp)"
+trap 'rm -f "$tmp_scope_file" "$tmp_artifacts"' EXIT
+
+if [[ -n "$promotion_scope_file" && -f "$promotion_scope_file" ]]; then
+  cp "$promotion_scope_file" "$tmp_scope_file"
+elif [[ -n "$promotion_scope_json" ]]; then
+  printf '%s\n' "$promotion_scope_json" > "$tmp_scope_file"
+elif [[ -n "$base_sha" ]] && [[ -f "$script_dir/../scripts/compute-promotion-scope.sh" ]]; then
+  bash "$script_dir/../scripts/compute-promotion-scope.sh" \
+    --base "$base_sha" \
+    --head "$git_sha" \
+    --format json \
+    --output "$tmp_scope_file"
+else
+  # Default full promotion scope when not specified
+  cat <<'EOF' > "$tmp_scope_file"
+{
+  "promotion": {
+    "gateway": true,
+    "worker": true,
+    "schema": true,
+    "auth_browser": true,
+    "tts": true,
+    "bark": true,
+    "platform": true
+  },
+  "promotion_scope": [
+    "gateway",
+    "worker",
+    "schema",
+    "auth_browser",
+    "tts",
+    "bark",
+    "platform"
+  ]
+}
+EOF
+fi
+
 declare -A images=(
   ["gateway"]="$gateway_image"
   ["worker"]="$worker_image"
@@ -147,6 +219,17 @@ bundle_files=(
   "rollback.sh"
   "verify-deployment.sh"
   "backup.sh"
+  "backup-db.sh"
+  "backup-secrets.sh"
+  "restore-db.sh"
+  "provision-secrets.sh"
+  "init-fresh-data.sh"
+  "release-env.sh"
+  "verify-compose-runtime.sh"
+  "cve-allowlist.json"
+  "validate-cve-allowlist.sh"
+  "third-party-allowlist.json"
+  "verify-third-party-policy.sh"
   "bark-entrypoint.sh"
   "smoke-test-bark.sh"
   "smoke-test-tts-gateway.sh"
@@ -156,7 +239,6 @@ bundle_files=(
 )
 
 tmp_artifacts="$(mktemp)"
-trap 'rm -f "$tmp_artifacts"' EXIT
 
 for filename in "${bundle_files[@]}"; do
   filepath="$deploy_dir/$filename"
@@ -166,14 +248,12 @@ for filename in "${bundle_files[@]}"; do
   fi
 done
 
-created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
 if command -v node >/dev/null 2>&1; then
-  node - "$output_file" "$git_sha" "$created_at" "$tmp_artifacts" \
+  node - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
     "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'JSEOF'
 const fs = require('fs');
 
-const [,, outFile, gitSha, createdAt, artifactsFile, gateway, worker, dbtool, authBrowser, tts, bark] = process.argv;
+const [,, outFile, gitSha, releaseId, createdAt, artifactsFile, scopeFile, gateway, worker, dbtool, authBrowser, tts, bark] = process.argv;
 
 const artifacts = {};
 const lines = fs.readFileSync(artifactsFile, 'utf8').split('\n');
@@ -186,8 +266,31 @@ for (const line of lines) {
   }
 }
 
+let scopeData = {};
+try {
+  scopeData = JSON.parse(fs.readFileSync(scopeFile, 'utf8'));
+} catch (e) {
+  console.error(`Error parsing scope file: ${e.message}`);
+  process.exit(1);
+}
+
+const defaultPromotion = {
+  gateway: true,
+  worker: true,
+  schema: true,
+  auth_browser: true,
+  tts: true,
+  bark: true,
+  platform: true
+};
+
+const promotion = scopeData.promotion || defaultPromotion;
+const promotionScope = scopeData.promotion_scope || Object.keys(promotion).filter(k => promotion[k]);
+
 const manifest = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   schema_version: 1,
+  release_id: releaseId,
   git_sha: gitSha,
   created_at: createdAt,
   compatibility: {
@@ -202,6 +305,8 @@ const manifest = {
       "/rpc/verify-session"
     ]
   },
+  promotion,
+  promotion_scope: promotionScope,
   images: {
     gateway,
     worker,
@@ -216,15 +321,17 @@ const manifest = {
 fs.writeFileSync(outFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 JSEOF
 elif command -v python3 >/dev/null 2>&1; then
-  python3 - "$output_file" "$git_sha" "$created_at" "$tmp_artifacts" \
+  python3 - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
     "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'PYEOF'
 import sys, json
 
 out_file = sys.argv[1]
 git_sha = sys.argv[2]
-created_at = sys.argv[3]
-artifacts_file = sys.argv[4]
-gateway, worker, dbtool, auth_browser, tts, bark = sys.argv[5:11]
+release_id = sys.argv[3]
+created_at = sys.argv[4]
+artifacts_file = sys.argv[5]
+scope_file = sys.argv[6]
+gateway, worker, dbtool, auth_browser, tts, bark = sys.argv[7:13]
 
 artifacts = {}
 with open(artifacts_file, 'r', encoding='utf-8') as f:
@@ -236,8 +343,30 @@ with open(artifacts_file, 'r', encoding='utf-8') as f:
             k, v = line.split('=', 1)
             artifacts[k] = v
 
+try:
+    with open(scope_file, 'r', encoding='utf-8') as f:
+        scope_data = json.load(f)
+except Exception as e:
+    print(f"Error parsing scope file: {e}", file=sys.stderr)
+    sys.exit(1)
+
+default_promotion = {
+    "gateway": True,
+    "worker": True,
+    "schema": True,
+    "auth_browser": True,
+    "tts": True,
+    "bark": True,
+    "platform": True
+}
+
+promotion = scope_data.get("promotion", default_promotion)
+promotion_scope = scope_data.get("promotion_scope", [k for k, v in promotion.items() if v])
+
 manifest = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "schema_version": 1,
+    "release_id": release_id,
     "git_sha": git_sha,
     "created_at": created_at,
     "compatibility": {
@@ -252,6 +381,8 @@ manifest = {
             "/rpc/verify-session"
         ]
     },
+    "promotion": promotion,
+    "promotion_scope": promotion_scope,
     "images": {
         "gateway": gateway,
         "worker": worker,
@@ -272,4 +403,5 @@ else
   exit 1
 fi
 
-printf 'Release manifest generated successfully: %s (git_sha: %s)\n' "$output_file" "$git_sha"
+printf 'Release manifest generated successfully: %s (git_sha: %s, release_id: %s)\n' "$output_file" "$git_sha" "$release_id"
+exit 0

@@ -116,9 +116,9 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 24** | Segregate Docker networks (edge, core, egress) | **PR10** | **COMPLETED** | `deploy/compose.prod.yaml`, `deploy/verify-compose-runtime.sh` | Docker network inspection and test_runtime_policy.sh prove strict network isolation. |
 | **Task 25** | Hardened container runtime profiles | **PR10** | **COMPLETED** | `deploy/compose.prod.yaml`, `deploy/verify-compose-runtime.sh` | Read-only rootfs, `no-new-privileges`, capability drop, dual-level CPU/memory/PID limits verified. |
 | **Task 26** | Health & readiness probe alignment | **PR10** | **COMPLETED** | `deploy/compose.prod.yaml`, `deploy/verify-compose-runtime.sh` | Liveness (/healthz, /ping) vs Readiness (/readyz) vs Deploy (/internal/deployz) verified. |
-| **Task 27** | CI promotion scope classifier | PR11 | PENDING | `.github/workflows/ci.yml`, `scripts/ci/*` | Diff calculation identifies changed components; matches promotion scope. |
-| **Task 28** | Cosign keyless signing & SBOM generation | PR11 | PENDING | `.github/workflows/ci.yml` | Images and release manifest signed with GitHub Actions OIDC. |
-| **Task 29** | Signed release manifest verification on VPS | PR11 | PENDING | `deploy/verify-manifest.sh` | Cosign fails closed on invalid signature or unauthorized subject identity. |
+| **Task 27** | CI promotion scope classifier | **PR11** | **COMPLETED** | `scripts/compute-promotion-scope.sh`, `scripts/test-promotion-scope.sh`, `.github/workflows/deploy.yml` | Diff calculation identifies changed, deleted, renamed, and shared components; emits signed promotion scope. |
+| **Task 28** | Cosign keyless signing & SBOM generation | **PR11** | **COMPLETED** | `.github/workflows/deploy.yml`, `scripts/verify-actions-pinned.sh` | Verified Cosign fallback bootstrap, all 47 actions pinned by SHA with Dependabot, 6 images signed and attested with Trivy JSON + CycloneDX SBOMs. |
+| **Task 29** | Signed release manifest verification on VPS | **PR11** | **COMPLETED** | `deploy/verify-manifest.sh`, `deploy/check-host.sh`, `deploy/test-supply-chain.sh` | Cosign fails closed on missing binary, wildcard identity rejection, exact subject match, artifact checksum verification, and anti-replay validation. |
 | **Task 30** | Separate gateway and worker deploy transactions | PR12 | PENDING | `deploy/deploy-warm.sh`, `deploy/deploy-worker.sh` | Gateway deploy leaves worker container untouched; timestamps confirm continuous polling. |
 | **Task 31** | Schema deployment transaction with drain | PR12 | PENDING | `deploy/deploy-schema.sh`, `cmd/dbtool/*` | Pre-migration backup verified; DB locked; migrations applied; health checked. |
 | **Task 32** | Traefik route cutover & ACK verification | PR12 | PENDING | `deploy/switch-slot.sh`, `deploy/rollback-warm.sh` | Positive ACK asserts `X-Platform-Slot`; route rollback verified on forced failure. |
@@ -162,7 +162,7 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **GATE-12** | Traefik route switch positively acknowledged via X-Platform-Slot header | Live Route Probe | PENDING (Host Blocker) | Edge Platform Lead | `deploy/switch-slot.sh` probe trace |
 | **GATE-13** | SSE subscriber across Blue/Green cutover replays all sequence events | Browser E2E Replay Test | PENDING | Frontend Lead | `web/tests/e2e/sse_cutover.spec.ts` |
 | **GATE-14** | Missing immutable image digest fails deployment before container mutation | Compose Validation Test | **VERIFIED** | Release Engineer | `deploy/test-supply-chain.sh`, `deploy/tests/test_compose_policy.sh` |
-| **GATE-15** | Missing Cosign on VPS causes signed manifest verification to fail closed | Verifier Harness | PENDING (Host Blocker) | Security Lead | `deploy/verify-manifest.sh` negative test |
+| **GATE-15** | Missing Cosign on VPS causes signed manifest verification to fail closed | Verifier Harness | **VERIFIED** | Security Lead | `deploy/test-supply-chain.sh` (Section 3.14) & `deploy/verify-manifest.sh` --require-cosign negative test |
 | **GATE-16** | All automated test, lint, and security gates pass on final commit | GitHub Actions CI Run | PENDING | Repository Lead | CI run workflow URL & artifact digest |
 
 ---

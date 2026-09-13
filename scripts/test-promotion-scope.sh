@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# test-promotion-scope.sh
+# Table-driven test suite for component promotion scope classifier
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+classifier="$script_dir/compute-promotion-scope.sh"
+
+test_tmp="$(mktemp -d)"
+trap 'rm -rf "$test_tmp"' EXIT
+
+pass_count=0
+fail_count=0
+
+assert_eq() {
+  local desc="$1"
+  local actual="$2"
+  local expected="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    printf '  [PASS] %s\n' "$desc"
+    pass_count=$((pass_count + 1))
+  else
+    printf '  [FAIL] %s (expected "%s", got "%s")\n' "$desc" "$expected" "$actual" >&2
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+printf "========================================\n"
+printf "Running Promotion Scope Classifier Tests\n"
+printf "========================================\n\n"
+
+# Helper to run classifier on a list of changed lines
+run_case() {
+  local file="$1"
+  shift
+  bash "$classifier" --files-from "$file" "$@"
+}
+
+# 1. Documentation-only change
+printf "1. Testing documentation-only changes...\n"
+cat <<'EOF' > "$test_tmp/doc_only.txt"
+M	docs/architecture/COMPATIBILITY_CONTRACTS.md
+M	README.md
+A	docs/runbooks/TEST.md
+M	.github/dependabot.yml
+EOF
+doc_out="$(run_case "$test_tmp/doc_only.txt" --format env)"
+assert_eq "doc-only: PROMOTION_GATEWAY is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "doc-only: PROMOTION_WORKER is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "doc-only: PROMOTION_SCHEMA is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
+assert_eq "doc-only: PROMOTION_DOC_ONLY is true" "$(printf '%s' "$doc_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "true"
+assert_eq "doc-only: PROMOTION_SCOPE is empty" "$(printf '%s' "$doc_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" ""
+
+# 2. Gateway-only change
+printf "\n2. Testing gateway-only changes...\n"
+cat <<'EOF' > "$test_tmp/gateway_only.txt"
+M	web/src/App.tsx
+M	cmd/gateway/main.go
+M	internal/httpapi/routes.go
+EOF
+gw_out="$(run_case "$test_tmp/gateway_only.txt" --format env)"
+assert_eq "gateway: PROMOTION_GATEWAY is true" "$(printf '%s' "$gw_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "gateway: PROMOTION_WORKER is false" "$(printf '%s' "$gw_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "gateway: PROMOTION_SCHEMA is false" "$(printf '%s' "$gw_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
+assert_eq "gateway: PROMOTION_SCOPE is gateway" "$(printf '%s' "$gw_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" "gateway"
+
+# 3. Worker-only change
+printf "\n3. Testing worker-only changes...\n"
+cat <<'EOF' > "$test_tmp/worker_only.txt"
+M	cmd/worker/main.go
+M	internal/monitor/poller.go
+M	internal/acb/client.go
+EOF
+w_out="$(run_case "$test_tmp/worker_only.txt" --format env)"
+assert_eq "worker: PROMOTION_GATEWAY is false" "$(printf '%s' "$w_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "worker: PROMOTION_WORKER is true" "$(printf '%s' "$w_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "worker: PROMOTION_SCHEMA is false" "$(printf '%s' "$w_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
+assert_eq "worker: PROMOTION_SCOPE is worker" "$(printf '%s' "$w_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" "worker"
+
+# 4. Shared RPC change (gateway + worker)
+printf "\n4. Testing shared workerrpc changes...\n"
+cat <<'EOF' > "$test_tmp/rpc_shared.txt"
+M	internal/workerrpc/rpc.go
+EOF
+rpc_out="$(run_case "$test_tmp/rpc_shared.txt" --format env)"
+assert_eq "shared RPC: PROMOTION_GATEWAY is true" "$(printf '%s' "$rpc_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "shared RPC: PROMOTION_WORKER is true" "$(printf '%s' "$rpc_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "shared RPC: PROMOTION_SCHEMA is false" "$(printf '%s' "$rpc_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
+
+# 5. Schema migration change (schema + gateway + worker)
+printf "\n5. Testing schema migration changes...\n"
+cat <<'EOF' > "$test_tmp/schema_migration.txt"
+A	internal/storage/migrations/010_new_table.sql
+EOF
+schema_out="$(run_case "$test_tmp/schema_migration.txt" --format env)"
+assert_eq "schema: PROMOTION_SCHEMA is true" "$(printf '%s' "$schema_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "true"
+assert_eq "schema: PROMOTION_GATEWAY is true" "$(printf '%s' "$schema_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "schema: PROMOTION_WORKER is true" "$(printf '%s' "$schema_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+
+# 6. Shared config package change
+printf "\n6. Testing shared internal/config changes...\n"
+cat <<'EOF' > "$test_tmp/config_shared.txt"
+M	internal/config/config.go
+EOF
+cfg_out="$(run_case "$test_tmp/config_shared.txt" --format env)"
+assert_eq "config: PROMOTION_GATEWAY is true" "$(printf '%s' "$cfg_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "config: PROMOTION_WORKER is true" "$(printf '%s' "$cfg_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+
+# 7. Shared root dependencies (go.mod)
+printf "\n7. Testing root go.mod change...\n"
+cat <<'EOF' > "$test_tmp/gomod_shared.txt"
+M	go.mod
+M	go.sum
+EOF
+mod_out="$(run_case "$test_tmp/gomod_shared.txt" --format env)"
+assert_eq "go.mod: PROMOTION_GATEWAY is true" "$(printf '%s' "$mod_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "go.mod: PROMOTION_WORKER is true" "$(printf '%s' "$mod_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "go.mod: PROMOTION_SCHEMA is true" "$(printf '%s' "$mod_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "true"
+
+# 8. Auth-browser sidecar
+printf "\n8. Testing auth-browser changes...\n"
+cat <<'EOF' > "$test_tmp/auth_browser.txt"
+M	Dockerfile.auth-browser
+M	cmd/auth-browser/main.go
+EOF
+ab_out="$(run_case "$test_tmp/auth_browser.txt" --format env)"
+assert_eq "auth-browser: PROMOTION_AUTH_BROWSER is true" "$(printf '%s' "$ab_out" | grep '^PROMOTION_AUTH_BROWSER=' | cut -d= -f2)" "true"
+assert_eq "auth-browser: PROMOTION_GATEWAY is false" "$(printf '%s' "$ab_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+
+# 9. TTS sidecar
+printf "\n9. Testing tts-gateway changes...\n"
+cat <<'EOF' > "$test_tmp/tts.txt"
+M	tts-gateway/server.py
+EOF
+tts_out="$(run_case "$test_tmp/tts.txt" --format env)"
+assert_eq "tts: PROMOTION_TTS is true" "$(printf '%s' "$tts_out" | grep '^PROMOTION_TTS=' | cut -d= -f2)" "true"
+assert_eq "tts: PROMOTION_GATEWAY is false" "$(printf '%s' "$tts_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+
+# 10. Bark policy change
+printf "\n10. Testing bark third-party policy changes...\n"
+cat <<'EOF' > "$test_tmp/bark.txt"
+M	deploy/third-party-allowlist.json
+EOF
+bark_out="$(run_case "$test_tmp/bark.txt" --format env)"
+assert_eq "bark: PROMOTION_BARK is true" "$(printf '%s' "$bark_out" | grep '^PROMOTION_BARK=' | cut -d= -f2)" "true"
+assert_eq "bark: PROMOTION_GATEWAY is false" "$(printf '%s' "$bark_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+
+# 11. Deleted and renamed file detection
+printf "\n11. Testing deleted and renamed files...\n"
+cat <<'EOF' > "$test_tmp/deleted_and_renamed.txt"
+D	cmd/gateway/old_file.go
+R100	cmd/gateway/foo.go	cmd/gateway/bar.go
+EOF
+del_out="$(run_case "$test_tmp/deleted_and_renamed.txt" --format env)"
+assert_eq "deleted/renamed: PROMOTION_GATEWAY is true" "$(printf '%s' "$del_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "deleted/renamed: PROMOTION_WORKER is false" "$(printf '%s' "$del_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+
+# 12. JSON format schema verification
+printf "\n12. Testing JSON output schema...\n"
+json_out="$(run_case "$test_tmp/gateway_only.txt" --format json)"
+if command -v node >/dev/null 2>&1; then
+  node - "$json_out" <<'JSEOF'
+const data = JSON.parse(process.argv[2]);
+if (!data.promotion || typeof data.promotion !== 'object') throw new Error('missing promotion');
+if (data.promotion.gateway !== true) throw new Error('gateway must be true');
+if (data.promotion.worker !== false) throw new Error('worker must be false');
+if (!Array.isArray(data.promotion_scope)) throw new Error('promotion_scope must be array');
+if (!data.promotion_scope.includes('gateway')) throw new Error('promotion_scope must contain gateway');
+JSEOF
+  printf '  [PASS] JSON structure parsed and verified with node\n'
+  pass_count=$((pass_count + 1))
+fi
+
+printf "\n========================================\n"
+printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
+printf "========================================\n"
+
+if [[ $fail_count -gt 0 ]]; then
+  exit 1
+fi
+exit 0

@@ -148,6 +148,31 @@ assert_failure "Exception with invalid expiry date format is rejected" \
 assert_success "Output ignore file contains active CVE" \
   bash -c "bash '$script_dir/validate-cve-allowlist.sh' --file '$test_tmp/cve-valid.json' --reference-date '2026-09-13' --output-ignorefile '$test_tmp/.trivyignore' && grep -q 'CVE-2026-12345' '$test_tmp/.trivyignore'"
 
+# 1.9 Component-specific allowlist filtering
+cat <<'EOF' > "$test_tmp/cve-components.json"
+{
+  "version": 1,
+  "exceptions": [
+    {
+      "cve": "CVE-2026-11111",
+      "components": ["gateway"],
+      "reason": "Gateway only risk accepted",
+      "owner": "security@tuannguyenviet.site",
+      "expiry": "2027-12-31"
+    },
+    {
+      "cve": "CVE-2026-22222",
+      "components": ["auth-browser"],
+      "reason": "Browser only risk accepted",
+      "owner": "security@tuannguyenviet.site",
+      "expiry": "2027-12-31"
+    }
+  ]
+}
+EOF
+assert_success "Component-specific ignorefile for gateway includes gateway CVE and excludes auth-browser CVE" \
+  bash -c "bash '$script_dir/validate-cve-allowlist.sh' --file '$test_tmp/cve-components.json' --component gateway --reference-date '2026-09-13' --output-ignorefile '$test_tmp/.trivyignore-gw' && grep -q 'CVE-2026-11111' '$test_tmp/.trivyignore-gw' && ! grep -q 'CVE-2026-22222' '$test_tmp/.trivyignore-gw'"
+
 printf "\n"
 
 # ----------------------------------------------------
@@ -195,7 +220,13 @@ manifest_test_dir="$test_tmp/bundle"
 mkdir -p "$manifest_test_dir"
 
 # Copy real deploy files to test bundle
-cp "$script_dir"/compose.prod.yaml "$script_dir"/deploy-warm.sh "$script_dir"/verify-manifest.sh "$manifest_test_dir/"
+cp "$script_dir"/compose.prod.yaml "$script_dir"/deploy-warm.sh "$script_dir"/rollback-warm.sh \
+   "$script_dir"/switch-slot.sh "$script_dir"/smoke-slot.sh "$script_dir"/check-host.sh \
+   "$script_dir"/seccomp-auth-browser.json "$script_dir"/deploy.sh "$script_dir"/rollback.sh \
+   "$script_dir"/verify-deployment.sh "$script_dir"/backup.sh "$script_dir"/bark-entrypoint.sh \
+   "$script_dir"/smoke-test-bark.sh "$script_dir"/smoke-test-tts-gateway.sh \
+   "$script_dir"/smoke-test-auth-browser.sh "$script_dir"/verify-manifest.sh "$script_dir"/lib.sh \
+   "$script_dir"/README.md "$manifest_test_dir/"
 
 manifest_out="$manifest_test_dir/release-manifest.json"
 valid_sha="a4e71ffe29e97e88df6bf25e449c5a0d032a18cb"
@@ -266,19 +297,115 @@ assert_success "Verify manifest with matching worker RPC compatibility version 2
     --deploy-dir "$manifest_test_dir" \
     --expected-rpc-version 2
 
-# 3.8 Reject mismatched worker RPC compatibility version (old gateway/new worker or new gateway/old worker)
-assert_failure "Reject manifest with mismatched worker RPC compatibility version (version 1 vs expected 2)" \
+# 3.8 Reject mismatched worker RPC compatibility version
+assert_failure "Reject manifest with mismatched worker RPC compatibility version" \
   bash "$script_dir/verify-manifest.sh" \
     --manifest "$manifest_out" \
     --deploy-dir "$manifest_test_dir" \
     --expected-rpc-version 1
 
+# 3.9 Anti-replay: Reject candidate manifest older than currently deployed timestamp
+assert_failure "Reject candidate manifest older than currently deployed timestamp (anti-replay)" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --current-deployed-time "2099-01-01T00:00:00Z"
+
+# 3.10 Anti-replay: Reject candidate manifest replaying same commit without allow-redeploy
+assert_failure "Reject replaying already deployed commit without --allow-redeploy" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --current-deployed-commit "$valid_sha"
+
+# 3.11 Anti-replay: Allow redeploy with --allow-redeploy flag
+assert_success "Allow redeploying commit when --allow-redeploy is explicitly specified" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --current-deployed-commit "$valid_sha" \
+    --allow-redeploy
+
+# 3.12 Promotion scope: Manifest with gateway promotion passes --require-promotion-scope gateway
+assert_success "Verify manifest authorizes required gateway promotion scope" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --require-promotion-scope "gateway"
+
+# 3.13 Promotion scope: Gateway-only manifest rejects --require-promotion-scope schema
+gw_only_manifest="$test_tmp/manifest-gw-only.json"
+assert_success "Generate gateway-only scoped release manifest" \
+  bash "$script_dir/generate-release-manifest.sh" \
+    --git-sha "$valid_sha" \
+    --promotion-scope '{"promotion":{"gateway":true,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false},"promotion_scope":["gateway"]}' \
+    --gateway-image "$dummy_gw" \
+    --worker-image "$dummy_worker" \
+    --dbtool-image "$dummy_dbtool" \
+    --auth-browser-image "$dummy_browser" \
+    --tts-image "$dummy_tts" \
+    --bark-image "$dummy_bark" \
+    --deploy-dir "$manifest_test_dir" \
+    --output "$gw_only_manifest"
+
+assert_failure "Reject promotion when required schema component is not authorized by signed manifest" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$gw_only_manifest" \
+    --deploy-dir "$manifest_test_dir" \
+    --require-promotion-scope "schema"
+
+# 3.14 Cosign verification: Missing Cosign binary fails closed when --require-cosign is set (GATE-15)
+assert_failure "Missing Cosign on host causes signed manifest verification to fail closed (GATE-15)" \
+  env PATH="/usr/bin:/bin" bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --require-cosign
+
+# 3.15 Cosign verification: Wildcard expected certificate identity is rejected fail-closed
+touch "$manifest_test_dir/release-manifest.bundle"
+assert_failure "Wildcard certificate identity (.*) is rejected fail-closed in production verification" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --bundle "$manifest_test_dir/release-manifest.bundle" \
+    --deploy-dir "$manifest_test_dir" \
+    --expected-identity ".*" \
+    --require-cosign
+rm -f "$manifest_test_dir/release-manifest.bundle"
+
 printf "\n"
 
 # ----------------------------------------------------
-# 4. Compose Immutability & Missing Digest Fail-Closed (GATE-14)
+# 4. Actions Pinning & Promotion Scope Classifier Tests
 # ----------------------------------------------------
-printf "4. Testing Compose Immutability & Missing Digest Fail-Closed (GATE-14)...\n"
+printf "4. Testing Actions Pinning and Promotion Scope Classifiers...\n"
+
+# 4.1 All repository workflow actions are pinned
+assert_success "All repository workflow actions are pinned to 40-character SHAs" \
+  bash "$script_dir/../scripts/verify-actions-pinned.sh"
+
+# 4.2 Negative test: unpinned action fails verification
+cat <<'EOF' > "$test_tmp/unpinned_workflow.yml"
+name: Test
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+EOF
+assert_failure "Unpinned action tag in workflow is detected and rejected" \
+  bash "$script_dir/../scripts/verify-actions-pinned.sh" --file "$test_tmp/unpinned_workflow.yml"
+
+# 4.3 Promotion scope classifier test suite passes
+assert_success "Component promotion scope test suite passes (test-promotion-scope.sh)" \
+  bash "$script_dir/../scripts/test-promotion-scope.sh"
+
+printf "\n"
+
+# ----------------------------------------------------
+# 5. Compose Immutability & Missing Digest Fail-Closed (GATE-14)
+# ----------------------------------------------------
+printf "5. Testing Compose Immutability & Missing Digest Fail-Closed (GATE-14)...\n"
 
 assert_success "Compose immutability policy tests pass (test_compose_policy.sh)" \
   bash "$script_dir/tests/test_compose_policy.sh"
