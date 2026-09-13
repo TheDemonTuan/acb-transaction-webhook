@@ -15,10 +15,10 @@ ACTIVE_SLOT_FILE="${ACTIVE_SLOT_FILE:-$SCRIPT_DIR/.active-slot}"
 PREVIOUS_SLOT_FILE="${PREVIOUS_SLOT_FILE:-$SCRIPT_DIR/.previous-slot}"
 DEPLOY_STATE_FILE="${DEPLOY_STATE_FILE:-$SCRIPT_DIR/.deploy-state}"
 SOAK_STATE_FILE="${SOAK_STATE_FILE:-$SCRIPT_DIR/.soak-state}"
-DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-$SCRIPT_DIR/.deploy.lock}"
+DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
 TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/edge/dynamic}"
 ACB_CONFIG="${ACB_CONFIG:-$TRAEFIK_DYNAMIC_DIR/acb.yml}"
-FAILOVER_STATE_DIR="${FAILOVER_STATE_DIR:-/tmp/vps-failover}"
+FAILOVER_STATE_DIR="${FAILOVER_STATE_DIR:-/var/lib/vps-failover/apps/acb}"
 
 DATA_VOLUME_NAME="${DATA_VOLUME_NAME:-bank-event-gateway_gateway_data}"
 BARK_VOLUME_NAME="${BARK_VOLUME_NAME:-bank-event-gateway_bark_data}"
@@ -451,16 +451,17 @@ central_switch_route() {
 mark_intentional_stop() {
   local slot="$1"
   mkdir -p "$FAILOVER_STATE_DIR"
-  touch "$FAILOVER_STATE_DIR/acb.intentional-stop"
-  touch "$FAILOVER_STATE_DIR/acb.cooldown"
-  touch "$SCRIPT_DIR/.intentional-stop-${slot}"
-  log_info "Marked intentional stop for slot [${slot}] before stopping container."
+  local marker="$FAILOVER_STATE_DIR/intentional-stop-${slot}"
+  local tmp="${marker}.tmp.$$"
+  printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
+    "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
+  mv -f "$tmp" "$marker"
+  log_info "Recorded intentional stop for slot [${slot}] before stopping container."
 }
 
 clear_intentional_stop() {
-  local slot="$1"
-  rm -f "$FAILOVER_STATE_DIR/acb.intentional-stop" 2>/dev/null || true
-  rm -f "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
+  # The desired stopped marker is durable by design; the controller ignores non-active slots.
+  return 0
 }
 
 stop_standby_container() {
