@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,6 +16,8 @@ func main() {
 	migrateFlag := flag.Bool("migrate", false, "apply schema migrations")
 	checkFlag := flag.Bool("check", false, "run read-only integrity check")
 	backupToFlag := flag.String("backup-to", "", "destination path for SQLite backup")
+	schemaVersionFlag := flag.Bool("schema-version", false, "print schema compatibility information as JSON")
+	activeAuthCountFlag := flag.Bool("active-auth-count", false, "print active authentication attempt count as JSON")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -35,8 +37,19 @@ func main() {
 
 	ctx := context.Background()
 
-	// If migrateFlag is set or no flags are set, run migration
-	if *migrateFlag || (!*checkFlag && *backupToFlag == "") {
+	actionCount := 0
+	for _, selected := range []bool{*migrateFlag, *checkFlag, *backupToFlag != "", *schemaVersionFlag, *activeAuthCountFlag} {
+		if selected {
+			actionCount++
+		}
+	}
+	if actionCount > 1 {
+		logger.Error("select exactly one dbtool action")
+		os.Exit(2)
+	}
+
+	// If --migrate is set or no action is selected, run migration.
+	if *migrateFlag || actionCount == 0 {
 		logger.Info("running database migration", "database", dbPath)
 		store, err := storage.OpenWithOptions(ctx, dbPath, storage.OpenOptions{RunMigrations: true})
 		if err != nil {
@@ -66,25 +79,45 @@ func main() {
 		return
 	}
 
+	encoder := json.NewEncoder(os.Stdout)
+	if *schemaVersionFlag {
+		report, err := store.SchemaReport(ctx)
+		if err != nil {
+			logger.Error("schema report failed", "error", err)
+			os.Exit(1)
+		}
+		if err := encoder.Encode(report); err != nil {
+			logger.Error("encode schema report", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *activeAuthCountFlag {
+		count, err := store.ActiveAuthAttemptCount(ctx)
+		if err != nil {
+			logger.Error("active auth attempt count failed", "error", err)
+			os.Exit(1)
+		}
+		if err := encoder.Encode(map[string]int64{"activeAuthAttempts": count}); err != nil {
+			logger.Error("encode active auth count", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if *checkFlag {
 		report, err := store.CheckIntegrity(ctx)
 		if err != nil {
 			logger.Error("database integrity check failed", "error", err)
 			os.Exit(1)
 		}
-		logger.Info("database integrity report",
-			"integrityOk", report.IntegrityOK,
-			"integrityMessage", report.IntegrityMessage,
-			"migrationsApplied", report.MigrationsApplied,
-			"connectionsCount", report.ConnectionsCount,
-			"connectionState", report.ConnectionState,
-			"generation", report.Generation,
-			"transactionsCount", report.TransactionsCount,
-			"eventsCount", report.EventsCount,
-		)
+		if err := encoder.Encode(report); err != nil {
+			logger.Error("encode integrity report", "error", err)
+			os.Exit(1)
+		}
 		if !report.IntegrityOK {
 			os.Exit(1)
 		}
-		fmt.Println("INTEGRITY_OK")
 	}
 }

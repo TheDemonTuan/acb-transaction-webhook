@@ -1,0 +1,94 @@
+package main
+
+import (
+	"bytes"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+func TestParseGatewayFlags_MigrateOnlyFails(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseGatewayFlags([]string{"--migrate-only"}, &buf)
+	if err == nil {
+		t.Fatal("expected error when --migrate-only is provided, got nil")
+	}
+	if !strings.Contains(err.Error(), "dbtool --migrate") {
+		t.Errorf("expected actionable error mentioning 'dbtool --migrate', got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "--migrate-only") {
+		t.Errorf("expected error mentioning '--migrate-only', got %q", err.Error())
+	}
+}
+
+func TestParseGatewayFlags_ValidFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want gatewayFlags
+	}{
+		{
+			name: "empty args",
+			args: []string{},
+			want: gatewayFlags{},
+		},
+		{
+			name: "healthcheck",
+			args: []string{"--healthcheck"},
+			want: gatewayFlags{healthcheck: true},
+		},
+		{
+			name: "check",
+			args: []string{"--check"},
+			want: gatewayFlags{checkIntegrity: true},
+		},
+		{
+			name: "backup-to",
+			args: []string{"--backup-to", "/tmp/backup.db"},
+			want: gatewayFlags{backupTo: "/tmp/backup.db"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, err := parseGatewayFlags(tt.args, io.Discard)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if flags.healthcheck != tt.want.healthcheck {
+				t.Errorf("healthcheck: got %v, want %v", flags.healthcheck, tt.want.healthcheck)
+			}
+			if flags.checkIntegrity != tt.want.checkIntegrity {
+				t.Errorf("checkIntegrity: got %v, want %v", flags.checkIntegrity, tt.want.checkIntegrity)
+			}
+			if flags.backupTo != tt.want.backupTo {
+				t.Errorf("backupTo: got %q, want %q", flags.backupTo, tt.want.backupTo)
+			}
+		})
+	}
+}
+
+func TestGatewayMigrateOnly_Subprocess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess test in short mode")
+	}
+
+	cmd := exec.Command("go", "run", ".", "--migrate-only")
+	cmd.Dir = "."
+	cmd.Env = append(os.Environ(), "LISTEN_ADDR=127.0.0.1:0")
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected gateway --migrate-only subprocess to exit with error, got 0")
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "dbtool --migrate") {
+		t.Errorf("expected stderr to contain 'dbtool --migrate', got: %s", stderrStr)
+	}
+}

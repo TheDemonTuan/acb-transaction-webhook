@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -195,4 +196,54 @@ func (s *Store) HasActiveAuthAttempt(ctx context.Context, connectionID string) (
 		WHERE connection_id = ? AND status IN ('STARTING', 'IN_PROGRESS', 'EXPORTING', 'VERIFYING') AND expires_at > ?
 	`, connectionID, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&count)
 	return count > 0, err
+}
+
+type ActiveAuthReport struct {
+	ActiveCount int           `json:"activeCount"`
+	Count       int           `json:"count"`
+	Attempts    []AuthAttempt `json:"attempts"`
+}
+
+// ActiveAuthAttempts returns all active non-expired auth attempts across all connections.
+func (s *Store) ActiveAuthAttempts(ctx context.Context) (ActiveAuthReport, error) {
+	rep := ActiveAuthReport{
+		Attempts: []AuthAttempt{},
+	}
+	var tableExists int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='auth_attempts'`).Scan(&tableExists)
+	if err != nil {
+		return rep, fmt.Errorf("check auth_attempts table: %w", err)
+	}
+	if tableExists == 0 {
+		return rep, nil
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, connection_id, generation, COALESCE(owner_subject, ''), status, expires_at, created_at
+		FROM auth_attempts
+		WHERE status IN ('STARTING', 'IN_PROGRESS', 'EXPORTING', 'VERIFYING') AND expires_at > ?
+		ORDER BY created_at ASC
+	`, nowStr)
+	if err != nil {
+		return rep, fmt.Errorf("query active auth attempts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var it AuthAttempt
+		if err := rows.Scan(
+			&it.ID, &it.ConnectionID, &it.Generation,
+			&it.OwnerSubject, &it.Status, &it.ExpiresAt, &it.CreatedAt,
+		); err != nil {
+			return rep, fmt.Errorf("scan auth attempt: %w", err)
+		}
+		rep.Attempts = append(rep.Attempts, it)
+	}
+	if err := rows.Err(); err != nil {
+		return rep, fmt.Errorf("iterate auth attempts: %w", err)
+	}
+	rep.ActiveCount = len(rep.Attempts)
+	rep.Count = len(rep.Attempts)
+	return rep, nil
 }

@@ -181,3 +181,54 @@ func TestStaleAuthAttemptExpiryAndRecovery(t *testing.T) {
 	}
 }
 
+func TestActiveAuthAttempts(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Initial: 0 active attempts
+	rep, err := store.ActiveAuthAttempts(ctx)
+	if err != nil {
+		t.Fatalf("ActiveAuthAttempts failed: %v", err)
+	}
+	if rep.ActiveCount != 0 || len(rep.Attempts) != 0 {
+		t.Fatalf("expected 0 active attempts, got %+v", rep)
+	}
+
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start an attempt with 1 hour TTL
+	attempt, err := store.StartAuthAttempt(ctx, "admin@example.com", time.Hour)
+	if err != nil {
+		t.Fatalf("StartAuthAttempt: %v", err)
+	}
+
+	rep, err = store.ActiveAuthAttempts(ctx)
+	if err != nil {
+		t.Fatalf("ActiveAuthAttempts failed: %v", err)
+	}
+	if rep.ActiveCount != 1 || len(rep.Attempts) != 1 {
+		t.Fatalf("expected 1 active attempt, got %+v", rep)
+	}
+	if rep.Attempts[0].ID != attempt.ID {
+		t.Fatalf("expected attempt ID %s, got %s", attempt.ID, rep.Attempts[0].ID)
+	}
+
+	// Cancel attempt
+	if err := store.FinishAuthAttempt(ctx, attempt.ID, "CANCELLED"); err != nil {
+		t.Fatalf("FinishAuthAttempt: %v", err)
+	}
+
+	rep, err = store.ActiveAuthAttempts(ctx)
+	if err != nil {
+		t.Fatalf("ActiveAuthAttempts failed: %v", err)
+	}
+	if rep.ActiveCount != 0 || len(rep.Attempts) != 0 {
+		t.Fatalf("expected 0 active attempts after cancellation, got %+v", rep)
+	}
+}

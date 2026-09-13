@@ -96,3 +96,44 @@ func (s *Store) CheckIntegrity(ctx context.Context) (IntegrityReport, error) {
 
 	return rep, nil
 }
+
+type SchemaVersionReport struct {
+	Version       int    `json:"version"`
+	SchemaVersion int    `json:"schemaVersion"`
+	Checksum      string `json:"checksum,omitempty"`
+	AppliedAt     string `json:"appliedAt,omitempty"`
+	AppliedCount  int    `json:"appliedCount"`
+}
+
+func (s *Store) SchemaVersion(ctx context.Context) (SchemaVersionReport, error) {
+	var rep SchemaVersionReport
+
+	var tableExists int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`).Scan(&tableExists)
+	if err != nil {
+		return rep, fmt.Errorf("check schema_migrations table: %w", err)
+	}
+	if tableExists == 0 {
+		return rep, nil
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&rep.AppliedCount)
+	if err != nil {
+		return rep, fmt.Errorf("count schema_migrations: %w", err)
+	}
+	if rep.AppliedCount == 0 {
+		return rep, nil
+	}
+
+	var version int
+	var checksum, appliedAt string
+	err = s.db.QueryRowContext(ctx, `SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &checksum, &appliedAt)
+	if err != nil {
+		return rep, fmt.Errorf("query schema_migrations version: %w", err)
+	}
+	rep.Version = version
+	rep.SchemaVersion = version
+	rep.Checksum = checksum
+	rep.AppliedAt = appliedAt
+	return rep, nil
+}

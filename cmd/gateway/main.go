@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,13 +32,42 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
+type gatewayFlags struct {
+	healthcheck    bool
+	checkIntegrity bool
+	migrateOnly    bool
+	backupTo       string
+}
+
+func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
+	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
+	fs.SetOutput(output)
+	healthcheck := fs.Bool("healthcheck", false, "verify server health via HTTP")
+	checkIntegrity := fs.Bool("check", false, "run read-only database integrity and inventory check")
+	migrateOnly := fs.Bool("migrate-only", false, "apply database migrations and exit (deprecated: use dbtool --migrate)")
+	backupTo := fs.String("backup-to", "", "create a SQLite backup and exit")
+
+	if err := fs.Parse(args); err != nil {
+		return gatewayFlags{}, err
+	}
+	if *migrateOnly {
+		return gatewayFlags{}, errors.New("gateway --migrate-only is disabled: database migrations must be performed using 'dbtool --migrate'")
+	}
+	return gatewayFlags{
+		healthcheck:    *healthcheck,
+		checkIntegrity: *checkIntegrity,
+		migrateOnly:    *migrateOnly,
+		backupTo:       *backupTo,
+	}, nil
+}
+
 func main() {
-	healthcheck := flag.Bool("healthcheck", false, "verify server health via HTTP")
-	checkIntegrity := flag.Bool("check", false, "run read-only database integrity and inventory check")
-	migrateOnly := flag.Bool("migrate-only", false, "apply database migrations and exit")
-	backupTo := flag.String("backup-to", "", "create a SQLite backup and exit")
-	flag.Parse()
-	if *healthcheck {
+	flags, err := parseGatewayFlags(os.Args[1:], os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if flags.healthcheck {
 		client := &http.Client{Timeout: 3 * time.Second}
 		ports := []string{"8090", "8080"}
 		if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -71,7 +101,7 @@ func main() {
 	// and does not hold a singleton lock on gateway.lock.
 	if cfg.WorkerRPCURL == "" {
 		lockPath := filepath.Join(filepath.Dir(cfg.DatabasePath), "gateway.lock")
-		if *checkIntegrity || *backupTo != "" {
+		if flags.checkIntegrity || flags.backupTo != "" {
 			fileLock, err = lock.AcquireShared(lockPath)
 		} else {
 			fileLock, err = lock.Acquire(lockPath)
@@ -92,21 +122,16 @@ func main() {
 		logger.Info("reaped stale auth attempts on startup", "count", n)
 	}
 
-	if *migrateOnly {
-		logger.Info("database migrations applied successfully", "database", cfg.DatabasePath)
-		return
-	}
-
-	if *backupTo != "" {
-		if err := store.Backup(ctx, *backupTo); err != nil {
+	if flags.backupTo != "" {
+		if err := store.Backup(ctx, flags.backupTo); err != nil {
 			logger.Error("database backup failed", "error", err)
 			os.Exit(1)
 		}
-		logger.Info("database backup created", "destination", *backupTo)
+		logger.Info("database backup created", "destination", flags.backupTo)
 		return
 	}
 
-	if *checkIntegrity {
+	if flags.checkIntegrity {
 		report, err := store.CheckIntegrity(ctx)
 		if err != nil {
 			logger.Error("database check failed", "error", err)
