@@ -165,7 +165,7 @@ services:
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=32m
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ping | grep -q pong"]
       interval: 10s
       timeout: 3s
       retries: 3
