@@ -163,7 +163,6 @@ ensure_secret_permissions "$bark_pass_file" "bark_basic_auth_password"
 # Bark runs as the image default user, which must be able to read its bind-mounted secrets.
 chmod 644 "$bark_user_file" "$bark_pass_file"
 [[ -f "$script_dir/bark-entrypoint.sh" ]] && chmod 755 "$script_dir/bark-entrypoint.sh" || true
-[[ -f "$script_dir/bark-healthcheck.sh" ]] && chmod 755 "$script_dir/bark-healthcheck.sh" || true
 [[ -f "$script_dir/smoke-test-bark.sh" ]] && chmod 755 "$script_dir/smoke-test-bark.sh" || true
 
 # 1. Back up the active named-volume database through the gateway image.

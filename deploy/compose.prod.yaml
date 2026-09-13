@@ -160,13 +160,12 @@ services:
     volumes:
       - bark_data:/data:rw
       - ./bark-entrypoint.sh:/bark-entrypoint.sh:ro
-      - ./bark-healthcheck.sh:/bark-healthcheck.sh:ro
       - ./secrets/bark_basic_auth_user:/run/secrets/bark_basic_auth_user:ro
       - ./secrets/bark_basic_auth_password:/run/secrets/bark_basic_auth_password:ro
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=32m
     healthcheck:
-      test: ["CMD", "/bin/sh", "/bark-healthcheck.sh"]
+      test: ["CMD-SHELL", "pidof bark-server >/dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
