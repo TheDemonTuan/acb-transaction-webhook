@@ -119,7 +119,13 @@ acquire_deploy_lock() {
   if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" || "${SKIP_LOCK:-0}" == "1" ]]; then
     return 0
   fi
-  mkdir -p "$(dirname "$DEPLOY_LOCK_FILE")"
+  local lock_dir
+  lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
+  if ! mkdir -p "$lock_dir" 2>/dev/null; then
+    DEPLOY_LOCK_FILE="$SCRIPT_DIR/.deploy.lock"
+    lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
+    mkdir -p "$lock_dir"
+  fi
   exec 9>"$DEPLOY_LOCK_FILE"
   if command -v flock >/dev/null 2>&1; then
     if ! flock -w "$timeout" 9; then
@@ -467,12 +473,16 @@ central_switch_route() {
 
 mark_intentional_stop() {
   local slot="$1"
-  mkdir -p "$FAILOVER_STATE_DIR"
+  if ! mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null; then
+    FAILOVER_STATE_DIR="/tmp/vps-failover"
+    mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null || true
+  fi
   local marker="$FAILOVER_STATE_DIR/intentional-stop-${slot}"
   local tmp="${marker}.tmp.$$"
   printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
     "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
-  mv -f "$tmp" "$marker"
+  mv -f "$tmp" "$marker" 2>/dev/null || true
+  touch "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
   log_info "Recorded intentional stop for slot [${slot}] before stopping container."
 }
 
