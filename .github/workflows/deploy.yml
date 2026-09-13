@@ -56,7 +56,7 @@ jobs:
       - name: Verify failover controller
         run: |
           python3 -m py_compile platform/failover/vps-failover-controller.py
-          python3 -c "import importlib.util; spec = importlib.util.spec_from_file_location('controller', 'platform/failover/vps-failover-controller.py'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)"
+          python3 -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('controller', 'platform/failover/vps-failover-controller.py'); mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = mod; spec.loader.exec_module(mod)"
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
