@@ -1,6 +1,33 @@
 name: edge-traefik
 
 services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: edge-cloudflared
+    restart: unless-stopped
+    user: "1000:1000"
+    command: tunnel --no-autoupdate run --token-file /run/secrets/tunnel-token
+    secrets:
+      - tunnel-token
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    mem_limit: 128m
+    cpus: 0.25
+    networks:
+      edge-egress:
+        gw_priority: 1
+      edge-cf-ingress:
+        ipv4_address: 172.31.250.2
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
     container_name: edge-docker-socket-proxy
@@ -61,12 +88,19 @@ services:
     depends_on:
       - socket-proxy
 
+secrets:
+  tunnel-token:
+    file: ./secrets/tunnel-token
+
 networks:
   edge-management:
     internal: true
   edge-cf-ingress:
     external: true
     name: edge-cf-ingress
+  edge-egress:
+    external: true
+    name: edge-egress
   edge-acb:
     external: true
     name: edge-acb
