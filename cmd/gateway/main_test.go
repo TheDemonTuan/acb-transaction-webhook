@@ -40,6 +40,11 @@ func TestParseGatewayFlags_ValidFlags(t *testing.T) {
 			want: gatewayFlags{healthcheck: true},
 		},
 		{
+			name: "deploycheck",
+			args: []string{"--deploycheck"},
+			want: gatewayFlags{deploycheck: true},
+		},
+		{
 			name: "check",
 			args: []string{"--check"},
 			want: gatewayFlags{checkIntegrity: true},

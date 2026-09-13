@@ -18,6 +18,7 @@ Covers:
 import importlib.util
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -543,3 +544,33 @@ def test_trusted_switch_interface_validation(env):
             },
             "switch_cmd": ["/tmp/malicious-switch", "{app}", "{slot}"],
         }, "acb")
+
+
+# 12. App Registry matches Docker Compose
+def test_apps_registry_matches_compose():
+    """All container_name declarations in apps.d/*.json must exist in deploy/compose.prod.yaml."""
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    apps_d = base_dir / "platform" / "failover" / "apps.d"
+    compose_file = base_dir / "deploy" / "compose.prod.yaml"
+
+    if not apps_d.exists() or not compose_file.exists():
+        pytest.skip("apps.d or compose.prod.yaml not found at expected path")
+
+    compose_text = compose_file.read_text(encoding="utf-8")
+    compose_containers = set(re.findall(r"container_name:\s*([^\s#]+)", compose_text))
+
+    assert len(compose_containers) > 0, "Failed to parse any container_name from compose.prod.yaml"
+
+    for json_file in apps_d.glob("*.json"):
+        data = json.loads(json_file.read_text(encoding="utf-8"))
+        if data.get("workload_class") == "singleton":
+            cname = data.get("container_name")
+            assert cname in compose_containers, (
+                f"{json_file.name}: singleton container '{cname}' not found in compose.prod.yaml ({compose_containers})"
+            )
+        elif data.get("workload_class") == "blue_green":
+            for slot_name, slot_cfg in data.get("slots", {}).items():
+                cname = slot_cfg.get("container_name")
+                assert cname in compose_containers, (
+                    f"{json_file.name}: slot '{slot_name}' container '{cname}' not found in compose.prod.yaml ({compose_containers})"
+                )

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 
 type gatewayFlags struct {
 	healthcheck    bool
+	deploycheck    bool
 	checkIntegrity bool
 	migrateOnly    bool
 	backupTo       string
@@ -42,6 +44,7 @@ func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(output)
 	healthcheck := fs.Bool("healthcheck", false, "verify server health via HTTP")
+	deploycheck := fs.Bool("deploycheck", false, "verify server deployment readiness via /internal/deployz")
 	checkIntegrity := fs.Bool("check", false, "run read-only database integrity and inventory check")
 	migrateOnly := fs.Bool("migrate-only", false, "apply database migrations and exit (deprecated: use dbtool --migrate)")
 	backupTo := fs.String("backup-to", "", "create a SQLite backup and exit")
@@ -54,6 +57,7 @@ func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
 	}
 	return gatewayFlags{
 		healthcheck:    *healthcheck,
+		deploycheck:    *deploycheck,
 		checkIntegrity: *checkIntegrity,
 		migrateOnly:    *migrateOnly,
 		backupTo:       *backupTo,
@@ -78,6 +82,50 @@ func main() {
 			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", p))
 			if err == nil && resp.StatusCode == http.StatusOK {
 				return
+			}
+		}
+		os.Exit(1)
+	}
+	if flags.deploycheck {
+		client := &http.Client{Timeout: 5 * time.Second}
+		ports := []string{"8090", "8080"}
+		if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
+			if _, p, err := net.SplitHostPort(addr); err == nil {
+				ports = append([]string{p}, ports...)
+			}
+		}
+		token := os.Getenv("WORKER_INTERNAL_TOKEN")
+		if token == "" {
+			if tokenFile := os.Getenv("WORKER_INTERNAL_TOKEN_FILE"); tokenFile != "" {
+				if b, err := os.ReadFile(tokenFile); err == nil {
+					token = strings.TrimSpace(string(b))
+				}
+			}
+		}
+		for _, p := range ports {
+			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%s/internal/deployz", p), nil)
+			if err != nil {
+				continue
+			}
+			if token != "" {
+				req.Header.Set("X-Worker-Internal-Token", token)
+			}
+			resp, err := client.Do(req)
+			if err == nil && resp != nil {
+				if resp.StatusCode == http.StatusOK {
+					var body map[string]any
+					if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
+						resp.Body.Close()
+						if body["storage"] == "ready" && body["schema"] == "compatible" {
+							fmt.Println("DEPLOYZ_READY")
+							return
+						}
+					} else {
+						resp.Body.Close()
+					}
+				} else {
+					resp.Body.Close()
+				}
 			}
 		}
 		os.Exit(1)

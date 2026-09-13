@@ -48,6 +48,12 @@ services:
       - bark_basic_auth_password
     labels:
       - "platform.workload.class=singleton"
+    healthcheck:
+      test: ["CMD", "/worker", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     logging:
       driver: "json-file"
       options:

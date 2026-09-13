@@ -7,12 +7,12 @@
   "switch_cmd": ["/usr/local/bin/platform-switch", "{app}", "{slot}"],
   "slots": {
     "blue": {
-      "container_name": "acb-web-blue",
-      "service": "acb-web"
+      "container_name": "acb-gateway-blue",
+      "service": "gateway-blue"
     },
     "green": {
-      "container_name": "acb-web-green",
-      "service": "acb-web"
+      "container_name": "acb-gateway-green",
+      "service": "gateway-green"
     }
   }
 }

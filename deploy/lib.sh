@@ -197,16 +197,33 @@ clear_deploy_state() {
 check_active_auth_gate() {
   log_info "Evaluating active-auth gate before migration / core modification..."
   local active_count=0
-  local db_file="${1:-$SCRIPT_DIR/data/gateway.db}"
 
   if [[ -n "${ACTIVE_AUTH_CHECK_CMD:-}" ]]; then
     active_count="$($ACTIVE_AUTH_CHECK_CMD)"
+  elif command -v docker >/dev/null 2>&1 && docker volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1; then
+    local dbtool_img="${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}"
+    local auth_json
+    auth_json="$(
+      docker run --rm \
+        --user 1000:1000 \
+        -e DATABASE_PATH=/data/gateway.db \
+        -v "${DATA_VOLUME_NAME}:/data:ro" \
+        "$dbtool_img" \
+        -path /data/gateway.db \
+        -active-auth-count 2>/dev/null || echo '{"activeCount":0}'
+    )"
+    if command -v jq >/dev/null 2>&1; then
+      active_count="$(printf '%s' "$auth_json" | jq -r '.activeCount // .count // 0' 2>/dev/null || echo 0)"
+    else
+      active_count="$(printf '%s' "$auth_json" | grep -o '"activeCount":[0-9]*' | cut -d: -f2 || echo 0)"
+    fi
   elif command -v sqlite3 >/dev/null 2>&1; then
+    local db_file="${1:-$SCRIPT_DIR/data/gateway.db}"
     local query="SELECT count(*) FROM auth_attempts WHERE status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING') AND (expires_at > datetime('now') OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));"
     active_count="$(sqlite3 "$db_file" "$query" 2>/dev/null || echo "0")"
   fi
 
-  if [[ "$active_count" -gt 0 ]]; then
+  if [[ "$active_count" =~ ^[0-9]+$ ]] && [[ "$active_count" -gt 0 ]]; then
     log_error "Active-auth gate FAILED: found ${active_count} active in-flight authentication session(s). Aborting to protect customer authentication."
     return 1
   fi

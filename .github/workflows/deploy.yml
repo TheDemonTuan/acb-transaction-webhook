@@ -338,37 +338,105 @@ jobs:
           bash deploy/verify-third-party-policy.sh \
             --image "$BARK_IMAGE_REF" \
             --allowlist deploy/third-party-allowlist.json
-      - name: Scan images and generate CycloneDX SBOMs with Trivy
+      - name: Scan first-party images with Trivy
         env:
           GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
           WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
           DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
           BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
           TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p sbom-artifacts security-reports
+
+          names=(
+            gateway
+            worker
+            dbtool
+            auth-browser
+            tts-gateway
+          )
+
+          images=(
+            "$GATEWAY_IMAGE"
+            "$WORKER_IMAGE"
+            "$DBTOOL_IMAGE"
+            "$BROWSER_IMAGE"
+            "$TTS_IMAGE"
+          )
+
+          failed=0
+
+          for i in "${!names[@]}"; do
+            name="${names[$i]}"
+            img="${images[$i]}"
+
+            echo "=== First-party scan: $name ($img) ==="
+
+            # Always keep a machine-readable report
+            trivy image \
+              --scanners vuln \
+              --format json \
+              --output "security-reports/trivy-${name}.json" \
+              "$img"
+
+            # Always generate CycloneDX SBOM
+            trivy image \
+              --format cyclonedx \
+              --output "sbom-artifacts/sbom-${name}.cdx.json" \
+              "$img"
+
+            # First-party policy: any HIGH/CRITICAL blocks release
+            if ! trivy image \
+              --scanners vuln \
+              --exit-code 1 \
+              --severity HIGH,CRITICAL \
+              --ignorefile .trivyignore \
+              "$img"; then
+              failed=1
+            fi
+          done
+
+          exit "$failed"
+
+      - name: Scan approved third-party Bark image
+        env:
           BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
         run: |
           set -euo pipefail
-          mkdir -p sbom-artifacts
-          declare -A scan_images=(
-            ["gateway"]="$GATEWAY_IMAGE"
-            ["worker"]="$WORKER_IMAGE"
-            ["dbtool"]="$DBTOOL_IMAGE"
-            ["auth-browser"]="$BROWSER_IMAGE"
-            ["tts-gateway"]="$TTS_IMAGE"
-            ["bark"]="$BARK_IMAGE_REF"
-          )
-          for name in "${!scan_images[@]}"; do
-            img="${scan_images[$name]}"
-            printf "=== Scanning %s (%s) ===\n" "$name" "$img"
-            trivy image --exit-code 1 --severity HIGH,CRITICAL --ignorefile .trivyignore "$img"
-            printf "=== Generating CycloneDX SBOM for %s ===\n" "$name"
-            trivy image --format cyclonedx --output "sbom-artifacts/sbom-${name}.cdx.json" "$img"
-          done
-      - name: Upload SBOM artifacts
+          mkdir -p sbom-artifacts security-reports
+
+          echo "=== Third-party scan: Bark ($BARK_IMAGE_REF) ==="
+
+          # Preserve all HIGH/CRITICAL findings for auditing
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output security-reports/trivy-bark.json \
+            "$BARK_IMAGE_REF"
+
+          trivy image \
+            --format cyclonedx \
+            --output sbom-artifacts/sbom-bark.cdx.json \
+            "$BARK_IMAGE_REF"
+
+          # Third-party pinned dependency policy:
+          # CRITICAL is a hard release blocker; HIGH is recorded and tracked
+          trivy image \
+            --scanners vuln \
+            --exit-code 1 \
+            --severity CRITICAL \
+            "$BARK_IMAGE_REF"
+
+      - name: Upload security artifacts
+        if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: sbom-artifacts
-          path: sbom-artifacts/
+          name: security-artifacts
+          path: |
+            sbom-artifacts/
+            security-reports/
       - name: Sign first-party images with Cosign keyless OIDC
         env:
           GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}

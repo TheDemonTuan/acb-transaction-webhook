@@ -25,6 +25,9 @@ fi
 # 2. Probe health probe
 if docker exec "$CONTAINER_NAME" /gateway --healthcheck >/dev/null 2>&1; then
   log_info "Slot ${SLOT} passed health check probe."
+  if docker exec "$CONTAINER_NAME" /gateway --deploycheck >/dev/null 2>&1; then
+    log_info "Slot ${SLOT} passed deep deployment readiness probe (/internal/deployz)."
+  fi
 else
   log_error "Slot ${SLOT} failed health check probe"
   exit 1
