@@ -9,14 +9,14 @@ pass="${BARK_PASS:-}"
 
 printf 'Running smoke tests on Bark server at %s...\n' "$base_url"
 
-# 1. Ping check
-printf '1. Checking /ping endpoint...\n'
-ping_code="$(curl -s -o /dev/null -w '%{http_code}' -u "${user}:${pass}" "${base_url}/ping" || true)"
-if [[ "$ping_code" != "200" ]]; then
-    printf 'FAIL: authenticated /ping returned %s (expected 200)\n' "$ping_code" >&2
+# 1. Health check
+printf '1. Checking authenticated /healthz endpoint...\n'
+health_code="$(curl -s -o /dev/null -w '%{http_code}' -u "${user}:${pass}" "${base_url}/healthz" || true)"
+if [[ "$health_code" != "200" ]]; then
+    printf 'FAIL: authenticated /healthz returned %s (expected 200)\n' "$health_code" >&2
     exit 1
 fi
-printf 'OK: authenticated /ping returned 200\n'
+printf 'OK: authenticated /healthz returned 200\n'
 
 # 3. Unauthorized push check (if basic auth is enabled)
 if [[ -n "$user" && -n "$pass" ]]; then
