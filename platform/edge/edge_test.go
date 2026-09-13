@@ -189,12 +189,12 @@ func TestTraefikStaticConfiguration(t *testing.T) {
 	}
 
 	// AccessLog headers defaultMode: drop
-	if !strings.Contains(cfg, "headers:\n      defaultMode: drop") {
+	if !strings.Contains(cfg, "headers:\n      defaultMode: drop") && !strings.Contains(cfg, "headers:\r\n      defaultMode: drop") {
 		t.Errorf("traefik.yml accessLog headers must have defaultMode: drop")
 	}
 
 	// AccessLog queryParameters defaultMode: drop
-	if !strings.Contains(cfg, "queryParameters:\n      defaultMode: drop") {
+	if !strings.Contains(cfg, "queryParameters:\n      defaultMode: drop") && !strings.Contains(cfg, "queryParameters:\r\n      defaultMode: drop") {
 		t.Errorf("traefik.yml accessLog queryParameters must have defaultMode: drop")
 	}
 
