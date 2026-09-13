@@ -599,6 +599,13 @@ jobs:
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat <<'EOF' > ~/.ssh/config
+Host *
+  ServerAliveInterval 15
+  ServerAliveCountMax 10
+  TCPKeepAlive yes
+EOF
+          chmod 600 ~/.ssh/config
       - name: Sync deployment files
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -674,5 +681,6 @@ jobs:
           export BARK_IMAGE_REF="$BARK_IMAGE_REF"
           export UPGRADE_CORE=1
           cd "$DEPLOY_PATH"
-          timeout 900 ./deploy/deploy-warm.sh --upgrade-core "$IMAGE"
+          timeout 900 ./deploy/deploy-warm.sh --upgrade-core --soak-seconds 30 "$IMAGE"
+          ./deploy/verify-deployment.sh
           REMOTE
