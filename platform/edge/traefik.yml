@@ -39,6 +39,5 @@ providers:
     endpoint: "tcp://socket-proxy:2375"
     exposedByDefault: false
     watch: true
-    network: "edge-acb"
     # Do not auto-generate public default routers
     defaultRule: "Host(`{{ normalize .Name }}.internal.invalid`)"
