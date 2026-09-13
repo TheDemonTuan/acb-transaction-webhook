@@ -65,6 +65,8 @@ jobs:
             exit 1
           fi
           shellcheck --severity=error "${scripts[@]}"
+      - name: Test supply-chain validators and release manifest
+        run: bash deploy/test-supply-chain.sh
       - name: Check generated source and whitespace
         run: git diff --check
 

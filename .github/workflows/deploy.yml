@@ -14,6 +14,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 concurrency:
   group: acb-transaction-webhook-production
@@ -76,6 +77,8 @@ jobs:
             exit 1
           fi
           shellcheck --severity=error "${scripts[@]}"
+      - name: Test supply-chain validators and release manifest
+        run: bash deploy/test-supply-chain.sh
       - name: Check generated source and whitespace
         run: git diff --check
 
@@ -287,15 +290,179 @@ jobs:
           TTS_GATEWAY_IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
         run: bash deploy/smoke-test-tts-gateway.sh "$TTS_GATEWAY_IMAGE"
 
+  scan-and-attest:
+    name: Scan, attest, and sign release artifacts
+    needs:
+      - verify
+      - build-gateway-image
+      - build-worker-image
+      - build-dbtool-image
+      - build-auth-browser-image
+      - build-tts-gateway-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@053f9b74638557590800a301da1ba82351507e2c # v3.8.1
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.59.1
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate CVE exception allowlist
+        run: |
+          bash deploy/validate-cve-allowlist.sh \
+            --file deploy/cve-allowlist.json \
+            --output-ignorefile .trivyignore
+      - name: Validate Bark third-party policy
+        env:
+          BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
+        run: |
+          bash deploy/verify-third-party-policy.sh \
+            --image "$BARK_IMAGE_REF" \
+            --allowlist deploy/third-party-allowlist.json
+      - name: Scan images and generate CycloneDX SBOMs with Trivy
+        env:
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
+        run: |
+          set -euo pipefail
+          mkdir -p sbom-artifacts
+          declare -A scan_images=(
+            ["gateway"]="$GATEWAY_IMAGE"
+            ["worker"]="$WORKER_IMAGE"
+            ["dbtool"]="$DBTOOL_IMAGE"
+            ["auth-browser"]="$BROWSER_IMAGE"
+            ["tts-gateway"]="$TTS_IMAGE"
+            ["bark"]="$BARK_IMAGE_REF"
+          )
+          for name in "${!scan_images[@]}"; do
+            img="${scan_images[$name]}"
+            printf "=== Scanning %s (%s) ===\n" "$name" "$img"
+            trivy image --exit-code 1 --severity HIGH,CRITICAL --ignorefile .trivyignore "$img"
+            printf "=== Generating CycloneDX SBOM for %s ===\n" "$name"
+            trivy image --format cyclonedx --output "sbom-artifacts/sbom-${name}.cdx.json" "$img"
+          done
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: sbom-artifacts
+          path: sbom-artifacts/
+      - name: Sign first-party images with Cosign keyless OIDC
+        env:
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          first_party=(
+            "$GATEWAY_IMAGE"
+            "$WORKER_IMAGE"
+            "$DBTOOL_IMAGE"
+            "$BROWSER_IMAGE"
+            "$TTS_IMAGE"
+          )
+          for img in "${first_party[@]}"; do
+            printf "=== Signing %s with Cosign ===\n" "$img"
+            cosign sign --yes "$img"
+          done
+      - name: Verify first-party image signatures
+        env:
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cert_identity_regex="^https://github\.com/${REPO}/\.github/workflows/deploy\.yml@refs/heads/main$"
+          oidc_issuer="https://token.actions.githubusercontent.com"
+          first_party=(
+            "$GATEWAY_IMAGE"
+            "$WORKER_IMAGE"
+            "$DBTOOL_IMAGE"
+            "$BROWSER_IMAGE"
+            "$TTS_IMAGE"
+          )
+          for img in "${first_party[@]}"; do
+            printf "=== Verifying Cosign signature for %s ===\n" "$img"
+            cosign verify \
+              --certificate-identity-regexp "$cert_identity_regex" \
+              --certificate-oidc-issuer "$oidc_issuer" \
+              "$img"
+          done
+      - name: Generate release manifest JSON
+        env:
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
+        run: |
+          bash deploy/generate-release-manifest.sh \
+            --git-sha "${{ github.sha }}" \
+            --gateway-image "$GATEWAY_IMAGE" \
+            --worker-image "$WORKER_IMAGE" \
+            --dbtool-image "$DBTOOL_IMAGE" \
+            --auth-browser-image "$BROWSER_IMAGE" \
+            --tts-image "$TTS_IMAGE" \
+            --bark-image "$BARK_IMAGE_REF" \
+            --deploy-dir deploy \
+            --output deploy/release-manifest.json
+      - name: Sign release manifest blob with Cosign
+        run: |
+          cosign sign-blob --yes \
+            --bundle deploy/release-manifest.bundle \
+            deploy/release-manifest.json
+      - name: Verify release manifest signature blob
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          cert_identity_regex="^https://github\.com/${REPO}/\.github/workflows/deploy\.yml@refs/heads/main$"
+          oidc_issuer="https://token.actions.githubusercontent.com"
+          cosign verify-blob \
+            --bundle deploy/release-manifest.bundle \
+            --certificate-identity-regexp "$cert_identity_regex" \
+            --certificate-oidc-issuer "$oidc_issuer" \
+            deploy/release-manifest.json
+      - name: Upload release manifest artifacts
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: release-manifest
+          path: |
+            deploy/release-manifest.json
+            deploy/release-manifest.bundle
+
   deploy:
     name: Deploy to VPS
-    needs: [verify, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image]
+    needs: [verify, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
     # Hard freeze: automatic deploy on push is disabled. Explicit workflow_dispatch approval required.
     if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
     runs-on: ubuntu-latest
     environment: production
     steps:
       - uses: actions/checkout@v7
+      - name: Download release manifest
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: release-manifest
+          path: deploy/
       - name: Configure SSH
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -324,6 +491,7 @@ jobs:
             deploy/seccomp-auth-browser.json deploy/deploy.sh deploy/rollback.sh \
             deploy/verify-deployment.sh deploy/backup.sh deploy/bark-entrypoint.sh \
             deploy/smoke-test-bark.sh deploy/README.md \
+            deploy/release-manifest.json deploy/release-manifest.bundle deploy/verify-manifest.sh \
             "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" "chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
@@ -334,7 +502,7 @@ jobs:
           VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
           DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
-          BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF }}
+          BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
         run: |
           set -euo pipefail
           [[ -n "$DASHBOARD_OWNER_EMAIL" ]] || { printf 'DASHBOARD_OWNER_EMAIL is required.\n' >&2; exit 1; }
@@ -348,6 +516,19 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' IMAGE='$image' WORKER_IMAGE='$worker_image' DBTOOL_IMAGE='$dbtool_image' BROWSER_IMAGE='$browser_image' TTS_IMAGE='$tts_image' BARK_IMAGE_REF='$BARK_IMAGE_REF' bash -s" <<'REMOTE'
           set -Eeuo pipefail
+
+          # Preflight: verify release manifest, artifact checksums, and image digests before any remote mutation
+          bash "$DEPLOY_PATH/deploy/verify-manifest.sh" \
+            --manifest "$DEPLOY_PATH/deploy/release-manifest.json" \
+            --bundle "$DEPLOY_PATH/deploy/release-manifest.bundle" \
+            --deploy-dir "$DEPLOY_PATH/deploy" \
+            --gateway-image "$IMAGE" \
+            --worker-image "$WORKER_IMAGE" \
+            --dbtool-image "$DBTOOL_IMAGE" \
+            --browser-image "$BROWSER_IMAGE" \
+            --tts-image "$TTS_IMAGE" \
+            --bark-image "$BARK_IMAGE_REF"
+
           env_file="$DEPLOY_PATH/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing production env file: %s\n' "$env_file" >&2; exit 1; }
           tmp="$(mktemp "${env_file}.XXXXXX")"

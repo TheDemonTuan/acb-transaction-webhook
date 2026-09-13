@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "description": "Approved third-party container image digests",
+  "images": [
+    {
+      "image": "ghcr.io/finb/bark-server",
+      "digest": "sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4",
+      "owner": "infrastructure@tuannguyenviet.site",
+      "reason": "Upstream iOS Bark push notification server release",
+      "expiry": "2027-01-01"
+    }
+  ]
+}
