@@ -54,8 +54,8 @@ var DefaultMonitorSettings = MonitorSettings{
 	Timezone: "Asia/Ho_Chi_Minh",
 	DefaultProfile: Profile{
 		Mode:       ModeKeepaliveOnly,
-		MinSeconds: 180,
-		MaxSeconds: 300,
+		MinSeconds: 120,
+		MaxSeconds: 180,
 	},
 	Windows: []Window{
 		{
@@ -65,8 +65,8 @@ var DefaultMonitorSettings = MonitorSettings{
 			EndTime:    "23:00",
 			Profile: Profile{
 				Mode:       ModeRealtime,
-				MinSeconds: 5,
-				MaxSeconds: 15,
+				MinSeconds: 3,
+				MaxSeconds: 10,
 			},
 		},
 	},
@@ -114,8 +114,8 @@ func (s *MonitorSettings) Validate() error {
 func validateProfile(p Profile) error {
 	switch p.Mode {
 	case ModeRealtime:
-		if p.MinSeconds < 5 {
-			return errors.New("REALTIME minSeconds must be at least 5")
+		if p.MinSeconds < 3 {
+			return errors.New("REALTIME minSeconds must be at least 3")
 		}
 		if p.MaxSeconds > 300 {
 			return errors.New("REALTIME maxSeconds must not exceed 300")
@@ -145,8 +145,8 @@ func ResolveSchedule(now time.Time, s *MonitorSettings) ResolvedSchedule {
 	if s == nil {
 		return ResolvedSchedule{
 			Mode:        ModeRealtime,
-			MinInterval: 5 * time.Second,
-			MaxInterval: 15 * time.Second,
+			MinInterval: 3 * time.Second,
+			MaxInterval: 12 * time.Second,
 		}
 	}
 

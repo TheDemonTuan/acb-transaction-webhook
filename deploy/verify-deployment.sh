@@ -9,6 +9,7 @@ compose_file="${COMPOSE_FILE:-$script_dir/compose.prod.yaml}"
 expected_gateway_image="${IMAGE_REF:-}"
 expected_browser_image="${AUTH_BROWSER_IMAGE_REF:-}"
 expected_tts_image="${TTS_GATEWAY_IMAGE_REF:-}"
+expected_bark_image="${BARK_IMAGE_REF:-}"
 start="$(date +%s)"
 
 verify_image() {
@@ -119,6 +120,15 @@ if command -v docker >/dev/null 2>&1 && [[ -f "$compose_file" ]]; then
       fi
       sleep 2
     done
+  fi
+  if docker compose --env-file "${ENV_FILE:-$script_dir/.env.production}" -f "$compose_file" config --services 2>/dev/null | grep -q "^bark$"; then
+    bark_container="${BARK_CONTAINER:-acb-bark}"
+    verify_image "$bark_container" "$expected_bark_image" "bark"
+    if [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$bark_container" 2>/dev/null || true)" != "healthy" ]]; then
+      printf 'Bark container is not healthy.\n' >&2
+      docker compose -f "$compose_file" logs --tail 30 bark >&2 || true
+      exit 1
+    fi
   fi
 elif [[ -n "${AUTH_BROWSER_URL:-}" ]]; then
   # Non-Docker fallback: verify healthz endpoint only (never /sessions)

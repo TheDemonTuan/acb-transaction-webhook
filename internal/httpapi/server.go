@@ -121,6 +121,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/events/stream", s.eventsStream)
 		api.Get("/realtime/status", s.realtimeStatus)
 		api.Get("/monitor/settings", s.getMonitorSettings)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/monitor/settings", s.updateMonitorSettings)
 		api.With(s.auth.Require(auth.Owner, auth.Operator)).Put("/monitor/settings", s.updateMonitorSettings)
 		api.Get("/payment-qr", s.getPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
@@ -248,7 +249,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage_error"})
 		return
 	}
-	summary, err := s.store.DeliverySummary(r.Context())
+	summary, err := s.store.NotificationSummary(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage_error"})
 		return
@@ -259,7 +260,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"uptimeSeconds": int(time.Since(s.started).Seconds()),
 		"acb":           acb,
 		"storage":       map[string]string{"status": "READY"},
-		"webhooks":      summary,
+		"webhooks":      summary.ByProvider[notification.ProviderWebhook],
 		"notifications": summary,
 	})
 }

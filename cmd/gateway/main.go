@@ -34,6 +34,7 @@ func main() {
 	healthcheck := flag.Bool("healthcheck", false, "verify server health via HTTP")
 	checkIntegrity := flag.Bool("check", false, "run read-only database integrity and inventory check")
 	migrateOnly := flag.Bool("migrate-only", false, "apply database migrations and exit")
+	backupTo := flag.String("backup-to", "", "create a SQLite backup and exit")
 	flag.Parse()
 	if *healthcheck {
 		client := &http.Client{Timeout: 3 * time.Second}
@@ -66,7 +67,7 @@ func main() {
 	}
 	lockPath := filepath.Join(filepath.Dir(cfg.DatabasePath), "gateway.lock")
 	var fileLock *lock.FileLock
-	if *checkIntegrity {
+	if *checkIntegrity || *backupTo != "" {
 		fileLock, err = lock.AcquireShared(lockPath)
 	} else {
 		fileLock, err = lock.Acquire(lockPath)
@@ -88,6 +89,15 @@ func main() {
 
 	if *migrateOnly {
 		logger.Info("database migrations applied successfully", "database", cfg.DatabasePath)
+		return
+	}
+
+	if *backupTo != "" {
+		if err := store.Backup(ctx, *backupTo); err != nil {
+			logger.Error("database backup failed", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("database backup created", "destination", *backupTo)
 		return
 	}
 
@@ -134,17 +144,23 @@ func main() {
 	hub := eventhub.New()
 
 	notificationRegistry := notification.NewRegistry()
-	notificationRegistry.Register("WEBHOOK", webhook.NewSender(nil, false))
+	notificationRegistry.Register(notification.ProviderWebhook, webhook.NewSender(nil, false))
 
-	barkCfg, err := bark.LoadConfigFromEnv()
-	if err != nil {
-		logger.Warn("invalid Bark configuration", "error", err)
+	barkCfg := bark.Config{
+		ServerURL:         cfg.BarkServerURL,
+		PublicURL:         cfg.BarkPublicURL,
+		BasicAuthUser:     cfg.BarkBasicAuthUser,
+		BasicAuthPassword: cfg.BarkBasicAuthPassword,
+		Timeout:           cfg.BarkTimeout,
+		DefaultGroup:      cfg.BarkDefaultGroup,
+		DefaultLevel:      cfg.BarkDefaultLevel,
+		DefaultSound:      cfg.BarkDefaultSound,
 	}
 	var barkSender *bark.Sender
 	if barkCfg.Configured() {
 		barkSender = bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
-		notificationRegistry.Register("BARK", barkSender)
-		logger.Info("Bark notification provider registered", "server_url", barkCfg.ServerURL)
+		notificationRegistry.Register(notification.ProviderBark, barkSender)
+		logger.Info("Bark notification provider registered")
 	}
 
 	dispatcher := notification.NewDispatcher(store, notificationRegistry)

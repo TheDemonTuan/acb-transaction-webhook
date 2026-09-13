@@ -130,13 +130,13 @@ export const SystemPage: React.FC = () => {
           <div className="py-2.5 flex items-center justify-between">
             <span className="text-stone-500">Thông báo đang xếp hàng gửi:</span>
             <span className="font-bold text-stone-900">
-              {status?.notifications?.pending ?? status?.webhooks?.pending ?? 0}
+              {status?.notifications?.total.pending ?? status?.webhooks?.pending ?? 0}
             </span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
             <span className="text-stone-500">Thông báo gửi không thành công:</span>
             <span className="font-bold text-stone-900">
-              {status?.notifications?.deadLetter ?? status?.webhooks?.deadLetter ?? 0}
+              {status?.notifications?.total.deadLetter ?? status?.webhooks?.deadLetter ?? 0}
             </span>
           </div>
         </div>

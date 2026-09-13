@@ -206,6 +206,30 @@ func TestNotificationProvidersAndChannelsLifecycle(t *testing.T) {
 	}
 }
 
+func TestRotateSecretMalformedBodyHasNoSideEffects(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	ch, err := store.CreateBarkChannel(context.Background(), "Test Phone", "original_device_key", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrf, cookie := getCSRF(srv)
+	req := prepareAuthedPost("http://example.test/api/v1/notification-channels/"+ch.ID+"/rotate-secret", []byte(`{"deviceKey":`), csrf, cookie)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var keyCount int
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT count(*) FROM endpoint_secrets WHERE endpoint_id = ?`, ch.ID).Scan(&keyCount); err != nil {
+		t.Fatal(err)
+	}
+	if keyCount != 1 {
+		t.Fatalf("malformed rotation changed key count to %d", keyCount)
+	}
+}
+
 func TestBarkTestNotificationEndpoint(t *testing.T) {
 	srv, store := setupTestServerWithKeyring(t)
 	defer store.Close()

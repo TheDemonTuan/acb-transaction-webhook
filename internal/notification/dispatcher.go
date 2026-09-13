@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -28,6 +29,7 @@ type Dispatcher struct {
 	registry   *Registry
 	maxRetries int
 	backoffs   []time.Duration
+	workers    int
 	wakeCh     chan struct{}
 }
 
@@ -37,7 +39,8 @@ func NewDispatcher(store *storage.Store, registry *Registry) *Dispatcher {
 		registry:   registry,
 		maxRetries: len(defaultBackoffs),
 		backoffs:   defaultBackoffs,
-		wakeCh:     make(chan struct{}, 1),
+		workers:    4,
+		wakeCh:     make(chan struct{}, 4),
 	}
 }
 
@@ -56,22 +59,44 @@ func (d *Dispatcher) SetBackoffs(b []time.Duration) *Dispatcher {
 	return d
 }
 
+func (d *Dispatcher) SetWorkers(n int) *Dispatcher {
+	if n > 0 {
+		d.workers = n
+	}
+	return d
+}
+
 func (d *Dispatcher) Wake() {
-	select {
-	case d.wakeCh <- struct{}{}:
-	default:
+	for range d.workers {
+		select {
+		case d.wakeCh <- struct{}{}:
+		default:
+			return
+		}
 	}
 }
 
 func (d *Dispatcher) Start(ctx context.Context) {
-	slog.Info("notification dispatcher started", "max_retries", d.maxRetries)
+	slog.Info("notification dispatcher started", "max_retries", d.maxRetries, "workers", d.workers)
+	var wg sync.WaitGroup
+	for range d.workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.worker(ctx)
+		}()
+	}
+	<-ctx.Done()
+	wg.Wait()
+	slog.Info("notification dispatcher stopping")
+}
+
+func (d *Dispatcher) worker(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("notification dispatcher stopping")
 			return
 		case <-d.wakeCh:
 			d.drain(ctx)
@@ -137,7 +162,8 @@ func (d *Dispatcher) DispatchOne(ctx context.Context) (bool, error) {
 	res := sender.Send(ctx, req)
 	duration := time.Since(start)
 
-	if target.Provider == "WEBHOOK" {
+	telemetry.Default.RecordNotification(target.Provider, duration, res.Outcome == OutcomeSuccess)
+	if target.Provider == ProviderWebhook {
 		telemetry.Default.RecordWebhook(duration, res.Outcome == OutcomeSuccess)
 	}
 

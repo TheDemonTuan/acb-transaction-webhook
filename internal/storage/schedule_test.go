@@ -160,11 +160,27 @@ func TestScheduleOvernightWindowSingleWeekday(t *testing.T) {
 	}
 }
 
+func TestDefaultMonitorSettingsIntervals(t *testing.T) {
+	if got := DefaultMonitorSettings.DefaultProfile; got.Mode != ModeKeepaliveOnly || got.MinSeconds != 120 || got.MaxSeconds != 180 {
+		t.Fatalf("unexpected default keepalive profile: %+v", got)
+	}
+	if len(DefaultMonitorSettings.Windows) != 1 {
+		t.Fatalf("expected one default window, got %d", len(DefaultMonitorSettings.Windows))
+	}
+	if got := DefaultMonitorSettings.Windows[0].Profile; got.Mode != ModeRealtime || got.MinSeconds != 3 || got.MaxSeconds != 10 {
+		t.Fatalf("unexpected default realtime profile: %+v", got)
+	}
+}
+
 func TestScheduleValidationBounds(t *testing.T) {
-	// REALTIME minSeconds < 5 must fail
-	pRealtimeTooLow := Profile{Mode: ModeRealtime, MinSeconds: 4, MaxSeconds: 10}
+	if err := validateProfile(Profile{Mode: ModeRealtime, MinSeconds: 3, MaxSeconds: 10}); err != nil {
+		t.Errorf("expected 3-10 second REALTIME profile to be valid: %v", err)
+	}
+
+	// REALTIME minSeconds < 3 must fail
+	pRealtimeTooLow := Profile{Mode: ModeRealtime, MinSeconds: 2, MaxSeconds: 10}
 	if err := validateProfile(pRealtimeTooLow); err == nil {
-		t.Errorf("expected error for REALTIME minSeconds < 5")
+		t.Errorf("expected error for REALTIME minSeconds < 3")
 	}
 
 	// REALTIME maxSeconds > 300 must fail
@@ -174,7 +190,7 @@ func TestScheduleValidationBounds(t *testing.T) {
 	}
 
 	// KEEPALIVE minSeconds < 60 must fail
-	pKeepaliveTooLow := Profile{Mode: ModeKeepaliveOnly, MinSeconds: 59, MaxSeconds: 120}
+	pKeepaliveTooLow := Profile{Mode: ModeKeepaliveOnly, MinSeconds: 59, MaxSeconds: 100}
 	if err := validateProfile(pKeepaliveTooLow); err == nil {
 		t.Errorf("expected error for KEEPALIVE minSeconds < 60")
 	}
@@ -214,7 +230,7 @@ func TestSaveMonitorSettingsOptimisticLocking(t *testing.T) {
 	}
 
 	// Second save with matching revision 2 succeeds and increments to 3
-	saved.DefaultProfile.MinSeconds = 200
+	saved.DefaultProfile.MinSeconds = 130
 	saved2, err := store.SaveMonitorSettings(ctx, saved)
 	if err != nil {
 		t.Fatalf("SaveMonitorSettings second save: %v", err)

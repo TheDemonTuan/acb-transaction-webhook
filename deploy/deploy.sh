@@ -24,6 +24,8 @@ fi
 [[ "$image_ref" =~ $image_pattern ]] || { printf 'Pass an immutable gateway image digest as first argument.\n' >&2; exit 1; }
 [[ "$browser_image_ref" =~ $image_pattern ]] || { printf 'Pass an immutable auth-browser image digest as second argument.\n' >&2; exit 1; }
 [[ "$tts_image_ref" =~ $image_pattern ]] || { printf 'Pass an immutable tts-gateway image digest as third argument (or via TTS_GATEWAY_IMAGE_REF).\n' >&2; exit 1; }
+bark_image_ref="${BARK_IMAGE_REF:-}"
+[[ "$bark_image_ref" =~ $image_pattern ]] || { printf 'BARK_IMAGE_REF must be an immutable image digest.\n' >&2; exit 1; }
 [[ -z "$staged_compose" || -f "$staged_compose" ]] || { printf 'Staged compose file not found: %s\n' "$staged_compose" >&2; exit 1; }
 
 export IMAGE_REF="$image_ref"
@@ -156,15 +158,24 @@ if [[ ! -f "$bark_pass_file" ]]; then
 fi
 ensure_secret_permissions "$bark_pass_file" "bark_basic_auth_password"
 
-chmod 644 "$bark_user_file" 2>/dev/null || true
-chmod 644 "$bark_pass_file" 2>/dev/null || true
+[[ -s "$bark_user_file" ]] || { printf 'Bark basic auth user file is empty.\n' >&2; exit 1; }
+[[ -s "$bark_pass_file" ]] || { printf 'Bark basic auth password file is empty.\n' >&2; exit 1; }
 [[ -f "$script_dir/bark-entrypoint.sh" ]] && chmod 755 "$script_dir/bark-entrypoint.sh" || true
 [[ -f "$script_dir/smoke-test-bark.sh" ]] && chmod 755 "$script_dir/smoke-test-bark.sh" || true
 
-# 1. Execute pre-deployment offline backup
-if [[ -f "$script_dir/data/gateway.db" ]]; then
-  printf 'Executing pre-deployment backup with WAL checkpoint...\n'
-  DATABASE_PATH="$script_dir/data/gateway.db" BACKUP_DIR="$script_dir/data/backups" "$script_dir/backup.sh"
+# 1. Back up the active named-volume database through the gateway image.
+backup_dir="$script_dir/data/backups"
+mkdir -p "$backup_dir"
+if docker volume inspect bank-event-gateway_gateway_data >/dev/null 2>&1; then
+  backup_name="gateway-$(date -u +%Y%m%d%H%M%S).db"
+  printf 'Backing up the active gateway named volume...\n'
+  docker run --rm --user 1000:1000 \
+    -e APP_ENV=development -e DATA_DIR=/data -e DATABASE_PATH=/data/gateway.db \
+    -e APP_MASTER_KEY_FILE=/run/secrets/app_master_key \
+    -v bank-event-gateway_gateway_data:/data:rw \
+    -v "$backup_dir:/backup:rw" \
+    -v "$script_dir/secrets/app_master_key:/run/secrets/app_master_key:ro" \
+    "$image_ref" --backup-to "/backup/$backup_name"
 fi
 
 [[ -f "$compose_file" ]] || { printf 'Missing compose file: %s\n' "$compose_file" >&2; exit 1; }
@@ -177,7 +188,6 @@ browser_current="$(cat "$browser_current_file" 2>/dev/null || true)"
 tts_current="$(cat "$tts_current_file" 2>/dev/null || true)"
 bark_current="$(cat "$bark_current_file" 2>/dev/null || true)"
 
-bark_image_ref="${BARK_IMAGE_REF:-${bark_current:-ghcr.io/finb/bark-server:latest}}"
 export BARK_IMAGE_REF="$bark_image_ref"
 
 # 2. Pull images and execute migration-only gate
@@ -211,6 +221,13 @@ if ! timeout "${READY_TIMEOUT:-120}" docker compose --env-file "$env_file" -f "$
 fi
 
 PORT="${PORT:-8080}" "$script_dir/verify-deployment.sh"
+printf 'Running Bark authentication smoke test in the private Docker network...\n'
+bark_user="$(tr -d '\r\n' < "$script_dir/secrets/bark_basic_auth_user")"
+bark_pass="$(tr -d '\r\n' < "$script_dir/secrets/bark_basic_auth_password")"
+docker run --rm --network acb-transaction-webhook_default \
+  -v "$script_dir/smoke-test-bark.sh:/smoke-test-bark.sh:ro" \
+  -e BARK_HOST=bark -e BARK_PORT=8080 -e BARK_USER="$bark_user" -e BARK_PASS="$bark_pass" \
+  bash:5.3 /bin/bash /smoke-test-bark.sh
 if [[ -n "$gateway_current" && "$gateway_current" != "$image_ref" ]]; then
   printf '%s\n' "$gateway_current" > "$script_dir/.previous-image"
 fi

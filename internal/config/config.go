@@ -17,23 +17,23 @@ type RoleSubjects struct {
 }
 
 type Config struct {
-	Address            string
-	DatabasePath       string
-	MasterKeyFile      string
-	Timezone           *time.Location
-	PollMinInterval    time.Duration
-	PollMaxInterval    time.Duration
-	CloudflareIssuer   string
-	CloudflareAudience string
-	CloudflareJWKSURL  string
-	Roles              RoleSubjects
-	DevelopmentSubject string
-	Production         bool
-	PublicOrigin       string
-	AuthBrowserURL     string
-	AuthBrowserVNCURL  string
-	TTSGatewayURL      string
-	TTSInternalToken   string
+	Address               string
+	DatabasePath          string
+	MasterKeyFile         string
+	Timezone              *time.Location
+	PollMinInterval       time.Duration
+	PollMaxInterval       time.Duration
+	CloudflareIssuer      string
+	CloudflareAudience    string
+	CloudflareJWKSURL     string
+	Roles                 RoleSubjects
+	DevelopmentSubject    string
+	Production            bool
+	PublicOrigin          string
+	AuthBrowserURL        string
+	AuthBrowserVNCURL     string
+	TTSGatewayURL         string
+	TTSInternalToken      string
 	BarkServerURL         string
 	BarkPublicURL         string
 	BarkBasicAuthUser     string
@@ -49,11 +49,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("load timezone: %w", err)
 	}
-	pollMin, err := seconds("POLL_MIN_INTERVAL_SEC", 5, 2, 300)
+	pollMin, err := seconds("POLL_MIN_INTERVAL_SEC", 3, 2, 300)
 	if err != nil {
 		return Config{}, err
 	}
-	pollMax, err := seconds("POLL_MAX_INTERVAL_SEC", 15, 2, 300)
+	pollMax, err := seconds("POLL_MAX_INTERVAL_SEC", 10, 2, 300)
 	if err != nil {
 		return Config{}, err
 	}
@@ -140,10 +140,12 @@ func Load() (Config, error) {
 	}
 
 	barkTimeoutMs := 5000
-	if raw := os.Getenv("BARK_TIMEOUT_MS"); raw != "" {
-		if ms, err := strconv.Atoi(raw); err == nil && ms >= 500 && ms <= 15000 {
-			barkTimeoutMs = ms
+	if raw := strings.TrimSpace(os.Getenv("BARK_TIMEOUT_MS")); raw != "" {
+		ms, err := strconv.Atoi(raw)
+		if err != nil || ms < 500 || ms > 15000 {
+			return Config{}, fmt.Errorf("BARK_TIMEOUT_MS must be an integer from 500 to 15000")
 		}
+		barkTimeoutMs = ms
 	}
 	barkGroup := value("BARK_DEFAULT_GROUP", "ACB")
 	barkLevel := value("BARK_DEFAULT_LEVEL", "timeSensitive")
@@ -151,12 +153,30 @@ func Load() (Config, error) {
 
 	if barkServerURL != "" {
 		u, err := url.Parse(barkServerURL)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return Config{}, fmt.Errorf("invalid BARK_SERVER_URL: must be absolute URL")
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("BARK_SERVER_URL must be an absolute http or https URL")
 		}
 		if u.Fragment != "" || u.RawQuery != "" || u.User != nil {
 			return Config{}, fmt.Errorf("BARK_SERVER_URL must not contain userinfo, query, or fragment")
 		}
+	}
+	if barkPublicURL != "" {
+		u, err := url.Parse(barkPublicURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("BARK_PUBLIC_URL must be an absolute http or https URL")
+		}
+		if u.Fragment != "" || u.RawQuery != "" || u.User != nil {
+			return Config{}, fmt.Errorf("BARK_PUBLIC_URL must not contain userinfo, query, or fragment")
+		}
+		if production && u.Scheme != "https" {
+			return Config{}, fmt.Errorf("BARK_PUBLIC_URL must use https in production")
+		}
+	}
+	if (barkAuthUser == "") != (barkAuthPassword == "") {
+		return Config{}, fmt.Errorf("Bark basic auth user and password must be configured together")
+	}
+	if production && barkServerURL != "" && barkAuthUser == "" {
+		return Config{}, fmt.Errorf("Bark basic auth user and password are required in production")
 	}
 
 	cfg := Config{
@@ -174,13 +194,13 @@ func Load() (Config, error) {
 			Operators: set("OPERATOR_SUBJECTS"),
 			Viewers:   set("VIEWER_SUBJECTS"),
 		},
-		DevelopmentSubject: value("DEVELOPMENT_SUBJECT", "local-owner"),
-		Production:         production,
-		PublicOrigin:       publicOrigin,
-		AuthBrowserURL:     value("AUTH_BROWSER_URL", "http://auth-browser:8181"),
-		AuthBrowserVNCURL:  value("AUTH_BROWSER_VNC_URL", "http://auth-browser:6080"),
-		TTSGatewayURL:      value("TTS_GATEWAY_URL", "http://tts-gateway:8081"),
-		TTSInternalToken:   ttsToken,
+		DevelopmentSubject:    value("DEVELOPMENT_SUBJECT", "local-owner"),
+		Production:            production,
+		PublicOrigin:          publicOrigin,
+		AuthBrowserURL:        value("AUTH_BROWSER_URL", "http://auth-browser:8181"),
+		AuthBrowserVNCURL:     value("AUTH_BROWSER_VNC_URL", "http://auth-browser:6080"),
+		TTSGatewayURL:         value("TTS_GATEWAY_URL", "http://tts-gateway:8081"),
+		TTSInternalToken:      ttsToken,
 		BarkServerURL:         barkServerURL,
 		BarkPublicURL:         barkPublicURL,
 		BarkBasicAuthUser:     barkAuthUser,

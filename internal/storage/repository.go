@@ -35,6 +35,11 @@ type DeliverySummary struct {
 	DeadLetter int `json:"deadLetter"`
 }
 
+type NotificationSummary struct {
+	Total      DeliverySummary            `json:"total"`
+	ByProvider map[string]DeliverySummary `json:"byProvider"`
+}
+
 func id(prefix string) string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
@@ -148,6 +153,36 @@ func (s *Store) DeliverySummary(ctx context.Context) (DeliverySummary, error) {
 	}
 	return d, nil
 }
+func (s *Store) NotificationSummary(ctx context.Context) (NotificationSummary, error) {
+	total, err := s.DeliverySummary(ctx)
+	if err != nil {
+		return NotificationSummary{}, err
+	}
+	result := NotificationSummary{Total: total, ByProvider: map[string]DeliverySummary{
+		"WEBHOOK": {},
+		"BARK":    {},
+	}}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(e.provider, 'WEBHOOK'),
+		       COALESCE(sum(CASE WHEN d.status IN('PENDING','IN_FLIGHT','RETRYING') THEN 1 ELSE 0 END),0),
+		       COALESCE(sum(CASE WHEN d.status='DEAD_LETTER' THEN 1 ELSE 0 END),0)
+		FROM deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id
+		GROUP BY COALESCE(e.provider, 'WEBHOOK')`)
+	if err != nil {
+		return NotificationSummary{}, fmt.Errorf("notification summary: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var provider string
+		var summary DeliverySummary
+		if err := rows.Scan(&provider, &summary.Pending, &summary.DeadLetter); err != nil {
+			return NotificationSummary{}, fmt.Errorf("notification summary: %w", err)
+		}
+		result.ByProvider[provider] = summary
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) Audit(ctx context.Context, subject, role, action, target, requestID string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_logs(id,actor_subject,actor_role,action,target,request_id,details_json,created_at)VALUES(?,?,?,?,?,?, '{}',?)`, id("audit"), subject, role, action, target, requestID, now())
 	return err

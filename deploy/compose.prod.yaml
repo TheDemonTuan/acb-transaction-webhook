@@ -20,8 +20,8 @@ services:
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY: ${APP_MASTER_KEY:-}
       APP_MASTER_KEY_FILE: ${APP_MASTER_KEY_FILE:-/run/secrets/app_master_key}
-      POLL_MIN_INTERVAL_SEC: ${POLL_MIN_INTERVAL_SEC:-5}
-      POLL_MAX_INTERVAL_SEC: ${POLL_MAX_INTERVAL_SEC:-15}
+      POLL_MIN_INTERVAL_SEC: ${POLL_MIN_INTERVAL_SEC:-3}
+      POLL_MAX_INTERVAL_SEC: ${POLL_MAX_INTERVAL_SEC:-10}
       CLOUDFLARE_ACCESS_TEAM_NAME: ${CLOUDFLARE_ACCESS_TEAM_NAME:-}
       CLOUDFLARE_ACCESS_AUD: ${CLOUDFLARE_ACCESS_AUD:-}
       CF_ACCESS_ISSUER: ${CF_ACCESS_ISSUER:-https://${CLOUDFLARE_ACCESS_TEAM_NAME:-your-team}.cloudflareaccess.com}
@@ -136,7 +136,7 @@ services:
         max-file: "3"
 
   bark:
-    image: ${BARK_IMAGE_REF:-ghcr.io/finb/bark-server:latest}
+    image: ${BARK_IMAGE_REF:?BARK_IMAGE_REF must be an immutable digest}
     container_name: acb-bark
     restart: unless-stopped
     read_only: true

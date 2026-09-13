@@ -228,15 +228,17 @@ jobs:
           VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
           DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
+          BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF }}
         run: |
           set -euo pipefail
           [[ -n "$DASHBOARD_OWNER_EMAIL" ]] || { printf 'DASHBOARD_OWNER_EMAIL is required.\n' >&2; exit 1; }
+          [[ "$BARK_IMAGE_REF" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || { printf 'BARK_IMAGE_REF must be an immutable digest.\n' >&2; exit 1; }
           image="${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}"
           browser_image="${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}"
           tts_image="${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}"
           owner="$(printf '%s' "$DASHBOARD_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' IMAGE='$image' BROWSER_IMAGE='$browser_image' TTS_IMAGE='$tts_image' bash -s" <<'REMOTE'
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' IMAGE='$image' BROWSER_IMAGE='$browser_image' TTS_IMAGE='$tts_image' BARK_IMAGE_REF='$BARK_IMAGE_REF' bash -s" <<'REMOTE'
           set -Eeuo pipefail
           env_file="$DEPLOY_PATH/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing production env file: %s\n' "$env_file" >&2; exit 1; }
@@ -258,5 +260,6 @@ jobs:
           export IMAGE_REF="$IMAGE"
           export AUTH_BROWSER_IMAGE_REF="$BROWSER_IMAGE"
           export TTS_GATEWAY_IMAGE_REF="$TTS_IMAGE"
+          export BARK_IMAGE_REF="$BARK_IMAGE_REF"
           timeout 300 ./deploy.sh "$IMAGE" "$BROWSER_IMAGE" "$TTS_IMAGE" "$staged_compose"
           REMOTE

@@ -112,6 +112,43 @@ func TestBarkSenderAuthFailure(t *testing.T) {
 	}
 }
 
+func TestBarkSenderHTTPClassification(t *testing.T) {
+	tests := []struct {
+		status  int
+		outcome notification.Outcome
+		code    string
+	}{
+		{http.StatusFound, notification.OutcomeTerminalFailure, "BARK_REDIRECT_REJECTED"},
+		{http.StatusBadRequest, notification.OutcomeTerminalFailure, "BARK_BAD_REQUEST"},
+		{http.StatusUnauthorized, notification.OutcomeTerminalFailure, "BARK_AUTH_FAILED"},
+		{http.StatusTeapot, notification.OutcomeTerminalFailure, "BARK_AUTH_FAILED"},
+		{http.StatusTooManyRequests, notification.OutcomeRetry, "HTTP_429"},
+		{http.StatusInternalServerError, notification.OutcomeRetry, "HTTP_500"},
+		{http.StatusServiceUnavailable, notification.OutcomeRetry, "HTTP_503"},
+	}
+	for _, tc := range tests {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status) }))
+			defer ts.Close()
+			res := NewSender(Config{ServerURL: ts.URL, Timeout: time.Second}, ts.Client(), "").SendTestNotification(context.Background(), storage.DeliveryTarget{Secret: []byte("device_key")})
+			if res.Outcome != tc.outcome || res.ProviderErrorCode != tc.code {
+				t.Fatalf("status %d: got outcome=%s code=%s", tc.status, res.Outcome, res.ProviderErrorCode)
+			}
+		})
+	}
+}
+
+func TestBarkSenderRejectsOversizedResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, (16<<10)+1))
+	}))
+	defer ts.Close()
+	res := NewSender(Config{ServerURL: ts.URL, Timeout: time.Second}, ts.Client(), "").SendTestNotification(context.Background(), storage.DeliveryTarget{Secret: []byte("device_key")})
+	if res.Outcome != notification.OutcomeTerminalFailure || res.ProviderErrorCode != "BARK_RESPONSE_TOO_LARGE" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
 func TestBarkSenderServerErrorRetries(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

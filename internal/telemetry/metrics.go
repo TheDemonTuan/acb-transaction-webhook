@@ -7,35 +7,46 @@ import (
 )
 
 type RealtimeMetricsReport struct {
-	ConnectedClients   int64   `json:"connectedClients"`
-	CircuitBreakerOpen bool    `json:"circuitBreakerOpen"`
-	LastACBPollAt      string  `json:"lastAcbPollAt,omitempty"`
-	P95IngestMs        float64 `json:"p95IngestMs"`
-	P95SSEMs           float64 `json:"p95SseMs"`
-	P95WebhookMs       float64 `json:"p95WebhookMs"`
-	TotalIngested      int     `json:"totalIngested"`
-	TotalWebhooksSent  int     `json:"totalWebhooksSent"`
+	ConnectedClients   int64                         `json:"connectedClients"`
+	CircuitBreakerOpen bool                          `json:"circuitBreakerOpen"`
+	LastACBPollAt      string                        `json:"lastAcbPollAt,omitempty"`
+	P95IngestMs        float64                       `json:"p95IngestMs"`
+	P95SSEMs           float64                       `json:"p95SseMs"`
+	P95WebhookMs       float64                       `json:"p95WebhookMs"`
+	TotalIngested      int                           `json:"totalIngested"`
+	TotalWebhooksSent  int                           `json:"totalWebhooksSent"`
+	Notifications      map[string]NotificationMetric `json:"notifications"`
+}
+
+type NotificationMetric struct {
+	Success int     `json:"success"`
+	Failure int     `json:"failure"`
+	P95Ms   float64 `json:"p95Ms"`
 }
 
 type Registry struct {
-	mu                 sync.RWMutex
-	ingestSamples      []float64
-	sseSamples         []float64
-	webhookSamples     []float64
-	connectedClients   int64
-	circuitBreakerOpen bool
-	lastACBPollAt      string
-	totalIngested      int
-	totalWebhooksSent  int
+	mu                  sync.RWMutex
+	ingestSamples       []float64
+	sseSamples          []float64
+	webhookSamples      []float64
+	notificationSamples map[string][]float64
+	notificationTotals  map[string]map[string]int
+	connectedClients    int64
+	circuitBreakerOpen  bool
+	lastACBPollAt       string
+	totalIngested       int
+	totalWebhooksSent   int
 }
 
 var Default = NewRegistry()
 
 func NewRegistry() *Registry {
 	return &Registry{
-		ingestSamples:  make([]float64, 0, 1000),
-		sseSamples:     make([]float64, 0, 1000),
-		webhookSamples: make([]float64, 0, 1000),
+		ingestSamples:       make([]float64, 0, 1000),
+		sseSamples:          make([]float64, 0, 1000),
+		webhookSamples:      make([]float64, 0, 1000),
+		notificationSamples: make(map[string][]float64),
+		notificationTotals:  make(map[string]map[string]int),
 	}
 }
 
@@ -73,6 +84,25 @@ func (r *Registry) RecordWebhook(d time.Duration, delivered ...bool) {
 	r.webhookSamples = append(r.webhookSamples, ms)
 }
 
+func (r *Registry) RecordNotification(provider string, d time.Duration, success bool) {
+	outcome := "failure"
+	if success {
+		outcome = "success"
+	}
+	ms := float64(d.Microseconds()) / 1000.0
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	samples := r.notificationSamples[provider]
+	if len(samples) >= 1000 {
+		samples = samples[1:]
+	}
+	r.notificationSamples[provider] = append(samples, ms)
+	if r.notificationTotals[provider] == nil {
+		r.notificationTotals[provider] = make(map[string]int)
+	}
+	r.notificationTotals[provider][outcome]++
+}
+
 func (r *Registry) SetConnectedClients(count int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -95,6 +125,14 @@ func (r *Registry) Report() RealtimeMetricsReport {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	notifications := make(map[string]NotificationMetric, len(r.notificationTotals))
+	for provider, totals := range r.notificationTotals {
+		notifications[provider] = NotificationMetric{
+			Success: totals["success"],
+			Failure: totals["failure"],
+			P95Ms:   calcP95(r.notificationSamples[provider]),
+		}
+	}
 	return RealtimeMetricsReport{
 		ConnectedClients:   r.connectedClients,
 		CircuitBreakerOpen: r.circuitBreakerOpen,
@@ -104,6 +142,7 @@ func (r *Registry) Report() RealtimeMetricsReport {
 		P95WebhookMs:       calcP95(r.webhookSamples),
 		TotalIngested:      r.totalIngested,
 		TotalWebhooksSent:  r.totalWebhooksSent,
+		Notifications:      notifications,
 	}
 }
 

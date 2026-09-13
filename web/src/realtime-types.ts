@@ -17,7 +17,10 @@ export type Status = {
   };
   storage: { status: string };
   webhooks: { pending: number; deadLetter: number };
-  notifications?: { pending: number; deadLetter: number };
+  notifications?: {
+    total: { pending: number; deadLetter: number };
+    byProvider: Record<string, { pending: number; deadLetter: number }>;
+  };
 };
 
 export type Connection = {

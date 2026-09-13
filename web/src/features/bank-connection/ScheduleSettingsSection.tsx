@@ -65,33 +65,36 @@ export const ScheduleSettingsSection: React.FC = () => {
   const current = data?.current;
 
   // Apply Presets
-  const applyPreset = (presetType: 'v3_standard' | 'business' | 'realtime_247') => {
+  const realtimeProfile = { mode: 'REALTIME' as const, minSeconds: 3, maxSeconds: 10 };
+const keepaliveProfile = { mode: 'KEEPALIVE_ONLY' as const, minSeconds: 120, maxSeconds: 180 };
+
+const applyPreset = (presetType: 'v3_standard' | 'business' | 'realtime_247') => {
     const updated = JSON.parse(JSON.stringify(formSettings)) as MonitorSettings;
     updated.enabled = true;
     if (presetType === 'v3_standard') {
-      updated.defaultProfile = { mode: 'KEEPALIVE_ONLY', minSeconds: 180, maxSeconds: 300 };
+      updated.defaultProfile = keepaliveProfile;
       updated.windows = [
         {
           name: 'Giờ hoạt động thường ngày',
           daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
           startTime: '07:00',
           endTime: '23:00',
-          profile: { mode: 'REALTIME', minSeconds: 5, maxSeconds: 15 },
+          profile: realtimeProfile,
         },
       ];
     } else if (presetType === 'business') {
-      updated.defaultProfile = { mode: 'KEEPALIVE_ONLY', minSeconds: 180, maxSeconds: 300 };
+      updated.defaultProfile = keepaliveProfile;
       updated.windows = [
         {
           name: 'Giờ hành chính (Thứ 2 - Thứ 6)',
           daysOfWeek: [1, 2, 3, 4, 5],
           startTime: '08:00',
           endTime: '18:00',
-          profile: { mode: 'REALTIME', minSeconds: 5, maxSeconds: 15 },
+          profile: realtimeProfile,
         },
       ];
     } else if (presetType === 'realtime_247') {
-      updated.defaultProfile = { mode: 'REALTIME', minSeconds: 5, maxSeconds: 15 };
+      updated.defaultProfile = realtimeProfile;
       updated.windows = [];
     }
     setFormSettings(updated);
@@ -104,7 +107,7 @@ export const ScheduleSettingsSection: React.FC = () => {
       daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
       startTime: '08:00',
       endTime: '17:00',
-      profile: { mode: 'REALTIME', minSeconds: 5, maxSeconds: 15 },
+      profile: realtimeProfile,
     };
     setFormSettings({
       ...formSettings,
@@ -230,7 +233,7 @@ export const ScheduleSettingsSection: React.FC = () => {
           <div>
             <p className="text-xs font-bold text-stone-900">Kích hoạt lịch trình thông minh</p>
             <p className="text-xs text-stone-500 mt-0.5">
-              Khi tắt, hệ thống sẽ chạy Realtime liên tục 5–15s 24/7 theo cơ chế cũ
+              Khi tắt, hệ thống sẽ chạy Realtime liên tục 3–10s 24/7 theo cơ chế cũ
             </p>
           </div>
           <label className="relative inline-flex items-center cursor-pointer">
@@ -258,7 +261,7 @@ export const ScheduleSettingsSection: React.FC = () => {
                 Chuẩn V3 (Khuyến nghị)
               </div>
               <p className="text-xs text-stone-500 mt-1">
-                07:00–23:00 Realtime (5–15s)<br />23:00–07:00 Giữ phiên (3–5p)
+                07:00–23:00 Realtime (3–10s)<br />23:00–07:00 Giữ phiên (2–3p)
               </p>
             </button>
 
@@ -272,7 +275,7 @@ export const ScheduleSettingsSection: React.FC = () => {
                 Giờ hành chính T2-T6
               </div>
               <p className="text-xs text-stone-500 mt-1">
-                08:00–18:00 Realtime (5–15s)<br />Ngoài giờ Giữ phiên (3–5p)
+                08:00–18:00 Realtime (3–10s)<br />Ngoài giờ Giữ phiên (2–3p)
               </p>
             </button>
 
@@ -286,7 +289,7 @@ export const ScheduleSettingsSection: React.FC = () => {
                 Realtime 24/7
               </div>
               <p className="text-xs text-stone-500 mt-1">
-                Quét liên tục 5–15s cả ngày<br />(Yêu cầu mạng ổn định)
+                Quét liên tục 3–10s cả ngày<br />(Yêu cầu mạng ổn định)
               </p>
             </button>
           </div>
@@ -384,7 +387,7 @@ export const ScheduleSettingsSection: React.FC = () => {
                               profile: { ...win.profile, minSeconds: Number(e.target.value) },
                             })
                           }
-                          min={2}
+                          min={win.profile.mode === 'REALTIME' ? 3 : 60}
                           className="w-16 px-2 py-1.5 bg-white border border-stone-200 rounded-lg text-xs font-mono"
                         />
                         <span className="text-stone-400">–</span>
@@ -396,7 +399,7 @@ export const ScheduleSettingsSection: React.FC = () => {
                               profile: { ...win.profile, maxSeconds: Number(e.target.value) },
                             })
                           }
-                          min={2}
+                          min={win.profile.mode === 'REALTIME' ? 3 : 60}
                           className="w-16 px-2 py-1.5 bg-white border border-stone-200 rounded-lg text-xs font-mono"
                         />
                       </div>

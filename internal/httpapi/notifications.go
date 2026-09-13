@@ -174,7 +174,9 @@ func (s *Server) rotateChannelSecret(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		DeviceKey string `json:"deviceKey,omitempty"`
 	}
-	_ = decode(w, r, &in) // optional for webhook
+	if r.ContentLength != 0 && !decode(w, r, &in) {
+		return
+	}
 
 	newSecret, err := s.store.RotateSecret(r.Context(), id, in.DeviceKey)
 	if errors.Is(err, storage.ErrNotFound) {

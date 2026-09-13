@@ -13,13 +13,22 @@ test.describe('V3 Features: Schedule, QR, Server-side Transactions & Detail', ()
     await page.getByRole('button', { name: /Chuẩn V3/ }).click();
     await expect(page.getByText(/Đã áp dụng mẫu cấu hình/)).toBeVisible();
 
-    // Add a custom window
+    await expect(page.getByText(/07:00–23:00 Realtime \(3–10s\)/)).toBeVisible();
+    await expect(page.getByText(/Ngoài giờ Giữ phiên \(2–3p\)/)).toBeVisible();
+
+    const saveResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/api/v1/monitor/settings') && response.request().method() === 'POST',
+    );
+    await page.getByRole('button', { name: 'Lưu thay đổi lịch trình' }).click();
+    expect((await saveResponse).status()).toBe(200);
+    await expect(page.getByText('Đã lưu cấu hình lịch trình polling thành công!')).toBeVisible();
+
+    await page.reload();
+    await expect(page.locator('input[type="number"][value="3"]').first()).toBeVisible();
+    await expect(page.locator('input[type="number"][value="10"]').first()).toBeVisible();
+
     await page.getByRole('button', { name: 'Thêm khung giờ' }).click();
     await expect(page.getByPlaceholder('Tên khung giờ (ví dụ: Ban ngày)').last()).toBeVisible();
-
-    // Save changes
-    await page.getByRole('button', { name: 'Lưu thay đổi lịch trình' }).click();
-    await expect(page.getByText('Đã lưu cấu hình lịch trình polling thành công!')).toBeVisible();
   });
 
   test('interacts with Payment QR settings in admin', async ({ page }) => {

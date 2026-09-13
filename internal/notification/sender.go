@@ -10,6 +10,9 @@ import (
 type Outcome string
 
 const (
+	ProviderWebhook = "WEBHOOK"
+	ProviderBark    = "BARK"
+
 	OutcomeSuccess         Outcome = "SUCCESS"
 	OutcomeRetry           Outcome = "RETRY"
 	OutcomeTerminalFailure Outcome = "TERMINAL_FAILURE"

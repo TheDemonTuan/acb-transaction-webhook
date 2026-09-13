@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -24,10 +26,19 @@ func NewSender(cfg Config, client *http.Client, publicOrigin string) *Sender {
 	if client == nil {
 		client = &http.Client{
 			Timeout: cfg.Timeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   3 * time.Second,
+				ResponseHeaderTimeout: 3 * time.Second,
+				IdleConnTimeout:       60 * time.Second,
+				MaxIdleConns:          16,
+				MaxIdleConnsPerHost:   8,
 			},
 		}
+	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	return &Sender{
 		cfg:          cfg,
@@ -157,22 +168,24 @@ func (s *Sender) doPush(ctx context.Context, payload pushPayload) notification.S
 	latencyMs := int(time.Since(start).Milliseconds())
 
 	if reqErr != nil {
-		errStr := reqErr.Error()
-		if len(errStr) > 500 {
-			errStr = errStr[:500]
+		code := "NETWORK_ERROR"
+		message := "Bark network request failed"
+		if errors.Is(reqErr, context.DeadlineExceeded) {
+			code = "NETWORK_TIMEOUT"
+			message = "Bark network request timed out"
 		}
 		return notification.SendResult{
 			Outcome:           notification.OutcomeRetry,
 			StatusCode:        0,
 			LatencyMs:         latencyMs,
-			ProviderErrorCode: "NETWORK_ERROR",
-			SanitizedError:    errStr,
+			ProviderErrorCode: code,
+			SanitizedError:    message,
 		}
 	}
 	defer resp.Body.Close()
 
-	// Read response up to 64 KiB
-	bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	const maxResponseBody = 16 << 10
+	bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	if readErr != nil {
 		return notification.SendResult{
 			Outcome:           notification.OutcomeRetry,
@@ -180,6 +193,15 @@ func (s *Sender) doPush(ctx context.Context, payload pushPayload) notification.S
 			LatencyMs:         latencyMs,
 			ProviderErrorCode: "READ_ERROR",
 			SanitizedError:    "failed to read response body",
+		}
+	}
+	if len(bodyBytes) > maxResponseBody {
+		return notification.SendResult{
+			Outcome:           notification.OutcomeTerminalFailure,
+			StatusCode:        resp.StatusCode,
+			LatencyMs:         latencyMs,
+			ProviderErrorCode: "BARK_RESPONSE_TOO_LARGE",
+			SanitizedError:    "Bark response body exceeded the limit",
 		}
 	}
 
@@ -228,17 +250,29 @@ func (s *Sender) doPush(ctx context.Context, payload pushPayload) notification.S
 		}
 	}
 
-	// Upstream HTTP errors
-	outcome := notification.OutcomeRetry
-	if resp.StatusCode == 400 || resp.StatusCode == 404 || resp.StatusCode == 410 || resp.StatusCode == 413 || resp.StatusCode == 422 {
-		outcome = notification.OutcomeTerminalFailure
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return notification.SendResult{Outcome: notification.OutcomeTerminalFailure, StatusCode: resp.StatusCode, LatencyMs: latencyMs, ProviderErrorCode: "BARK_REDIRECT_REJECTED", SanitizedError: "Bark server redirect was rejected"}
+	}
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return notification.SendResult{Outcome: notification.OutcomeRetry, StatusCode: resp.StatusCode, LatencyMs: latencyMs, ProviderErrorCode: fmt.Sprintf("HTTP_%d", resp.StatusCode), SanitizedError: fmt.Sprintf("Bark server returned HTTP %d", resp.StatusCode)}
 	}
 
+	code := "BARK_CLIENT_ERROR"
+	switch resp.StatusCode {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		code = "BARK_BAD_REQUEST"
+	case http.StatusNotFound:
+		code = "BARK_NOT_FOUND"
+	case http.StatusGone:
+		code = "BARK_DEVICE_GONE"
+	case http.StatusRequestEntityTooLarge:
+		code = "BARK_PAYLOAD_TOO_LARGE"
+	}
 	return notification.SendResult{
-		Outcome:           outcome,
+		Outcome:           notification.OutcomeTerminalFailure,
 		StatusCode:        resp.StatusCode,
 		LatencyMs:         latencyMs,
-		ProviderErrorCode: fmt.Sprintf("HTTP_%d", resp.StatusCode),
-		SanitizedError:    fmt.Sprintf("Bark server returned HTTP %d", resp.StatusCode),
+		ProviderErrorCode: code,
+		SanitizedError:    fmt.Sprintf("Bark request rejected with HTTP %d", resp.StatusCode),
 	}
 }

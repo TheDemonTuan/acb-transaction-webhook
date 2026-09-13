@@ -149,7 +149,7 @@ export const fetchMonitorSettings = async (): Promise<any> => {
 export const updateMonitorSettings = async (settings: any): Promise<any> => {
   const csrf = await getCsrfToken();
   return api('/monitor/settings', {
-    method: 'PUT',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
     body: JSON.stringify(settings),
   });

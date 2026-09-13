@@ -66,8 +66,8 @@ func TestMonitorSettingsAPIAndHotReloadWake(t *testing.T) {
 	var token struct{ Token string }
 	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&token)
 
-	postPut := func(body string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodPut, "http://example.test/api/v1/monitor/settings", bytes.NewBufferString(body))
+	postSettings := func(method, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://example.test/api/v1/monitor/settings", bytes.NewBufferString(body))
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("Origin", "http://example.test")
 		r.Header.Set("X-CSRF-Token", token.Token)
@@ -78,12 +78,18 @@ func TestMonitorSettingsAPIAndHotReloadWake(t *testing.T) {
 	}
 
 	updatePayload := getResp.Settings
-	updatePayload.DefaultProfile.MinSeconds = 240
+	updatePayload.DefaultProfile.MinSeconds = 130
 	payloadBytes, _ := json.Marshal(updatePayload)
 
-	recPut := postPut(string(payloadBytes))
+	recPut := postSettings(http.MethodPost, string(payloadBytes))
 	if recPut.Code != http.StatusOK {
-		t.Fatalf("expected 200 for PUT, got %d: %s", recPut.Code, recPut.Body.String())
+		t.Fatalf("expected 200 for POST, got %d: %s", recPut.Code, recPut.Body.String())
+	}
+	if getResp.Settings.DefaultProfile.MinSeconds != 120 || getResp.Settings.DefaultProfile.MaxSeconds != 180 {
+		t.Fatalf("unexpected default keepalive interval: %+v", getResp.Settings.DefaultProfile)
+	}
+	if got := updatePayload.Windows[0].Profile; got.MinSeconds != 3 || got.MaxSeconds != 10 {
+		t.Fatalf("unexpected default realtime interval: %+v", got)
 	}
 
 	// Verify notifier was signaled to wake the timer immediately!
@@ -92,7 +98,7 @@ func TestMonitorSettingsAPIAndHotReloadWake(t *testing.T) {
 	}
 
 	// Re-sending with stale revision should return 409 conflict
-	recStale := postPut(string(payloadBytes))
+	recStale := postSettings(http.MethodPut, string(payloadBytes))
 	if recStale.Code != http.StatusConflict {
 		t.Errorf("expected 409 conflict on stale revision, got %d: %s", recStale.Code, recStale.Body.String())
 	}
