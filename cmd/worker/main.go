@@ -83,11 +83,12 @@ func (w *workerService) VerifySession(ctx context.Context, account string, gener
 	if w.verifierSessionLoader == nil || w.verifierClient == nil {
 		return fmt.Errorf("session verifier not configured")
 	}
-	var gate *sync.Mutex
+	var verifier *monitor.SessionVerifier
 	if w.bankMonitor != nil {
-		gate = w.bankMonitor.UpstreamGate()
+		verifier = monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient, w.bankMonitor.Scheduler())
+	} else {
+		verifier = monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient)
 	}
-	verifier := monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient, gate)
 	return verifier.VerifySession(ctx, account, generation, password)
 }
 

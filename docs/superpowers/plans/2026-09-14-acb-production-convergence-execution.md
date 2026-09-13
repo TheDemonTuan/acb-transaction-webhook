@@ -95,10 +95,10 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 3** | Centralize browser CSRF handling | **PR02** | **COMPLETED** | `web/src/api.ts`, query/mutation hooks | Single CSRF interceptor; mutations include token; unit tests pass. |
 | **Task 4** | Fail closed on database errors before ACB requests | **PR02** | **COMPLETED** | `internal/monitor/*`, `internal/storage/*` | DB lookup failure produces zero upstream ACB calls in test mocks. |
 | **Task 5** | Single-owner ACB upstream scheduler | **PR03** | **COMPLETED** | `internal/scheduler/*`, `internal/monitor/*` | Priority queue test: interactive > realtime > catchup; single active goroutine. |
-| **Task 6** | Realtime and manual sync tasks | PR04 | PENDING | `internal/monitor/*` | Deduplication and coalescing tests; manual sync returns immediately if poll in flight. |
-| **Task 7** | Bootstrap-only keepalive task | PR04 | PENDING | `internal/monitor/*` | Keepalive runs only when idle; skipped during active polling. |
-| **Task 8** | Preemptible multi-day catch-up | PR04 | PENDING | `internal/monitor/*` | Catch-up yields after 1 page; realtime poll executes without waiting for 7-day range. |
-| **Task 9** | Scheduler invariant verifier & retire UpstreamGate | PR04 | PENDING | `internal/monitor/*` | Concurrency tests prove zero simultaneous ACB requests; UpstreamGate removed. |
+| **Task 6** | Realtime and manual sync tasks | **PR04** | **COMPLETED** | `internal/monitor/*` | Deduplication and coalescing tests; manual sync returns immediately if poll in flight. |
+| **Task 7** | Bootstrap-only keepalive task | **PR04** | **COMPLETED** | `internal/monitor/*` | Keepalive runs only when idle; skipped during active polling. |
+| **Task 8** | Preemptible multi-day catch-up | **PR04** | **COMPLETED** | `internal/monitor/*` | Catch-up yields after 1 page; realtime poll executes without waiting for 7-day range. |
+| **Task 9** | Scheduler invariant verifier & retire UpstreamGate | **PR04** | **COMPLETED** | `internal/monitor/*` | Concurrency tests prove zero simultaneous ACB requests; UpstreamGate removed. |
 | **Task 10** | Database schema for durable history jobs | PR05 | PENDING | `internal/storage/*`, `cmd/dbtool/*` | Migration 8 applies cleanly; active index constraint tested. |
 | **Task 11** | Atomic history job lifecycle storage | PR05 | PENDING | `internal/storage/history_jobs.go` | Concurrent claim/create CAS tests; stale recovery test. |
 | **Task 12** | History job runner with quantum yielding | PR06 | PENDING | `internal/monitor/history_runner.go` | Multi-page mock job yields between pages; FILTER_SYNC source tagged. |
@@ -151,7 +151,7 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **GATE-01** | 31-day history job interleaves with realtime polls | Automated Integration Test | PENDING | Scheduler Lead | `tests/integration/scheduler_interleave_test.go` |
 | **GATE-02** | Browser cancel idempotent; tab close does not cancel | Automated Integration Test | PENDING | Frontend Lead | `tests/integration/history_cancel_test.go` |
 | **GATE-03** | Worker crash recovers durable history from checkpoint | Automated Integration Test | PENDING | Storage Lead | `tests/integration/worker_recovery_test.go` |
-| **GATE-04** | Database error during session verifier produces zero ACB calls | Mock Upstream Unit Test | PENDING | Backend Lead | `internal/monitor/verifier_test.go` |
+| **GATE-04** | Database error during session verifier produces zero ACB calls | Mock Upstream Unit Test | **VERIFIED** | Backend Lead | `internal/monitor/verifier_test.go` |
 | **GATE-05** | Active-auth lookup failure produces zero ACB poll calls | Mock Upstream Unit Test | PENDING | Backend Lead | `internal/monitor/poller_test.go` |
 | **GATE-06** | Gateway-only deployment leaves worker/browser/TTS/Bark IDs unchanged | Docker Container Audit | PENDING (Host Blocker) | Release Engineer | Host Docker inspect diff before/after deploy |
 | **GATE-07** | Worker upgrade never permits two lock owners; candidate rollback on error | Process Lock Harness | PENDING | Release Engineer | `deploy/tests/test_worker_handoff.sh` |

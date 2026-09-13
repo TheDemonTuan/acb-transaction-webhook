@@ -356,7 +356,7 @@ func main() {
 				os.Exit(1)
 			}
 			verifierLoader := monitor.NewSessionLoader(store, keyring, verifierClient)
-			server.WithAuthVerifier(monitor.NewSessionVerifier(verifierLoader, verifierClient, bankMonitor.UpstreamGate()))
+			server.WithAuthVerifier(monitor.NewSessionVerifier(verifierLoader, verifierClient, bankMonitor.Scheduler()))
 		}
 	}
 	go server.RunJournalRetention(ctx, 24*time.Hour)

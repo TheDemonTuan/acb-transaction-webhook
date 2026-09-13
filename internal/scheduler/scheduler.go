@@ -76,6 +76,11 @@ func (s *Scheduler) Start(ctx context.Context) {
 	go s.run(ctx)
 }
 
+// IsRunning reports whether the scheduler loop is actively running.
+func (s *Scheduler) IsRunning() bool {
+	return s.running.Load() && !s.stopped.Load()
+}
+
 // Stop shuts down the scheduler, cancels any in-flight task step, and waits for loop exit.
 func (s *Scheduler) Stop() error {
 	if !s.running.Load() {
