@@ -160,6 +160,8 @@ ensure_secret_permissions "$bark_pass_file" "bark_basic_auth_password"
 
 [[ -s "$bark_user_file" ]] || { printf 'Bark basic auth user file is empty.\n' >&2; exit 1; }
 [[ -s "$bark_pass_file" ]] || { printf 'Bark basic auth password file is empty.\n' >&2; exit 1; }
+# Bark runs as the image default user, which must be able to read its bind-mounted secrets.
+chmod 644 "$bark_user_file" "$bark_pass_file"
 [[ -f "$script_dir/bark-entrypoint.sh" ]] && chmod 755 "$script_dir/bark-entrypoint.sh" || true
 [[ -f "$script_dir/smoke-test-bark.sh" ]] && chmod 755 "$script_dir/smoke-test-bark.sh" || true
 
