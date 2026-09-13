@@ -178,9 +178,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
-	if n, err := store.ExpireStaleAuthAttempts(ctx); err == nil && n > 0 {
-		logger.Info("reaped stale auth attempts on startup", "count", n)
-	}
 
 	if flags.backupTo != "" {
 		if err := store.Backup(ctx, flags.backupTo); err != nil {
@@ -315,7 +312,9 @@ func main() {
 			if err != nil {
 				return
 			}
-			seq, err := store.AppendJournalEvent(context.Background(), "ep1", "poll.completed", p.ID, payload)
+			appendCtx, appendCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
+			appendCancel()
 			if err != nil {
 				return
 			}
@@ -363,19 +362,6 @@ func main() {
 			server.WithAuthVerifier(monitor.NewSessionVerifier(verifierLoader, verifierClient, bankMonitor.Scheduler()))
 		}
 	}
-	go server.RunJournalRetention(ctx, 24*time.Hour)
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_, _ = store.ExpireStaleAuthAttempts(ctx)
-			}
-		}
-	}()
 
 	primaryAddr := cfg.Address
 	addresses := []string{primaryAddr}

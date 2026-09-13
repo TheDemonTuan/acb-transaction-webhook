@@ -54,6 +54,16 @@ func (s *Store) AppendJournalEvent(ctx context.Context, epoch, eventType, aggreg
 	return seq, nil
 }
 
+// AppendJournalEventDetached appends a journal event with an independent bounded timeout context.
+func (s *Store) AppendJournalEventDetached(epoch, eventType, aggregateID string, payload []byte, timeout time.Duration) (int64, error) {
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.AppendJournalEvent(ctx, epoch, eventType, aggregateID, payload)
+}
+
 // ReadJournalEvents fetches events ordered by seq strictly after afterSeq.
 func (s *Store) ReadJournalEvents(ctx context.Context, epoch string, afterSeq int64, limit int) ([]JournalEntry, error) {
 	if epoch == "" {

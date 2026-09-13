@@ -761,6 +761,17 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "ACB session verification is unavailable")
 			return
 		}
+		preVerifyConn, err := s.store.Connection(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if preVerifyConn.Generation != attempt.Generation {
+			_ = s.browser.Cancel(r.Context(), attemptID)
+			_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
+			return
+		}
 		if err := s.authVerifier.VerifySession(r.Context(), attempt.ConnectionID, attempt.Generation, encrypted); err != nil {
 			slog.Warn("ACB HTTP session verification pending or failed", "attempt_id", attemptID, "generation", attempt.Generation, "error", err)
 			writeJSON(w, http.StatusOK, map[string]string{

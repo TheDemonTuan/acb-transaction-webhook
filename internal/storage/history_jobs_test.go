@@ -631,3 +631,68 @@ func TestStore_HistorySyncJobs_OverlapSafeTransactionWrites(t *testing.T) {
 		t.Fatalf("expected 0 inserted and 2 skipped without conflict on replay, got: %+v", res2)
 	}
 }
+
+func TestStore_HistorySyncJobs_RequeueRunningJobsOnShutdown(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, conn := setupTestStore(t)
+
+	// Job 1 on current generation
+	job1, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, "2026-09-01", "2026-09-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claimed1, err := store.ClaimNextHistorySyncJob(ctx, time.Now().UTC())
+	if err != nil || !claimed1 {
+		t.Fatal("failed to claim job 1")
+	}
+
+	// Bump connection generation in DB so job2 will be on new generation while job1 stays on old generation
+	_, err = store.DB().ExecContext(ctx, `UPDATE connections SET generation = generation + 1 WHERE id = ?`, conn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Job 2 created on new generation
+	job2, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation+1, "2026-09-03", "2026-09-04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claimed2, err := store.ClaimNextHistorySyncJob(ctx, time.Now().UTC())
+	if err != nil || !claimed2 {
+		t.Fatal("failed to claim job 2")
+	}
+
+	// Now job2 is on current generation (gen+1), while job1 is on stale generation (gen)
+	requeued, err := store.RequeueRunningHistorySyncJobs(ctx, "graceful shutdown test")
+	if err != nil {
+		t.Fatalf("RequeueRunningHistorySyncJobs failed: %v", err)
+	}
+	if requeued != 1 {
+		t.Fatalf("expected 1 job requeued, got %d", requeued)
+	}
+
+	// Job 1 should be CANCELED due to stale generation
+	j1, err := store.GetHistorySyncJob(ctx, job1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j1.Status != HistoryJobStatusCanceled {
+		t.Errorf("expected job 1 status CANCELED, got %s", j1.Status)
+	}
+	if j1.ErrorCode != "STALE_GENERATION" {
+		t.Errorf("expected job 1 error code STALE_GENERATION, got %s", j1.ErrorCode)
+	}
+
+	// Job 2 should be QUEUED with WORKER_SHUTDOWN error code
+	j2, err := store.GetHistorySyncJob(ctx, job2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j2.Status != HistoryJobStatusQueued {
+		t.Errorf("expected job 2 status QUEUED, got %s", j2.Status)
+	}
+	if j2.ErrorCode != "WORKER_SHUTDOWN" {
+		t.Errorf("expected job 2 error code WORKER_SHUTDOWN, got %s", j2.ErrorCode)
+	}
+}

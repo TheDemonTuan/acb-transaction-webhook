@@ -121,7 +121,9 @@ func main() {
 	httpServer := &http.Server{Addr: ":8181", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
-		_ = httpServer.Shutdown(context.Background())
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = httpServer.Shutdown(shutdownCtx)
 		controller.stopCurrent()
 	}()
 	slog.Info("ACB browser controller listening", "address", ":8181")

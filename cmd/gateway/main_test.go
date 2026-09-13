@@ -2,11 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/httpapi"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 func TestParseGatewayFlags_MigrateOnlyFails(t *testing.T) {
@@ -163,5 +172,60 @@ func TestGatewayRoleValidation_Subprocess(t *testing.T) {
 				t.Fatalf("expected output to contain %q, got %q", tc.wantStderr, out)
 			}
 		})
+	}
+}
+
+func TestTwoGatewaysNoSingletonMaintenance(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "shared_gateway.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+
+	// Seed 48-hour-old journal event
+	oldTime := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano)
+	_, err = store.DB().ExecContext(ctx, `
+		INSERT INTO event_journal(epoch, event_type, aggregate_id, payload_json, created_at)
+		VALUES('ep1', 'old.event', 'old_agg_1', '{}', ?)
+	`, oldTime)
+	if err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	// Gateway A (Blue)
+	cfgA := config.Config{
+		Production:         false,
+		Slot:               "blue",
+		DevelopmentSubject: "dev@example.com",
+	}
+	gwA := httpapi.New(cfgA, store).WithEventHub(eventhub.New())
+
+	// Gateway B (Green)
+	cfgB := config.Config{
+		Production:         false,
+		Slot:               "green",
+		DevelopmentSubject: "dev@example.com",
+	}
+	gwB := httpapi.New(cfgB, store).WithEventHub(eventhub.New())
+
+	// Run both gateways concurrently for 100ms
+	srvA := httptest.NewServer(gwA.Handler())
+	defer srvA.Close()
+	srvB := httptest.NewServer(gwB.Handler())
+	defer srvB.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify old journal event was NOT deleted by either gateway
+	events, err := store.ReadJournalEvents(ctx, "ep1", 0, 10)
+	if err != nil {
+		t.Fatalf("ReadJournalEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].AggregateID != "old_agg_1" {
+		t.Fatalf("expected old journal event to remain untouched by gateways, got %v", events)
 	}
 }

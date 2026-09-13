@@ -19,12 +19,14 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/webhook"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
 type workerService struct {
@@ -207,6 +209,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+
+	coordinator := workerstate.NewCoordinator(
+		workerstate.WithDrainTimeout(10*time.Second),
+		workerstate.WithShutdownTimeout(15*time.Second),
+	)
+
 	// 1. Singleton Fencing via flock on the same gateway.lock
 	dataDir := filepath.Dir(cfg.DatabasePath)
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
@@ -265,7 +275,7 @@ func main() {
 	}
 
 	dispatcher := notification.NewDispatcher(store, notificationRegistry)
-	go dispatcher.Start(ctx)
+	go dispatcher.Start(workerCtx)
 
 	// 4. ACB Bank Monitor
 	acbClient, err := acb.NewClient("https://online.acb.com.vn", nil)
@@ -294,7 +304,9 @@ func main() {
 		if err != nil {
 			return
 		}
-		_, _ = store.AppendJournalEvent(context.Background(), "ep1", "poll.completed", p.ID, payload)
+		appendCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
+		aCancel()
 	})
 
 	var sessionLoader *monitor.SessionLoader
@@ -311,15 +323,24 @@ func main() {
 		}
 		verifierSessionLoader = monitor.NewSessionLoader(store, keyring, verifierClient)
 	}
-	go bankMonitor.Run(ctx)
+	go bankMonitor.Run(workerCtx)
 	logger.Info("ACB bank polling monitor started in worker")
 
 	historyRunner := monitor.NewHistoryJobRunner(store, acbClient, bankMonitor.Scheduler(), sessionLoader).
 		WithMonitor(bankMonitor)
-	go historyRunner.Run(ctx)
+	go historyRunner.Run(workerCtx)
 	logger.Info("ACB durable history job runner started in worker")
 
-	// 5. Setup Private RPC Server
+	// 5. Singleton Maintenance Runner (hourly retention and stale auth reap)
+	maintRunner := maintenance.NewRunner(store,
+		maintenance.WithRetentionPeriod(24*time.Hour),
+		maintenance.WithRetentionInterval(1*time.Hour),
+		maintenance.WithStaleAuthInterval(30*time.Second),
+	)
+	go maintRunner.Run(workerCtx)
+	logger.Info("singleton maintenance runner started in worker")
+
+	// 6. Setup Private RPC Server
 	ws := &workerService{
 		bankMonitor:           bankMonitor,
 		historyRunner:         historyRunner,
@@ -334,8 +355,13 @@ func main() {
 		logger.Error("create worker RPC server failed", "error", err)
 		os.Exit(1)
 	}
+	rpcServer.SetStateProvider(coordinator.State)
+	rpcServer.SetDrainHandler(coordinator.Drain)
 
 	rpcServer.SetReadyChecker(func(ctx context.Context) error {
+		if !coordinator.IsReady() {
+			return fmt.Errorf("worker state is %s", coordinator.State())
+		}
 		if bankMonitor == nil || dispatcher == nil || store == nil {
 			return errors.New("worker services not fully initialized")
 		}
@@ -350,6 +376,32 @@ func main() {
 		}
 		return nil
 	})
+
+	coordinator.RegisterStopHook(func(stopCtx context.Context) error {
+		logger.Info("persisting session snapshot and checkpointing background jobs on shutdown")
+		// 1. Session snapshot persistence with fresh bounded context
+		persistCtx, pCancel := context.WithTimeout(stopCtx, 3*time.Second)
+		if err := bankMonitor.PersistSession(persistCtx); err != nil {
+			logger.Warn("persist session snapshot on shutdown", "error", err)
+		}
+		pCancel()
+
+		// 2. Requeue all RUNNING history sync jobs back to QUEUED
+		requeueCtx, rCancel := context.WithTimeout(stopCtx, 3*time.Second)
+		if n, err := store.RequeueRunningHistorySyncJobs(requeueCtx, "Graceful worker shutdown"); err != nil {
+			logger.Warn("requeue running history jobs on shutdown", "error", err)
+		} else if n > 0 {
+			logger.Info("requeued running history jobs on shutdown", "count", n)
+		}
+		rCancel()
+		return nil
+	})
+
+	if err := coordinator.SetReady(); err != nil {
+		logger.Error("failed to mark worker ready", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("singleton worker is READY")
 
 	httpServer := &http.Server{
 		Addr:              rpcAddr,
@@ -367,10 +419,36 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigCh:
+		logger.Info("received termination signal", "signal", sig)
+	case <-coordinator.DrainDone():
+		logger.Info("worker drain initiated via RPC")
+	case <-ctx.Done():
+		logger.Info("worker context done")
+	}
+
 	logger.Info("shutting down worker...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = httpServer.Shutdown(shutdownCtx)
+	// Drain if not already drained
+	drainCtx, dCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = coordinator.Drain(drainCtx)
+	dCancel()
+
+	// Stop coordinator (runs session persistence and job requeue)
+	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = coordinator.Stop(shutdownCtx)
+	sCancel()
+
+	// Stop RPC server
+	rpcShutdownCtx, rpcCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = httpServer.Shutdown(rpcShutdownCtx)
+	rpcCancel()
+
+	// Cancel background workers
+	workerCancel()
+
 	logger.Info("worker stopped successfully")
 }

@@ -13,7 +13,9 @@ func (s *Server) publishStateEvent(eventType, aggregateID string, data any) {
 	if err != nil {
 		return
 	}
-	seq, err := s.store.AppendJournalEvent(context.Background(), realtimeEpoch, eventType, aggregateID, payload)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	seq, err := s.store.AppendJournalEvent(ctx, realtimeEpoch, eventType, aggregateID, payload)
 	if err != nil {
 		return
 	}

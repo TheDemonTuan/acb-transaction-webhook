@@ -108,6 +108,21 @@ func (m *Monitor) WithSessionLoader(loader *SessionLoader) *Monitor {
 	return m
 }
 
+// PersistSession persists the freshest live ACB session snapshot to storage using an independent context.
+func (m *Monitor) PersistSession(ctx context.Context) error {
+	if m == nil || m.sessions == nil || m.store == nil {
+		return nil
+	}
+	conn, err := m.store.Connection(ctx)
+	if err != nil {
+		return err
+	}
+	if conn.ID == "" || conn.Generation <= 0 {
+		return nil
+	}
+	return m.sessions.Persist(ctx, conn.ID, conn.Generation)
+}
+
 func (m *Monitor) SetBackoff(duration time.Duration) {
 	m.backoffMu.Lock()
 	m.backoffUntil = time.Now().Add(duration)

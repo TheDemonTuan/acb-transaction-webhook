@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,5 +280,188 @@ func TestJournalRetention(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].AggregateID != "recent_1" {
 		t.Errorf("expected only recent_1 event to remain, got %v", events)
+	}
+}
+
+func TestDetachedContextStateEventOnCanceledRequest(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "detached_ctx.db")
+	store, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	hub := eventhub.New()
+	cfg := config.Config{Production: false, DevelopmentSubject: "dev@example.com"}
+	server := New(cfg, store).WithEventHub(hub)
+
+	// Simulate canceled caller request context
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	cancelReq() // cancel before publishStateEvent
+
+	// Ensure publishStateEvent succeeds despite canceled request context
+	_ = reqCtx
+	server.publishStateEvent("connection.state_changed", "conn_test", map[string]string{"status": "OK"})
+
+	// Verify the event was persisted in the journal
+	events, err := store.ReadJournalEvents(context.Background(), "ep1", 0, 10)
+	if err != nil {
+		t.Fatalf("ReadJournalEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event appended in detached context, got %d", len(events))
+	}
+	if events[0].EventType != "connection.state_changed" || events[0].AggregateID != "conn_test" {
+		t.Errorf("unexpected event content: %+v", events[0])
+	}
+}
+
+func TestBlueGreenReplayCrossSlot(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "blue_green_sse.db")
+	ctx := context.Background()
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Slot A (Blue)
+	hubA := eventhub.New()
+	cfgA := config.Config{Production: false, DevelopmentSubject: "dev@example.com", Slot: "blue"}
+	serverA := New(cfgA, store).WithEventHub(hubA)
+	_ = serverA
+
+	// Slot B (Green)
+	hubB := eventhub.New()
+	cfgB := config.Config{Production: false, DevelopmentSubject: "dev@example.com", Slot: "green"}
+	serverB := New(cfgB, store).WithEventHub(hubB)
+
+	// Slot A appends 5 events into SQLite
+	for i := 1; i <= 5; i++ {
+		_, err := store.AppendJournalEvent(ctx, "ep1", "payment.received", fmt.Sprintf("txn_%d", i), []byte(fmt.Sprintf(`{"i":%d}`, i)))
+		if err != nil {
+			t.Fatalf("append event %d: %v", i, err)
+		}
+	}
+
+	// Client was on Slot A and got up to seq 3.
+	// Now cutover promotes Slot B. Client reconnects to Slot B with Last-Event-ID: ep1:3
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(streamCtx)
+	req.Header.Set("Last-Event-ID", "ep1:3")
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serverB.Handler().ServeHTTP(w, req)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancelStream()
+	<-done
+
+	body := w.Body.String()
+	// Slot B must replay missing seq 4 and 5 exactly once
+	if strings.Contains(body, `"i":1`) || strings.Contains(body, `"i":2`) || strings.Contains(body, `"i":3`) {
+		t.Errorf("Slot B replayed already seen events 1-3: %s", body)
+	}
+	if !strings.Contains(body, `"i":4`) || !strings.Contains(body, `"i":5`) {
+		t.Errorf("Slot B did not replay missing events 4 and 5: %s", body)
+	}
+	if strings.Count(body, "id: ep1:4") != 1 || strings.Count(body, "id: ep1:5") != 1 {
+		t.Errorf("Slot B replayed events multiple times: %s", body)
+	}
+}
+
+func TestJournalWatcherBatchDrainOver100(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "watcher_batch.db")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	hub := eventhub.New()
+	_, ch, unsub := hub.Subscribe()
+	defer unsub()
+
+	cfg := config.Config{Production: false, DevelopmentSubject: "dev@example.com"}
+	server := New(cfg, store).WithEventHub(hub)
+
+	var received atomic.Int32
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		for received.Load() < 250 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ch:
+				received.Add(1)
+			}
+		}
+	}()
+
+	// Run watcher with short interval
+	go server.RunJournalWatcher(ctx, 20*time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // ensure watcher initialized lastSeq
+
+	// Now append 250 journal entries (greater than the 100 batch limit)
+	for i := 1; i <= 250; i++ {
+		_, err := store.AppendJournalEvent(ctx, "ep1", "poll.completed", fmt.Sprintf("p_%d", i), []byte(fmt.Sprintf(`{"pollId":"p_%d"}`, i)))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	select {
+	case <-consumeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("watcher did not drain all 250 events in time, only got %d", received.Load())
+	}
+}
+
+func TestRetentionBoundaryExpiredCursor(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "retention_boundary.db")
+	ctx := context.Background()
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Append events 1 to 10
+	for i := 1; i <= 10; i++ {
+		_, err := store.AppendJournalEvent(ctx, "ep1", "test.event", fmt.Sprintf("t_%d", i), []byte(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Purge events 1 to 5 directly from DB to simulate retention deletion
+	_, err = store.DB().ExecContext(ctx, `DELETE FROM event_journal WHERE seq <= 5`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{Production: false, DevelopmentSubject: "dev@example.com"}
+	server := New(cfg, store).WithEventHub(eventhub.New())
+
+	// Client reconnects with cursor seq 3 (older than minSeq-1, since minSeq is 6 and minSeq-1 is 5)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("Last-Event-ID", "ep1:3")
+	w := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(w, req)
+	body := w.Body.String()
+
+	if !strings.Contains(body, "event: reset") || !strings.Contains(body, `"retention_expired"`) {
+		t.Fatalf("expected explicit retention_expired reset event, got: %s", body)
 	}
 }

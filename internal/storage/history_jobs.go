@@ -594,6 +594,73 @@ func (s *Store) RequeueStaleHistorySyncJobs(ctx context.Context, staleBefore tim
 	return count, err
 }
 
+// RequeueRunningHistorySyncJobs recovers all RUNNING jobs back to QUEUED upon graceful worker shutdown.
+func (s *Store) RequeueRunningHistorySyncJobs(ctx context.Context, reason string) (int, error) {
+	var count int
+	if reason == "" {
+		reason = "Graceful worker shutdown"
+	}
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		type runningTarget struct {
+			id         string
+			isStaleGen bool
+		}
+
+		rows, err := tx.QueryContext(ctx, `
+			SELECT j.id, j.generation, c.generation
+			FROM history_sync_jobs j
+			JOIN connections c ON c.id = j.connection_id
+			WHERE j.status = 'RUNNING'
+		`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		var targets []runningTarget
+		for rows.Next() {
+			var jID string
+			var jGen, cGen int64
+			if err := rows.Scan(&jID, &jGen, &cGen); err == nil {
+				targets = append(targets, runningTarget{id: jID, isStaleGen: jGen != cGen})
+			}
+		}
+		_ = rows.Close()
+
+		nowTs := now()
+		sanitizedReason := sanitizeJobErrorMessage(reason)
+		requeuedCount := 0
+		for _, t := range targets {
+			if t.isStaleGen {
+				_, _ = tx.ExecContext(ctx, `
+					UPDATE history_sync_jobs
+					SET status = 'CANCELED', error_code = 'STALE_GENERATION',
+					    error_message = 'Connection generation bumped while job was running',
+					    finished_at = ?, updated_at = ?
+					WHERE id = ? AND status = 'RUNNING'
+				`, nowTs, nowTs, t.id)
+			} else {
+				res, err := tx.ExecContext(ctx, `
+					UPDATE history_sync_jobs
+					SET status = 'QUEUED', error_code = 'WORKER_SHUTDOWN',
+					    error_message = ?,
+					    next_attempt_at = NULL, updated_at = ?
+					WHERE id = ? AND status = 'RUNNING'
+				`, sanitizedReason, nowTs, t.id)
+				if err == nil {
+					if ra, _ := res.RowsAffected(); ra > 0 {
+						requeuedCount += int(ra)
+					}
+				}
+			}
+		}
+		count = requeuedCount
+		return nil
+	})
+
+	return count, err
+}
+
 // GetHistorySyncJob retrieves a job by ID.
 func (s *Store) GetHistorySyncJob(ctx context.Context, jobID string) (HistorySyncJob, error) {
 	if jobID == "" {

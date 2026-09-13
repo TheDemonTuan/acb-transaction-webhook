@@ -47,6 +47,7 @@ services:
       - worker_internal_token
       - bark_basic_auth_user
       - bark_basic_auth_password
+    stop_grace_period: 30s
     labels:
       - "platform.workload.class=singleton"
     healthcheck:

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -652,6 +653,257 @@ func TestStartAuthTransientFailurePreservesAttempt(t *testing.T) {
 	wStart404 := post("/api/v1/connection/auth/start", `{}`)
 	if wStart404.Code != http.StatusCreated {
 		t.Fatalf("expected 201 Created after 404 cleanup, got %d: %s", wStart404.Code, wStart404.Body.String())
+	}
+}
+
+func TestAuthBrowserCancelPersistsWhenBrowserReturns404(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cancel_404.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
+			var body struct {
+				AttemptID string `json:"attemptId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"attemptId": body.AttemptID,
+				"status":    "STARTING",
+				"screenUrl": "/",
+				"expiresAt": time.Now().Add(15 * time.Minute).Format(time.RFC3339),
+			})
+			return
+		}
+		if r.Method == http.MethodDelete {
+			// Upstream browser already lost/deleted session, returns 404
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "session not found"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	server := New(config.Config{
+		Timezone:           time.UTC,
+		DevelopmentSubject: "owner",
+		AuthBrowserURL:     upstream.URL,
+	}, store)
+	h := server.Handler()
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	h.ServeHTTP(csrfRec, csrfReq)
+	cookie := csrfRec.Result().Cookies()[0]
+	var token struct{ Token string }
+	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&token)
+
+	post := func(path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "http://example.test"+path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "http://example.test")
+		r.Header.Set("X-CSRF-Token", token.Token)
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	// 1. Start auth attempt
+	wStart := post("/api/v1/connection/auth/start", `{}`)
+	if wStart.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", wStart.Code, wStart.Body.String())
+	}
+	var startResp struct {
+		AttemptID string `json:"attemptId"`
+	}
+	_ = json.NewDecoder(wStart.Body).Decode(&startResp)
+
+	// 2. Explicit cancel while upstream returns 404
+	wCancel := post("/api/v1/connection/auth/cancel", `{"attemptId":"`+startResp.AttemptID+`"}`)
+	if wCancel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for cancel despite upstream 404, got %d: %s", wCancel.Code, wCancel.Body.String())
+	}
+
+	// 3. Store must persist CANCELLED status
+	status, err := store.AuthAttemptStatusForOwner(ctx, startResp.AttemptID, "")
+	if err != nil {
+		t.Fatalf("AuthAttemptStatusForOwner: %v", err)
+	}
+	if status.Status != "CANCELLED" {
+		t.Fatalf("expected attempt status CANCELLED, got %s", status.Status)
+	}
+}
+
+func TestAuthBrowserHandoffGenerationMismatchRejectsStaleVerification(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "stale_verify.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attempt, err := store.StartAuthAttempt(ctx, "", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	keyPath := filepath.Join(t.TempDir(), "master.key")
+	if err := os.WriteFile(keyPath, []byte(base64.RawStdEncoding.EncodeToString(key)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/handoff") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"session": "handoff-secret-data"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"attemptId": attempt.ID,
+			"status":    "VERIFIED",
+		})
+	}))
+	defer upstream.Close()
+
+	server := New(config.Config{
+		Timezone:           time.UTC,
+		DevelopmentSubject: "owner",
+		AuthBrowserURL:     upstream.URL,
+		MasterKeyFile:      keyPath,
+	}, store).WithAuthVerifier(rejectingAuthVerifier{err: errors.New("should not be called")})
+
+	// Bump connection generation behind the scenes before verification
+	_, err = store.DB().ExecContext(ctx, `UPDATE connections SET generation = generation + 1 WHERE id = ?`, conn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connection/auth/"+attempt.ID+"/status", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for stale generation handoff, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "AUTH_SESSION_SUPERSEDED") {
+		t.Fatalf("expected AUTH_SESSION_SUPERSEDED, got: %s", w.Body.String())
+	}
+
+	// Verify connection state did NOT transition to MONITORING
+	latestConn, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latestConn.State == "MONITORING" {
+		t.Fatalf("connection must not adopt stale session, state is %s", latestConn.State)
+	}
+}
+
+func TestAuthBrowserConcurrentStartLoginRace(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "concurrent_start.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"attemptId": "concurrent_test",
+				"status":    "STARTING",
+				"screenUrl": "/",
+				"expiresAt": time.Now().Add(15 * time.Minute).Format(time.RFC3339),
+			})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"attemptId": "concurrent_test",
+			"status":    "STARTING",
+			"screenUrl": "/",
+			"expiresAt": time.Now().Add(15 * time.Minute).Format(time.RFC3339),
+		})
+	}))
+	defer upstream.Close()
+
+	server := New(config.Config{
+		Timezone:           time.UTC,
+		DevelopmentSubject: "owner",
+		AuthBrowserURL:     upstream.URL,
+	}, store)
+	h := server.Handler()
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	h.ServeHTTP(csrfRec, csrfReq)
+	cookie := csrfRec.Result().Cookies()[0]
+	var token struct{ Token string }
+	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&token)
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	codes := make([]int, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			r := httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/connection/auth/start", strings.NewReader(`{}`))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Origin", "http://example.test")
+			r.Header.Set("X-CSRF-Token", token.Token)
+			r.AddCookie(cookie)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			codes[idx] = w.Code
+		}(i)
+	}
+	wg.Wait()
+
+	createdCount := 0
+	okOrConflictCount := 0
+	for _, code := range codes {
+		if code == http.StatusCreated {
+			createdCount++
+		} else if code == http.StatusConflict || code == http.StatusOK {
+			okOrConflictCount++
+		} else {
+			t.Errorf("unexpected status code: %d", code)
+		}
+	}
+
+	if createdCount != 1 {
+		t.Fatalf("expected exactly 1 attempt created (201), got %d (all codes: %v)", createdCount, codes)
+	}
+	if okOrConflictCount != concurrency-1 {
+		t.Fatalf("expected %d conflict or resume responses, got %d (all codes: %v)", concurrency-1, okOrConflictCount, codes)
 	}
 }
 

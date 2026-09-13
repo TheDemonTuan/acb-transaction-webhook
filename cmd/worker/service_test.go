@@ -8,10 +8,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
 type roundTripFunc func(req *http.Request) (*http.Response, error)
@@ -193,5 +196,94 @@ func TestWorkerService_CreateAndCancelHistoryJob(t *testing.T) {
 	}
 	if canceledJob.Status != storage.HistoryJobStatusCanceled {
 		t.Fatalf("expected job status CANCELED, got %s", canceledJob.Status)
+	}
+}
+
+func TestWorkerShutdownGracefulRequeueAndReleaseLock(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "worker_shutdown_test.db")
+	lockPath := filepath.Join(tempDir, "gateway.lock")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state = 'MONITORING' WHERE id = ?", conn.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Worker acquires singleton flock
+	flock, err := lock.Acquire(lockPath)
+	if err != nil {
+		t.Fatalf("acquire singleton flock: %v", err)
+	}
+
+	// 2. Second concurrent lock acquisition fails immediately
+	if _, err := lock.Acquire(lockPath); err == nil {
+		t.Fatal("expected second flock acquisition to fail while first worker holds it")
+	}
+
+	// 3. Worker creates a history job and claims it (status RUNNING)
+	job, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, "2026-09-01", "2026-09-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claimed, err := store.ClaimNextHistorySyncJob(ctx, time.Now().UTC())
+	if err != nil || !claimed {
+		t.Fatal("failed to claim job")
+	}
+
+	coordinator := workerstate.NewCoordinator()
+	if err := coordinator.SetReady(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Register stop hook that requeues running jobs on shutdown
+	coordinator.RegisterStopHook(func(stopCtx context.Context) error {
+		_, err := store.RequeueRunningHistorySyncJobs(stopCtx, "graceful shutdown test")
+		return err
+	})
+
+	// 5. Worker shuts down: Stop coordinator, then release flock
+	if err := coordinator.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if err := coordinator.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	flock.Close()
+
+	// 6. Verify job was requeued to QUEUED with WORKER_SHUTDOWN error code
+	j, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != storage.HistoryJobStatusQueued {
+		t.Fatalf("expected requeued job status QUEUED, got %s", j.Status)
+	}
+	if j.ErrorCode != "WORKER_SHUTDOWN" {
+		t.Fatalf("expected error code WORKER_SHUTDOWN, got %s", j.ErrorCode)
+	}
+
+	// 7. Next worker can acquire lock immediately and claim the requeued job
+	newFlock, err := lock.Acquire(lockPath)
+	if err != nil {
+		t.Fatalf("new worker failed to acquire lock after old worker shutdown: %v", err)
+	}
+	defer newFlock.Close()
+
+	claimedJob, reclaimed, err := store.ClaimNextHistorySyncJob(ctx, time.Now().UTC())
+	if err != nil || !reclaimed {
+		t.Fatalf("new worker failed to claim requeued job: %v", err)
+	}
+	if claimedJob.ID != job.ID {
+		t.Fatalf("expected reclaimed job %s, got %s", job.ID, claimedJob.ID)
 	}
 }

@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
 type mockWorkerHandler struct {
@@ -471,5 +473,107 @@ func TestWorkerRPC_NotifyAndWakeErrors(t *testing.T) {
 	}
 	if err := client.WakeDispatcher(ctx); err == nil {
 		t.Fatal("expected WakeDispatcher to fail, got nil")
+	}
+}
+
+func TestWorkerRPC_DrainCommand(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	var drainCalled atomic.Bool
+	server.SetDrainHandler(func(ctx context.Context) error {
+		drainCalled.Store(true)
+		return nil
+	})
+
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	// 1. Unauthorized request
+	unauthReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/rpc/drain", nil)
+	resp, err := http.DefaultClient.Do(unauthReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for unauthenticated drain, got %d", resp.StatusCode)
+	}
+
+	// 2. Client Drain
+	client := workerrpc.NewClient(ts.URL, token)
+	if err := client.Drain(context.Background()); err != nil {
+		t.Fatalf("client.Drain failed: %v", err)
+	}
+	if !drainCalled.Load() {
+		t.Fatal("expected drain handler to have been called")
+	}
+}
+
+func TestWorkerRPC_DrainingRejectsUpstreamCommands(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	coordinator := workerstate.NewCoordinator()
+	_ = coordinator.SetReady()
+	server.SetStateProvider(coordinator.State)
+	server.SetReadyChecker(func(ctx context.Context) error {
+		if !coordinator.IsReady() {
+			return errors.New("worker not ready")
+		}
+		return nil
+	})
+
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+	ctx := context.Background()
+
+	// In READY state, upstream requests succeed
+	if err := client.RequestSync(ctx); err != nil {
+		t.Fatalf("expected RequestSync to succeed when READY, got: %v", err)
+	}
+
+	// Now transition to DRAINING
+	_ = coordinator.Drain(ctx)
+
+	// 1. GET /healthz remains 200 OK
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected /healthz to be 200 OK during drain, got %v (code: %d)", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 2. GET /readyz becomes 503
+	if err := client.Ready(ctx); err == nil {
+		t.Fatal("expected Ready check to fail during drain, but got nil")
+	}
+
+	// 3. Upstream-producing commands are rejected with 503 / draining
+	if err := client.RequestSync(ctx); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("expected RequestSync to be rejected with 503 during drain, got: %v", err)
+	}
+	if _, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02"); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("expected CreateHistoryJob to be rejected with 503 during drain, got: %v", err)
+	}
+	if err := client.VerifySession(ctx, "12345", 1, []byte("pw")); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("expected VerifySession to be rejected with 503 during drain, got: %v", err)
+	}
+
+	// 4. Non-upstream calls (wake-dispatcher, notify-settings) still succeed
+	if err := client.WakeDispatcher(ctx); err != nil {
+		t.Fatalf("expected WakeDispatcher to succeed during drain, got: %v", err)
+	}
+	if err := client.NotifySettingsChanged(ctx); err != nil {
+		t.Fatalf("expected NotifySettingsChanged to succeed during drain, got: %v", err)
 	}
 }

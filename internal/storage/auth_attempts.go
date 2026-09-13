@@ -131,7 +131,7 @@ func (s *Store) StartAuthAttempt(ctx context.Context, owner string, ttl time.Dur
 		}
 		changed, err := result.RowsAffected()
 		if err != nil || changed != 1 {
-			return sql.ErrNoRows
+			return ErrAuthAttemptActive
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`, attempt.ID, attempt.ConnectionID, attempt.Generation, owner, attempt.Status, attempt.ExpiresAt, attempt.CreatedAt)
 		if err != nil {

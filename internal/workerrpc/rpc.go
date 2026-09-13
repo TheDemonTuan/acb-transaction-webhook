@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
 const (
@@ -127,8 +128,10 @@ type Server struct {
 	serverTimeout time.Duration
 	sem           chan struct{}
 
-	mu           sync.Mutex
-	readyChecker func(ctx context.Context) error
+	mu            sync.Mutex
+	readyChecker  func(ctx context.Context) error
+	drainHandler  func(ctx context.Context) error
+	stateProvider func() workerstate.State
 }
 
 func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOption) (*Server, error) {
@@ -162,6 +165,31 @@ func (s *Server) SetReadyChecker(checker func(ctx context.Context) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.readyChecker = checker
+}
+
+func (s *Server) SetDrainHandler(drainer func(ctx context.Context) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drainHandler = drainer
+}
+
+func (s *Server) SetStateProvider(provider func() workerstate.State) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stateProvider = provider
+}
+
+func (s *Server) checkWorkAllowed() error {
+	s.mu.Lock()
+	sp := s.stateProvider
+	s.mu.Unlock()
+	if sp != nil {
+		state := sp()
+		if state != workerstate.StateReady {
+			return fmt.Errorf("worker is in %s state", state)
+		}
+	}
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -246,10 +274,36 @@ func (s *Server) routes() {
 		})
 	})
 
+	s.mux.HandleFunc("/rpc/drain", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		s.mu.Lock()
+		drainer := s.drainHandler
+		s.mu.Unlock()
+		if drainer != nil {
+			if err := drainer(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "draining", "requestId": reqID})
+	}))
+
 	s.mux.HandleFunc("/rpc/request-sync", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.checkWorkAllowed(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     err.Error(),
+				"code":      "WORKER_DRAINING",
+				"requestId": reqID,
+			})
 			return
 		}
 		if err := s.handler.RequestSync(r.Context()); err != nil {
@@ -263,6 +317,14 @@ func (s *Server) routes() {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.checkWorkAllowed(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     err.Error(),
+				"code":      "WORKER_DRAINING",
+				"requestId": reqID,
+			})
 			return
 		}
 		var req CreateHistoryJobRequest
@@ -360,6 +422,14 @@ func (s *Server) routes() {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
 			return
 		}
+		if err := s.checkWorkAllowed(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     err.Error(),
+				"code":      "WORKER_DRAINING",
+				"requestId": reqID,
+			})
+			return
+		}
 		var req VerifySessionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "bad request", reqID)
@@ -453,6 +523,12 @@ func (c *Client) RequestSync(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return c.post(callCtx, "/rpc/request-sync", nil, nil)
+}
+
+func (c *Client) Drain(ctx context.Context) error {
+	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return c.post(callCtx, "/rpc/drain", nil, nil)
 }
 
 func (c *Client) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
