@@ -24,8 +24,6 @@ services:
       POLL_MAX_INTERVAL_SEC: ${POLL_MAX_INTERVAL_SEC:-10}
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
-      TTS_GATEWAY_URL: http://tts-gateway:8081
-      TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
       BARK_SERVER_URL: http://bark:8080
       BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
       BARK_BASIC_AUTH_USER_FILE: /run/secrets/bark_basic_auth_user
@@ -43,7 +41,6 @@ services:
       - gateway_data:/data
     secrets:
       - app_master_key
-      - tts_internal_token
       - worker_internal_token
       - bark_basic_auth_user
       - bark_basic_auth_password
@@ -219,10 +216,6 @@ services:
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
-      BARK_SERVER_URL: http://bark:8080
-      BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
-      BARK_BASIC_AUTH_USER_FILE: /run/secrets/bark_basic_auth_user
-      BARK_BASIC_AUTH_PASSWORD_FILE: /run/secrets/bark_basic_auth_password
     expose:
       - "8090"
     networks:
@@ -237,8 +230,6 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
-      - bark_basic_auth_user
-      - bark_basic_auth_password
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=edge-acb"
@@ -293,10 +284,6 @@ services:
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
-      BARK_SERVER_URL: http://bark:8080
-      BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
-      BARK_BASIC_AUTH_USER_FILE: /run/secrets/bark_basic_auth_user
-      BARK_BASIC_AUTH_PASSWORD_FILE: /run/secrets/bark_basic_auth_password
     expose:
       - "8090"
     networks:
@@ -311,8 +298,6 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
-      - bark_basic_auth_user
-      - bark_basic_auth_password
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=edge-acb"

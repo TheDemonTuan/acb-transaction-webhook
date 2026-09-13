@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -36,6 +37,8 @@ type workerService struct {
 	verifierSessionLoader *monitor.SessionLoader
 	verifierClient        *acb.Client
 	store                 *storage.Store
+	notificationRegistry  *notification.Registry
+	barkSender            *bark.Sender
 }
 
 func (w *workerService) RequestSync(ctx context.Context) error {
@@ -136,6 +139,106 @@ func (w *workerService) VerifySession(ctx context.Context, account string, gener
 		verifier = monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient)
 	}
 	return verifier.VerifySession(ctx, account, generation, password)
+}
+
+func (w *workerService) TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error) {
+	if w.store == nil {
+		return workerrpc.TestNotificationResponse{
+			Success:        false,
+			Status:         "FAILED",
+			SanitizedError: "storage not initialized",
+		}, nil
+	}
+	ch, err := w.store.NotificationChannelByID(ctx, channelID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return workerrpc.TestNotificationResponse{
+			Success:        false,
+			Status:         "FAILED",
+			SanitizedError: "channel_not_found",
+		}, nil
+	}
+	if err != nil {
+		return workerrpc.TestNotificationResponse{
+			Success:        false,
+			Status:         "FAILED",
+			SanitizedError: "storage_error",
+		}, nil
+	}
+
+	target, err := w.store.DeliveryTargetForDelivery(ctx, storage.Delivery{
+		EndpointID:       ch.ID,
+		EndpointRevision: ch.Revision,
+	})
+	if err != nil {
+		return workerrpc.TestNotificationResponse{
+			Success:        false,
+			Status:         "FAILED",
+			SanitizedError: "cannot decrypt channel target: " + err.Error(),
+		}, nil
+	}
+
+	if ch.Provider == "BARK" {
+		if w.barkSender == nil {
+			return workerrpc.TestNotificationResponse{
+				Success:           false,
+				Status:            "FAILED",
+				ProviderErrorCode: "BARK_NOT_CONFIGURED",
+				SanitizedError:    "Bark server URL chưa được cấu hình trên worker",
+			}, nil
+		}
+		res := w.barkSender.SendTestNotification(ctx, target)
+		if res.Outcome == notification.OutcomeSuccess {
+			return workerrpc.TestNotificationResponse{
+				Success:   true,
+				Status:    "DELIVERED",
+				LatencyMs: int64(res.LatencyMs),
+				Message:   "Bark đã chấp nhận thông báo thử — hãy kiểm tra iPhone",
+			}, nil
+		}
+		return workerrpc.TestNotificationResponse{
+			Success:           false,
+			Status:            "FAILED",
+			LatencyMs:         int64(res.LatencyMs),
+			ProviderErrorCode: res.ProviderErrorCode,
+			SanitizedError:    res.SanitizedError,
+		}, nil
+	}
+
+	if w.notificationRegistry != nil {
+		if sender, ok := w.notificationRegistry.Get(ch.Provider); ok {
+			testReq := notification.SendRequest{
+				DeliveryID:   "del_test_" + channelID,
+				EventID:      "evt_test_ping",
+				EventType:    "bank.transaction.credit",
+				Target:       target,
+				EventPayload: []byte(`{"bank":"ACB","credit":"0","debit":"0","description":"Test Webhook Ping","source":"TEST"}`),
+			}
+			res := sender.Send(ctx, testReq)
+			if res.Outcome == notification.OutcomeSuccess {
+				msg := "Webhook endpoint responded with HTTP " + strconv.Itoa(res.StatusCode)
+				return workerrpc.TestNotificationResponse{
+					Success:   true,
+					Status:    "DELIVERED",
+					LatencyMs: int64(res.LatencyMs),
+					Message:   msg,
+				}, nil
+			}
+			return workerrpc.TestNotificationResponse{
+				Success:           false,
+				Status:            "FAILED",
+				LatencyMs:         int64(res.LatencyMs),
+				ProviderErrorCode: res.ProviderErrorCode,
+				SanitizedError:    res.SanitizedError,
+			}, nil
+		}
+	}
+
+	return workerrpc.TestNotificationResponse{
+		Success:           false,
+		Status:            "FAILED",
+		ProviderErrorCode: "UNKNOWN_PROVIDER",
+		SanitizedError:    "unsupported notification provider: " + ch.Provider,
+	}, nil
 }
 
 func main() {
@@ -264,12 +367,13 @@ func main() {
 		DefaultLevel:      cfg.BarkDefaultLevel,
 		DefaultSound:      cfg.BarkDefaultSound,
 	}
+	var barkSender *bark.Sender
 	if barkCfg.Configured() {
 		if err := bark.ValidateConfig(barkCfg); err != nil {
 			logger.Error("invalid Bark configuration", "error", err)
 			os.Exit(1)
 		}
-		barkSender := bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
+		barkSender = bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
 		notificationRegistry.Register(notification.ProviderBark, barkSender)
 		logger.Info("Bark notification provider registered in worker")
 	}
@@ -348,6 +452,8 @@ func main() {
 		verifierSessionLoader: verifierSessionLoader,
 		verifierClient:        verifierClient,
 		store:                 store,
+		notificationRegistry:  notificationRegistry,
+		barkSender:            barkSender,
 	}
 
 	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken)

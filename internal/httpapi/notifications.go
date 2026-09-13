@@ -226,6 +226,29 @@ func (s *Server) testNotificationChannel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if s.channelTester != nil {
+		res, err := s.channelTester.TestNotificationChannel(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "worker RPC failure: "+err.Error())
+			return
+		}
+		audit(s.store, r, "notification_channel.test", id)
+		if res.Success || res.Status == "DELIVERED" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":    "DELIVERED",
+				"latencyMs": res.LatencyMs,
+				"message":   res.Message,
+			})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"status": "FAILED",
+			"code":   res.ProviderErrorCode,
+			"error":  res.SanitizedError,
+		})
+		return
+	}
+
 	target, err := s.store.DeliveryTargetForDelivery(r.Context(), storage.Delivery{
 		EndpointID:       ch.ID,
 		EndpointRevision: ch.Revision,

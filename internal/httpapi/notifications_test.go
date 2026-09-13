@@ -17,6 +17,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
 func setupTestServerWithKeyring(t *testing.T) (*Server, *storage.Store) {
@@ -40,6 +41,7 @@ func setupTestServerWithKeyring(t *testing.T) (*Server, *storage.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	store.WithKeyring(kr)
 
 	cfg := config.Config{
@@ -327,3 +329,49 @@ func TestReplayDeliveryEndpoint(t *testing.T) {
 		t.Fatalf("expected 409 Conflict when delivery is already PENDING, got %d", recReplay2.Code)
 	}
 }
+
+type mockChannelTester struct {
+	calledChannelID string
+	resp            workerrpc.TestNotificationResponse
+	err             error
+}
+
+func (m *mockChannelTester) TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error) {
+	m.calledChannelID = channelID
+	return m.resp, m.err
+}
+
+func TestChannelTestDelegatesToWorkerRPC(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+
+	ch, err := store.CreateBarkChannel(context.Background(), "Worker Bark", "device_key_worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tester := &mockChannelTester{
+		resp: workerrpc.TestNotificationResponse{
+			Success:   true,
+			Status:    "DELIVERED",
+			LatencyMs: 99,
+			Message:   "Worker delivered Bark push",
+		},
+	}
+	srv.WithNotificationTester(tester)
+
+	csrf, cookie := getCSRF(srv)
+	req := prepareAuthedPost("http://example.test/api/v1/notification-channels/"+ch.ID+"/test", nil, csrf, cookie)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from worker RPC delegation, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if tester.calledChannelID != ch.ID {
+		t.Fatalf("expected tester called with channel %s, got %s", ch.ID, tester.calledChannelID)
+	}
+	if !strings.Contains(rec.Body.String(), "DELIVERED") {
+		t.Fatalf("expected DELIVERED response, got %s", rec.Body.String())
+	}
+}
+

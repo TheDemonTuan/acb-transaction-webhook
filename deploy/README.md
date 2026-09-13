@@ -60,9 +60,9 @@ When transitioning from the legacy monolithic `acb-transaction-gateway`:
    ```bash
    docker stop acb-transaction-gateway || true
    ```
-2. Run database migration and verification via immutable dbtool:
+2. Run database backup and migration via age and immutable dbtool:
    ```bash
-   ./deploy/backup.sh
+   ./deploy/backup-db.sh
    docker run --rm --user 1000:1000 \
      -v bank-event-gateway_gateway_data:/data:rw \
      ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:<dbtool-digest> \

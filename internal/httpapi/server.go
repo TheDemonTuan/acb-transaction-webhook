@@ -36,6 +36,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/ttsclient"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
 type SyncRequester interface {
@@ -69,6 +70,10 @@ type WorkerProber interface {
 	Ready(ctx context.Context) error
 }
 
+type NotificationChannelTester interface {
+	TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error)
+}
+
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
@@ -76,9 +81,10 @@ type Server struct {
 	historyEnsurer    HistoryEnsurer
 	historyJobManager HistoryJobManager
 	monitorNotifier   MonitorNotifier
-	authVerifier    AuthVerifier
-	workerProber    WorkerProber
-	cfg             config.Config
+	authVerifier      AuthVerifier
+	workerProber      WorkerProber
+	channelTester     NotificationChannelTester
+	cfg               config.Config
 	store           *storage.Store
 	auth            *auth.Middleware
 	browser         *authbrowser.Client
@@ -237,6 +243,11 @@ func (s *Server) WithBarkSender(sender *bark.Sender) *Server {
 
 func (s *Server) WithNotificationRegistry(reg *notification.Registry) *Server {
 	s.notifRegistry = reg
+	return s
+}
+
+func (s *Server) WithNotificationTester(tester NotificationChannelTester) *Server {
+	s.channelTester = tester
 	return s
 }
 

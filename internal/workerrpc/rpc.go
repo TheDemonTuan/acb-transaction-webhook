@@ -83,6 +83,19 @@ type VerifySessionRequest struct {
 	Password   []byte `json:"password"`
 }
 
+type TestNotificationRequest struct {
+	ChannelID string `json:"channelId"`
+}
+
+type TestNotificationResponse struct {
+	Success           bool   `json:"success"`
+	Status            string `json:"status"`
+	LatencyMs         int64  `json:"latencyMs"`
+	Message           string `json:"message,omitempty"`
+	ProviderErrorCode string `json:"code,omitempty"`
+	SanitizedError    string `json:"error,omitempty"`
+}
+
 // Handler interface implemented by worker
 type WorkerHandler interface {
 	RequestSync(ctx context.Context) error
@@ -91,6 +104,7 @@ type WorkerHandler interface {
 	NotifySettingsChanged(ctx context.Context) error
 	WakeDispatcher(ctx context.Context) error
 	VerifySession(ctx context.Context, account string, generation int64, password []byte) error
+	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 }
 
 type ServerOption func(*Server)
@@ -445,6 +459,37 @@ func (s *Server) routes() {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
 	}))
+
+	s.mux.HandleFunc("/rpc/notification-channels/test", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.checkWorkAllowed(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     err.Error(),
+				"code":      "WORKER_DRAINING",
+				"requestId": reqID,
+			})
+			return
+		}
+		var req TestNotificationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad request: "+err.Error(), reqID)
+			return
+		}
+		if strings.TrimSpace(req.ChannelID) == "" {
+			writeError(w, http.StatusBadRequest, "channelId is required", reqID)
+			return
+		}
+		resp, err := s.handler.TestNotificationChannel(r.Context(), req.ChannelID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
 }
 
 // Client calls the worker RPC server from gateway slots
@@ -580,6 +625,14 @@ func (c *Client) VerifySession(ctx context.Context, account string, generation i
 		Generation: generation,
 		Password:   password,
 	}, nil)
+}
+
+func (c *Client) TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error) {
+	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var resp TestNotificationResponse
+	err := c.post(callCtx, "/rpc/notification-channels/test", TestNotificationRequest{ChannelID: channelID}, &resp)
+	return resp, err
 }
 
 // Ready checks the worker /readyz endpoint from gateway

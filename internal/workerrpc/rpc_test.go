@@ -105,6 +105,26 @@ func (m *mockWorkerHandler) VerifySession(ctx context.Context, account string, g
 	return nil
 }
 
+func (m *mockWorkerHandler) TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error) {
+	if channelID == "error-id" {
+		return workerrpc.TestNotificationResponse{}, errors.New("internal test error")
+	}
+	if channelID == "failed-id" {
+		return workerrpc.TestNotificationResponse{
+			Success:           false,
+			Status:            "FAILED",
+			ProviderErrorCode: "PROVIDER_DOWN",
+			SanitizedError:    "gateway unreachable",
+		}, nil
+	}
+	return workerrpc.TestNotificationResponse{
+		Success:   true,
+		Status:    "DELIVERED",
+		LatencyMs: 42,
+		Message:   "Delivered test message",
+	}, nil
+}
+
 func TestWorkerRPC_ConstructorValidation(t *testing.T) {
 	mock := &mockWorkerHandler{}
 
@@ -577,3 +597,49 @@ func TestWorkerRPC_DrainingRejectsUpstreamCommands(t *testing.T) {
 		t.Fatalf("expected NotifySettingsChanged to succeed during drain, got: %v", err)
 	}
 }
+
+func TestWorkerRPC_TestNotificationChannel(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+	ctx := context.Background()
+
+	// 1. Successful test send
+	resp, err := client.TestNotificationChannel(ctx, "ch_ok_123")
+	if err != nil {
+		t.Fatalf("TestNotificationChannel failed: %v", err)
+	}
+	if !resp.Success || resp.Status != "DELIVERED" || resp.LatencyMs != 42 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+
+	// 2. Failed delivery result (bounded error)
+	resp, err = client.TestNotificationChannel(ctx, "failed-id")
+	if err != nil {
+		t.Fatalf("expected 200 RPC response with failed status, got err: %v", err)
+	}
+	if resp.Success || resp.Status != "FAILED" || resp.ProviderErrorCode != "PROVIDER_DOWN" {
+		t.Fatalf("unexpected failure response: %+v", resp)
+	}
+
+	// 3. Worker handler internal error (500)
+	_, err = client.TestNotificationChannel(ctx, "error-id")
+	if err == nil {
+		t.Fatal("expected error on handler internal failure, got nil")
+	}
+
+	// 4. Bad request (empty channel ID)
+	_, err = client.TestNotificationChannel(ctx, "   ")
+	if err == nil {
+		t.Fatal("expected error on empty channel ID, got nil")
+	}
+}
+

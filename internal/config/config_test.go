@@ -46,7 +46,29 @@ func TestLoadTTSInternalTokenFileEmpty(t *testing.T) {
 	}
 }
 
-func TestProductionRequiresTTSToken(t *testing.T) {
+func TestProductionWorkerDoesNotRequireTTSToken(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("32byteslongkeyforproductiontest!"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
+	t.Setenv("RUNTIME_ROLE", "worker")
+	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
+	t.Setenv("TTS_INTERNAL_TOKEN", "")
+	t.Setenv("TTS_INTERNAL_TOKEN_FILE", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected worker Load without TTS token to succeed, got: %v", err)
+	}
+	if cfg.TTSGatewayURL != "" {
+		t.Fatalf("expected worker TTSGatewayURL to default to empty, got %q", cfg.TTSGatewayURL)
+	}
+}
+
+func TestProductionGatewayRequiresTTSToken(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "key")
 	if err := os.WriteFile(keyFile, []byte("32byteslongkeyforproductiontest!"), 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
@@ -58,7 +80,8 @@ func TestProductionRequiresTTSToken(t *testing.T) {
 	t.Setenv("CLOUDFLARE_ACCESS_ISSUER", "https://test.cloudflareaccess.com")
 	t.Setenv("CLOUDFLARE_ACCESS_AUD", "aud123")
 	t.Setenv("CLOUDFLARE_ACCESS_JWKS_URL", "https://test.cloudflareaccess.com/certs")
-	t.Setenv("RUNTIME_ROLE", "worker")
+	t.Setenv("RUNTIME_ROLE", "gateway")
+	t.Setenv("WORKER_RPC_URL", "http://worker:8190")
 	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
 	t.Setenv("TTS_GATEWAY_URL", "http://tts-gateway:8081")
 	t.Setenv("TTS_INTERNAL_TOKEN", "")
@@ -66,7 +89,66 @@ func TestProductionRequiresTTSToken(t *testing.T) {
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected production Load without TTS token to fail, but it succeeded")
+		t.Fatal("expected production gateway Load without TTS token to fail, but it succeeded")
+	}
+}
+
+func TestProductionGatewayDoesNotRequireBarkCredentials(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("32byteslongkeyforproductiontest!"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
+	t.Setenv("OWNER_SUBJECTS", "owner@example.com")
+	t.Setenv("CLOUDFLARE_ACCESS_ISSUER", "https://test.cloudflareaccess.com")
+	t.Setenv("CLOUDFLARE_ACCESS_AUD", "aud123")
+	t.Setenv("CLOUDFLARE_ACCESS_JWKS_URL", "https://test.cloudflareaccess.com/certs")
+	t.Setenv("RUNTIME_ROLE", "gateway")
+	t.Setenv("WORKER_RPC_URL", "http://worker:8190")
+	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
+	t.Setenv("TTS_INTERNAL_TOKEN", "mock-tts-token")
+	t.Setenv("BARK_SERVER_URL", "http://bark:8080")
+	t.Setenv("BARK_BASIC_AUTH_USER", "")
+	t.Setenv("BARK_BASIC_AUTH_PASSWORD", "")
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected gateway Load without Bark credentials to succeed, got: %v", err)
+	}
+}
+
+func TestProductionWorkerRequiresBarkCredentialsWhenBarkConfigured(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("32byteslongkeyforproductiontest!"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
+	t.Setenv("RUNTIME_ROLE", "worker")
+	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
+	t.Setenv("BARK_SERVER_URL", "http://bark:8080")
+	t.Setenv("BARK_BASIC_AUTH_USER", "")
+	t.Setenv("BARK_BASIC_AUTH_PASSWORD", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected production worker Load with Bark server but no credentials to fail")
+	}
+}
+
+func TestProductionRejectsDirectAppMasterKeyWithoutFile(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("RUNTIME_ROLE", "worker")
+	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
+	t.Setenv("APP_MASTER_KEY", "32byteslongkeyforproductiontest!")
+	t.Setenv("APP_MASTER_KEY_FILE", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected production Load with direct APP_MASTER_KEY and no file to fail")
 	}
 }
 

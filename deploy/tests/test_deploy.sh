@@ -216,6 +216,32 @@ fi
 exit 0
 EOF
   chmod +x "$test_dir/bin/sqlite3"
+
+  # Mock age CLI
+  cat <<'EOF' > "$test_dir/bin/age"
+#!/usr/bin/env bash
+set -eu
+if [ ! -t 0 ]; then
+  cat >/dev/null 2>&1 || true
+fi
+out=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+if [[ -n "$out" ]]; then
+  mkdir -p "$(dirname "$out")"
+  printf 'age-encryption.org/v1\n' > "$out"
+fi
+exit 0
+EOF
+  chmod +x "$test_dir/bin/age"
+
+  export BACKUP_AGE_RECIPIENT="age1mockrecipienttest000000000000000000000000000000000000000000"
 }
 
 # ==============================================================================

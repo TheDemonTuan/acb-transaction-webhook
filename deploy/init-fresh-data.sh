@@ -32,6 +32,8 @@ if [[ "$CONFIRMED" -ne 1 ]]; then
   fi
 fi
 
+assert_fresh_installation
+
 log_info "Initializing production data volumes..."
 if ! docker volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1; then
   docker volume create "$DATA_VOLUME_NAME"
@@ -47,8 +49,8 @@ else
   log_info "Volume already exists: $BARK_VOLUME_NAME"
 fi
 
-# Ensure secrets directory and default secrets are provisioned
-validate_secrets
+# Ensure secrets directory and fresh secrets are provisioned
+provision_fresh_secrets
 
 dbtool_img="${DBTOOL_IMAGE_REF:-}"
 if [[ -n "$dbtool_img" ]]; then

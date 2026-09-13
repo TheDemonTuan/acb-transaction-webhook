@@ -23,5 +23,6 @@ if [[ -n "$out" && "$out" != "$backup_file" ]]; then
   log_info "Copied backup to requested destination: ${out}"
 fi
 
-log_info "Backup operation completed successfully."
+log_info "Backup operation completed successfully: ${backup_file}"
+printf '%s\n' "$backup_file"
 exit 0

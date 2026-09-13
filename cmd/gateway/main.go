@@ -230,30 +230,6 @@ func main() {
 
 	hub := eventhub.New()
 
-	notificationRegistry := notification.NewRegistry()
-	notificationRegistry.Register(notification.ProviderWebhook, webhook.NewSender(nil, false))
-
-	barkCfg := bark.Config{
-		ServerURL:         cfg.BarkServerURL,
-		PublicURL:         cfg.BarkPublicURL,
-		BasicAuthUser:     cfg.BarkBasicAuthUser,
-		BasicAuthPassword: cfg.BarkBasicAuthPassword,
-		Timeout:           cfg.BarkTimeout,
-		DefaultGroup:      cfg.BarkDefaultGroup,
-		DefaultLevel:      cfg.BarkDefaultLevel,
-		DefaultSound:      cfg.BarkDefaultSound,
-	}
-	var barkSender *bark.Sender
-	if barkCfg.Configured() {
-		if err := bark.ValidateConfig(barkCfg); err != nil {
-			logger.Error("invalid Bark configuration", "error", err)
-			os.Exit(1)
-		}
-		barkSender = bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
-		notificationRegistry.Register(notification.ProviderBark, barkSender)
-		logger.Info("Bark notification provider registered")
-	}
-
 	var server *httpapi.Server
 	if cfg.RuntimeRole == config.RuntimeRoleGateway {
 		logger.Info("starting gateway in HTTP-only mode with worker RPC", "workerRPCURL", cfg.WorkerRPCURL)
@@ -264,13 +240,36 @@ func main() {
 			WithHistoryJobManager(workerClient).
 			WithMonitorNotifier(workerClient).
 			WithEventHub(hub).
-			WithBarkSender(barkSender).
-			WithNotificationRegistry(notificationRegistry).
+			WithNotificationTester(workerClient).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient)
 		go server.RunJournalWatcher(ctx, 200*time.Millisecond)
 	} else if cfg.RuntimeRole == config.RuntimeRoleMonolithDev {
+		notificationRegistry := notification.NewRegistry()
+		notificationRegistry.Register(notification.ProviderWebhook, webhook.NewSender(nil, false))
+
+		barkCfg := bark.Config{
+			ServerURL:         cfg.BarkServerURL,
+			PublicURL:         cfg.BarkPublicURL,
+			BasicAuthUser:     cfg.BarkBasicAuthUser,
+			BasicAuthPassword: cfg.BarkBasicAuthPassword,
+			Timeout:           cfg.BarkTimeout,
+			DefaultGroup:      cfg.BarkDefaultGroup,
+			DefaultLevel:      cfg.BarkDefaultLevel,
+			DefaultSound:      cfg.BarkDefaultSound,
+		}
+		var barkSender *bark.Sender
+		if barkCfg.Configured() {
+			if err := bark.ValidateConfig(barkCfg); err != nil {
+				logger.Error("invalid Bark configuration", "error", err)
+				os.Exit(1)
+			}
+			barkSender = bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
+			notificationRegistry.Register(notification.ProviderBark, barkSender)
+			logger.Info("Bark notification provider registered in monolith-dev")
+		}
+
 		logger.Info("starting gateway in development monolith mode")
 		dispatcher := notification.NewDispatcher(store, notificationRegistry)
 		go dispatcher.Start(ctx)

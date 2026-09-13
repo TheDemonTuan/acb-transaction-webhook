@@ -111,6 +111,9 @@ func Load() (Config, error) {
 
 	cfTeam := os.Getenv("CLOUDFLARE_ACCESS_TEAM_NAME")
 	cfIssuer := strings.TrimSuffix(os.Getenv("CF_ACCESS_ISSUER"), "/")
+	if cfIssuer == "" {
+		cfIssuer = strings.TrimSuffix(os.Getenv("CLOUDFLARE_ACCESS_ISSUER"), "/")
+	}
 	if cfIssuer == "" && cfTeam != "" {
 		cfIssuer = fmt.Sprintf("https://%s.cloudflareaccess.com", cfTeam)
 	}
@@ -119,25 +122,30 @@ func Load() (Config, error) {
 		cfAud = os.Getenv("CLOUDFLARE_ACCESS_AUD")
 	}
 	cfJWKS := os.Getenv("CF_ACCESS_JWKS_URL")
+	if cfJWKS == "" {
+		cfJWKS = os.Getenv("CLOUDFLARE_ACCESS_JWKS_URL")
+	}
 	if cfJWKS == "" && cfTeam != "" {
 		cfJWKS = fmt.Sprintf("https://%s.cloudflareaccess.com/cdn-cgi/access/certs", cfTeam)
 	}
 
 	masterKeyFile := os.Getenv("APP_MASTER_KEY_FILE")
-	if masterKeyFile == "" && os.Getenv("APP_MASTER_KEY") != "" {
-		absDataDir, _ := filepath.Abs(dataDir)
-		autoKey := filepath.Join(absDataDir, "app_master_key")
-		_ = os.MkdirAll(absDataDir, 0o700)
-		_ = os.WriteFile(autoKey, []byte(os.Getenv("APP_MASTER_KEY")), 0o600)
-		masterKeyFile = autoKey
-	} else if masterKeyFile == "" && !production {
-		absDataDir, _ := filepath.Abs(dataDir)
-		autoKey := filepath.Join(absDataDir, "dev_master.key")
-		if _, err := os.Stat(autoKey); os.IsNotExist(err) {
+	if !production {
+		if masterKeyFile == "" && os.Getenv("APP_MASTER_KEY") != "" {
+			absDataDir, _ := filepath.Abs(dataDir)
+			autoKey := filepath.Join(absDataDir, "app_master_key")
 			_ = os.MkdirAll(absDataDir, 0o700)
-			_ = os.WriteFile(autoKey, []byte("0123456789012345678901234567890123456789012345678901234567890123"), 0o600)
+			_ = os.WriteFile(autoKey, []byte(os.Getenv("APP_MASTER_KEY")), 0o600)
+			masterKeyFile = autoKey
+		} else if masterKeyFile == "" {
+			absDataDir, _ := filepath.Abs(dataDir)
+			autoKey := filepath.Join(absDataDir, "dev_master.key")
+			if _, err := os.Stat(autoKey); os.IsNotExist(err) {
+				_ = os.MkdirAll(absDataDir, 0o700)
+				_ = os.WriteFile(autoKey, []byte("0123456789012345678901234567890123456789012345678901234567890123"), 0o600)
+			}
+			masterKeyFile = autoKey
 		}
-		masterKeyFile = autoKey
 	}
 
 	owners := set("OWNER_SUBJECTS")
@@ -206,7 +214,7 @@ func Load() (Config, error) {
 	if (barkAuthUser == "") != (barkAuthPassword == "") {
 		return Config{}, fmt.Errorf("Bark basic auth user and password must be configured together")
 	}
-	if production && barkServerURL != "" && barkAuthUser == "" {
+	if production && runtimeRole == RuntimeRoleWorker && barkServerURL != "" && barkAuthUser == "" {
 		return Config{}, fmt.Errorf("Bark basic auth user and password are required in production")
 	}
 
@@ -217,6 +225,13 @@ func Load() (Config, error) {
 
 	slot := value("PLATFORM_SLOT", value("APP_SLOT", value("SLOT", "monolith")))
 	releaseCommit := value("RELEASE_COMMIT", value("APP_RELEASE_COMMIT", value("GIT_COMMIT", "unknown")))
+
+	ttsGatewayURL := ""
+	if runtimeRole != RuntimeRoleWorker {
+		ttsGatewayURL = value("TTS_GATEWAY_URL", "http://tts-gateway:8081")
+	} else if v := strings.TrimSpace(os.Getenv("TTS_GATEWAY_URL")); v != "" {
+		ttsGatewayURL = v
+	}
 
 	cfg := Config{
 		RuntimeRole:        runtimeRole,
@@ -239,7 +254,7 @@ func Load() (Config, error) {
 		PublicOrigin:          publicOrigin,
 		AuthBrowserURL:        value("AUTH_BROWSER_URL", "http://auth-browser:8181"),
 		AuthBrowserVNCURL:     value("AUTH_BROWSER_VNC_URL", "http://auth-browser:6080"),
-		TTSGatewayURL:         value("TTS_GATEWAY_URL", "http://tts-gateway:8081"),
+		TTSGatewayURL:         ttsGatewayURL,
 		TTSInternalToken:      ttsToken,
 		BarkServerURL:         barkServerURL,
 		BarkPublicURL:         barkPublicURL,
@@ -258,16 +273,16 @@ func Load() (Config, error) {
 		if cfg.MasterKeyFile == "" {
 			return Config{}, fmt.Errorf("APP_MASTER_KEY_FILE is required in production")
 		}
-		if len(cfg.Roles.Owners) == 0 {
-			return Config{}, fmt.Errorf("OWNER_SUBJECTS is required in production")
-		}
-		if cfg.CloudflareIssuer == "" || cfg.CloudflareAudience == "" || cfg.CloudflareJWKSURL == "" || cfg.CloudflareAudience == "*" || strings.EqualFold(cfg.CloudflareAudience, "any") {
-			return Config{}, fmt.Errorf("specific Cloudflare Access issuer, audience, and JWKS URL are required in production")
-		}
-		if cfg.TTSGatewayURL != "" && cfg.TTSInternalToken == "" {
-			return Config{}, fmt.Errorf("TTS_INTERNAL_TOKEN or TTS_INTERNAL_TOKEN_FILE is required in production when TTS_GATEWAY_URL is configured")
-		}
 		if cfg.RuntimeRole == RuntimeRoleGateway {
+			if len(cfg.Roles.Owners) == 0 {
+				return Config{}, fmt.Errorf("OWNER_SUBJECTS is required in production")
+			}
+			if cfg.CloudflareIssuer == "" || cfg.CloudflareAudience == "" || cfg.CloudflareJWKSURL == "" || cfg.CloudflareAudience == "*" || strings.EqualFold(cfg.CloudflareAudience, "any") {
+				return Config{}, fmt.Errorf("specific Cloudflare Access issuer, audience, and JWKS URL are required in production")
+			}
+			if cfg.TTSGatewayURL != "" && cfg.TTSInternalToken == "" {
+				return Config{}, fmt.Errorf("TTS_INTERNAL_TOKEN or TTS_INTERNAL_TOKEN_FILE is required in production when TTS_GATEWAY_URL is configured")
+			}
 			if cfg.WorkerRPCURL == "" {
 				return Config{}, fmt.Errorf("WORKER_RPC_URL is required for gateway in production")
 			}

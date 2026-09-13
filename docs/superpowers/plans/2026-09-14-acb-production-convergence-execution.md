@@ -109,10 +109,10 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 17** | Bounded SSE replay across Blue/Green cutover | **PR08** | **COMPLETED** | `internal/httpapi/sse.go`, `internal/storage/journal.go` | Reconnect with Last-Event-ID replays all intervening events across slot promotion. |
 | **Task 18** | Graceful worker shutdown & state persistence | **PR08** | **COMPLETED** | `cmd/worker/main.go`, `internal/monitor/*` | Shutdown persists freshest session in bounded context; releases lock cleanly. |
 | **Task 19** | Auth-browser transient failure handling | **PR08** | **COMPLETED** | `internal/authbrowser/*` | Transient 5xx does not fail attempt; 404 or terminal browser state marks failed. |
-| **Task 20** | Split secret provisioning from validation | PR09 | PENDING | `deploy/init-fresh-data.sh`, `deploy/lib.sh` | Deploy fails if secrets missing; no secrets generated automatically on VPS. |
-| **Task 21** | Least-privilege secret distribution | PR09 | PENDING | `deploy/compose.prod.yaml` | Container mounts inspect proves each service sees only permitted secret files. |
-| **Task 22** | age encrypted backup & restore scripts | PR09 | PENDING | `deploy/backup.sh`, `deploy/restore.sh` | Plaintext tmpfs securely unlinked; backup artifact encrypted; manifest valid. |
-| **Task 23** | Disaster recovery restore drill | PR09 | PENDING | `deploy/tests/test_restore.sh` | Isolated container restores `.db.age`, verifies integrity, starts application. |
+| **Task 20** | Split secret provisioning from validation | **PR09** | **COMPLETED** | `deploy/init-fresh-data.sh`, `deploy/lib.sh`, `deploy/provision-secrets.sh` | Deploy fails if secrets missing; no secrets generated automatically on VPS. |
+| **Task 21** | Least-privilege secret distribution | **PR09** | **COMPLETED** | `deploy/compose.prod.yaml`, `internal/config/*` | Container mounts inspect proves each service sees only permitted secret files. |
+| **Task 22** | age encrypted backup & restore scripts | **PR09** | **COMPLETED** | `deploy/backup-db.sh`, `deploy/backup-secrets.sh`, `deploy/restore-db.sh` | Plaintext tmpfs securely unlinked; backup artifact encrypted; manifest valid. |
+| **Task 23** | Disaster recovery restore drill | **PR09** | **COMPLETED** | `scripts/ops/restore-drill.sh`, `deploy/tests/test_restore_drill.sh` | Isolated container restores `.db.age`, verifies integrity, starts application. |
 | **Task 24** | Segregate Docker networks (edge, core, egress) | PR10 | PENDING | `deploy/compose.prod.yaml` | Docker network inspect proves strict network isolation. |
 | **Task 25** | Hardened container runtime profiles | PR10 | PENDING | `deploy/compose.prod.yaml`, `Dockerfile*` | Read-only rootfs, `no-new-privileges`, capability drop, memory/PID limits. |
 | **Task 26** | Health & readiness probe alignment | PR10 | PENDING | `deploy/compose.prod.yaml`, `internal/httpapi/*` | Liveness (/healthz) vs Readiness (/readyz) vs Deploy (/internal/deployz). |
@@ -156,9 +156,9 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **GATE-06** | Gateway-only deployment leaves worker/browser/TTS/Bark IDs unchanged | Docker Container Audit | PENDING (Host Blocker) | Release Engineer | Host Docker inspect diff before/after deploy |
 | **GATE-07** | Worker upgrade never permits two lock owners; candidate rollback on error | Process Lock Harness | PENDING | Release Engineer | `deploy/tests/test_worker_handoff.sh` |
 | **GATE-08** | Active auth attempt blocks browser & worker replacement | Deploy Preflight Test | PENDING | Auth Lead | `deploy/smoke-test-auth-browser.sh` |
-| **GATE-09** | Missing production secrets abort deployment; no auto-generation | Deploy Negative Test | PENDING | Security Lead | `deploy/tests/test_missing_secrets.sh` |
-| **GATE-10** | Durable backup directory contains ciphertext (.db.age) and manifests only | Artifact Directory Audit | PENDING | Platform Operator | `deploy/tests/test_backup_format.sh` |
-| **GATE-11** | Off-host disaster recovery drill succeeds using recovery private key | Isolated Container Drill | PENDING (Host Blocker) | Platform Operator | `deploy/tests/test_restore.sh` output log |
+| **GATE-09** | Missing production secrets abort deployment; no auto-generation | Deploy Negative Test | **VERIFIED** | Security Lead | `deploy/tests/test_secrets.sh` |
+| **GATE-10** | Durable backup directory contains ciphertext (.db.age) and manifests only | Artifact Directory Audit | **VERIFIED** | Platform Operator | `deploy/tests/test_backup.sh` |
+| **GATE-11** | Off-host disaster recovery drill succeeds using recovery private key | Isolated Container Drill | **VERIFIED** | Platform Operator | `deploy/tests/test_restore_drill.sh` |
 | **GATE-12** | Traefik route switch positively acknowledged via X-Platform-Slot header | Live Route Probe | PENDING (Host Blocker) | Edge Platform Lead | `deploy/switch-slot.sh` probe trace |
 | **GATE-13** | SSE subscriber across Blue/Green cutover replays all sequence events | Browser E2E Replay Test | PENDING | Frontend Lead | `web/tests/e2e/sse_cutover.spec.ts` |
 | **GATE-14** | Missing immutable image digest fails deployment before container mutation | Compose Validation Test | PENDING | Release Engineer | `deploy/test-supply-chain.sh` |
