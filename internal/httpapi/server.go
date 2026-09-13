@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -46,18 +47,31 @@ type HistoryEnsurer interface {
 }
 
 type MonitorNotifier interface {
-	NotifySettingsChanged()
+	NotifySettingsChanged(ctx context.Context) error
+}
+
+type MonitorNotifierFunc func(ctx context.Context) error
+
+func (f MonitorNotifierFunc) NotifySettingsChanged(ctx context.Context) error {
+	return f(ctx)
 }
 
 type AuthVerifier interface {
 	VerifySession(context.Context, string, int64, []byte) error
 }
 
+type WorkerProber interface {
+	Ready(ctx context.Context) error
+}
+
+type WakeDispatcherFunc func(ctx context.Context) error
+
 type Server struct {
 	syncRequester   SyncRequester
 	historyEnsurer  HistoryEnsurer
 	monitorNotifier MonitorNotifier
 	authVerifier    AuthVerifier
+	workerProber    WorkerProber
 	cfg             config.Config
 	store           *storage.Store
 	auth            *auth.Middleware
@@ -68,7 +82,8 @@ type Server struct {
 	ttsClient       *ttsclient.Client
 	barkSender      *bark.Sender
 	notifRegistry   *notification.Registry
-	wakeFn          func()
+	wakeFn          WakeDispatcherFunc
+	instanceNonce   string
 	testCooldownMu  sync.Mutex
 	lastTestPerCh   map[string]time.Time
 	started         time.Time
@@ -88,6 +103,10 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	if cfg.TTSGatewayURL != "" {
 		ttsClientInstance = ttsclient.New(cfg.TTSGatewayURL, cfg.TTSInternalToken)
 	}
+	nonceBytes := make([]byte, 16)
+	_, _ = rand.Read(nonceBytes)
+	instanceNonce := hex.EncodeToString(nonceBytes)
+
 	s := &Server{
 		cfg:           cfg,
 		store:         store,
@@ -97,6 +116,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		keyring:       keyring,
 		eventHub:      eventhub.New(),
 		ttsClient:     ttsClientInstance,
+		instanceNonce: instanceNonce,
 		started:       time.Now().UTC(),
 	}
 	r := chi.NewRouter()
@@ -105,6 +125,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	r.Get("/health", s.health)
 	r.Get("/readyz", s.ready)
 	r.Get("/ready", s.ready)
+	r.Get("/internal/deployz", s.deployReady)
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
 		api.Get("/status", s.status)
@@ -199,8 +220,13 @@ func (s *Server) WithNotificationRegistry(reg *notification.Registry) *Server {
 	return s
 }
 
-func (s *Server) WithWakeDispatcher(wake func()) *Server {
+func (s *Server) WithWakeDispatcher(wake WakeDispatcherFunc) *Server {
 	s.wakeFn = wake
+	return s
+}
+
+func (s *Server) WithWorkerProber(wp WorkerProber) *Server {
+	s.workerProber = wp
 	return s
 }
 
@@ -224,6 +250,103 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
+	reqToken := strings.TrimSpace(r.Header.Get("X-Worker-Internal-Token"))
+	if reqToken == "" {
+		if authHdr := r.Header.Get("Authorization"); strings.HasPrefix(authHdr, "Bearer ") {
+			reqToken = strings.TrimSpace(strings.TrimPrefix(authHdr, "Bearer "))
+		}
+	}
+
+	expectedToken := strings.TrimSpace(s.cfg.WorkerInternalToken)
+	if expectedToken == "" || subtle.ConstantTimeCompare([]byte(reqToken), []byte(expectedToken)) != 1 {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	ctx := r.Context()
+	resp := map[string]any{
+		"release": s.cfg.ReleaseCommit,
+		"slot":    s.cfg.Slot,
+		"nonce":   s.instanceNonce,
+	}
+
+	status := "ready"
+
+	// 1. Storage check
+	if err := s.store.Health(ctx); err != nil {
+		resp["storage"] = "unhealthy: " + err.Error()
+		status = "not_ready"
+	} else {
+		resp["storage"] = "ready"
+	}
+
+	// 2. Schema check
+	schemaReport, err := s.store.SchemaVersion(ctx)
+	if err != nil {
+		resp["schema"] = "incompatible: " + err.Error()
+		status = "not_ready"
+	} else {
+		resp["schema"] = "compatible"
+		resp["schemaVersion"] = schemaReport.Version
+	}
+
+	// 3. Worker check (if configured)
+	if s.cfg.WorkerRPCURL != "" {
+		if s.workerProber != nil {
+			if err := s.workerProber.Ready(ctx); err != nil {
+				resp["worker"] = "unreachable: " + err.Error()
+				status = "not_ready"
+			} else {
+				resp["worker"] = "ready"
+			}
+		} else {
+			resp["worker"] = "not_configured"
+			status = "not_ready"
+		}
+	} else {
+		resp["worker"] = "monolith"
+	}
+
+	// 4. Auth-browser check (if configured)
+	if s.cfg.AuthBrowserURL != "" {
+		client := &http.Client{Timeout: 1500 * time.Millisecond}
+		res, err := client.Get(strings.TrimRight(s.cfg.AuthBrowserURL, "/") + "/healthz")
+		if err != nil || res.StatusCode != http.StatusOK {
+			resp["authBrowser"] = "unreachable"
+		} else {
+			resp["authBrowser"] = "ready"
+			_ = res.Body.Close()
+		}
+	} else {
+		resp["authBrowser"] = "disabled"
+	}
+
+	// 5. TTS gateway check (if configured)
+	if s.cfg.TTSGatewayURL != "" {
+		client := &http.Client{Timeout: 1500 * time.Millisecond}
+		res, err := client.Get(strings.TrimRight(s.cfg.TTSGatewayURL, "/") + "/healthz")
+		if err != nil || res.StatusCode != http.StatusOK {
+			resp["tts"] = "unreachable"
+			if status == "ready" {
+				status = "degraded"
+			}
+		} else {
+			resp["tts"] = "ready"
+			_ = res.Body.Close()
+		}
+	} else {
+		resp["tts"] = "disabled"
+	}
+
+	resp["status"] = status
+	code := http.StatusOK
+	if status == "not_ready" {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, resp)
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	connection, err := s.store.Connection(r.Context())
@@ -855,12 +978,16 @@ func (s *Server) updateMonitorSettings(w http.ResponseWriter, r *http.Request) {
 
 	audit(s.store, r, "monitor.settings.update", "singleton")
 
+	var wakeWarning string
 	if s.monitorNotifier != nil {
-		s.monitorNotifier.NotifySettingsChanged()
+		if err := s.monitorNotifier.NotifySettingsChanged(r.Context()); err != nil {
+			slog.Warn("monitor settings wake degraded", "error", err)
+			wakeWarning = "worker wake degraded; settings saved"
+		}
 	}
 
 	resolved := storage.ResolveSchedule(time.Now(), &saved)
-	writeJSON(w, http.StatusOK, map[string]any{
+	respData := map[string]any{
 		"settings": saved,
 		"current": map[string]any{
 			"mode":             resolved.Mode,
@@ -870,7 +997,11 @@ func (s *Server) updateMonitorSettings(w http.ResponseWriter, r *http.Request) {
 			"nextTransitionAt": resolved.NextTransition.Format(time.RFC3339),
 			"nextMode":         resolved.NextMode,
 		},
-	})
+	}
+	if wakeWarning != "" {
+		respData["warning"] = wakeWarning
+	}
+	writeJSON(w, http.StatusOK, respData)
 }
 
 func (s *Server) getPaymentQR(w http.ResponseWriter, r *http.Request) {

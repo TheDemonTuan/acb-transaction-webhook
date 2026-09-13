@@ -33,25 +33,30 @@ func (s *Server) RunJournalWatcher(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			maxSeq, err := s.store.GetMaxJournalSeq(ctx, realtimeEpoch)
-			if err != nil || maxSeq <= lastSeq {
-				continue
-			}
-			entries, err := s.store.ReadJournalEvents(ctx, realtimeEpoch, lastSeq, 100)
-			if err != nil {
-				continue
-			}
-			for _, entry := range entries {
-				s.Publish(eventhub.Event{
-					Seq:         entry.Seq,
-					Epoch:       entry.Epoch,
-					EventType:   entry.EventType,
-					AggregateID: entry.AggregateID,
-					Payload:     entry.Payload,
-					CreatedAt:   entry.CreatedAt,
-				})
-				if entry.Seq > lastSeq {
-					lastSeq = entry.Seq
+			for {
+				maxSeq, err := s.store.GetMaxJournalSeq(ctx, realtimeEpoch)
+				if err != nil || maxSeq <= lastSeq {
+					break
+				}
+				entries, err := s.store.ReadJournalEvents(ctx, realtimeEpoch, lastSeq, 100)
+				if err != nil || len(entries) == 0 {
+					break
+				}
+				for _, entry := range entries {
+					s.Publish(eventhub.Event{
+						Seq:         entry.Seq,
+						Epoch:       entry.Epoch,
+						EventType:   entry.EventType,
+						AggregateID: entry.AggregateID,
+						Payload:     entry.Payload,
+						CreatedAt:   entry.CreatedAt,
+					})
+					if entry.Seq > lastSeq {
+						lastSeq = entry.Seq
+					}
+				}
+				if len(entries) < 100 {
+					break
 				}
 			}
 		}

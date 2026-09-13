@@ -19,8 +19,9 @@ type mockMonitorNotifier struct {
 	wakeCalls atomic.Int32
 }
 
-func (m *mockMonitorNotifier) NotifySettingsChanged() {
+func (m *mockMonitorNotifier) NotifySettingsChanged(ctx context.Context) error {
 	m.wakeCalls.Add(1)
+	return nil
 }
 
 func TestMonitorSettingsAPIAndHotReloadWake(t *testing.T) {

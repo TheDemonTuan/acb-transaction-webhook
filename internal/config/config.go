@@ -44,6 +44,8 @@ type Config struct {
 	BarkDefaultSound      string
 	WorkerRPCURL          string
 	WorkerInternalToken   string
+	Slot                  string
+	ReleaseCommit         string
 }
 
 func Load() (Config, error) {
@@ -110,35 +112,20 @@ func Load() (Config, error) {
 		}
 	}
 
-	ttsToken := value("TTS_INTERNAL_TOKEN", "")
-	if ttsTokenFile := strings.TrimSpace(os.Getenv("TTS_INTERNAL_TOKEN_FILE")); ttsTokenFile != "" {
-		data, err := os.ReadFile(ttsTokenFile)
-		if err != nil {
-			return Config{}, fmt.Errorf("read TTS_INTERNAL_TOKEN_FILE (%s): %w", ttsTokenFile, err)
-		}
-		ttsToken = strings.TrimSpace(string(data))
-		if ttsToken == "" {
-			return Config{}, fmt.Errorf("TTS_INTERNAL_TOKEN_FILE (%s) is empty", ttsTokenFile)
-		}
+	ttsToken, err := ReadSecret("TTS_INTERNAL_TOKEN", "TTS_INTERNAL_TOKEN_FILE")
+	if err != nil {
+		return Config{}, err
 	}
 
 	barkServerURL := strings.TrimSpace(os.Getenv("BARK_SERVER_URL"))
 	barkPublicURL := strings.TrimSpace(os.Getenv("BARK_PUBLIC_URL"))
-	barkAuthUser := strings.TrimSpace(os.Getenv("BARK_BASIC_AUTH_USER"))
-	if file := strings.TrimSpace(os.Getenv("BARK_BASIC_AUTH_USER_FILE")); file != "" {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return Config{}, fmt.Errorf("read BARK_BASIC_AUTH_USER_FILE (%s): %w", file, err)
-		}
-		barkAuthUser = strings.TrimSpace(string(data))
+	barkAuthUser, err := ReadSecret("BARK_BASIC_AUTH_USER", "BARK_BASIC_AUTH_USER_FILE")
+	if err != nil {
+		return Config{}, err
 	}
-	barkAuthPassword := strings.TrimSpace(os.Getenv("BARK_BASIC_AUTH_PASSWORD"))
-	if file := strings.TrimSpace(os.Getenv("BARK_BASIC_AUTH_PASSWORD_FILE")); file != "" {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return Config{}, fmt.Errorf("read BARK_BASIC_AUTH_PASSWORD_FILE (%s): %w", file, err)
-		}
-		barkAuthPassword = strings.TrimSpace(string(data))
+	barkAuthPassword, err := ReadSecret("BARK_BASIC_AUTH_PASSWORD", "BARK_BASIC_AUTH_PASSWORD_FILE")
+	if err != nil {
+		return Config{}, err
 	}
 
 	barkTimeoutMs := 5000
@@ -181,14 +168,13 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("Bark basic auth user and password are required in production")
 	}
 
-	workerToken := value("WORKER_INTERNAL_TOKEN", "")
-	if workerToken == "" {
-		if tokenFile := os.Getenv("WORKER_INTERNAL_TOKEN_FILE"); tokenFile != "" {
-			if b, err := os.ReadFile(tokenFile); err == nil {
-				workerToken = strings.TrimSpace(string(b))
-			}
-		}
+	workerToken, err := ReadSecret("WORKER_INTERNAL_TOKEN", "WORKER_INTERNAL_TOKEN_FILE")
+	if err != nil {
+		return Config{}, err
 	}
+
+	slot := value("PLATFORM_SLOT", value("APP_SLOT", value("SLOT", "monolith")))
+	releaseCommit := value("RELEASE_COMMIT", value("APP_RELEASE_COMMIT", value("GIT_COMMIT", "unknown")))
 
 	cfg := Config{
 		Address:            value("LISTEN_ADDR", "0.0.0.0:"+value("PORT", "8090")),
@@ -222,6 +208,8 @@ func Load() (Config, error) {
 		BarkDefaultSound:      barkSound,
 		WorkerRPCURL:          value("WORKER_RPC_URL", ""),
 		WorkerInternalToken:   workerToken,
+		Slot:                  slot,
+		ReleaseCommit:         releaseCommit,
 	}
 	if production {
 		if cfg.MasterKeyFile == "" {
@@ -235,6 +223,9 @@ func Load() (Config, error) {
 		}
 		if cfg.TTSGatewayURL != "" && cfg.TTSInternalToken == "" {
 			return Config{}, fmt.Errorf("TTS_INTERNAL_TOKEN or TTS_INTERNAL_TOKEN_FILE is required in production when TTS_GATEWAY_URL is configured")
+		}
+		if cfg.WorkerRPCURL != "" && cfg.WorkerInternalToken == "" {
+			return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required in production when WORKER_RPC_URL is configured")
 		}
 	}
 	if cfg.MasterKeyFile != "" && !filepath.IsAbs(cfg.MasterKeyFile) {
@@ -264,3 +255,25 @@ func seconds(key string, fallback, minimum, maximum int) (time.Duration, error) 
 	}
 	return time.Duration(v) * time.Second, nil
 }
+
+// ReadSecret reads a secret from an environment variable or secret file.
+// Consistently trims whitespace, newlines, and carriage returns.
+func ReadSecret(envVar, fileEnvVar string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
+		return v, nil
+	}
+	filePath := strings.TrimSpace(os.Getenv(fileEnvVar))
+	if filePath == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("read %s (%s): %w", fileEnvVar, filePath, err)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return "", fmt.Errorf("%s (%s) is empty", fileEnvVar, filePath)
+	}
+	return trimmed, nil
+}
+

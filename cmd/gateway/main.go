@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -188,6 +187,10 @@ func main() {
 	}
 	var barkSender *bark.Sender
 	if barkCfg.Configured() {
+		if err := bark.ValidateConfig(barkCfg); err != nil {
+			logger.Error("invalid Bark configuration", "error", err)
+			os.Exit(1)
+		}
 		barkSender = bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
 		notificationRegistry.Register(notification.ProviderBark, barkSender)
 		logger.Info("Bark notification provider registered")
@@ -205,7 +208,8 @@ func main() {
 			WithBarkSender(barkSender).
 			WithNotificationRegistry(notificationRegistry).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
-			WithAuthVerifier(workerClient)
+			WithAuthVerifier(workerClient).
+			WithWorkerProber(workerClient)
 		go server.RunJournalWatcher(ctx, 1*time.Second)
 	} else {
 		dispatcher := notification.NewDispatcher(store, notificationRegistry)
@@ -244,18 +248,7 @@ func main() {
 				return
 			}
 
-			payload, err := json.Marshal(map[string]any{
-				"pollId":        p.ID,
-				"status":        p.Status,
-				"classifier":    p.Classifier,
-				"httpStatus":    p.HTTPStatus,
-				"pages":         p.Pages,
-				"rowsSeen":      p.RowsSeen,
-				"insertedCount": insertedCount,
-				"error":         p.Error,
-				"startedAt":     p.StartedAt,
-				"finishedAt":    p.FinishedAt,
-			})
+			payload, err := storage.PollCompletedPayload(p, insertedCount)
 			if err != nil {
 				return
 			}
@@ -282,11 +275,17 @@ func main() {
 		server = httpapi.New(cfg, store).
 			WithSyncRequester(bankMonitor).
 			WithHistoryEnsurer(bankMonitor).
-			WithMonitorNotifier(bankMonitor).
+			WithMonitorNotifier(httpapi.MonitorNotifierFunc(func(ctx context.Context) error {
+				bankMonitor.NotifySettingsChanged()
+				return nil
+			})).
 			WithEventHub(hub).
 			WithBarkSender(barkSender).
 			WithNotificationRegistry(notificationRegistry).
-			WithWakeDispatcher(dispatcher.Wake)
+			WithWakeDispatcher(func(ctx context.Context) error {
+				dispatcher.Wake()
+				return nil
+			})
 
 		if keyring != nil {
 			verifierClient, verifierErr := acb.NewClient("https://online.acb.com.vn", nil)

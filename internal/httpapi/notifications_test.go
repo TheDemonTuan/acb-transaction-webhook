@@ -304,8 +304,9 @@ func TestReplayDeliveryEndpoint(t *testing.T) {
 	csrf, cookie := getCSRF(srv)
 
 	var woken bool
-	srv.WithWakeDispatcher(func() {
+	srv.WithWakeDispatcher(func(ctx context.Context) error {
 		woken = true
+		return nil
 	})
 
 	reqReplay := prepareAuthedPost("http://example.test/api/v1/deliveries/deliv_dead_1/replay", nil, csrf, cookie)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,7 @@ type workerService struct {
 	dispatcher     *notification.Dispatcher
 	sessionLoader  *monitor.SessionLoader
 	verifierClient *acb.Client
+	store          *storage.Store
 }
 
 func (w *workerService) RequestSync(ctx context.Context) error {
@@ -47,21 +49,34 @@ func (w *workerService) EnsureHistory(ctx context.Context, fromDay, toDay string
 	return w.bankMonitor.EnsureHistory(ctx, fromDay, toDay)
 }
 
-func (w *workerService) NotifySettingsChanged() {
-	if w.bankMonitor != nil {
-		w.bankMonitor.NotifySettingsChanged()
+func (w *workerService) NotifySettingsChanged(ctx context.Context) error {
+	if w.bankMonitor == nil {
+		return fmt.Errorf("bank monitor not initialized")
 	}
+	w.bankMonitor.NotifySettingsChanged()
+	return nil
 }
 
-func (w *workerService) WakeDispatcher() {
-	if w.dispatcher != nil {
-		w.dispatcher.Wake()
+func (w *workerService) WakeDispatcher(ctx context.Context) error {
+	if w.dispatcher == nil {
+		return fmt.Errorf("dispatcher not initialized")
 	}
+	w.dispatcher.Wake()
+	return nil
 }
 
 func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
 	if w.sessionLoader == nil || w.verifierClient == nil {
 		return fmt.Errorf("session verifier not configured")
+	}
+	if generation <= 0 {
+		return fmt.Errorf("invalid generation %d", generation)
+	}
+	if w.store != nil {
+		conn, err := w.store.Connection(ctx)
+		if err == nil && conn.Generation > generation {
+			return fmt.Errorf("stale session verification generation: requested %d, current is %d", generation, conn.Generation)
+		}
 	}
 	verifier := monitor.NewSessionVerifier(w.sessionLoader, w.verifierClient, w.bankMonitor.UpstreamGate())
 	return verifier.VerifySession(ctx, account, generation, password)
@@ -86,7 +101,11 @@ func main() {
 		if err != nil {
 			port = "8190"
 		}
-		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz", port))
+		if err == nil && resp.StatusCode == http.StatusOK {
+			return
+		}
+		resp, err = client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
 		if err == nil && resp.StatusCode == http.StatusOK {
 			return
 		}
@@ -99,6 +118,11 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
+	if cfg.Production && cfg.WorkerInternalToken == "" {
+		logger.Error("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required in production")
 		os.Exit(1)
 	}
 
@@ -153,6 +177,10 @@ func main() {
 		DefaultSound:      cfg.BarkDefaultSound,
 	}
 	if barkCfg.Configured() {
+		if err := bark.ValidateConfig(barkCfg); err != nil {
+			logger.Error("invalid Bark configuration", "error", err)
+			os.Exit(1)
+		}
 		barkSender := bark.NewSender(barkCfg, nil, cfg.PublicOrigin)
 		notificationRegistry.Register(notification.ProviderBark, barkSender)
 		logger.Info("Bark notification provider registered in worker")
@@ -181,6 +209,14 @@ func main() {
 		if insertedCount > 0 || statusChanged {
 			dispatcher.Wake()
 		}
+		if insertedCount == 0 && !statusChanged && p.Status == "SUCCEEDED" {
+			return
+		}
+		payload, err := storage.PollCompletedPayload(p, insertedCount)
+		if err != nil {
+			return
+		}
+		_, _ = store.AppendJournalEvent(context.Background(), "ep1", "poll.completed", p.ID, payload)
 	})
 
 	var sessionLoader *monitor.SessionLoader
@@ -199,23 +235,36 @@ func main() {
 	logger.Info("ACB bank polling monitor started in worker")
 
 	// 5. Setup Private RPC Server
-	workerToken := os.Getenv("WORKER_INTERNAL_TOKEN")
-	if workerToken == "" {
-		if tokenFile := os.Getenv("WORKER_INTERNAL_TOKEN_FILE"); tokenFile != "" {
-			if b, err := os.ReadFile(tokenFile); err == nil {
-				workerToken = string(b)
-			}
-		}
-	}
-
 	ws := &workerService{
 		bankMonitor:    bankMonitor,
 		dispatcher:     dispatcher,
 		sessionLoader:  sessionLoader,
 		verifierClient: verifierClient,
+		store:          store,
 	}
 
-	rpcServer := workerrpc.NewServer(ws, workerToken)
+	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken)
+	if err != nil {
+		logger.Error("create worker RPC server failed", "error", err)
+		os.Exit(1)
+	}
+
+	rpcServer.SetReadyChecker(func(ctx context.Context) error {
+		if bankMonitor == nil || dispatcher == nil || store == nil {
+			return errors.New("worker services not fully initialized")
+		}
+		if err := store.Health(ctx); err != nil {
+			return fmt.Errorf("storage health check failed: %w", err)
+		}
+		if _, err := store.SchemaVersion(ctx); err != nil {
+			return fmt.Errorf("schema check failed: %w", err)
+		}
+		if flock == nil {
+			return errors.New("singleton worker lock not held")
+		}
+		return nil
+	})
+
 	httpServer := &http.Server{
 		Addr:              rpcAddr,
 		Handler:           rpcServer.Handler(),

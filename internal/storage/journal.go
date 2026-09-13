@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -15,6 +16,22 @@ type JournalEntry struct {
 	AggregateID string `json:"aggregateId"`
 	Payload     []byte `json:"payload"`
 	CreatedAt   string `json:"createdAt"`
+}
+
+// PollCompletedPayload builds the JSON payload for a poll.completed journal event.
+func PollCompletedPayload(p PollRun, insertedCount int) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"pollId":        p.ID,
+		"status":        p.Status,
+		"classifier":    p.Classifier,
+		"httpStatus":    p.HTTPStatus,
+		"pages":         p.Pages,
+		"rowsSeen":      p.RowsSeen,
+		"insertedCount": insertedCount,
+		"error":         p.Error,
+		"startedAt":     p.StartedAt,
+		"finishedAt":    p.FinishedAt,
+	})
 }
 
 // AppendJournalEvent records a new event into the ordered event journal.

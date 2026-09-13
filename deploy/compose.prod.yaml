@@ -48,6 +48,12 @@ services:
       - bark_basic_auth_password
     labels:
       - "platform.workload.class=singleton"
+    healthcheck:
+      test: ["CMD", "/worker", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
     logging:
       driver: "json-file"
       options:
@@ -199,6 +205,8 @@ services:
       APP_ENV: production
       PORT: 8090
       LISTEN_ADDR: 0.0.0.0:8090
+      PLATFORM_SLOT: blue
+      RELEASE_COMMIT: ${RELEASE_COMMIT:-unknown}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
       DATA_DIR: /data
       DATABASE_PATH: /data/gateway.db
@@ -272,6 +280,8 @@ services:
       APP_ENV: production
       PORT: 8090
       LISTEN_ADDR: 0.0.0.0:8090
+      PLATFORM_SLOT: green
+      RELEASE_COMMIT: ${RELEASE_COMMIT:-unknown}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
       DATA_DIR: /data
       DATABASE_PATH: /data/gateway.db

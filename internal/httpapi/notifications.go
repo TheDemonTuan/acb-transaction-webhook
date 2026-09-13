@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -312,9 +313,13 @@ func (s *Server) replayDelivery(w http.ResponseWriter, r *http.Request) {
 	audit(s.store, r, "delivery.replay", id)
 	s.publishStateEvent("delivery.changed", id, map[string]any{"id": id, "status": "PENDING"})
 
+	resp := map[string]string{"status": "PENDING"}
 	if s.wakeFn != nil {
-		s.wakeFn()
+		if err := s.wakeFn(r.Context()); err != nil {
+			slog.Warn("delivery replay wake dispatcher degraded", "error", err)
+			resp["warning"] = "wake degraded: " + err.Error()
+		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "PENDING"})
+	writeJSON(w, http.StatusOK, resp)
 }
