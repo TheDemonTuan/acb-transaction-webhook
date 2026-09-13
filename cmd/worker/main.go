@@ -28,11 +28,11 @@ import (
 )
 
 type workerService struct {
-	bankMonitor    *monitor.Monitor
-	dispatcher     *notification.Dispatcher
-	sessionLoader  *monitor.SessionLoader
-	verifierClient *acb.Client
-	store          *storage.Store
+	bankMonitor           *monitor.Monitor
+	dispatcher            *notification.Dispatcher
+	verifierSessionLoader *monitor.SessionLoader
+	verifierClient        *acb.Client
+	store                 *storage.Store
 }
 
 func (w *workerService) RequestSync(ctx context.Context) error {
@@ -66,7 +66,7 @@ func (w *workerService) WakeDispatcher(ctx context.Context) error {
 }
 
 func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
-	if w.sessionLoader == nil || w.verifierClient == nil {
+	if w.verifierSessionLoader == nil || w.verifierClient == nil {
 		return fmt.Errorf("session verifier not configured")
 	}
 	if generation <= 0 {
@@ -78,7 +78,7 @@ func (w *workerService) VerifySession(ctx context.Context, account string, gener
 			return fmt.Errorf("stale session verification generation: requested %d, current is %d", generation, conn.Generation)
 		}
 	}
-	verifier := monitor.NewSessionVerifier(w.sessionLoader, w.verifierClient, w.bankMonitor.UpstreamGate())
+	verifier := monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient, w.bankMonitor.UpstreamGate())
 	return verifier.VerifySession(ctx, account, generation, password)
 }
 
@@ -221,6 +221,7 @@ func main() {
 
 	var sessionLoader *monitor.SessionLoader
 	var verifierClient *acb.Client
+	var verifierSessionLoader *monitor.SessionLoader
 	if keyring != nil {
 		sessionLoader = monitor.NewSessionLoader(store, keyring, acbClient)
 		bankMonitor.WithSessionLoader(sessionLoader)
@@ -230,17 +231,18 @@ func main() {
 			logger.Error("create ACB session verifier client failed", "error", err)
 			os.Exit(1)
 		}
+		verifierSessionLoader = monitor.NewSessionLoader(store, keyring, verifierClient)
 	}
 	go bankMonitor.Run(ctx)
 	logger.Info("ACB bank polling monitor started in worker")
 
 	// 5. Setup Private RPC Server
 	ws := &workerService{
-		bankMonitor:    bankMonitor,
-		dispatcher:     dispatcher,
-		sessionLoader:  sessionLoader,
-		verifierClient: verifierClient,
-		store:          store,
+		bankMonitor:           bankMonitor,
+		dispatcher:            dispatcher,
+		verifierSessionLoader: verifierSessionLoader,
+		verifierClient:        verifierClient,
+		store:                 store,
 	}
 
 	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken)

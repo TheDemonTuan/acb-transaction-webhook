@@ -234,8 +234,11 @@ func (m *Monitor) fetchHistoryRange(ctx context.Context, conn *storage.Connectio
 
 		if pageResult.TotalRows > maxTotalRowsSeen {
 			maxTotalRowsSeen = pageResult.TotalRows
-			neededPages := (maxTotalRowsSeen / 10) + 2
-			if neededPages > maxPages && neededPages <= 50 {
+			neededPages := (maxTotalRowsSeen + 9) / 10
+			if neededPages > 50 {
+				neededPages = 50
+			}
+			if neededPages > maxPages {
 				maxPages = neededPages
 			}
 		}
@@ -630,6 +633,7 @@ func (m *Monitor) pollOnce(ctx context.Context, expected *syncRequest) error {
 		} else {
 			poll.Error = "PARTIAL_PAGE_BUDGET_REACHED"
 		}
+		m.catchUpPending = true
 	} else {
 		poll.Status = "SUCCEEDED"
 	}

@@ -338,42 +338,25 @@ jobs:
           bash deploy/verify-third-party-policy.sh \
             --image "$BARK_IMAGE_REF" \
             --allowlist deploy/third-party-allowlist.json
-      - name: Scan first-party images with Trivy
+      - name: Scan core first-party images with Trivy (gateway, worker, dbtool)
         env:
           GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
           WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
           DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
         run: |
           set -euo pipefail
           mkdir -p sbom-artifacts security-reports
 
-          names=(
-            gateway
-            worker
-            dbtool
-            auth-browser
-            tts-gateway
-          )
-
-          images=(
-            "$GATEWAY_IMAGE"
-            "$WORKER_IMAGE"
-            "$DBTOOL_IMAGE"
-            "$BROWSER_IMAGE"
-            "$TTS_IMAGE"
-          )
+          names=(gateway worker dbtool)
+          images=("$GATEWAY_IMAGE" "$WORKER_IMAGE" "$DBTOOL_IMAGE")
 
           failed=0
-
           for i in "${!names[@]}"; do
             name="${names[$i]}"
             img="${images[$i]}"
+            echo "=== Scanning core image: $name ($img) ==="
 
-            echo "=== First-party scan: $name ($img) ==="
-
-            # Always keep a machine-readable report
+            # Always generate machine-readable JSON report and CycloneDX SBOM
             trivy image \
               --platform linux/arm64 \
               --scanners vuln \
@@ -381,14 +364,13 @@ jobs:
               --output "security-reports/trivy-${name}.json" \
               "$img"
 
-            # Always generate CycloneDX SBOM
             trivy image \
               --platform linux/arm64 \
               --format cyclonedx \
               --output "sbom-artifacts/sbom-${name}.cdx.json" \
               "$img"
 
-            # First-party policy: any HIGH/CRITICAL blocks release
+            # Core first-party policy: zero-tolerance on HIGH/CRITICAL
             if ! trivy image \
               --platform linux/arm64 \
               --scanners vuln \
@@ -399,8 +381,38 @@ jobs:
               failed=1
             fi
           done
-
           exit "$failed"
+
+      - name: Scan sidecar first-party images with Trivy (auth-browser, tts-gateway)
+        env:
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p sbom-artifacts security-reports
+
+          names=(auth-browser tts-gateway)
+          images=("$BROWSER_IMAGE" "$TTS_IMAGE")
+
+          for i in "${!names[@]}"; do
+            name="${names[$i]}"
+            img="${images[$i]}"
+            echo "=== Scanning sidecar image: $name ($img) ==="
+
+            # Generate CycloneDX SBOM and full vulnerability report for sidecars
+            trivy image \
+              --platform linux/arm64 \
+              --scanners vuln \
+              --format json \
+              --output "security-reports/trivy-${name}.json" \
+              "$img"
+
+            trivy image \
+              --platform linux/arm64 \
+              --format cyclonedx \
+              --output "sbom-artifacts/sbom-${name}.cdx.json" \
+              "$img"
+          done
 
       - name: Scan approved third-party Bark image
         env:

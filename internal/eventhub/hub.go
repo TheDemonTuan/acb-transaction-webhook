@@ -2,6 +2,7 @@ package eventhub
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 type Event struct {
@@ -17,7 +18,7 @@ type Hub struct {
 	mu          sync.RWMutex
 	subscribers map[uint64]chan Event
 	nextID      uint64
-	dropped     uint64
+	dropped     atomic.Uint64
 }
 
 func New() *Hub {
@@ -57,15 +58,13 @@ func (h *Hub) Publish(e Event) {
 		select {
 		case ch <- e:
 		default:
-			h.dropped++
+			h.dropped.Add(1)
 		}
 	}
 }
 
 func (h *Hub) DroppedNotifications() uint64 {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.dropped
+	return h.dropped.Load()
 }
 
 // SubscriberCount returns current active subscriber count.
