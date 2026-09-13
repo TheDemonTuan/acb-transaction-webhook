@@ -315,18 +315,18 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets'"
+            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
-            deploy/compose.prod.yaml "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/compose.prod.yaml.next"
+            deploy/compose.prod.yaml "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/compose.prod.yaml.next"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
             deploy/deploy-warm.sh deploy/rollback-warm.sh deploy/switch-slot.sh \
             deploy/smoke-slot.sh deploy/check-host.sh \
             deploy/seccomp-auth-browser.json deploy/deploy.sh deploy/rollback.sh \
             deploy/verify-deployment.sh deploy/backup.sh deploy/bark-entrypoint.sh \
             deploy/smoke-test-bark.sh deploy/README.md \
-            "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
+            "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "chmod 755 '$DEPLOY_PATH/'*.sh"
+            "$VPS_USER@$VPS_HOST" "chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
       - name: Deploy immutable image
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -340,16 +340,18 @@ jobs:
           [[ -n "$DASHBOARD_OWNER_EMAIL" ]] || { printf 'DASHBOARD_OWNER_EMAIL is required.\n' >&2; exit 1; }
           [[ "$BARK_IMAGE_REF" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || { printf 'BARK_IMAGE_REF must be an immutable digest.\n' >&2; exit 1; }
           image="${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}"
+          worker_image="${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}"
+          dbtool_image="${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}"
           browser_image="${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}"
           tts_image="${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}"
           owner="$(printf '%s' "$DASHBOARD_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' IMAGE='$image' BROWSER_IMAGE='$browser_image' TTS_IMAGE='$tts_image' BARK_IMAGE_REF='$BARK_IMAGE_REF' bash -s" <<'REMOTE'
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' IMAGE='$image' WORKER_IMAGE='$worker_image' DBTOOL_IMAGE='$dbtool_image' BROWSER_IMAGE='$browser_image' TTS_IMAGE='$tts_image' BARK_IMAGE_REF='$BARK_IMAGE_REF' bash -s" <<'REMOTE'
           set -Eeuo pipefail
           env_file="$DEPLOY_PATH/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing production env file: %s\n' "$env_file" >&2; exit 1; }
           tmp="$(mktemp "${env_file}.XXXXXX")"
-          staged_compose="$DEPLOY_PATH/compose.prod.yaml.next"
+          staged_compose="$DEPLOY_PATH/deploy/compose.prod.yaml.next"
           [[ -f "$staged_compose" ]] || { printf 'Missing staged compose file: %s\n' "$staged_compose" >&2; exit 1; }
           trap 'rm -f "$tmp"' EXIT
           grep -v -E '^(OWNER_SUBJECTS|CLOUDFLARE_ACCESS_OWNER_EMAIL)=' "$env_file" > "$tmp" || true
@@ -364,8 +366,11 @@ jobs:
           fi
           cd "$DEPLOY_PATH"
           export IMAGE_REF="$IMAGE"
-          export AUTH_BROWSER_IMAGE_REF="$BROWSER_IMAGE"
-          export TTS_GATEWAY_IMAGE_REF="$TTS_IMAGE"
+          export WORKER_IMAGE_REF="$WORKER_IMAGE"
+          export DBTOOL_IMAGE_REF="$DBTOOL_IMAGE"
+          export BROWSER_IMAGE_REF="$BROWSER_IMAGE"
+          export TTS_IMAGE_REF="$TTS_IMAGE"
           export BARK_IMAGE_REF="$BARK_IMAGE_REF"
-          timeout 300 ./deploy.sh "$IMAGE" "$BROWSER_IMAGE" "$TTS_IMAGE" "$staged_compose"
+          cd "$DEPLOY_PATH"
+          timeout 900 ./deploy/deploy-warm.sh "$IMAGE"
           REMOTE
