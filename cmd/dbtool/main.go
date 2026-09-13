@@ -81,7 +81,7 @@ func main() {
 
 	encoder := json.NewEncoder(os.Stdout)
 	if *schemaVersionFlag {
-		report, err := store.SchemaReport(ctx)
+		report, err := store.SchemaVersion(ctx)
 		if err != nil {
 			logger.Error("schema report failed", "error", err)
 			os.Exit(1)
@@ -94,12 +94,12 @@ func main() {
 	}
 
 	if *activeAuthCountFlag {
-		count, err := store.ActiveAuthAttemptCount(ctx)
+		report, err := store.ActiveAuthAttempts(ctx)
 		if err != nil {
 			logger.Error("active auth attempt count failed", "error", err)
 			os.Exit(1)
 		}
-		if err := encoder.Encode(map[string]int64{"activeAuthAttempts": count}); err != nil {
+		if err := encoder.Encode(report); err != nil {
 			logger.Error("encode active auth count", "error", err)
 			os.Exit(1)
 		}
