@@ -10,6 +10,8 @@ services:
     user: "1000:1000"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    env_file:
+      - .env.production
     environment:
       APP_ENV: production
       PORT: ${PORT:-8090}

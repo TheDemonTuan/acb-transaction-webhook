@@ -66,20 +66,22 @@ func main() {
 		logger.Error("create data directory", "error", err)
 		os.Exit(1)
 	}
-	lockPath := filepath.Join(filepath.Dir(cfg.DatabasePath), "gateway.lock")
 	var fileLock *lock.FileLock
 	// When Worker is running as a dedicated service, Gateway operates in concurrent HTTP-only mode
-	// and does not hold an exclusive singleton lock.
-	if cfg.WorkerRPCURL != "" || *checkIntegrity || *backupTo != "" {
-		fileLock, err = lock.AcquireShared(lockPath)
-	} else {
-		fileLock, err = lock.Acquire(lockPath)
+	// and does not hold a singleton lock on gateway.lock.
+	if cfg.WorkerRPCURL == "" {
+		lockPath := filepath.Join(filepath.Dir(cfg.DatabasePath), "gateway.lock")
+		if *checkIntegrity || *backupTo != "" {
+			fileLock, err = lock.AcquireShared(lockPath)
+		} else {
+			fileLock, err = lock.Acquire(lockPath)
+		}
+		if err != nil {
+			logger.Error("gateway lock unavailable", "error", err)
+			os.Exit(1)
+		}
+		defer fileLock.Close()
 	}
-	if err != nil {
-		logger.Error("gateway lock unavailable", "error", err)
-		os.Exit(1)
-	}
-	defer fileLock.Close()
 	store, err := storage.OpenRuntime(ctx, cfg.DatabasePath)
 	if err != nil {
 		logger.Error("open storage", "error", err)
