@@ -310,7 +310,7 @@ jobs:
         uses: sigstore/cosign-installer@053f9b74638557590800a301da1ba82351507e2c # v3.8.1
       - name: Install pinned Trivy
         env:
-          TRIVY_VERSION: 0.59.1
+          TRIVY_VERSION: 0.74.0
         run: |
           set -euo pipefail
           archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
