@@ -302,7 +302,7 @@ while IFS= read -r line; do
   if [[ "$line" =~ ^ARTIFACT:(.*)=(.*)$ ]]; then
     art_file="${BASH_REMATCH[1]}"
     expected_hash="${BASH_REMATCH[2]}"
-    
+
     # Locate artifact file on disk
     target_path=""
     if [[ -f "$deploy_dir/$art_file" ]]; then
@@ -315,7 +315,7 @@ while IFS= read -r line; do
       printf 'Error: artifact file listed in manifest not found on disk: %s (checked in %s)\n' "$art_file" "$deploy_dir" >&2
       exit 1
     fi
-    
+
     actual_hash="$(compute_hash "$target_path")"
     if [[ "$actual_hash" != "$expected_hash" ]]; then
       printf 'Error: artifact checksum mismatch for %s: expected=%s actual=%s\n' "$art_file" "$expected_hash" "$actual_hash" >&2
