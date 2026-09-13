@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
@@ -49,6 +50,7 @@ type Monitor struct {
 	onNewEvents     func([]storage.EventNotification)
 	onPollFinished  func(poll storage.PollRun, insertedCount int)
 	backoffUntil    time.Time
+	scheduler       *scheduler.Scheduler
 }
 
 func (m *Monitor) WithEventNotifier(fn func([]storage.EventNotification)) *Monitor {
@@ -94,6 +96,7 @@ func New(store *storage.Store, client BankClient, minInterval, maxInterval time.
 		syncCh:         make(chan struct{}, 1),
 		settingsCh:     make(chan struct{}, 1),
 		cachedSettings: storage.DefaultMonitorSettings,
+		scheduler:      scheduler.New(nil),
 	}
 }
 
