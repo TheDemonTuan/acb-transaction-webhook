@@ -657,6 +657,8 @@ jobs:
           printf 'OWNER_SUBJECTS=%s\n' "$OWNER" >> "$tmp"
           chmod 600 "$tmp"
           mv "$tmp" "$env_file"
+          cp -p "$env_file" "$DEPLOY_PATH/deploy/.env.production"
+          chmod 600 "$DEPLOY_PATH/deploy/.env.production"
           if [[ -d "$DEPLOY_PATH/secrets/tts_internal_token" ]]; then
             rmdir "$DEPLOY_PATH/secrets/tts_internal_token" 2>/dev/null || rm -rf "$DEPLOY_PATH/secrets/tts_internal_token" 2>/dev/null || docker run --rm --user 0:0 -v "$DEPLOY_PATH/secrets:/s" --entrypoint /bin/sh "$TTS_IMAGE" -c 'rm -rf /s/tts_internal_token' 2>/dev/null || true
           fi

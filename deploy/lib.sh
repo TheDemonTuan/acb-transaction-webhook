@@ -8,6 +8,13 @@ export SCRIPT_DIR
 
 # Canonical environment variable defaults
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env.production}"
+if [[ -f "$SCRIPT_DIR/../.env.production" && ! -f "$SCRIPT_DIR/.env.production" ]]; then
+  cp -p "$SCRIPT_DIR/../.env.production" "$SCRIPT_DIR/.env.production" 2>/dev/null || true
+  chmod 600 "$SCRIPT_DIR/.env.production" 2>/dev/null || true
+elif [[ -f "$SCRIPT_DIR/.env.production" && ! -f "$SCRIPT_DIR/../.env.production" ]]; then
+  cp -p "$SCRIPT_DIR/.env.production" "$SCRIPT_DIR/../.env.production" 2>/dev/null || true
+  chmod 600 "$SCRIPT_DIR/../.env.production" 2>/dev/null || true
+fi
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/compose.prod.yaml}"
 SECRETS_DIR="${SECRETS_DIR:-$SCRIPT_DIR/secrets}"
 BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/data/backups}"
