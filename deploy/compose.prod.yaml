@@ -160,12 +160,13 @@ services:
     volumes:
       - bark_data:/data:rw
       - ./bark-entrypoint.sh:/bark-entrypoint.sh:ro
+      - ./bark-healthcheck.sh:/bark-healthcheck.sh:ro
       - ./secrets/bark_basic_auth_user:/run/secrets/bark_basic_auth_user:ro
       - ./secrets/bark_basic_auth_password:/run/secrets/bark_basic_auth_password:ro
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=32m
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --user=\"$$BARK_SERVER_BASIC_AUTH_USER\" --password=\"$$BARK_SERVER_BASIC_AUTH_PASSWORD\" -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      test: ["CMD", "/bin/sh", "/bark-healthcheck.sh"]
       interval: 10s
       timeout: 3s
       retries: 3
