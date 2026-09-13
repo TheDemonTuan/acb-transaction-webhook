@@ -45,39 +45,26 @@ backend docker-events
 
 frontend dockerfrontend
     bind ${BIND_CONFIG}
-    http-request replace-path ^/v1\.[0-3][0-9]/(.*) /v1.44/\1
-    http-request deny unless METH_GET || { env(POST) -m bool }
 
-    # Allowed endpoints
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/[a-zA-Z0-9_.-]+/((stop)|(restart)|(kill)) } { env(ALLOW_RESTARTS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/[a-zA-Z0-9_.-]+/start } { env(ALLOW_START) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/[a-zA-Z0-9_.-]+/stop } { env(ALLOW_STOP) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/[a-zA-Z0-9_.-]+/pause } { env(ALLOW_PAUSE) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/[a-zA-Z0-9_.-]+/unpause } { env(ALLOW_UNPAUSE) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/auth } { env(AUTH) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/build } { env(BUILD) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/commit } { env(COMMIT) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/configs } { env(CONFIGS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers } { env(CONTAINERS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/distribution } { env(DISTRIBUTION) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/events } { env(EVENTS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/exec } { env(EXEC) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/grpc } { env(GRPC) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/images } { env(IMAGES) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/info } { env(INFO) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/networks } { env(NETWORKS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/nodes } { env(NODES) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/_ping } { env(PING) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/plugins } { env(PLUGINS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/secrets } { env(SECRETS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/services } { env(SERVICES) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/session } { env(SESSION) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/swarm } { env(SWARM) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/system } { env(SYSTEM) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/tasks } { env(TASKS) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/version } { env(VERSION) -m bool }
-    http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/volumes } { env(VOLUMES) -m bool }
+    # Normalize older Docker API versions to v1.44
+    http-request replace-path ^/v1\.[0-3][0-9]/(.*) /v1.44/\1
+
+    # Strictly deny any HTTP mutation (POST, PUT, DELETE, PATCH)
+    http-request deny unless METH_GET
+
+    # Explicitly deny sensitive container sub-resources and operations
+    http-request deny if { path,url_dec -m reg -i /containers/[^/]+/(logs|archive|export|attach|exec) }
+    http-request deny if { path,url_dec -m reg -i ^(/v[\d\.]+)?/(secrets|exec|volumes|networks|plugins|swarm|nodes|services|tasks|build|commit|configs|distribution) }
+
+    # Exact method/path allow list needed for Traefik Docker provider discovery/events/version/ping/inspect/list
+    http-request allow if METH_GET { path,url_dec -m reg -i ^(/v[\d\.]+)?/_?ping$ } { env(PING) -m bool }
+    http-request allow if METH_GET { path,url_dec -m reg -i ^(/v[\d\.]+)?/version$ } { env(VERSION) -m bool }
+    http-request allow if METH_GET { path,url_dec -m reg -i ^(/v[\d\.]+)?/events$ } { env(EVENTS) -m bool }
+    http-request allow if METH_GET { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/json$ } { env(CONTAINERS) -m bool }
+    http-request allow if METH_GET { path,url_dec -m reg -i ^(/v[\d\.]+)?/containers/[a-zA-Z0-9_.-]+/json$ } { env(CONTAINERS) -m bool }
+
+    # Deny everything else (no broad container paths, no unlisted APIs)
     http-request deny
     default_backend dockerbackend
 
-    use_backend docker-events if { path,url_dec -m reg -i ^(/v[\d\.]+)?/events }
+    use_backend docker-events if { path,url_dec -m reg -i ^(/v[\d\.]+)?/events$ }

@@ -12,13 +12,12 @@ accessLog:
     defaultMode: keep
     names:
       ClientUsername: drop
+      RequestPath: drop
+      RequestLine: drop
     headers:
-      defaultMode: keep
-      names:
-        Authorization: drop
-        Cookie: drop
-        Cf-Access-Jwt-Assertion: drop
-        X-Worker-Internal-Token: drop
+      defaultMode: drop
+    queryParameters:
+      defaultMode: drop
 
 entryPoints:
   web:

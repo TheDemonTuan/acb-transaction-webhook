@@ -1,9 +1,21 @@
 http:
   routers:
-    bark-router:
-      rule: "Host(`bark.tuannguyenviet.site`)"
+    # Explicit higher-priority deny router blocking /internal endpoints from public ingress
+    bark-deny-internal:
+      rule: "Host(`bark.tuannguyenviet.site`) && PathPrefix(`/internal`)"
       entryPoints:
         - web
+      priority: 1000
+      middlewares:
+        - deny-internal
+      service: bark-service
+
+    # Production router with explicit PathPrefix exclusion
+    bark-router:
+      rule: "Host(`bark.tuannguyenviet.site`) && !PathPrefix(`/internal`)"
+      entryPoints:
+        - web
+      priority: 100
       middlewares:
         - tunnel-only
         - security-headers
