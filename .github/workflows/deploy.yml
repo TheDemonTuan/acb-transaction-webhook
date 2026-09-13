@@ -375,6 +375,7 @@ jobs:
 
             # Always keep a machine-readable report
             trivy image \
+              --platform linux/arm64 \
               --scanners vuln \
               --format json \
               --output "security-reports/trivy-${name}.json" \
@@ -382,12 +383,14 @@ jobs:
 
             # Always generate CycloneDX SBOM
             trivy image \
+              --platform linux/arm64 \
               --format cyclonedx \
               --output "sbom-artifacts/sbom-${name}.cdx.json" \
               "$img"
 
             # First-party policy: any HIGH/CRITICAL blocks release
             if ! trivy image \
+              --platform linux/arm64 \
               --scanners vuln \
               --exit-code 1 \
               --severity HIGH,CRITICAL \
@@ -410,6 +413,7 @@ jobs:
 
           # Preserve all HIGH/CRITICAL findings for auditing
           trivy image \
+            --platform linux/arm64 \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --format json \
@@ -417,6 +421,7 @@ jobs:
             "$BARK_IMAGE_REF"
 
           trivy image \
+            --platform linux/arm64 \
             --format cyclonedx \
             --output sbom-artifacts/sbom-bark.cdx.json \
             "$BARK_IMAGE_REF"
@@ -424,6 +429,7 @@ jobs:
           # Third-party pinned dependency policy:
           # CRITICAL is a hard release blocker; HIGH is recorded and tracked
           trivy image \
+            --platform linux/arm64 \
             --scanners vuln \
             --exit-code 1 \
             --severity CRITICAL \
