@@ -11,12 +11,12 @@ printf 'Running smoke tests on Bark server at %s...\n' "$base_url"
 
 # 1. Ping check
 printf '1. Checking /ping endpoint...\n'
-ping_resp="$(curl -s "${base_url}/ping" || true)"
-if ! echo "$ping_resp" | grep -q 'pong'; then
-    printf 'FAIL: /ping did not return pong: %s\n' "$ping_resp" >&2
+ping_code="$(curl -s -o /dev/null -w '%{http_code}' -u "${user}:${pass}" "${base_url}/ping" || true)"
+if [[ "$ping_code" != "200" ]]; then
+    printf 'FAIL: authenticated /ping returned %s (expected 200)\n' "$ping_code" >&2
     exit 1
 fi
-printf 'OK: /ping returned pong\n'
+printf 'OK: authenticated /ping returned 200\n'
 
 # 3. Unauthorized push check (if basic auth is enabled)
 if [[ -n "$user" && -n "$pass" ]]; then
