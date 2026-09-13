@@ -317,47 +317,87 @@ func (m *Monitor) EnsureHistory(ctx context.Context, fromDay, toDay string) (int
 			return 0, nil
 		}
 
+		var jobID string
+		if m.store != nil {
+			jobID, _ = m.store.CreateHistorySyncJob(ctx, conn.ID, fromDay, toDay)
+		}
+
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
 		if time.Now().Before(m.backoffUntil) {
-			return 0, errors.New("circuit breaker backoff active")
+			err := errors.New("circuit breaker backoff active")
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, err)
+			}
+			return 0, err
 		}
 
 		if m.client == nil {
-			return 0, errors.New("bank client not configured")
+			err := errors.New("bank client not configured")
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, err)
+			}
+			return 0, err
 		}
 		if m.sessions != nil {
 			if err := m.sessions.Restore(ctx, conn.ID, conn.Generation); err != nil {
-				return 0, fmt.Errorf("restore ACB session: %w", err)
+				restoreErr := fmt.Errorf("restore ACB session: %w", err)
+				if jobID != "" && m.store != nil {
+					_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, restoreErr)
+				}
+				return 0, restoreErr
 			}
 		}
 
 		resp, err := m.client.Bootstrap(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("bootstrap ACB session: %w", err)
+			bootErr := fmt.Errorf("bootstrap ACB session: %w", err)
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, bootErr)
+			}
+			return 0, bootErr
 		}
 		if resp.Kind == acb.LoginPage || resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
-			return 0, errors.New("ACB session expired or challenge required")
+			err := errors.New("ACB session expired or challenge required")
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, err)
+			}
+			return 0, err
 		}
 		if resp.Kind == acb.MaintenancePage {
 			m.backoffUntil = time.Now().Add(60 * time.Second)
-			return 0, errors.New("ACB maintenance")
+			err := errors.New("ACB maintenance")
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, err)
+			}
+			return 0, err
 		}
 
 		fetchRes, fetchErr := m.fetchHistoryRange(ctx, &conn, resp, fromDay, toDay, 10)
 		if fetchErr != nil {
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, fetchErr)
+			}
 			return 0, fetchErr
 		}
 
 		// Ingest with FILTER_SYNC source (suppressing webhooks and voice)
 		_, ingestErr := m.store.IngestTransactionsBatchWithSource(ctx, conn.ID, conn.Generation, conn.AccountMasked, fetchRes.Transactions, false, "FILTER_SYNC")
 		if ingestErr != nil {
-			return 0, fmt.Errorf("ingest history transactions: %w", ingestErr)
+			err := fmt.Errorf("ingest history transactions: %w", ingestErr)
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, 0, err)
+			}
+			return 0, err
 		}
 
 		if !fetchRes.Complete {
-			return len(fetchRes.Transactions), fmt.Errorf("ACB history range incomplete: fetched %d pages (%d rows) but more rows remain", fetchRes.PagesFetched, len(fetchRes.Transactions))
+			err := fmt.Errorf("ACB history range incomplete: fetched %d pages (%d rows) but more rows remain", fetchRes.PagesFetched, len(fetchRes.Transactions))
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, len(fetchRes.Transactions), err)
+			}
+			return len(fetchRes.Transactions), err
 		}
 
 		dayCounts := make(map[string]int)
@@ -376,9 +416,16 @@ func (m *Monitor) EnsureHistory(ctx context.Context, fromDay, toDay string) (int
 			}
 		}
 		if err := m.store.RecordCoveragePerDay(ctx, conn.ID, dayCounts); err != nil {
-			return len(fetchRes.Transactions), fmt.Errorf("record coverage: %w", err)
+			recErr := fmt.Errorf("record coverage: %w", err)
+			if jobID != "" && m.store != nil {
+				_ = m.store.CompleteHistorySyncJob(ctx, jobID, len(fetchRes.Transactions), recErr)
+			}
+			return len(fetchRes.Transactions), recErr
 		}
 
+		if jobID != "" && m.store != nil {
+			_ = m.store.CompleteHistorySyncJob(ctx, jobID, len(fetchRes.Transactions), nil)
+		}
 		return len(fetchRes.Transactions), nil
 	})
 

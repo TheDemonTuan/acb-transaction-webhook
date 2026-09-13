@@ -49,7 +49,7 @@ services:
     labels:
       - "platform.workload.class=singleton"
     healthcheck:
-      test: ["CMD", "/worker", "--healthcheck"]
+      test: ["CMD", "/worker", "--liveness-check"]
       interval: 10s
       timeout: 3s
       retries: 3

@@ -111,6 +111,20 @@ if [[ "$UPGRADE_CORE" -eq 1 ]]; then
   docker compose -f "$COMPOSE_FILE" pull worker auth-browser tts-gateway bark "gateway-${CANDIDATE_SLOT}"
   log_info "Starting core singleton services..."
   docker compose -f "$COMPOSE_FILE" up -d worker auth-browser tts-gateway bark
+  log_info "Verifying core worker readiness..."
+  worker_timeout=30
+  worker_start="$(date +%s)"
+  while true; do
+    if docker compose -f "$COMPOSE_FILE" exec -T worker /worker --readiness-check >/dev/null 2>&1; then
+      log_info "Core worker is ready."
+      break
+    fi
+    if (( $(date +%s) - worker_start >= worker_timeout )); then
+      log_warn "Core worker readiness probe timed out after ${worker_timeout}s, continuing..."
+      break
+    fi
+    sleep 2
+  done
 else
   log_info "Web-only deploy: Pulling ONLY candidate [gateway-${CANDIDATE_SLOT}]..."
   docker compose -f "$COMPOSE_FILE" pull "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker pull "$IMAGE_REF"

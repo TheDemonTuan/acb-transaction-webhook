@@ -111,14 +111,18 @@ All production images must be specified as **explicit immutable digests** (`imag
    `DATA_VOLUME_NAME` must exist prior to deployment. If the volume is missing or ambiguous, deployment aborts immediately. The deployment tooling never creates, deletes, or renames production data except through the explicit `init-fresh-data.sh --confirm-fresh-init` command.
 2. **Online SQLite Backup & Integrity Verification**:
    Before schema migrations or core modification, an online SQLite backup is executed (`.backup` with `PRAGMA wal_checkpoint(TRUNCATE)`), followed by `PRAGMA integrity_check;` and schema migration verification.
-3. **Backup Manifest**:
-   A cryptographic manifest (`manifest-<timestamp>.json`) records SHA-256 digests and file sizes for the database backup, secrets (`app_master_key`, internal tokens, basic auth credentials), and state.
+3. **Backup Encryption at Rest**:
+   Backups are automatically encrypted with OpenSSL AES-256-CBC using PBKDF2 with the host's `app_master_key` (`.db.enc`). A cryptographic manifest (`manifest-<timestamp>.json`) records SHA-256 digests and file sizes for both the SQLite database backup, encrypted backup, and secrets.
 4. **Encrypted Offhost Hook**:
    If `ENCRYPTED_BACKUP_HOOK` or `OFFHOST_BACKUP_HOOK` is configured, its executable status is verified before execution.
 5. **No Auto Restore**:
    If a database migration fails, the deployment aborts and active traffic remains on the existing active slot. Automated restoration of production databases is forbidden to prevent overwriting live transactions.
 6. **Active-Auth Gate**:
    Before modifying core services or running migrations, the active-auth gate verifies that zero authentication attempts are in-flight (`STARTING`, `IN_PROGRESS`, `EXPORTING`, `VERIFYING`). If an active login session exists, deployment aborts to protect customer authentication.
+7. **Threat Model & Storage Security**:
+   - **Credentials & Session Secrets**: ACB passwords, OAuth credentials, session cookies, and internal service tokens are encrypted at rest using AES-GCM 256 via the cryptographic Keyring (`internal/crypto`) derived from `app_master_key`.
+   - **Transaction Indexing & Metadata**: Transaction descriptions and metadata are indexed in SQLite for high-performance substring searching, pagination, and deduplication (`semantic_key`, `canonical_hash`).
+   - **OS & Volume Isolation**: The SQLite database volume is secured with Linux file mode `0600`, confined to non-root UID `1000:1000`, protected by host full-disk encryption (LUKS), and backed up with AES-256 encryption.
 
 ---
 

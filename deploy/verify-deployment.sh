@@ -67,6 +67,28 @@ if command -v docker >/dev/null 2>&1; then
     verify_image "acb-worker" "$expected_worker_image" "worker"
   fi
 
+  if docker compose -f "$compose_file" config --services 2>/dev/null | grep -q "^worker$"; then
+    log_info "Verifying worker container readiness (/readyz)..."
+    worker_container="acb-worker"
+    worker_timeout="${WORKER_READY_TIMEOUT:-60}"
+    worker_start="$(date +%s)"
+    while true; do
+      worker_running=$(docker inspect --format='{{.State.Running}}' "$worker_container" 2>/dev/null || echo "false")
+      if [[ "$worker_running" == "true" ]]; then
+        if docker compose -f "$compose_file" exec -T worker /worker --readiness-check >/dev/null 2>&1; then
+          log_info "Worker is ready and healthy"
+          break
+        fi
+      fi
+      if (( $(date +%s) - worker_start >= worker_timeout )); then
+        log_error "worker did not report ready within ${worker_timeout}s"
+        docker compose -f "$compose_file" logs --tail 30 worker >&2 || true
+        exit 1
+      fi
+      sleep 2
+    done
+  fi
+
   if docker compose -f "$compose_file" config --services 2>/dev/null | grep -q "^auth-browser$"; then
     log_info "Verifying auth-browser container health..."
     ab_container="acb-auth-browser"

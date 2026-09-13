@@ -146,7 +146,7 @@ func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOptio
 		token:         trimmedToken,
 		mux:           http.NewServeMux(),
 		maxBodyBytes:  1 << 20, // 1MB
-		serverTimeout: 25 * time.Second,
+		serverTimeout: 120 * time.Second,
 		sem:           make(chan struct{}, 32),
 	}
 	for _, opt := range opts {
@@ -408,7 +408,7 @@ func (c *Client) RequestSync(ctx context.Context) error {
 }
 
 func (c *Client) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
-	callCtx, cancel := c.withTimeout(ctx, 25*time.Second)
+	callCtx, cancel := c.withTimeout(ctx, 120*time.Second)
 	defer cancel()
 	var resp EnsureHistoryResponse
 	err := c.post(callCtx, "/rpc/ensure-history", EnsureHistoryRequest{FromDay: fromDay, ToDay: toDay}, &resp)

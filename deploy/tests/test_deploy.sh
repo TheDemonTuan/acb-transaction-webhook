@@ -60,6 +60,7 @@ setup_mock_env() {
   export MOCK_CANDIDATE_FAIL=0
   export MOCK_ROUTE_ACK_FAIL=0
   export MOCK_ACTIVE_AUTH=0
+  export DBTOOL_IMAGE_REF="ghcr.io/test/dbtool@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   unset ROUTE_ACK_URL || true
   unset ROUTE_ACK_TIMEOUT || true
   unset READY_TIMEOUT || true
@@ -131,6 +132,14 @@ elif [[ "$cmd" == "exec" ]]; then
   fi
   exit 0
 elif [[ "$cmd" == "run" ]]; then
+  if [[ "$*" =~ -active-auth-count ]]; then
+    if [[ "${MOCK_ACTIVE_AUTH:-0}" == "1" ]]; then
+      printf '{"activeCount":1}\n'
+    else
+      printf '{"activeCount":0}\n'
+    fi
+    exit 0
+  fi
   if [[ "${MOCK_MIGRATION_FAIL:-0}" == "1" && "$*" =~ -migrate ]]; then
     exit 1
   fi

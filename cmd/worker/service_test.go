@@ -43,7 +43,12 @@ func TestWorkerService_VerifySession_GenerationGuard(t *testing.T) {
 		t.Fatal("expected error for stale generation 4 < current 5, got nil")
 	}
 
-	// 3. Generation equal or higher proceeds past guard (fails on unconfigured verifier in this test)
+	// 3. Mismatched future generation (> 5) rejected by strict equality fence
+	if err := ws.VerifySession(ctx, conn.ID, 6, []byte("pw")); err == nil {
+		t.Fatal("expected error for mismatched generation 6 != current 5, got nil")
+	}
+
+	// 4. Exact matching generation 5 proceeds past guard (fails on unconfigured verifier in this test)
 	err = ws.VerifySession(ctx, conn.ID, 5, []byte("pw"))
 	if err == nil || err.Error() != "session verifier not configured" {
 		t.Fatalf("expected 'session verifier not configured' error when generation guard passes, got: %v", err)

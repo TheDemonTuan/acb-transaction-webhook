@@ -291,6 +291,21 @@ create_preflight_backup() {
   local db_size
   db_size="$(wc -c < "$backup_file" 2>/dev/null | tr -d ' ' || echo "0")"
 
+  local enc_backup_file=""
+  local enc_db_sha256=""
+  if command -v openssl >/dev/null 2>&1 && [[ -f "$SECRETS_DIR/app_master_key" ]]; then
+    enc_backup_file="${backup_file}.enc"
+    log_info "Creating AES-256 encrypted SQLite backup at rest: ${enc_backup_file}"
+    if openssl enc -aes-256-cbc -salt -pbkdf2 -in "$backup_file" -out "$enc_backup_file" -pass file:"$SECRETS_DIR/app_master_key" 2>/dev/null; then
+      chmod 600 "$enc_backup_file" 2>/dev/null || true
+      enc_db_sha256="$(sha256sum "$enc_backup_file" 2>/dev/null | cut -d' ' -f1 || echo "")"
+      log_info "Encrypted SQLite backup generated (sha256: ${enc_db_sha256})"
+    else
+      log_warn "Failed to create encrypted backup with openssl, keeping standard backup."
+      enc_backup_file=""
+    fi
+  fi
+
   local secrets_backup_dir="$BACKUP_DIR/secrets-${ts}"
   mkdir -p "$secrets_backup_dir"
   local sec_items=()
@@ -316,6 +331,10 @@ create_preflight_backup() {
     "file": "$(basename "$backup_file")",
     "sha256": "${db_sha256}",
     "size_bytes": ${db_size}
+  },
+  "encrypted_sqlite_backup": {
+    "file": "$(basename "${enc_backup_file:-}")",
+    "sha256": "${enc_db_sha256:-}"
   },
   "secrets_backup_dir": "$(basename "$secrets_backup_dir")",
   "secrets": [${joined_secrets}]
@@ -482,6 +501,7 @@ mark_intentional_stop() {
   printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
     "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
   mv -f "$tmp" "$marker" 2>/dev/null || true
+  touch "$FAILOVER_STATE_DIR/acb.cooldown" 2>/dev/null || true
   touch "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
   log_info "Recorded intentional stop for slot [${slot}] before stopping container."
 }

@@ -74,7 +74,7 @@ func (w *workerService) VerifySession(ctx context.Context, account string, gener
 	}
 	if w.store != nil {
 		conn, err := w.store.Connection(ctx)
-		if err == nil && conn.Generation > generation {
+		if err == nil && conn.Generation != generation {
 			return fmt.Errorf("stale session verification generation: requested %d, current is %d", generation, conn.Generation)
 		}
 	}
