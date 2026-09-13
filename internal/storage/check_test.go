@@ -59,13 +59,13 @@ func TestSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema version failed: %v", err)
 	}
-	if rep.Version != 7 {
-		t.Errorf("expected schema version 7, got %d", rep.Version)
+	if rep.Version != 8 {
+		t.Errorf("expected schema version 8, got %d", rep.Version)
 	}
-	if rep.AppliedCount != 7 {
-		t.Errorf("expected 7 migrations applied, got %d", rep.AppliedCount)
+	if rep.AppliedCount != 8 {
+		t.Errorf("expected 8 migrations applied, got %d", rep.AppliedCount)
 	}
-	if rep.Checksum != "2026-09-13-v6-notification-providers" {
-		t.Errorf("expected checksum '2026-09-13-v6-notification-providers', got %q", rep.Checksum)
+	if rep.Checksum != "2026-09-14-v8-history-job-queue" {
+		t.Errorf("expected checksum '2026-09-14-v8-history-job-queue', got %q", rep.Checksum)
 	}
 }

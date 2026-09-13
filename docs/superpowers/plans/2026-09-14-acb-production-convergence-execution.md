@@ -99,8 +99,8 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 7** | Bootstrap-only keepalive task | **PR04** | **COMPLETED** | `internal/monitor/*` | Keepalive runs only when idle; skipped during active polling. |
 | **Task 8** | Preemptible multi-day catch-up | **PR04** | **COMPLETED** | `internal/monitor/*` | Catch-up yields after 1 page; realtime poll executes without waiting for 7-day range. |
 | **Task 9** | Scheduler invariant verifier & retire UpstreamGate | **PR04** | **COMPLETED** | `internal/monitor/*` | Concurrency tests prove zero simultaneous ACB requests; UpstreamGate removed. |
-| **Task 10** | Database schema for durable history jobs | PR05 | PENDING | `internal/storage/*`, `cmd/dbtool/*` | Migration 8 applies cleanly; active index constraint tested. |
-| **Task 11** | Atomic history job lifecycle storage | PR05 | PENDING | `internal/storage/history_jobs.go` | Concurrent claim/create CAS tests; stale recovery test. |
+| **Task 10** | Database schema for durable history jobs | **PR05** | **COMPLETED** | `internal/storage/*`, `cmd/dbtool/*` | Migration 8 applies cleanly; active index constraint tested. |
+| **Task 11** | Atomic history job lifecycle storage | **PR05** | **COMPLETED** | `internal/storage/history_jobs.go` | Concurrent claim/create CAS tests; stale recovery test. |
 | **Task 12** | History job runner with quantum yielding | PR06 | PENDING | `internal/monitor/history_runner.go` | Multi-page mock job yields between pages; FILTER_SYNC source tagged. |
 | **Task 13** | Short-lived history RPC on worker | PR06 | PENDING | `internal/workerrpc/*` | Create/Get/Cancel RPCs respond < 500ms; durable idempotency verified. |
 | **Task 14** | Asynchronous HTTP history endpoints | PR07 | PENDING | `internal/httpapi/*` | 202 Accepted returned; cancel transitions state; invalid range returns 400. |

@@ -265,7 +265,7 @@ func (t *HistorySyncTask) Step(ctx context.Context) (scheduler.TaskStepResult, e
 	}
 
 	if t.jobID != "" && t.m.store != nil {
-		_ = t.m.store.CompleteHistorySyncJob(ctx, t.jobID, len(t.allBatchItems), nil)
+		_ = t.m.store.CompleteHistorySyncJob(ctx, t.jobID, 1, len(t.allBatchItems))
 	}
 
 	t.finish(len(t.allBatchItems), nil)
@@ -274,7 +274,7 @@ func (t *HistorySyncTask) Step(ctx context.Context) (scheduler.TaskStepResult, e
 
 func (t *HistorySyncTask) finish(insertedCount int, err error) {
 	if t.jobID != "" && t.m.store != nil && err != nil {
-		_ = t.m.store.CompleteHistorySyncJob(context.Background(), t.jobID, insertedCount, err)
+		_ = t.m.store.FailHistorySyncJob(context.Background(), t.jobID, "SYNC_FAILED", err.Error())
 	}
 	select {
 	case t.done <- historyTaskResult{insertedCount: insertedCount, err: err}:

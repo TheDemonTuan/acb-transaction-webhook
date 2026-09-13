@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
+	migrationfiles "github.com/thedemontuan/acb-transaction-webhook/internal/storage/migrations"
 	_ "modernc.org/sqlite"
 )
 
@@ -223,4 +224,4 @@ ALTER TABLE delivery_attempts ADD COLUMN provider TEXT NOT NULL DEFAULT 'WEBHOOK
 ALTER TABLE delivery_attempts ADD COLUMN provider_error_code TEXT;
 ALTER TABLE deliveries ADD COLUMN retry_cycle_start_attempt INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_provider_status ON webhook_endpoints(provider, status);
-`}}
+`}, {8, "2026-09-14-v8-history-job-queue", migrationfiles.HistoryJobQueueSQL}}
