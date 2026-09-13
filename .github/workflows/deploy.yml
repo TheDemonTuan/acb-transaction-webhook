@@ -10,6 +10,11 @@ on:
         required: true
         type: boolean
         default: false
+      upgrade_core:
+        description: Force upgrade core singleton services (worker, auth-browser, tts)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -115,6 +120,8 @@ jobs:
           target: gateway
           push: true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -155,6 +162,8 @@ jobs:
           target: worker
           push: true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -195,6 +204,8 @@ jobs:
           target: dbtool
           push: true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          cache-from: type=gha,scope=dbtool
+          cache-to: type=gha,mode=max,scope=dbtool
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -235,6 +246,8 @@ jobs:
           file: Dockerfile.auth-browser
           push: true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          cache-from: type=gha,scope=auth-browser
+          cache-to: type=gha,mode=max,scope=auth-browser
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -279,6 +292,8 @@ jobs:
           file: tts-gateway/Dockerfile
           push: true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          cache-from: type=gha,scope=tts-gateway
+          cache-to: type=gha,mode=max,scope=tts-gateway
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
