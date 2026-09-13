@@ -1,0 +1,12 @@
+[Unit]
+Description=VPS Failover Reconciliation Safety Net Scan
+After=docker.service
+
+[Service]
+Type=oneshot
+User=opc
+Group=docker
+WorkingDirectory=/opt/platform/failover
+ExecStart=/usr/bin/python3 /opt/platform/failover/vps-failover-controller.py --reconcile
+StandardOutput=journal
+StandardError=journal

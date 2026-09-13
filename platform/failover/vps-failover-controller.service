@@ -1,0 +1,18 @@
+[Unit]
+Description=VPS Multi-App Unified Failover Controller (Event-Driven)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=opc
+Group=docker
+WorkingDirectory=/opt/platform/failover
+ExecStart=/usr/bin/python3 /opt/platform/failover/vps-failover-controller.py
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -46,6 +46,8 @@ services:
       - worker_internal_token
       - bark_basic_auth_user
       - bark_basic_auth_password
+    labels:
+      - "platform.workload.class=singleton"
     logging:
       driver: "json-file"
       options:
@@ -237,6 +239,12 @@ services:
       - "traefik.http.services.acb-blue.loadbalancer.healthcheck.path=/readyz"
       - "traefik.http.services.acb-blue.loadbalancer.healthcheck.interval=3s"
       - "traefik.http.services.acb-blue.loadbalancer.healthcheck.timeout=1s"
+      - "platform.failover.enabled=true"
+      - "platform.failover.app=acb"
+      - "platform.failover.slot=blue"
+      - "platform.failover.peer=acb-gateway-green"
+      - "platform.workload.class=http"
+      - "platform.failover.mode=warm"
     logging:
       driver: "json-file"
       options:
@@ -304,6 +312,12 @@ services:
       - "traefik.http.services.acb-green.loadbalancer.healthcheck.path=/readyz"
       - "traefik.http.services.acb-green.loadbalancer.healthcheck.interval=3s"
       - "traefik.http.services.acb-green.loadbalancer.healthcheck.timeout=1s"
+      - "platform.failover.enabled=true"
+      - "platform.failover.app=acb"
+      - "platform.failover.slot=green"
+      - "platform.failover.peer=acb-gateway-blue"
+      - "platform.workload.class=http"
+      - "platform.failover.mode=warm"
     logging:
       driver: "json-file"
       options:
