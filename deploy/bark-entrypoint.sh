@@ -13,7 +13,7 @@ load_secret() {
 load_secret /run/secrets/bark_basic_auth_user BARK_SERVER_BASIC_AUTH_USER
 load_secret /run/secrets/bark_basic_auth_password BARK_SERVER_BASIC_AUTH_PASSWORD
 
-if [ "$1" = "bark-server" ]; then
+if [ "${1:-}" = "bark-server" ]; then
     shift
 fi
 
