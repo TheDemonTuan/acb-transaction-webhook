@@ -66,7 +66,7 @@ setup_mock_env() {
   unset SOAK_DURATION_SEC || true
   mkdir -p "$test_dir/bin" "$test_dir/secrets" "$test_dir/data/backups" "$test_dir/dynamic" "$test_dir/failover"
   touch "$test_dir/data/gateway.db"
-  
+
   # Default secret files
   printf 'mock-master-key\n' > "$test_dir/secrets/app_master_key"
   printf 'mock-tts-token\n' > "$test_dir/secrets/tts_internal_token"
