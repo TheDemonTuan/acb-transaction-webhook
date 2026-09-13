@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 # ACB Secure Single-VPS Platform Migration Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

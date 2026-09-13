@@ -48,7 +48,7 @@ jobs:
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
-          scripts=(deploy/*.sh scripts/ops/*.sh)
+          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts found" >&2
             exit 1
@@ -59,12 +59,14 @@ jobs:
       - name: Lint deployment and platform scripts
         run: |
           shopt -s nullglob
-          scripts=(deploy/*.sh scripts/ops/*.sh)
+          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts found" >&2
             exit 1
           fi
           shellcheck --severity=error "${scripts[@]}"
+      - name: Verify architecture documentation
+        run: bash scripts/verify-architecture-docs.sh
       - name: Test supply-chain validators and release manifest
         run: bash deploy/test-supply-chain.sh
       - name: Check generated source and whitespace

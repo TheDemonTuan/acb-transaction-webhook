@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 # Sổ Tay Vận Hành (Runbook): Traefik 3.x Ingress & Warm Standby Blue/Green
 
 Tài liệu hướng dẫn quy trình chuyển dịch, triển khai và vận hành hệ thống ACB Transaction Webhook trên nền tảng đơn VPS sử dụng Traefik 3.x, Docker Compose hợp nhất (`compose.prod.yaml`) và mô hình Warm Standby Blue/Green.

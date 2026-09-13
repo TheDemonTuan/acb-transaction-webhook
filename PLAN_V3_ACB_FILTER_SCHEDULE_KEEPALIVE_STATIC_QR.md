@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 # PLAN V3 — ACB Transaction Webhook
 ## Transaction Viewer hoàn chỉnh · Filter đẩy xuống ACB đúng phạm vi · Polling theo khung giờ · Keepalive Session · QR tĩnh nhận tiền
 

@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 Mình đã xem đúng commit mới. GitHub hiện resolve commit đầy đủ là **`64cbe2a08400258c5816b272b549384ab0496f72`**; tức short SHA thực tế là `64cbe2a0` — `64cbe2aa` bạn gửi có vẻ lệch ký tự cuối một chút. Đây đúng commit lớn có message fix auth/VNC + toàn bộ audit issues.
 
 ## Kết luận

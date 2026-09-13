@@ -9,6 +9,20 @@ A secure, high-performance service that monitors transaction history from Asia C
 
 ---
 
+## Authoritative Documentation & Specifications
+
+All contributors, operators, and automated workers must refer to the canonical production architecture specifications:
+
+- **Authoritative Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md) — The single source of truth for production invariants, failure domains, scheduling, and security contracts.
+- **Production Architecture Overview:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md) — High-level architecture, container roles, and Docker network topology.
+- **Implementation & Convergence Plan:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md) — Master implementation tracker for Tasks 1–51 and 16 acceptance gates.
+- **Compatibility Contracts:** [`docs/architecture/COMPATIBILITY_CONTRACTS.md`](docs/architecture/COMPATIBILITY_CONTRACTS.md) — Interface schemas, async DTOs, scheduler interfaces, and route ACK protocols.
+- **System Inventory:** [`docs/architecture/SYSTEM_INVENTORY.md`](docs/architecture/SYSTEM_INVENTORY.md) — Complete inventory of database writes, upstream ACB callers, secrets, and deploy entrypoints.
+
+*(Note: All earlier planning documents, platform migration drafts, and incremental fix notes in the repository root are historical and have been superseded by the 2026-09-14 canonical specifications).*
+
+---
+
 ## Highlights & Features
 
 - **Automated Bank Transaction Monitoring**: Continuously monitors ACB bank accounts for incoming and outgoing transactions with adaptive polling.

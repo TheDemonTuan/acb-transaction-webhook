@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 Mình đã audit lại **HEAD mới nhất** của `TheDemonTuan/acb-transaction-webhook`. Hiện `main` đã lên:
 
 `d6f8f11ba169e31e6c865798f7073cf96790bac7` — `feat: implement Plan V5 with Edge TTS, gTTS fallback, and resilient voice engine`. Trước đó còn hai commit redesign QR `f531992` và `67e399f`.

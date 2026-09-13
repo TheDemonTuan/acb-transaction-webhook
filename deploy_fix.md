@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 Mình đã đọc **HEAD mới nhất hiện tại** và log deploy thật của GitHub Actions. Nguyên nhân Bark deploy fail lần này đã xác định được khá chắc chắn.
 
 Commit mới nhất là `5cefa4a` lúc khoảng **13:53 ngày 13/09/2026**, nội dung chỉ là `test(storage): stabilize auth attempt expiry timing`, tức là không sửa Bark. Workflow của chính commit này vẫn **failure ở job Deploy to VPS**.

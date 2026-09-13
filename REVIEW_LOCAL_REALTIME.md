@@ -1,3 +1,15 @@
+> **SUPERSEDED / HISTORICAL ARCHIVE**
+>
+> This document is retained solely for historical context, audit trails, and design lineage.
+> It has been superseded by the canonical 2026-09-14 production architecture and hardening specifications:
+> - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md)
+> - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](docs/architecture/PRODUCTION_ARCHITECTURE.md)
+> - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+>
+> Do not implement, deploy, or operate against this document.
+
+---
+
 # Báo Cáo Đánh Giá Mã Nguồn (Code Review): Realtime Event-Driven ACB Webhook
 
 **Đối tượng đánh giá:** Toàn bộ các thay đổi chưa commit (uncommitted local changes) so với `HEAD` tại `D:\tuan-acb-email-webhook` sau khi hoàn tất toàn bộ các bản sửa đổi kiến trúc (Fair Leasing Worker Pool, Event Invalidation, Legacy Journal Atomicity, CSRF, Upstream Single Gate, Deployment Fencing).  
