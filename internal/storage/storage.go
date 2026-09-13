@@ -26,6 +26,10 @@ func (s *Store) WithKeyring(k *security.Keyring) *Store {
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	return openInternal(ctx, path, OpenOptions{RunMigrations: true})
+}
+
+func openInternal(ctx context.Context, path string, opts OpenOptions) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -41,9 +45,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db}
-	if err := s.Migrate(ctx); err != nil {
-		db.Close()
-		return nil, err
+	if opts.RunMigrations {
+		if err := s.Migrate(ctx); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }

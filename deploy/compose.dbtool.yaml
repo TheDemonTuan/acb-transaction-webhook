@@ -1,0 +1,23 @@
+name: acb-dbtool
+
+services:
+  dbtool:
+    image: ${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}
+    container_name: acb-dbtool-oneoff
+    user: "1000:1000"
+    read_only: true
+    environment:
+      DATABASE_PATH: /data/gateway.db
+    volumes:
+      - gateway_data:/data
+    networks:
+      - none
+
+volumes:
+  gateway_data:
+    external: true
+    name: bank-event-gateway_gateway_data
+
+networks:
+  none:
+    internal: true

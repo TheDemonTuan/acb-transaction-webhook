@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy the immutable image to the configured VPS
+        description: Deploy the immutable image to the configured VPS (manual approval required)
         required: true
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -87,6 +87,87 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: gateway
+          push: true
+          platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+  build-worker-image:
+    name: Build worker GHCR image
+    needs: verify
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image name
+        id: meta
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${repo_lc}-worker" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: worker
+          push: true
+          platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+  build-dbtool-image:
+    name: Build dbtool GHCR image
+    needs: verify
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image name
+        id: meta
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${repo_lc}-dbtool" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: dbtool
           push: true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
           tags: |
@@ -186,8 +267,9 @@ jobs:
 
   deploy:
     name: Deploy to VPS
-    needs: [verify, build-gateway-image, build-auth-browser-image, build-tts-gateway-image]
-    if: github.event_name == 'push' || inputs.deploy
+    needs: [verify, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image]
+    # Hard freeze: automatic deploy on push is disabled. Explicit workflow_dispatch approval required.
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -215,6 +297,9 @@ jobs:
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
             deploy/compose.prod.yaml "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/compose.prod.yaml.next"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
+            deploy/compose.core.yaml deploy/compose.slot.yaml deploy/compose.dbtool.yaml \
+            deploy/deploy-warm.sh deploy/rollback-warm.sh deploy/switch-slot.sh \
+            deploy/smoke-slot.sh deploy/check-host.sh \
             deploy/seccomp-auth-browser.json deploy/deploy.sh deploy/rollback.sh \
             deploy/verify-deployment.sh deploy/backup.sh deploy/bark-entrypoint.sh \
             deploy/smoke-test-bark.sh deploy/README.md \

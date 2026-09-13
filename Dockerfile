@@ -16,10 +16,24 @@ COPY internal/ ./internal/
 COPY --from=web-builder /src/internal/httpui/dist ./internal/httpui/dist
 RUN mkdir -p -m 0777 /data
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gateway && \
-    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/auth-browser ./cmd/auth-browser
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/auth-browser ./cmd/auth-browser && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/dbtool ./cmd/dbtool
 
 FROM gcr.io/distroless/static-debian12:nonroot AS gateway
 COPY --from=go-builder --chown=1000:1000 /data /data
 COPY --from=go-builder /out/gateway /gateway
 USER 1000:1000
 ENTRYPOINT ["/gateway"]
+
+FROM gcr.io/distroless/static-debian12:nonroot AS worker
+COPY --from=go-builder --chown=1000:1000 /data /data
+COPY --from=go-builder /out/worker /worker
+USER 1000:1000
+ENTRYPOINT ["/worker"]
+
+FROM gcr.io/distroless/static-debian12:nonroot AS dbtool
+COPY --from=go-builder --chown=1000:1000 /data /data
+COPY --from=go-builder /out/dbtool /dbtool
+USER 1000:1000
+ENTRYPOINT ["/dbtool"]

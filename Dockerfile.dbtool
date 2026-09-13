@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1.7
+FROM golang:1.27.1-bookworm AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/dbtool/ ./cmd/dbtool/
+COPY internal/ ./internal/
+RUN mkdir -p -m 0777 /data
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/dbtool ./cmd/dbtool
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder --chown=1000:1000 /data /data
+COPY --from=builder /out/dbtool /dbtool
+USER 1000:1000
+ENTRYPOINT ["/dbtool"]

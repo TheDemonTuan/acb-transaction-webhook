@@ -1,0 +1,23 @@
+http:
+  routers:
+    acb-router:
+      rule: "Host(`bank.tuannguyenviet.site`)"
+      entryPoints:
+        - web
+      middlewares:
+        - tunnel-only
+        - security-headers
+      service: acb-service
+
+  services:
+    acb-service:
+      loadBalancer:
+        passHostHeader: true
+        responseForwarding:
+          flushInterval: "100ms"
+        servers:
+          - url: "http://acb-web-blue:8090"
+        healthCheck:
+          path: "/readyz"
+          interval: "5s"
+          timeout: "2s"

@@ -1,0 +1,102 @@
+name: acb-${SLOT:-blue}
+
+services:
+  gateway:
+    image: ${IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook:latest}
+    container_name: acb-gateway-${SLOT:-blue}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      APP_ENV: production
+      PORT: ${PORT:-8090}
+      LISTEN_ADDR: 0.0.0.0:8090
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
+      DATA_DIR: /data
+      DATABASE_PATH: /data/gateway.db
+      TZ: Asia/Ho_Chi_Minh
+      APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+      WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
+      CLOUDFLARE_ACCESS_TEAM_NAME: ${CLOUDFLARE_ACCESS_TEAM_NAME:-}
+      CLOUDFLARE_ACCESS_AUD: ${CLOUDFLARE_ACCESS_AUD:-}
+      CF_ACCESS_ISSUER: ${CF_ACCESS_ISSUER:-https://${CLOUDFLARE_ACCESS_TEAM_NAME:-your-team}.cloudflareaccess.com}
+      CF_ACCESS_AUDIENCE: ${CF_ACCESS_AUDIENCE:-${CLOUDFLARE_ACCESS_AUD:-}}
+      CF_ACCESS_JWKS_URL: ${CF_ACCESS_JWKS_URL:-https://${CLOUDFLARE_ACCESS_TEAM_NAME:-your-team}.cloudflareaccess.com/cdn-cgi/access/certs}
+      OWNER_SUBJECTS: ${OWNER_SUBJECTS:-${CLOUDFLARE_ACCESS_OWNER_EMAIL:-}}
+      AUTH_BROWSER_URL: http://auth-browser:8181
+      AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      TTS_GATEWAY_URL: http://tts-gateway:8081
+      TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
+      BARK_SERVER_URL: http://bark:8080
+      BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
+      BARK_BASIC_AUTH_USER_FILE: /run/secrets/bark_basic_auth_user
+      BARK_BASIC_AUTH_PASSWORD_FILE: /run/secrets/bark_basic_auth_password
+    expose:
+      - "8090"
+    networks:
+      edge-acb:
+        aliases:
+          - acb-web-${SLOT:-blue}
+      acb-core:
+      acb-egress:
+    volumes:
+      - gateway_data:/data
+    secrets:
+      - app_master_key
+      - tts_internal_token
+      - worker_internal_token
+      - bark_basic_auth_user
+      - bark_basic_auth_password
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=edge-acb"
+      # Loopback-only probe router prevents public route leakage via Docker provider defaultRule
+      - "traefik.http.routers.acb-${SLOT:-blue}.entrypoints=slot-probe"
+      - "traefik.http.routers.acb-${SLOT:-blue}.rule=Host(`acb-${SLOT:-blue}.internal.invalid`)"
+      - "traefik.http.services.acb-${SLOT:-blue}.loadbalancer.server.port=8090"
+      - "traefik.http.services.acb-${SLOT:-blue}.loadbalancer.healthcheck.path=/readyz"
+      - "traefik.http.services.acb-${SLOT:-blue}.loadbalancer.healthcheck.interval=3s"
+      - "traefik.http.services.acb-${SLOT:-blue}.loadbalancer.healthcheck.timeout=1s"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+          pids: 100
+
+volumes:
+  gateway_data:
+    external: true
+    name: bank-event-gateway_gateway_data
+
+networks:
+  edge-acb:
+    external: true
+    name: edge-acb
+  acb-core:
+    external: true
+    name: acb-core
+  acb-egress:
+    external: true
+    name: acb-egress
+
+secrets:
+  app_master_key:
+    file: ./secrets/app_master_key
+  tts_internal_token:
+    file: ./secrets/tts_internal_token
+  worker_internal_token:
+    file: ./secrets/worker_internal_token
+  bark_basic_auth_user:
+    file: ./secrets/bark_basic_auth_user
+  bark_basic_auth_password:
+    file: ./secrets/bark_basic_auth_password

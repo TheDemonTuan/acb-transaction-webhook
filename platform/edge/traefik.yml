@@ -1,0 +1,44 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  format: json
+  fields:
+    defaultMode: keep
+    names:
+      ClientUsername: drop
+    headers:
+      defaultMode: keep
+      names:
+        Authorization: drop
+        Cookie: drop
+        Cf-Access-Jwt-Assertion: drop
+        X-Worker-Internal-Token: drop
+
+entryPoints:
+  web:
+    address: "172.31.250.4:8080"
+    forwardedHeaders:
+      trustedIPs:
+        - "172.31.250.2/32"
+
+  slot-probe:
+    address: "127.0.0.1:18080"
+
+providers:
+  file:
+    directory: "/etc/traefik/dynamic"
+    watch: true
+
+  docker:
+    endpoint: "tcp://socket-proxy:2375"
+    exposedByDefault: false
+    watch: true
+    network: "edge-acb"
+    # Do not auto-generate public default routers
+    defaultRule: "Host(`{{ normalize .Name }}.internal.invalid`)"

@@ -42,6 +42,8 @@ type Config struct {
 	BarkDefaultGroup      string
 	BarkDefaultLevel      string
 	BarkDefaultSound      string
+	WorkerRPCURL          string
+	WorkerInternalToken   string
 }
 
 func Load() (Config, error) {
@@ -179,6 +181,15 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("Bark basic auth user and password are required in production")
 	}
 
+	workerToken := value("WORKER_INTERNAL_TOKEN", "")
+	if workerToken == "" {
+		if tokenFile := os.Getenv("WORKER_INTERNAL_TOKEN_FILE"); tokenFile != "" {
+			if b, err := os.ReadFile(tokenFile); err == nil {
+				workerToken = strings.TrimSpace(string(b))
+			}
+		}
+	}
+
 	cfg := Config{
 		Address:            value("LISTEN_ADDR", "0.0.0.0:"+value("PORT", "8090")),
 		DatabasePath:       value("DATABASE_PATH", filepath.Join(dataDir, "gateway.db")),
@@ -209,6 +220,8 @@ func Load() (Config, error) {
 		BarkDefaultGroup:      barkGroup,
 		BarkDefaultLevel:      barkLevel,
 		BarkDefaultSound:      barkSound,
+		WorkerRPCURL:          value("WORKER_RPC_URL", ""),
+		WorkerInternalToken:   workerToken,
 	}
 	if production {
 		if cfg.MasterKeyFile == "" {

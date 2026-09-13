@@ -28,6 +28,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/webhook"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
 func main() {
@@ -67,7 +68,9 @@ func main() {
 	}
 	lockPath := filepath.Join(filepath.Dir(cfg.DatabasePath), "gateway.lock")
 	var fileLock *lock.FileLock
-	if *checkIntegrity || *backupTo != "" {
+	// When Worker is running as a dedicated service, Gateway operates in concurrent HTTP-only mode
+	// and does not hold an exclusive singleton lock.
+	if cfg.WorkerRPCURL != "" || *checkIntegrity || *backupTo != "" {
 		fileLock, err = lock.AcquireShared(lockPath)
 	} else {
 		fileLock, err = lock.Acquire(lockPath)
@@ -77,7 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer fileLock.Close()
-	store, err := storage.Open(ctx, cfg.DatabasePath)
+	store, err := storage.OpenRuntime(ctx, cfg.DatabasePath)
 	if err != nil {
 		logger.Error("open storage", "error", err)
 		os.Exit(1)
@@ -163,93 +166,111 @@ func main() {
 		logger.Info("Bark notification provider registered")
 	}
 
-	dispatcher := notification.NewDispatcher(store, notificationRegistry)
-	go dispatcher.Start(ctx)
+	var server *httpapi.Server
+	if cfg.WorkerRPCURL != "" {
+		logger.Info("starting gateway in HTTP-only mode with worker RPC", "workerRPCURL", cfg.WorkerRPCURL)
+		workerClient := workerrpc.NewClient(cfg.WorkerRPCURL, cfg.WorkerInternalToken)
+		server = httpapi.New(cfg, store).
+			WithSyncRequester(workerClient).
+			WithHistoryEnsurer(workerClient).
+			WithMonitorNotifier(workerClient).
+			WithEventHub(hub).
+			WithBarkSender(barkSender).
+			WithNotificationRegistry(notificationRegistry).
+			WithWakeDispatcher(workerClient.WakeDispatcher).
+			WithAuthVerifier(workerClient)
+		go server.RunJournalWatcher(ctx, 1*time.Second)
+	} else {
+		dispatcher := notification.NewDispatcher(store, notificationRegistry)
+		go dispatcher.Start(ctx)
 
-	acbClient, err := acb.NewClient("https://online.acb.com.vn", nil)
-	if err != nil {
-		logger.Error("create ACB client", "error", err)
-		os.Exit(1)
-	}
-	bankMonitor := monitor.New(store, acbClient, cfg.PollMinInterval, cfg.PollMaxInterval)
-	bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
-		for _, ev := range events {
-			hub.Publish(eventhub.Event{
-				Seq:         ev.JournalSeq,
-				Epoch:       ev.Epoch,
-				EventType:   ev.EventType,
-				AggregateID: ev.TransactionID,
-				Payload:     ev.Payload,
-				CreatedAt:   ev.CreatedAt,
+		acbClient, err := acb.NewClient("https://online.acb.com.vn", nil)
+		if err != nil {
+			logger.Error("create ACB client", "error", err)
+			os.Exit(1)
+		}
+		bankMonitor := monitor.New(store, acbClient, cfg.PollMinInterval, cfg.PollMaxInterval)
+		bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
+			for _, ev := range events {
+				hub.Publish(eventhub.Event{
+					Seq:         ev.JournalSeq,
+					Epoch:       ev.Epoch,
+					EventType:   ev.EventType,
+					AggregateID: ev.TransactionID,
+					Payload:     ev.Payload,
+					CreatedAt:   ev.CreatedAt,
+				})
+			}
+			dispatcher.Wake()
+		})
+		var pollStatusMu sync.Mutex
+		var lastPollStatus string
+		bankMonitor.WithPollNotifier(func(p storage.PollRun, insertedCount int) {
+			pollStatusMu.Lock()
+			statusChanged := p.Status != lastPollStatus
+			lastPollStatus = p.Status
+			pollStatusMu.Unlock()
+
+			// Only push to SSE when there are actually new transactions or when poll status changed.
+			// Suppress routine duplicate polls to avoid noisy repetitive SSE events.
+			if insertedCount == 0 && !statusChanged && p.Status == "SUCCEEDED" {
+				return
+			}
+
+			payload, err := json.Marshal(map[string]any{
+				"pollId":        p.ID,
+				"status":        p.Status,
+				"classifier":    p.Classifier,
+				"httpStatus":    p.HTTPStatus,
+				"pages":         p.Pages,
+				"rowsSeen":      p.RowsSeen,
+				"insertedCount": insertedCount,
+				"error":         p.Error,
+				"startedAt":     p.StartedAt,
+				"finishedAt":    p.FinishedAt,
 			})
-		}
-		dispatcher.Wake()
-	})
-	var pollStatusMu sync.Mutex
-	var lastPollStatus string
-	bankMonitor.WithPollNotifier(func(p storage.PollRun, insertedCount int) {
-		pollStatusMu.Lock()
-		statusChanged := p.Status != lastPollStatus
-		lastPollStatus = p.Status
-		pollStatusMu.Unlock()
-
-		// Only push to SSE when there are actually new transactions or when poll status changed.
-		// Suppress routine duplicate polls to avoid noisy repetitive SSE events.
-		if insertedCount == 0 && !statusChanged && p.Status == "SUCCEEDED" {
-			return
-		}
-
-		payload, err := json.Marshal(map[string]any{
-			"pollId":        p.ID,
-			"status":        p.Status,
-			"classifier":    p.Classifier,
-			"httpStatus":    p.HTTPStatus,
-			"pages":         p.Pages,
-			"rowsSeen":      p.RowsSeen,
-			"insertedCount": insertedCount,
-			"error":         p.Error,
-			"startedAt":     p.StartedAt,
-			"finishedAt":    p.FinishedAt,
+			if err != nil {
+				return
+			}
+			seq, err := store.AppendJournalEvent(context.Background(), "ep1", "poll.completed", p.ID, payload)
+			if err != nil {
+				return
+			}
+			hub.Publish(eventhub.Event{
+				Seq:         seq,
+				Epoch:       "ep1",
+				EventType:   "poll.completed",
+				AggregateID: p.ID,
+				Payload:     payload,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			})
 		})
-		if err != nil {
-			return
+		var sessionLoader *monitor.SessionLoader
+		if keyring != nil {
+			sessionLoader = monitor.NewSessionLoader(store, keyring, acbClient)
+			bankMonitor.WithSessionLoader(sessionLoader)
 		}
-		seq, err := store.AppendJournalEvent(context.Background(), "ep1", "poll.completed", p.ID, payload)
-		if err != nil {
-			return
+		go bankMonitor.Run(ctx)
+
+		server = httpapi.New(cfg, store).
+			WithSyncRequester(bankMonitor).
+			WithHistoryEnsurer(bankMonitor).
+			WithMonitorNotifier(bankMonitor).
+			WithEventHub(hub).
+			WithBarkSender(barkSender).
+			WithNotificationRegistry(notificationRegistry).
+			WithWakeDispatcher(dispatcher.Wake)
+
+		if keyring != nil {
+			verifierClient, verifierErr := acb.NewClient("https://online.acb.com.vn", nil)
+			if verifierErr != nil {
+				logger.Error("create ACB session verifier client", "error", verifierErr)
+				os.Exit(1)
+			}
+			verifierLoader := monitor.NewSessionLoader(store, keyring, verifierClient)
+			server.WithAuthVerifier(monitor.NewSessionVerifier(verifierLoader, verifierClient, bankMonitor.UpstreamGate()))
 		}
-		hub.Publish(eventhub.Event{
-			Seq:         seq,
-			Epoch:       "ep1",
-			EventType:   "poll.completed",
-			AggregateID: p.ID,
-			Payload:     payload,
-			CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
-		})
-	})
-	var sessionLoader *monitor.SessionLoader
-	if keyring != nil {
-		sessionLoader = monitor.NewSessionLoader(store, keyring, acbClient)
-		bankMonitor.WithSessionLoader(sessionLoader)
 	}
-	go bankMonitor.Run(ctx)
-
-	primaryAddr := cfg.Address
-	addresses := []string{primaryAddr}
-	if strings.HasSuffix(primaryAddr, ":8090") {
-		addresses = append(addresses, strings.TrimSuffix(primaryAddr, ":8090")+":8080")
-	} else if strings.HasSuffix(primaryAddr, ":8080") {
-		addresses = append(addresses, strings.TrimSuffix(primaryAddr, ":8080")+":8090")
-	}
-
-	server := httpapi.New(cfg, store).
-		WithSyncRequester(bankMonitor).
-		WithHistoryEnsurer(bankMonitor).
-		WithMonitorNotifier(bankMonitor).
-		WithEventHub(hub).
-		WithBarkSender(barkSender).
-		WithNotificationRegistry(notificationRegistry).
-		WithWakeDispatcher(dispatcher.Wake)
 	go server.RunJournalRetention(ctx, 24*time.Hour)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -263,15 +284,15 @@ func main() {
 			}
 		}
 	}()
-	if keyring != nil {
-		verifierClient, verifierErr := acb.NewClient("https://online.acb.com.vn", nil)
-		if verifierErr != nil {
-			logger.Error("create ACB session verifier client", "error", verifierErr)
-			os.Exit(1)
-		}
-		verifierLoader := monitor.NewSessionLoader(store, keyring, verifierClient)
-		server.WithAuthVerifier(monitor.NewSessionVerifier(verifierLoader, verifierClient, bankMonitor.UpstreamGate()))
+
+	primaryAddr := cfg.Address
+	addresses := []string{primaryAddr}
+	if strings.HasSuffix(primaryAddr, ":8090") {
+		addresses = append(addresses, strings.TrimSuffix(primaryAddr, ":8090")+":8080")
+	} else if strings.HasSuffix(primaryAddr, ":8080") {
+		addresses = append(addresses, strings.TrimSuffix(primaryAddr, ":8080")+":8090")
 	}
+
 	handler := server.Handler()
 	var servers []*http.Server
 	errCh := make(chan error, len(addresses))

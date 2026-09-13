@@ -1,0 +1,13 @@
+[Unit]
+Description=ACB Transaction Webhook Warm Standby Health Watchdog
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=opc
+Group=docker
+WorkingDirectory=/opt/bank-event-gateway
+ExecStart=/bin/bash /opt/bank-event-gateway/deploy/host/acb-health-watchdog.sh
+StandardOutput=journal
+StandardError=journal

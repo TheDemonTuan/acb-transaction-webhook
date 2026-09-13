@@ -1,0 +1,24 @@
+http:
+  middlewares:
+    # Restrict ingress only to Cloudflare Tunnel connector IP
+    tunnel-only:
+      ipAllowList:
+        sourceRange:
+          - "172.31.250.2/32"
+        rejectStatusCode: 403
+
+    # Security headers
+    security-headers:
+      headers:
+        sslRedirect: false
+        customResponseHeaders:
+          X-Content-Type-Options: "nosniff"
+          X-Frame-Options: "DENY"
+          Referrer-Policy: "strict-origin-when-cross-origin"
+
+    # Fix previous Caddy bug: Allow GET, POST, PUT, DELETE, HEAD, OPTIONS
+    # (Enabling voice settings PUT, notification channels PUT, and QR delete)
+    acb-method-filter:
+      headers:
+        allowedHosts:
+          - "bank.tuannguyenviet.site"
