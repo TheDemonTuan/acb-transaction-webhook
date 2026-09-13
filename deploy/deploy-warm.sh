@@ -90,7 +90,12 @@ fi
 
 # Preflight online SQLite backup and manifest
 set_deploy_state "BACKUP"
-dbtool_img="${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}"
+dbtool_img="${DBTOOL_IMAGE_REF:-}"
+if [[ -z "$dbtool_img" ]]; then
+  log_error "DBTOOL_IMAGE_REF immutable digest is required for backup and migration."
+  exit 1
+fi
+validate_digest "$dbtool_img" "dbtool"
 create_preflight_backup "$DATA_VOLUME_NAME" "$dbtool_img" "$ACTIVE_SLOT" >/dev/null
 
 # Execute dbtool schema migration if enabled

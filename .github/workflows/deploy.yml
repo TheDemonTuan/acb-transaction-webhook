@@ -552,6 +552,7 @@ jobs:
           export BROWSER_IMAGE_REF="$BROWSER_IMAGE"
           export TTS_IMAGE_REF="$TTS_IMAGE"
           export BARK_IMAGE_REF="$BARK_IMAGE_REF"
+          export UPGRADE_CORE=1
           cd "$DEPLOY_PATH"
-          timeout 900 ./deploy/deploy-warm.sh "$IMAGE"
+          timeout 900 ./deploy/deploy-warm.sh --upgrade-core "$IMAGE"
           REMOTE

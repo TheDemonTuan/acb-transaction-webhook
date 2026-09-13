@@ -89,6 +89,12 @@ fi
 validate_digest "$image_ref" "gateway"
 export IMAGE_REF="$image_ref"
 export GATEWAY_IMAGE_REF="$image_ref"
+if [[ -z "${WORKER_IMAGE_REF:-}" && -n "${WORKER_IMAGE:-}" ]]; then
+  export WORKER_IMAGE_REF="$WORKER_IMAGE"
+fi
+if [[ -z "${DBTOOL_IMAGE_REF:-}" && -n "${DBTOOL_IMAGE:-}" ]]; then
+  export DBTOOL_IMAGE_REF="$DBTOOL_IMAGE"
+fi
 
 if [[ -n "$browser_image_ref" ]]; then
   export AUTH_BROWSER_IMAGE_REF="$browser_image_ref"

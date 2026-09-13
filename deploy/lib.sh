@@ -371,10 +371,20 @@ atomic_switch_route() {
   cat <<EOF > "$tmp_config"
 http:
   routers:
-    acb-router:
-      rule: "Host(\`bank.tuannguyenviet.site\`)"
+    acb-deny-internal:
+      rule: "Host(\`bank.tuannguyenviet.site\`) && PathPrefix(\`/internal\`)"
       entryPoints:
         - web
+      priority: 1000
+      middlewares:
+        - deny-internal
+      service: acb-service
+
+    acb-router:
+      rule: "Host(\`bank.tuannguyenviet.site\`) && !PathPrefix(\`/internal\`)"
+      entryPoints:
+        - web
+      priority: 100
       middlewares:
         - tunnel-only
         - security-headers
