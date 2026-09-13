@@ -1,290 +1,990 @@
 #!/usr/bin/env python3
 """
-VPS Unified Failover Controller (Event-Driven + Reconcile Safety Net)
-Manages multi-app warm standby Blue/Green failover across the entire VPS.
-Listens to Docker events realtime (die, oom, health_status: unhealthy).
+VPS Unified Stateful Multi-App Failover Engine.
+Event-driven + periodic reconciliation for warm standby Blue/Green and singleton workloads.
+Trusted root-owned registry: /etc/vps-failover/apps.d/<app>.json
+Canonical crash-safe state:   /var/lib/vps-failover/apps/<app>/state.json
+Runtime per-app locks:        /run/lock/vps-failover/<app>.lock
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import logging
 import os
+import queue
+import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S%z",
 )
 logger = logging.getLogger("vps-failover")
 
-COOLDOWN_SECONDS = 300  # 5 minutes per-app cooldown
-STATE_DIR = Path("/tmp/vps-failover")
-STATE_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_REGISTRY_DIR = Path("/etc/vps-failover/apps.d")
+DEFAULT_STATE_DIR = Path("/var/lib/vps-failover/apps")
+DEFAULT_LOCK_DIR = Path("/run/lock/vps-failover")
+DEFAULT_COOLDOWN_SECONDS = 300
+DEFAULT_MAX_RESTARTS = 3
+TRUSTED_PATH_PREFIXES = ("/usr/local/bin/", "/opt/platform/bin/", "/usr/bin/", "/bin/")
+APP_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
-def run_cmd(cmd, timeout=15):
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return res.returncode, res.stdout.strip(), res.stderr.strip()
-    except Exception as e:
-        return -1, "", str(e)
+class CASConflictError(Exception):
+    """Raised when state revision does not match expected CAS revision."""
 
 
-def inspect_container(name):
-    code, out, _ = run_cmd(["docker", "inspect", name])
-    if code != 0 or not out:
-        return None
-    try:
-        data = json.loads(out)
-        if data and isinstance(data, list):
-            return data[0]
-    except Exception:
-        pass
-    return None
+@dataclass
+class SlotConfig:
+    slot_name: str
+    container_name: str
+    service: str = ""
 
 
-def is_on_cooldown(app_name):
-    lock_file = STATE_DIR / f"{app_name}.cooldown"
-    if lock_file.exists():
-        age = time.time() - lock_file.stat().st_mtime
-        if age < COOLDOWN_SECONDS:
-            logger.info("App %s is on failover cooldown (elapsed %.0fs / %ds)", app_name, age, COOLDOWN_SECONDS)
-            return True
-        lock_file.unlink(missing_ok=True)
-    return False
+@dataclass
+class AppConfig:
+    app: str
+    workload_class: str  # "blue_green" or "singleton"
+    slots: Dict[str, SlotConfig] = field(default_factory=dict)
+    container_name: str = ""  # for singleton
+    cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS
+    max_restarts: int = DEFAULT_MAX_RESTARTS
+    switch_cmd: Optional[List[str]] = None
+    health_timeout: int = 20
 
+    @classmethod
+    def from_dict(cls, data: dict, app_name: str) -> AppConfig:
+        if not APP_NAME_REGEX.match(app_name):
+            raise ValueError(f"Invalid app name '{app_name}'")
 
-def set_cooldown(app_name):
-    lock_file = STATE_DIR / f"{app_name}.cooldown"
-    lock_file.touch()
+        cfg_app = data.get("app", app_name)
+        if cfg_app != app_name:
+            raise ValueError(f"Registry 'app' field ({cfg_app}) does not match filename ({app_name})")
 
-
-def switch_traefik_slot(app_name, target_slot):
-    # 1. Check if an app-specific switch script exists (e.g. /opt/bank-event-gateway/deploy/switch-slot.sh)
-    app_dirs = [
-        Path("/opt/bank-event-gateway"),
-        Path(f"/opt/{app_name}"),
-    ]
-    for d in app_dirs:
-        script = d / "deploy" / "switch-slot.sh"
-        if script.exists():
-            code, out, err = run_cmd(["/bin/bash", str(script), target_slot], timeout=15)
-            if code == 0:
-                logger.info("Successfully executed %s for slot %s", script, target_slot)
-                return True
-            else:
-                logger.warning("Script %s failed: %s %s", script, out, err)
-
-    # 2. Fallback: Directly update Traefik dynamic config file
-    dynamic_files = [
-        Path(f"/opt/platform/edge/dynamic/{app_name}.yml"),
-        Path(f"/opt/edge/dynamic/{app_name}.yml"),
-    ]
-    for cfg in dynamic_files:
-        if cfg.exists():
-            try:
-                content = cfg.read_text()
-                # Replace acb-web-blue with acb-web-green or vice versa
-                other_slot = "green" if target_slot == "blue" else "blue"
-                old_str = f"acb-web-{other_slot}"
-                new_str = f"acb-web-{target_slot}"
-                if old_str in content:
-                    content = content.replace(old_str, new_str)
-                    tmp = cfg.with_suffix(".tmp")
-                    tmp.write_text(content)
-                    tmp.replace(cfg)
-                    logger.info("Atomically updated %s upstream to %s", cfg, new_str)
-                    return True
-            except Exception as e:
-                logger.error("Failed to update dynamic config %s: %s", cfg, e)
-    return False
-
-
-def handle_failover(container_name, labels):
-    app = labels.get("platform.failover.app", "")
-    current_slot = labels.get("platform.failover.slot", "")
-    peer_name = labels.get("platform.failover.peer", "")
-    workload_class = labels.get("platform.workload.class", "http")
-
-    if not app or not peer_name:
-        return
-
-    if workload_class == "singleton":
-        logger.warning("Container %s is a singleton workload. Never auto-failover to duplicate instance.", container_name)
-        return
-
-    if is_on_cooldown(app):
-        return
-
-    logger.warning("Initiating failover evaluation for app=%s (primary=%s, peer=%s)", app, container_name, peer_name)
-
-    # Verify primary failure (double check with 2s delay to avoid transient spikes)
-    time.sleep(2)
-    inspect = inspect_container(container_name)
-    if inspect:
-        state = inspect.get("State", {})
-        status = state.get("Status", "")
-        health = state.get("Health", {}).get("Status", "")
-        # If primary recovered on its own, cancel failover
-        if status == "running" and (health == "healthy" or not health):
-            logger.info("Primary %s recovered on its own. Failover aborted.", container_name)
-            return
-
-    # Attempt 1 bounded emergency restart of primary if container died
-    logger.info("Attempting single emergency restart of primary container %s...", container_name)
-    run_cmd(["docker", "restart", "-t", "5", container_name], timeout=10)
-    time.sleep(3)
-    inspect = inspect_container(container_name)
-    if inspect:
-        state = inspect.get("State", {})
-        if state.get("Status") == "running" and state.get("Health", {}).get("Status") != "unhealthy":
-            logger.info("Primary %s recovered after restart. Failover aborted.", container_name)
-            return
-
-    # Primary still failing -> Activate Peer (Warm Standby)
-    logger.critical("Primary %s failed. Activating warm standby peer %s...", container_name, peer_name)
-    set_cooldown(app)
-
-    code, out, err = run_cmd(["docker", "start", peer_name], timeout=15)
-    if code != 0:
-        logger.error("Failed to start peer container %s: %s %s", peer_name, out, err)
-        return
-
-    # Wait for peer readiness (up to 20 seconds)
-    peer_ready = False
-    peer_slot = "green" if current_slot == "blue" else "blue"
-    for _ in range(10):
-        time.sleep(2)
-        p_inspect = inspect_container(peer_name)
-        if not p_inspect:
-            continue
-        p_state = p_inspect.get("State", {})
-        if p_state.get("Status") == "running":
-            # Check internal health probe if available
-            code, _, _ = run_cmd(["docker", "exec", peer_name, "/gateway", "--healthcheck"], timeout=3)
-            if code == 0:
-                peer_ready = True
-                break
-            # If no healthcheck binary, running status is accepted
-            if "Health" not in p_state:
-                peer_ready = True
-                break
-
-    if peer_ready:
-        logger.info("Peer container %s is READY. Switching routing pointer to %s...", peer_name, peer_slot)
-        if switch_traefik_slot(app, peer_slot):
-            logger.info("SUCCESS: Failover completed. App %s is now served by %s", app, peer_name)
+        raw_class = data.get("workload_class", "blue_green").lower()
+        if raw_class in ("http", "blue_green", "warm_standby"):
+            workload_class = "blue_green"
+        elif raw_class in ("singleton", "worker"):
+            workload_class = "singleton"
         else:
-            logger.error("Failed to update route pointer for app %s to slot %s", app, peer_slot)
-    else:
-        logger.error("ERROR: Peer container %s failed to become healthy within timeout", peer_name)
+            raise ValueError(f"Unsupported workload_class '{raw_class}' for app '{app_name}'")
+
+        slots: Dict[str, SlotConfig] = {}
+        container_name = ""
+
+        if workload_class == "blue_green":
+            raw_slots = data.get("slots", {})
+            if not isinstance(raw_slots, dict) or len(raw_slots) < 2:
+                raise ValueError(f"App '{app_name}' must configure at least 2 slots (e.g. blue and green)")
+            for s_name, s_val in raw_slots.items():
+                if not isinstance(s_val, dict) or not s_val.get("container_name"):
+                    raise ValueError(f"Slot '{s_name}' for app '{app_name}' must specify 'container_name'")
+                slots[s_name] = SlotConfig(
+                    slot_name=s_name,
+                    container_name=str(s_val["container_name"]),
+                    service=str(s_val.get("service", "")),
+                )
+        else:
+            container_name = str(data.get("container_name", ""))
+            if not container_name:
+                raise ValueError(f"Singleton app '{app_name}' must specify 'container_name'")
+
+        switch_cmd = data.get("switch_cmd")
+        if switch_cmd is not None:
+            if not isinstance(switch_cmd, list) or not switch_cmd:
+                raise ValueError(f"Invalid switch_cmd for app '{app_name}': must be non-empty list of strings")
+            for arg in switch_cmd:
+                if not isinstance(arg, str):
+                    raise ValueError(f"switch_cmd args must be strings in app '{app_name}'")
+            # Validate trusted executable path
+            bin_path = switch_cmd[0]
+            if not any(bin_path.startswith(prefix) for prefix in TRUSTED_PATH_PREFIXES):
+                raise ValueError(f"switch_cmd binary '{bin_path}' not in trusted prefixes: {TRUSTED_PATH_PREFIXES}")
+
+        return cls(
+            app=app_name,
+            workload_class=workload_class,
+            slots=slots,
+            container_name=container_name,
+            cooldown_seconds=int(data.get("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)),
+            max_restarts=int(data.get("max_restarts", DEFAULT_MAX_RESTARTS)),
+            switch_cmd=switch_cmd,
+            health_timeout=int(data.get("health_timeout", 20)),
+        )
 
 
-def reconcile():
-    """Safety net scan every 60s: inspects all failover-enabled containers"""
-    logger.info("Running reconcile safety net scan...")
-    code, out, _ = run_cmd(["docker", "ps", "-a", "--filter", "label=platform.failover.enabled=true", "--format", "{{json .}}"])
-    if code != 0 or not out:
-        return
+class AppLock:
+    """Per-app runtime mutual exclusion file lock with timeout."""
 
-    apps = {}
-    for line in out.splitlines():
+    def __init__(self, app_name: str, lock_dir: Path | str = DEFAULT_LOCK_DIR, timeout: float = 5.0):
+        if not APP_NAME_REGEX.match(app_name):
+            raise ValueError(f"Invalid app name for lock: '{app_name}'")
+        self.app_name = app_name
+        self.lock_dir = Path(lock_dir)
+        self.timeout = timeout
+        self.lock_path = self.lock_dir / f"{app_name}.lock"
+        self._fd: Optional[int] = None
+
+    def __enter__(self) -> AppLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+    def acquire(self) -> AppLock:
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o640)
+        start_time = time.time()
+        while True:
+            try:
+                if fcntl:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
+                return self
+            except (BlockingIOError, OSError, IOError) as e:
+                if time.time() - start_time >= self.timeout:
+                    if self._fd is not None:
+                        os.close(self._fd)
+                        self._fd = None
+                    raise TimeoutError(f"AppLock timeout ({self.timeout}s) on {self.lock_path}: {e}")
+                time.sleep(0.05)
+
+    def release(self):
+        if self._fd is not None:
+            try:
+                if fcntl:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+                elif sys.platform == "win32":
+                    import msvcrt
+                    try:
+                        msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+
+
+def make_initial_state(app_name: str) -> dict:
+    return {
+        "schema_version": 1,
+        "app": app_name,
+        "revision": 0,
+        "active_slot": None,
+        "operation_lease": None,
+        "pending_route": None,
+        "slots": {},
+        "last_failover_time": None,
+        "restarts_count": 0,
+        "degraded": False,
+        "degraded_reason": None,
+    }
+
+
+def load_state(app_name: str, state_dir: Path | str = DEFAULT_STATE_DIR) -> dict:
+    target_file = Path(state_dir) / app_name / "state.json"
+    if not target_file.exists():
+        return make_initial_state(app_name)
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("State root must be a JSON object")
+            return data
+    except Exception as e:
+        logger.error("State file %s corrupted: %s. Backing up and resetting state.", target_file, e)
+        corrupt_backup = target_file.with_name(f"state.json.corrupt.{int(time.time())}")
         try:
-            c = json.loads(line)
-            inspect = inspect_container(c.get("ID", c.get("Names", "")))
-            if not inspect:
-                continue
-            labels = inspect.get("Config", {}).get("Labels", {})
-            app = labels.get("platform.failover.app")
-            if not app:
-                continue
-            if app not in apps:
-                apps[app] = []
-            apps[app].append({
-                "name": inspect.get("Name", "").lstrip("/"),
-                "state": inspect.get("State", {}),
-                "labels": labels,
-            })
-        except Exception:
+            target_file.rename(corrupt_backup)
+        except OSError:
+            pass
+        recovered = make_initial_state(app_name)
+        recovered["degraded"] = True
+        recovered["degraded_reason"] = f"Corrupt state file recovered: {e}"
+        return recovered
+
+
+def save_state_atomic(app_name: str, state: dict, state_dir: Path | str = DEFAULT_STATE_DIR) -> None:
+    target_dir = Path(state_dir) / app_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_file = target_dir / "state.json"
+    temp_file = target_dir / f"state.json.tmp.{os.getpid()}_{uuid.uuid4().hex}"
+
+    content = json.dumps(state, indent=2, sort_keys=True)
+    with open(temp_file, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp_file, target_file)
+
+    if hasattr(os, "O_DIRECTORY") and hasattr(os, "fsync"):
+        try:
+            dfd = os.open(str(target_dir), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
             pass
 
-    for app, containers in apps.items():
-        running = [c for c in containers if c["state"].get("Status") == "running"]
-        unhealthy = [c for c in running if c["state"].get("Health", {}).get("Status") == "unhealthy"]
 
-        if not running and containers:
-            logger.warning("Reconcile: App %s has NO running containers. Starting first peer %s", app, containers[0]["name"])
-            run_cmd(["docker", "start", containers[0]["name"]])
-        elif unhealthy and len(running) == 1:
-            bad_c = unhealthy[0]
-            logger.warning("Reconcile: App %s active container %s is unhealthy", app, bad_c["name"])
-            handle_failover(bad_c["name"], bad_c["labels"])
+def check_or_reap_lease(state: dict, now: float) -> Tuple[bool, str]:
+    """
+    Evaluates lease.
+    Returns (is_active, message).
+    If expired, mutates state dict to remove lease and returns False.
+    """
+    lease = state.get("operation_lease")
+    if not lease:
+        return False, ""
+    expires_at = float(lease.get("expires_at", 0))
+    if now >= expires_at:
+        owner = lease.get("owner", "unknown")
+        op = lease.get("operation", "unknown")
+        state["operation_lease"] = None
+        return False, f"Evicted stale lease (owner={owner}, op={op}, expired_at={expires_at})"
+    return True, f"Active lease held by {lease.get('owner')} for {lease.get('operation')} until {expires_at}"
 
 
-def listen_events():
-    """Event-driven fast path: streams Docker events realtime"""
-    logger.info("VPS Failover Controller started. Listening to realtime Docker events...")
-    cmd = [
-        "docker", "events",
-        "--format", "{{json .}}",
-        "--filter", "type=container",
-        "--filter", "event=die",
-        "--filter", "event=oom",
-        "--filter", "event=health_status",
-    ]
+class CommandRunner:
+    """Fixed trusted command runner (never shell=True)."""
 
-    while True:
-        proc = None
+    def run(self, cmd: List[str], timeout: int = 15) -> Tuple[int, str, str]:
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            for line in proc.stdout:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return res.returncode, res.stdout.strip(), res.stderr.strip()
+        except Exception as e:
+            return -1, "", str(e)
+
+
+class DockerClient:
+    """Interface to Docker CLI and Event Stream."""
+
+    def __init__(self, runner: Optional[CommandRunner] = None):
+        self.runner = runner or CommandRunner()
+
+    def inspect_container(self, name_or_id: str) -> Optional[dict]:
+        code, out, _ = self.runner.run(["docker", "inspect", name_or_id], timeout=10)
+        if code != 0 or not out:
+            return None
+        try:
+            data = json.loads(out)
+            if isinstance(data, list) and data:
+                return data[0]
+        except Exception:
+            pass
+        return None
+
+    def start_container(self, name_or_id: str) -> Tuple[int, str, str]:
+        return self.runner.run(["docker", "start", name_or_id], timeout=20)
+
+    def restart_container(self, name_or_id: str) -> Tuple[int, str, str]:
+        return self.runner.run(["docker", "restart", "-t", "5", name_or_id], timeout=20)
+
+    def exec_healthcheck(self, name_or_id: str, probe_cmd: Optional[List[str]] = None) -> bool:
+        cmd = ["docker", "exec", name_or_id] + (probe_cmd or ["/gateway", "--healthcheck"])
+        code, _, _ = self.runner.run(cmd, timeout=5)
+        return code == 0
+
+    def events_stream(self):
+        """Yields JSON parsed event objects from docker events."""
+        cmd = [
+            "docker", "events",
+            "--format", "{{json .}}",
+            "--filter", "type=container",
+            "--filter", "event=die",
+            "--filter", "event=oom",
+            "--filter", "event=health_status",
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            for line in proc.stdout:  # type: ignore
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    event = json.loads(line)
-                    action = event.get("Action", "")
-                    actor = event.get("Actor", {})
-                    attributes = actor.get("Attributes", {})
-                    container_name = attributes.get("name", "")
-
-                    if attributes.get("platform.failover.enabled") != "true":
-                        continue
-
-                    # Process triggers: die, oom, or health_status: unhealthy
-                    if action in ("die", "oom") or action.startswith("health_status: unhealthy"):
-                        logger.warning("Detected event: action=%s on container=%s", action, container_name)
-                        handle_failover(container_name, attributes)
-                except Exception as e:
-                    logger.debug("Error parsing event: %s", e)
-        except Exception as e:
-            logger.error("Docker events stream interrupted: %s. Retrying in 5s...", e)
-            time.sleep(5)
-        finally:
-            if proc:
-                try:
-                    proc.kill()
+                    yield json.loads(line)
                 except Exception:
-                    pass
+                    continue
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+class SystemClock:
+    def now(self) -> float:
+        return time.time()
+
+    def sleep(self, seconds: float):
+        time.sleep(seconds)
+
+
+class FailoverEngine:
+    """
+    Multi-app stateful failover and reconcile engine.
+    Root-owned registry + canonical crash-safe state + runtime locking.
+    """
+
+    def __init__(
+        self,
+        registry_dir: Path | str = DEFAULT_REGISTRY_DIR,
+        state_dir: Path | str = DEFAULT_STATE_DIR,
+        lock_dir: Path | str = DEFAULT_LOCK_DIR,
+        runner: Optional[CommandRunner] = None,
+        docker_client: Optional[DockerClient] = None,
+        clock: Optional[SystemClock] = None,
+        queue_maxsize: int = 500,
+    ):
+        self.registry_dir = Path(registry_dir)
+        self.state_dir = Path(state_dir)
+        self.lock_dir = Path(lock_dir)
+        self.runner = runner or CommandRunner()
+        self.docker_client = docker_client or DockerClient(self.runner)
+        self.clock = clock or SystemClock()
+
+        self.event_queue: queue.Queue = queue.Queue(maxsize=queue_maxsize)
+        self._dirty_apps: Set[str] = set()
+        self._queue_lock = threading.Lock()
+        self.running = False
+        self._stop_event = threading.Event()
+
+    def load_registry(self) -> Dict[str, AppConfig]:
+        configs: Dict[str, AppConfig] = {}
+        if not self.registry_dir.exists():
+            return configs
+        for path in self.registry_dir.glob("*.json"):
+            app_name = path.stem
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                cfg = AppConfig.from_dict(data, app_name)
+                configs[app_name] = cfg
+            except Exception as e:
+                logger.error("Failed to load registry config %s: %s", path, e)
+        return configs
+
+    def get_app_config(self, app_name: str) -> Optional[AppConfig]:
+        path = self.registry_dir / f"{app_name}.json"
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return AppConfig.from_dict(data, app_name)
+        except Exception as e:
+            logger.error("Failed to parse app config %s: %s", path, e)
+            return None
+
+    def execute_switch(self, app_cfg: AppConfig, target_slot: str) -> bool:
+        """Executes fixed trusted switch command without shell interpolation."""
+        if target_slot not in app_cfg.slots:
+            logger.error("Refusing switch: target_slot '%s' not registered for app '%s'", target_slot, app_cfg.app)
+            return False
+
+        if app_cfg.switch_cmd:
+            cmd = [arg.replace("{app}", app_cfg.app).replace("{slot}", target_slot) for arg in app_cfg.switch_cmd]
+        else:
+            cmd = ["/usr/local/bin/platform-switch", app_cfg.app, target_slot]
+
+        # Path validation: executable must be absolute and within trusted prefixes
+        bin_path = cmd[0]
+        if not any(bin_path.startswith(prefix) for prefix in TRUSTED_PATH_PREFIXES):
+            logger.error("Untrusted switch executable '%s' for app '%s'", bin_path, app_cfg.app)
+            return False
+
+        logger.info("Executing trusted switch: %s", " ".join(cmd))
+        code, out, err = self.runner.run(cmd, timeout=30)
+        if code == 0:
+            logger.info("Switch succeeded for app %s to slot %s: %s", app_cfg.app, target_slot, out)
+            return True
+        logger.error("Switch failed for app %s to slot %s (code=%d): %s %s", app_cfg.app, target_slot, code, out, err)
+        return False
+
+    def handle_failover(
+        self,
+        app_name: str,
+        event_slot: str,
+        event_container_id: str,
+        event_action: str,
+    ) -> None:
+        """
+        Active slot event evaluation under lock.
+        Validates container id/generation, lease, and cooldown.
+        """
+        app_cfg = self.get_app_config(app_name)
+        if not app_cfg:
+            logger.warning("No registry config found for app '%s'. Ignoring event.", app_name)
+            return
+
+        with AppLock(app_name, self.lock_dir):
+            state = load_state(app_name, self.state_dir)
+            now = self.clock.now()
+
+            # Check operation lease
+            is_active, lease_msg = check_or_reap_lease(state, now)
+            if is_active:
+                logger.info("App %s: active operation lease in effect (%s). Skipping failover.", app_name, lease_msg)
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            if state.get("operation_lease") is None and lease_msg:
+                # Stale lease was reaped; persist state
+                save_state_atomic(app_name, state, self.state_dir)
+
+            if app_cfg.workload_class == "singleton":
+                self._handle_singleton_failure(app_cfg, state, event_container_id, now)
+                return
+
+            # Blue/Green workload
+            active_slot = state.get("active_slot")
+            if not active_slot:
+                logger.warning("App %s: active slot is missing/unknown. Safe degraded mode, no default blue.", app_name)
+                state["degraded"] = True
+                state["degraded_reason"] = "Active slot missing or unknown; failover aborted without default"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Intentional standby stopped check:
+            # Only events affecting active slot trigger failover!
+            if event_slot != active_slot:
+                logger.info(
+                    "App %s: event on slot '%s' ignored (active slot is '%s'). Standby stopped/transition is normal.",
+                    app_name,
+                    event_slot,
+                    active_slot,
+                )
+                if "slots" not in state:
+                    state["slots"] = {}
+                if event_slot not in state["slots"]:
+                    state["slots"][event_slot] = {}
+                state["slots"][event_slot]["status"] = "stopped"
+                state["slots"][event_slot]["last_transition"] = now
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Active slot event -> validate container ID / generation
+            recorded_id = state.get("slots", {}).get(active_slot, {}).get("container_id")
+            if recorded_id and event_container_id and recorded_id != event_container_id:
+                logger.warning(
+                    "App %s: stale event on active slot '%s' (event id %s != recorded active id %s). Ignoring.",
+                    app_name,
+                    active_slot,
+                    event_container_id,
+                    recorded_id,
+                )
+                return
+
+            # Verify active container actual health status
+            active_slot_cfg = app_cfg.slots.get(active_slot)
+            if not active_slot_cfg:
+                state["degraded"] = True
+                state["degraded_reason"] = f"Active slot {active_slot} not defined in registry"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            inspect = self.docker_client.inspect_container(active_slot_cfg.container_name)
+            if inspect:
+                c_state = inspect.get("State", {})
+                status = c_state.get("Status", "")
+                health = c_state.get("Health", {}).get("Status", "")
+                if status == "running" and (health == "healthy" or not health):
+                    logger.info("App %s: container %s is running and healthy. Spurious event ignored.", app_name, active_slot_cfg.container_name)
+                    return
+
+            # Cooldown check
+            last_failover = state.get("last_failover_time")
+            if last_failover and (now - float(last_failover)) < app_cfg.cooldown_seconds:
+                elapsed = now - float(last_failover)
+                logger.warning(
+                    "App %s: active slot failed but failover blocked by cooldown (elapsed %.1fs < %ds).",
+                    app_name,
+                    elapsed,
+                    app_cfg.cooldown_seconds,
+                )
+                state["degraded"] = True
+                state["degraded_reason"] = f"Active slot failed within cooldown ({elapsed:.0f}s < {app_cfg.cooldown_seconds}s)"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Determine peer standby slot
+            candidate_slots = [s for s in app_cfg.slots.keys() if s != active_slot]
+            if not candidate_slots:
+                state["degraded"] = True
+                state["degraded_reason"] = "No standby slot configured in registry"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+            target_slot = candidate_slots[0]
+            target_slot_cfg = app_cfg.slots[target_slot]
+
+            logger.critical(
+                "App %s: Active container %s failed. Activating warm standby slot %s (%s)...",
+                app_name,
+                active_slot_cfg.container_name,
+                target_slot,
+                target_slot_cfg.container_name,
+            )
+
+            # Start standby container
+            code, out, err = self.docker_client.start_container(target_slot_cfg.container_name)
+            if code != 0:
+                logger.error("Failed to start standby %s: %s %s", target_slot_cfg.container_name, out, err)
+                state["degraded"] = True
+                state["degraded_reason"] = f"Failed to start standby container {target_slot_cfg.container_name}"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Readiness probe
+            ready = False
+            for _ in range(app_cfg.health_timeout):
+                p_inspect = self.docker_client.inspect_container(target_slot_cfg.container_name)
+                if p_inspect:
+                    p_state = p_inspect.get("State", {})
+                    if p_state.get("Status") == "running":
+                        health_stat = p_state.get("Health", {}).get("Status")
+                        if health_stat == "healthy":
+                            ready = True
+                            break
+                        if not health_stat and self.docker_client.exec_healthcheck(target_slot_cfg.container_name):
+                            ready = True
+                            break
+                        if "Health" not in p_state:
+                            ready = True
+                            break
+                self.clock.sleep(1)
+
+            if not ready:
+                logger.error("Standby container %s failed readiness check within %ds", target_slot_cfg.container_name, app_cfg.health_timeout)
+                state["degraded"] = True
+                state["degraded_reason"] = f"Standby container {target_slot_cfg.container_name} readiness timeout"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Perform atomic switch
+            if not self.execute_switch(app_cfg, target_slot):
+                state["degraded"] = True
+                state["degraded_reason"] = f"Switch command execution failed for target slot {target_slot}"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Update canonical state
+            target_inspect = self.docker_client.inspect_container(target_slot_cfg.container_name)
+            state["active_slot"] = target_slot
+            state["last_failover_time"] = now
+            state["degraded"] = False
+            state["degraded_reason"] = None
+            if "slots" not in state:
+                state["slots"] = {}
+            state["slots"][target_slot] = {
+                "container_id": target_inspect.get("Id", "") if target_inspect else "",
+                "image_digest": target_inspect.get("Image", "") if target_inspect else "",
+                "status": "running",
+                "health": "healthy",
+                "last_transition": now,
+            }
+            if active_slot in state["slots"]:
+                state["slots"][active_slot]["status"] = "failed"
+                state["slots"][active_slot]["last_transition"] = now
+
+            save_state_atomic(app_name, state, self.state_dir)
+            logger.info("Failover completed successfully. App %s active slot is now %s.", app_name, target_slot)
+
+    def _handle_singleton_failure(self, app_cfg: AppConfig, state: dict, event_container_id: str, now: float) -> None:
+        """Singleton workload: bounded restart same instance, never duplicate."""
+        app_name = app_cfg.app
+        c_name = app_cfg.container_name
+        restarts = int(state.get("restarts_count", 0))
+
+        if restarts < app_cfg.max_restarts:
+            state["restarts_count"] = restarts + 1
+            save_state_atomic(app_name, state, self.state_dir)
+            logger.warning(
+                "App %s: singleton container %s failed. Bounded emergency restart (%d/%d)...",
+                app_name,
+                c_name,
+                restarts + 1,
+                app_cfg.max_restarts,
+            )
+            self.docker_client.restart_container(c_name)
+        else:
+            logger.critical(
+                "App %s: singleton container %s exceeded max restarts (%d). Marked degraded without duplication.",
+                app_name,
+                c_name,
+                app_cfg.max_restarts,
+            )
+            state["degraded"] = True
+            state["degraded_reason"] = f"Singleton exceeded max restarts ({app_cfg.max_restarts})"
+            save_state_atomic(app_name, state, self.state_dir)
+
+    def reconcile_app(self, app_name: str) -> None:
+        """Reconciles canonical state with reality for a single app."""
+        app_cfg = self.get_app_config(app_name)
+        if not app_cfg:
+            return
+
+        with AppLock(app_name, self.lock_dir):
+            state = load_state(app_name, self.state_dir)
+            now = self.clock.now()
+
+            is_active, lease_msg = check_or_reap_lease(state, now)
+            if is_active:
+                logger.info("Reconcile: App %s skipped (active lease: %s)", app_name, lease_msg)
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            if state.get("operation_lease") is None and lease_msg:
+                save_state_atomic(app_name, state, self.state_dir)
+
+            if app_cfg.workload_class == "singleton":
+                insp = self.docker_client.inspect_container(app_cfg.container_name)
+                status = insp.get("State", {}).get("Status") if insp else "missing"
+                if status != "running":
+                    self._handle_singleton_failure(app_cfg, state, insp.get("Id", "") if insp else "", now)
+                else:
+                    state["slots"] = {
+                        "singleton": {
+                            "container_id": insp.get("Id", "") if insp else "",
+                            "status": "running",
+                            "health": insp.get("State", {}).get("Health", {}).get("Status", "healthy") if insp else "",
+                            "last_transition": now,
+                        }
+                    }
+                    save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            # Blue/Green reconcile
+            active_slot = state.get("active_slot")
+            if not active_slot:
+                # Check running containers
+                running_healthy = []
+                for s_name, s_cfg in app_cfg.slots.items():
+                    insp = self.docker_client.inspect_container(s_cfg.container_name)
+                    if insp:
+                        c_st = insp.get("State", {})
+                        if c_st.get("Status") == "running" and c_st.get("Health", {}).get("Status") != "unhealthy":
+                            running_healthy.append((s_name, insp))
+
+                if len(running_healthy) == 1:
+                    chosen_slot, insp = running_healthy[0]
+                    state["active_slot"] = chosen_slot
+                    state["degraded"] = False
+                    state["degraded_reason"] = None
+                    if "slots" not in state:
+                        state["slots"] = {}
+                    state["slots"][chosen_slot] = {
+                        "container_id": insp.get("Id", ""),
+                        "image_digest": insp.get("Image", ""),
+                        "status": "running",
+                        "health": "healthy",
+                        "last_transition": now,
+                    }
+                    save_state_atomic(app_name, state, self.state_dir)
+                    logger.info("Reconcile: Identified running active slot %s for app %s", chosen_slot, app_name)
+                else:
+                    # Missing active: safe degraded mode, NEVER default to blue
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Missing active slot; found {len(running_healthy)} healthy candidates"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    logger.warning("Reconcile: Missing active slot for app %s. Degraded mode entered, no default blue.", app_name)
+                    return
+                active_slot = state.get("active_slot")
+
+            active_cfg = app_cfg.slots.get(active_slot)
+            if not active_cfg:
+                state["degraded"] = True
+                state["degraded_reason"] = f"Active slot {active_slot} not configured in registry"
+                save_state_atomic(app_name, state, self.state_dir)
+                return
+
+            active_insp = self.docker_client.inspect_container(active_cfg.container_name)
+            is_active_healthy = (
+                active_insp is not None
+                and active_insp.get("State", {}).get("Status") == "running"
+                and active_insp.get("State", {}).get("Health", {}).get("Status") != "unhealthy"
+            )
+
+            if not is_active_healthy:
+                logger.warning("Reconcile: Active slot container %s is unhealthy/stopped for app %s.", active_cfg.container_name, app_name)
+                # Fall into failover handling
+                cid = active_insp.get("Id", "") if active_insp else ""
+                # Call handle_failover logic within current lock
+                # Release lock to avoid nested re-entry
+            else:
+                # Active is healthy. Verify standby slot:
+                # Controller handles intentional standby stopped: Standby stopped is valid.
+                if "slots" not in state:
+                    state["slots"] = {}
+                state["slots"][active_slot] = {
+                    "container_id": active_insp.get("Id", ""),
+                    "image_digest": active_insp.get("Image", ""),
+                    "status": "running",
+                    "health": active_insp.get("State", {}).get("Health", {}).get("Status", "healthy"),
+                    "last_transition": now,
+                }
+                for s_name, s_cfg in app_cfg.slots.items():
+                    if s_name == active_slot:
+                        continue
+                    standby_insp = self.docker_client.inspect_container(s_cfg.container_name)
+                    standby_status = standby_insp.get("State", {}).get("Status") if standby_insp else "stopped"
+                    state["slots"][s_name] = {
+                        "container_id": standby_insp.get("Id", "") if standby_insp else "",
+                        "image_digest": standby_insp.get("Image", "") if standby_insp else "",
+                        "status": standby_status,
+                        "health": standby_insp.get("State", {}).get("Health", {}).get("Status", "") if standby_insp else "",
+                        "last_transition": now,
+                    }
+                save_state_atomic(app_name, state, self.state_dir)
+
+        if not is_active_healthy:
+            # Active container unhealthy: execute failover
+            self.handle_failover(app_name, active_slot, cid, "reconcile_failure")
+
+    def reconcile_all(self) -> None:
+        """Initial / periodic reconcile across all registered apps."""
+        configs = self.load_registry()
+        for app_name in configs:
+            try:
+                self.reconcile_app(app_name)
+            except Exception as e:
+                logger.error("Reconcile failed for app %s: %s", app_name, e)
+
+    def ingest_docker_event(self, event: dict) -> bool:
+        """
+        Decoupled bounded ingestion.
+        Returns True if enqueued, False if dropped due to queue full (triggers dirty reconcile).
+        """
+        action = event.get("Action", "")
+        actor = event.get("Actor", {})
+        attributes = actor.get("Attributes", {})
+        container_name = attributes.get("name", "")
+        container_id = actor.get("ID", "")
+
+        # Quick action filter
+        if not (action in ("die", "oom") or action.startswith("health_status: unhealthy")):
+            return True
+
+        # Match container against registered apps
+        configs = self.load_registry()
+        matched_app: Optional[str] = None
+        matched_slot: str = ""
+
+        # Validate against registry config; NEVER trust arbitrary labels
+        for app_name, app_cfg in configs.items():
+            if app_cfg.workload_class == "singleton":
+                if app_cfg.container_name == container_name:
+                    matched_app = app_name
+                    matched_slot = "singleton"
+                    break
+            else:
+                for slot_name, slot_cfg in app_cfg.slots.items():
+                    if slot_cfg.container_name == container_name:
+                        matched_app = app_name
+                        matched_slot = slot_name
+                        break
+                if matched_app:
+                    break
+
+        if not matched_app:
+            return True
+
+        payload = {
+            "app": matched_app,
+            "slot": matched_slot,
+            "container_name": container_name,
+            "container_id": container_id,
+            "action": action,
+        }
+
+        try:
+            self.event_queue.put_nowait(payload)
+            return True
+        except queue.Full:
+            logger.warning(
+                "Event queue full! Dropped event for app %s (container %s). Marking app for dirty reconcile.",
+                matched_app,
+                container_name,
+            )
+            with self._queue_lock:
+                self._dirty_apps.add(matched_app)
+            return False
+
+    def process_event_batch(self, timeout: float = 1.0) -> bool:
+        """
+        Dequeues and coalesces events per app, executing failover or dirty reconcile.
+        Returns True if work was processed, False if queue idle.
+        """
+        # Check dirty apps first
+        dirty_app: Optional[str] = None
+        with self._queue_lock:
+            if self._dirty_apps:
+                dirty_app = self._dirty_apps.pop()
+
+        if dirty_app:
+            logger.info("Processing dirty reconcile for app %s due to queue overflow", dirty_app)
+            self.reconcile_app(dirty_app)
+            return True
+
+        try:
+            item = self.event_queue.get(timeout=timeout)
+        except queue.Empty:
+            return False
+
+        app = item["app"]
+        coalesced = [item]
+
+        # Coalesce any other pending events for the same app
+        others: List[dict] = []
+        while not self.event_queue.empty():
+            try:
+                nxt = self.event_queue.get_nowait()
+                if nxt["app"] == app:
+                    coalesced.append(nxt)
+                else:
+                    others.append(nxt)
+            except queue.Empty:
+                break
+
+        # Put back events for other apps
+        for other in others:
+            try:
+                self.event_queue.put_nowait(other)
+            except queue.Full:
+                with self._queue_lock:
+                    self._dirty_apps.add(other["app"])
+
+        # Execute failover evaluation on latest coalesced event
+        latest = coalesced[-1]
+        self.handle_failover(
+            app_name=latest["app"],
+            event_slot=latest["slot"],
+            event_container_id=latest["container_id"],
+            event_action=latest["action"],
+        )
+        return True
+
+    def run_event_stream_loop(self, backoff_init: float = 1.0, backoff_max: float = 30.0):
+        """Streams Docker events with reconnect EOF backoff and reconnect reconcile."""
+        backoff = backoff_init
+        while self.running:
+            try:
+                logger.info("Connecting to Docker event stream...")
+                stream = self.docker_client.events_stream()
+                # Run reconcile on successful (re)connect
+                self.reconcile_all()
+                backoff = backoff_init
+
+                for event in stream:
+                    if not self.running:
+                        break
+                    self.ingest_docker_event(event)
+            except EOFError as e:
+                logger.warning("Docker event stream encountered EOF (%s). Reconnecting in %.1fs...", e, backoff)
+            except Exception as e:
+                logger.error("Docker event stream error: %s. Reconnecting in %.1fs...", e, backoff)
+
+            if self.running:
+                self.clock.sleep(backoff)
+                backoff = min(backoff * 2, backoff_max)
+
+    def run_periodic_reconcile_loop(self, interval_seconds: int = 60):
+        """Safety net periodic reconcile scan."""
+        while self.running:
+            self.clock.sleep(interval_seconds)
+            if self.running:
+                logger.info("Executing periodic safety net reconcile scan...")
+                self.reconcile_all()
+
+    def start_daemon(self):
+        """Starts engine with initial reconcile, event stream, and worker thread."""
+        self.running = True
+        logger.info("VPS Failover Engine starting. Running initial reconcile...")
+        self.reconcile_all()
+
+        t_events = threading.Thread(target=self.run_event_stream_loop, daemon=True)
+        t_reconcile = threading.Thread(target=self.run_periodic_reconcile_loop, daemon=True)
+        t_events.start()
+        t_reconcile.start()
+
+        logger.info("VPS Failover Engine running. Listening for events and servicing queue...")
+        while self.running:
+            self.process_event_batch(timeout=1.0)
+
+    def stop(self):
+        self.running = False
+        self._stop_event.set()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="VPS Multi-App Unified Failover Controller")
+    parser.add_argument("--reconcile", action="store_true", help="Run one-shot safety net reconcile and exit")
+    parser.add_argument("--reconcile-app", type=str, default="", help="Run one-shot reconcile for specific app and exit")
+    parser.add_argument("--status", action="store_true", help="Print canonical state JSON for all registered apps")
+    parser.add_argument("--registry-dir", type=str, default=str(DEFAULT_REGISTRY_DIR))
+    parser.add_argument("--state-dir", type=str, default=str(DEFAULT_STATE_DIR))
+    parser.add_argument("--lock-dir", type=str, default=str(DEFAULT_LOCK_DIR))
+    return parser.parse_args()
 
 
 def main():
-    if "--reconcile" in sys.argv:
-        reconcile()
+    args = parse_args()
+    engine = FailoverEngine(
+        registry_dir=args.registry_dir,
+        state_dir=args.state_dir,
+        lock_dir=args.lock_dir,
+    )
+
+    if args.status:
+        configs = engine.load_registry()
+        result = {}
+        for app in configs:
+            result[app] = load_state(app, args.state_dir)
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.reconcile_app:
+        engine.reconcile_app(args.reconcile_app)
+        return
+
+    if args.reconcile:
+        engine.reconcile_all()
         return
 
     def sig_handler(sig, frame):
         logger.info("Terminating VPS Failover Controller...")
+        engine.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
-    listen_events()
+    engine.start_daemon()
 
 
 if __name__ == "__main__":
