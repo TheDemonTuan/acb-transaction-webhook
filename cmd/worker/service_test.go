@@ -80,8 +80,11 @@ func TestWorkerService_NotifyAndWake_Uninitialized(t *testing.T) {
 	if err := ws.RequestSync(ctx); err == nil {
 		t.Fatal("expected error when bank monitor is nil, got nil")
 	}
-	if _, err := ws.EnsureHistory(ctx, "2026-09-01", "2026-09-02"); err == nil {
-		t.Fatal("expected error when bank monitor is nil, got nil")
+	if _, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02"); err == nil {
+		t.Fatal("expected error when store is nil, got nil")
+	}
+	if err := ws.CancelHistoryJob(ctx, "job_123"); err == nil {
+		t.Fatal("expected error when store is nil, got nil")
 	}
 }
 
@@ -128,5 +131,67 @@ func TestWorkerService_VerifySession_FailsClosedOnStoreError(t *testing.T) {
 	}
 	if upstreamCalls.Load() != 0 {
 		t.Fatalf("expected zero upstream calls on store error, got %d", upstreamCalls.Load())
+	}
+}
+
+func TestWorkerService_CreateAndCancelHistoryJob(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_svc_history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := monitor.NewHistoryJobRunner(store, nil, nil, nil)
+	ws := &workerService{
+		store:         store,
+		historyRunner: runner,
+	}
+
+	// 1. Connection not monitoring
+	if _, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-10"); err == nil {
+		t.Fatal("expected error when connection is not MONITORING, got nil")
+	}
+
+	// Activate connection
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state = 'MONITORING' WHERE id = ?", conn.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Invalid range inputs
+	if _, err := ws.CreateHistoryJob(ctx, "bad-date", "2026-09-10"); err == nil {
+		t.Fatal("expected error for invalid fromDay, got nil")
+	}
+	if _, err := ws.CreateHistoryJob(ctx, "2026-09-10", "2026-09-01"); err == nil {
+		t.Fatal("expected error when fromDay > toDay, got nil")
+	}
+	if _, err := ws.CreateHistoryJob(ctx, "2026-08-01", "2026-09-10"); err == nil {
+		t.Fatal("expected error when range exceeds 31 days, got nil")
+	}
+
+	// 3. Valid job creation
+	job, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-10")
+	if err != nil {
+		t.Fatalf("CreateHistoryJob failed: %v", err)
+	}
+	if job.Status != storage.HistoryJobStatusQueued || job.RangeFrom != "2026-09-01" {
+		t.Fatalf("unexpected job descriptor: %+v", job)
+	}
+
+	// 4. Cancel job
+	if err := ws.CancelHistoryJob(ctx, job.ID); err != nil {
+		t.Fatalf("CancelHistoryJob failed: %v", err)
+	}
+	canceledJob, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetHistorySyncJob: %v", err)
+	}
+	if canceledJob.Status != storage.HistoryJobStatusCanceled {
+		t.Fatalf("expected job status CANCELED, got %s", canceledJob.Status)
 	}
 }

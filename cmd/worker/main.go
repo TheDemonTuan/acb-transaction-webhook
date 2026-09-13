@@ -29,6 +29,7 @@ import (
 
 type workerService struct {
 	bankMonitor           *monitor.Monitor
+	historyRunner         *monitor.HistoryJobRunner
 	dispatcher            *notification.Dispatcher
 	verifierSessionLoader *monitor.SessionLoader
 	verifierClient        *acb.Client
@@ -42,11 +43,54 @@ func (w *workerService) RequestSync(ctx context.Context) error {
 	return w.bankMonitor.RequestSync(ctx)
 }
 
-func (w *workerService) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
-	if w.bankMonitor == nil {
-		return 0, fmt.Errorf("bank monitor not initialized")
+func (w *workerService) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
+	if w.store == nil {
+		return storage.HistorySyncJob{}, errors.New("storage not initialized")
 	}
-	return w.bankMonitor.EnsureHistory(ctx, fromDay, toDay)
+	fromT, err := time.Parse("2006-01-02", fromDay)
+	if err != nil {
+		return storage.HistorySyncJob{}, fmt.Errorf("invalid fromDay: %w", err)
+	}
+	toT, err := time.Parse("2006-01-02", toDay)
+	if err != nil {
+		return storage.HistorySyncJob{}, fmt.Errorf("invalid toDay: %w", err)
+	}
+	if fromT.After(toT) {
+		return storage.HistorySyncJob{}, errors.New("fromDay must not be after toDay")
+	}
+	if toT.Sub(fromT) > 31*24*time.Hour {
+		return storage.HistorySyncJob{}, errors.New("range too large (max 31 days)")
+	}
+
+	conn, err := w.store.Connection(ctx)
+	if err != nil {
+		return storage.HistorySyncJob{}, fmt.Errorf("failed to lookup connection: %w", err)
+	}
+	if conn.State != "MONITORING" {
+		return storage.HistorySyncJob{}, errors.New("bank connection is not in MONITORING state")
+	}
+
+	job, _, err := w.store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, fromDay, toDay)
+	if err != nil {
+		return storage.HistorySyncJob{}, err
+	}
+	if w.historyRunner != nil {
+		w.historyRunner.Wake()
+	}
+	return job, nil
+}
+
+func (w *workerService) CancelHistoryJob(ctx context.Context, jobID string) error {
+	if w.store == nil {
+		return errors.New("storage not initialized")
+	}
+	if err := w.store.CancelHistorySyncJob(ctx, jobID); err != nil {
+		return err
+	}
+	if w.historyRunner != nil {
+		w.historyRunner.CancelJob(jobID)
+	}
+	return nil
 }
 
 func (w *workerService) NotifySettingsChanged(ctx context.Context) error {
@@ -270,9 +314,15 @@ func main() {
 	go bankMonitor.Run(ctx)
 	logger.Info("ACB bank polling monitor started in worker")
 
+	historyRunner := monitor.NewHistoryJobRunner(store, acbClient, bankMonitor.Scheduler(), sessionLoader).
+		WithMonitor(bankMonitor)
+	go historyRunner.Run(ctx)
+	logger.Info("ACB durable history job runner started in worker")
+
 	// 5. Setup Private RPC Server
 	ws := &workerService{
 		bankMonitor:           bankMonitor,
+		historyRunner:         historyRunner,
 		dispatcher:            dispatcher,
 		verifierSessionLoader: verifierSessionLoader,
 		verifierClient:        verifierClient,
@@ -306,7 +356,7 @@ func main() {
 		Handler:           rpcServer.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      40 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 

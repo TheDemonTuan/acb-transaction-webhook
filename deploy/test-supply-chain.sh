@@ -256,6 +256,22 @@ assert_failure "Detect and reject missing artifact file" \
   bash "$script_dir/verify-manifest.sh" \
     --manifest "$manifest_out" \
     --deploy-dir "$manifest_test_dir"
+# Restore
+cp "$script_dir/deploy-warm.sh" "$manifest_test_dir/"
+
+# 3.7 Verify worker RPC compatibility version
+assert_success "Verify manifest with matching worker RPC compatibility version 2" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --expected-rpc-version 2
+
+# 3.8 Reject mismatched worker RPC compatibility version (old gateway/new worker or new gateway/old worker)
+assert_failure "Reject manifest with mismatched worker RPC compatibility version (version 1 vs expected 2)" \
+  bash "$script_dir/verify-manifest.sh" \
+    --manifest "$manifest_out" \
+    --deploy-dir "$manifest_test_dir" \
+    --expected-rpc-version 1
 
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"

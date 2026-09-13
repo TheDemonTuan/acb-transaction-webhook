@@ -10,20 +10,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
 type mockWorkerHandler struct {
 	syncCalled            bool
-	ensureHistoryFrom     string
-	ensureHistoryTo       string
+	createHistoryFrom     string
+	createHistoryTo       string
+	canceledJobID         string
 	settingsChangedCalled bool
 	wakeDispatcherCalled  bool
 	verifiedAccount       string
 
-	settingsErr error
-	wakeErr     error
-	syncBlock   chan struct{}
+	createJobErr error
+	cancelJobErr error
+	settingsErr  error
+	wakeErr      error
+	syncBlock    chan struct{}
+	jobs         map[string]storage.HistorySyncJob
+	mu           sync.Mutex
 }
 
 func (m *mockWorkerHandler) RequestSync(ctx context.Context) error {
@@ -34,10 +40,49 @@ func (m *mockWorkerHandler) RequestSync(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockWorkerHandler) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
-	m.ensureHistoryFrom = fromDay
-	m.ensureHistoryTo = toDay
-	return 42, nil
+func (m *mockWorkerHandler) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createHistoryFrom = fromDay
+	m.createHistoryTo = toDay
+	if m.createJobErr != nil {
+		return storage.HistorySyncJob{}, m.createJobErr
+	}
+	key := fromDay + ":" + toDay
+	if m.jobs == nil {
+		m.jobs = make(map[string]storage.HistorySyncJob)
+	}
+	if existing, exists := m.jobs[key]; exists {
+		return existing, nil
+	}
+	job := storage.HistorySyncJob{
+		ID:           "job_" + fromDay + "_" + toDay,
+		ConnectionID: "conn_1",
+		Generation:   1,
+		RangeFrom:    fromDay,
+		RangeTo:      toDay,
+		Status:       storage.HistoryJobStatusQueued,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	m.jobs[key] = job
+	return job, nil
+}
+
+func (m *mockWorkerHandler) CancelHistoryJob(ctx context.Context, jobID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.canceledJobID = jobID
+	if m.cancelJobErr != nil {
+		return m.cancelJobErr
+	}
+	if jobID == "non-existent" {
+		return storage.ErrJobNotFound
+	}
+	if jobID == "terminal-job" {
+		return storage.ErrJobTerminal
+	}
+	return nil
 }
 
 func (m *mockWorkerHandler) NotifySettingsChanged(ctx context.Context) error {
@@ -94,16 +139,33 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 		t.Errorf("expected RequestSync to be called on mock")
 	}
 
-	// 2. EnsureHistory
-	count, err := client.EnsureHistory(ctx, "2026-09-01", "2026-09-10")
+	// 2. CreateHistoryJob
+	job, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-10")
 	if err != nil {
-		t.Fatalf("EnsureHistory failed: %v", err)
+		t.Fatalf("CreateHistoryJob failed: %v", err)
 	}
-	if count != 42 || mock.ensureHistoryFrom != "2026-09-01" || mock.ensureHistoryTo != "2026-09-10" {
-		t.Errorf("EnsureHistory unexpected result: count=%d, from=%s, to=%s", count, mock.ensureHistoryFrom, mock.ensureHistoryTo)
+	if job.Status != storage.HistoryJobStatusQueued || job.RangeFrom != "2026-09-01" || job.RangeTo != "2026-09-10" {
+		t.Errorf("CreateHistoryJob unexpected result: %+v", job)
 	}
 
-	// 3. NotifySettingsChanged
+	// 3. CancelHistoryJob
+	if err := client.CancelHistoryJob(ctx, job.ID); err != nil {
+		t.Fatalf("CancelHistoryJob failed: %v", err)
+	}
+	if mock.canceledJobID != job.ID {
+		t.Errorf("expected canceled job ID %s, got %s", job.ID, mock.canceledJobID)
+	}
+
+	// 4. EnsureHistory compatibility wrapper
+	count, err := client.EnsureHistory(ctx, "2026-09-01", "2026-09-10")
+	if err != nil {
+		t.Fatalf("EnsureHistory wrapper failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected count 0 from initial job, got %d", count)
+	}
+
+	// 5. NotifySettingsChanged
 	if err := client.NotifySettingsChanged(ctx); err != nil {
 		t.Fatalf("NotifySettingsChanged failed: %v", err)
 	}
@@ -111,7 +173,7 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 		t.Errorf("expected NotifySettingsChanged to be called")
 	}
 
-	// 4. WakeDispatcher
+	// 6. WakeDispatcher
 	if err := client.WakeDispatcher(ctx); err != nil {
 		t.Fatalf("WakeDispatcher failed: %v", err)
 	}
@@ -119,7 +181,7 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 		t.Errorf("expected WakeDispatcher to be called")
 	}
 
-	// 5. VerifySession success
+	// 7. VerifySession success
 	if err := client.VerifySession(ctx, "12345678", 1, []byte("correct")); err != nil {
 		t.Fatalf("VerifySession failed: %v", err)
 	}
@@ -127,19 +189,19 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 		t.Errorf("expected account to match")
 	}
 
-	// 6. VerifySession failure
+	// 8. VerifySession failure
 	if err := client.VerifySession(ctx, "12345678", 1, []byte("wrong")); err == nil {
 		t.Fatalf("expected VerifySession with wrong password to fail")
 	}
 
-	// 7. Unauthorized client
+	// 9. Unauthorized client
 	unauthClient := workerrpc.NewClient(ts.URL, "bad-token")
 	if err := unauthClient.RequestSync(ctx); err == nil {
 		t.Fatalf("expected unauthenticated request to fail")
 	}
 }
 
-func TestWorkerRPC_MethodValidation(t *testing.T) {
+func TestWorkerRPC_CreateHistoryJob_ValidAndDuplicateReuse(t *testing.T) {
 	mock := &mockWorkerHandler{}
 	token := "secret-test-token-123"
 	server, err := workerrpc.NewServer(mock, token)
@@ -149,15 +211,110 @@ func TestWorkerRPC_MethodValidation(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/rpc/request-sync", nil)
-	req.Header.Set(workerrpc.HeaderInternalToken, token)
-	resp, err := http.DefaultClient.Do(req)
+	client := workerrpc.NewClient(ts.URL, token)
+	ctx := context.Background()
+
+	// Initial creation
+	job1, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-15")
 	if err != nil {
-		t.Fatalf("GET /rpc/request-sync: %v", err)
+		t.Fatalf("CreateHistoryJob 1: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 Method Not Allowed, got %d", resp.StatusCode)
+	if job1.ID == "" || job1.Status != storage.HistoryJobStatusQueued {
+		t.Fatalf("unexpected job1 descriptor: %+v", job1)
+	}
+
+	// Duplicate creation: returns the exact same job ID
+	job2, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-15")
+	if err != nil {
+		t.Fatalf("CreateHistoryJob 2: %v", err)
+	}
+	if job2.ID != job1.ID {
+		t.Fatalf("expected duplicate range to reuse job ID %s, got %s", job1.ID, job2.ID)
+	}
+}
+
+func TestWorkerRPC_CreateHistoryJob_InvalidRangeValidation(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+	ctx := context.Background()
+
+	// 1. Invalid date format
+	if _, err := client.CreateHistoryJob(ctx, "invalid-date", "2026-09-10"); err == nil {
+		t.Fatal("expected error for invalid fromDay format, got nil")
+	}
+	if _, err := client.CreateHistoryJob(ctx, "2026-09-01", "not-a-date"); err == nil {
+		t.Fatal("expected error for invalid toDay format, got nil")
+	}
+
+	// 2. fromDay after toDay
+	if _, err := client.CreateHistoryJob(ctx, "2026-09-10", "2026-09-01"); err == nil {
+		t.Fatal("expected error when fromDay > toDay, got nil")
+	}
+
+	// 3. Range exceeds 31 days
+	if _, err := client.CreateHistoryJob(ctx, "2026-08-01", "2026-09-10"); err == nil {
+		t.Fatal("expected error when range exceeds 31 days (40 days), got nil")
+	}
+}
+
+func TestWorkerRPC_CreateHistoryJob_CanceledContext(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // Already canceled before call
+
+	_, err = client.CreateHistoryJob(canceledCtx, "2026-09-01", "2026-09-10")
+	if err == nil {
+		t.Fatal("expected error when context canceled before enqueue, got nil")
+	}
+	if mock.createHistoryFrom != "" {
+		t.Errorf("handler must not be executed when context is canceled beforehand")
+	}
+}
+
+func TestWorkerRPC_CancelHistoryJob_Semantics(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+	ctx := context.Background()
+
+	// 1. Success
+	if err := client.CancelHistoryJob(ctx, "job_valid_123"); err != nil {
+		t.Fatalf("CancelHistoryJob failed: %v", err)
+	}
+
+	// 2. Not found
+	if err := client.CancelHistoryJob(ctx, "non-existent"); err == nil {
+		t.Fatal("expected error for non-existent job, got nil")
+	}
+
+	// 3. Terminal state conflict
+	if err := client.CancelHistoryJob(ctx, "terminal-job"); err == nil {
+		t.Fatal("expected error for terminal job cancellation, got nil")
 	}
 }
 
@@ -172,12 +329,12 @@ func TestWorkerRPC_MaxBodyLimit(t *testing.T) {
 	defer ts.Close()
 
 	hugePayload := strings.Repeat("x", 512)
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/rpc/ensure-history", strings.NewReader(`{"fromDay":"`+hugePayload+`"}`))
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/rpc/history-jobs", strings.NewReader(`{"fromDay":"`+hugePayload+`"}`))
 	req.Header.Set(workerrpc.HeaderInternalToken, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST /rpc/ensure-history with huge body: %v", err)
+		t.Fatalf("POST /rpc/history-jobs with huge body: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 400 {
@@ -225,6 +382,8 @@ func TestWorkerRPC_BoundedConcurrency(t *testing.T) {
 		syncBlock: make(chan struct{}),
 	}
 	token := "secret-test-token-123"
+
+	// Server with concurrency limit of 1
 	server, err := workerrpc.NewServer(mock, token, workerrpc.WithMaxConcurrent(1))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -301,7 +460,6 @@ func TestWorkerRPC_NotifyAndWakeErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -309,9 +467,9 @@ func TestWorkerRPC_NotifyAndWakeErrors(t *testing.T) {
 	ctx := context.Background()
 
 	if err := client.NotifySettingsChanged(ctx); err == nil {
-		t.Fatal("expected NotifySettingsChanged to return error from server, got nil")
+		t.Fatal("expected NotifySettingsChanged to fail, got nil")
 	}
 	if err := client.WakeDispatcher(ctx); err == nil {
-		t.Fatal("expected WakeDispatcher to return error from server, got nil")
+		t.Fatal("expected WakeDispatcher to fail, got nil")
 	}
 }

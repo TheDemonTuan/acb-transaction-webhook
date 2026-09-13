@@ -10,6 +10,7 @@ expected_dbtool=""
 expected_browser=""
 expected_tts=""
 expected_bark=""
+expected_rpc_version=""
 expected_identity=""
 expected_issuer="https://token.actions.githubusercontent.com"
 require_cosign=0
@@ -28,6 +29,7 @@ Options:
   --browser-image <ref>      Expected auth-browser image digest (optional)
   --tts-image <ref>          Expected tts-gateway image digest (optional)
   --bark-image <ref>         Expected bark image digest (optional)
+  --expected-rpc-version <ver> Expected worker RPC version (optional)
   --expected-identity <id>   Expected Cosign certificate identity (optional)
   --expected-issuer <issuer> Expected Cosign OIDC issuer (default: github actions)
   --require-cosign           Require Cosign binary to be installed if bundle is provided
@@ -71,6 +73,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bark-image)
       expected_bark="$2"
+      shift 2
+      ;;
+    --expected-rpc-version)
+      expected_rpc_version="$2"
       shift 2
       ;;
     --expected-identity)
@@ -348,6 +354,14 @@ if [[ -n "$bundle_file" && -f "$bundle_file" ]]; then
     else
       printf 'Warning: Cosign not installed on host; skipping cryptographic blob signature check.\n'
     fi
+  fi
+fi
+
+if [[ -n "$expected_rpc_version" ]]; then
+  actual_rpc_version="$(printf '%s\n' "$parsed_output" | grep '^COMPAT_RPC=' | cut -d'=' -f2)"
+  if [[ "$actual_rpc_version" != "$expected_rpc_version" ]]; then
+    printf 'Error: worker RPC compatibility version mismatch: expected=%s actual=%s (gateway and worker must be promoted together)\n' "$expected_rpc_version" "$actual_rpc_version" >&2
+    exit 1
   fi
 fi
 

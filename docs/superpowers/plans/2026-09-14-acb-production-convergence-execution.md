@@ -101,8 +101,8 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 9** | Scheduler invariant verifier & retire UpstreamGate | **PR04** | **COMPLETED** | `internal/monitor/*` | Concurrency tests prove zero simultaneous ACB requests; UpstreamGate removed. |
 | **Task 10** | Database schema for durable history jobs | **PR05** | **COMPLETED** | `internal/storage/*`, `cmd/dbtool/*` | Migration 8 applies cleanly; active index constraint tested. |
 | **Task 11** | Atomic history job lifecycle storage | **PR05** | **COMPLETED** | `internal/storage/history_jobs.go` | Concurrent claim/create CAS tests; stale recovery test. |
-| **Task 12** | History job runner with quantum yielding | PR06 | PENDING | `internal/monitor/history_runner.go` | Multi-page mock job yields between pages; FILTER_SYNC source tagged. |
-| **Task 13** | Short-lived history RPC on worker | PR06 | PENDING | `internal/workerrpc/*` | Create/Get/Cancel RPCs respond < 500ms; durable idempotency verified. |
+| **Task 12** | History job runner with quantum yielding | **PR06** | **COMPLETED** | `internal/monitor/history_job_runner.go` | Multi-page mock job yields between pages; FILTER_SYNC source tagged. |
+| **Task 13** | Short-lived history RPC on worker | **PR06** | **COMPLETED** | `internal/workerrpc/*` | Create/Get/Cancel RPCs respond < 500ms; durable idempotency verified. |
 | **Task 14** | Asynchronous HTTP history endpoints | PR07 | PENDING | `internal/httpapi/*` | 202 Accepted returned; cancel transitions state; invalid range returns 400. |
 | **Task 15** | Async Transactions UI & multi-tab coordination | PR07 | PENDING | `web/src/pages/viewer/TransactionsPage.tsx` | Browser polling reflects progress; closing tab does not cancel; reload restores job ID. |
 | **Task 16** | Move maintenance tasks into worker | PR08 | PENDING | `cmd/gateway/*`, `cmd/worker/*` | Gateway startup performs zero background maintenance; worker runs retention. |

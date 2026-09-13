@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 const (
@@ -67,15 +69,10 @@ type ErrorResponse struct {
 	RequestID string `json:"requestId,omitempty"`
 }
 
-// EnsureHistoryRequest payload for historical backfill
-type EnsureHistoryRequest struct {
+// CreateHistoryJobRequest payload for enqueuing a durable historical backfill job
+type CreateHistoryJobRequest struct {
 	FromDay string `json:"fromDay"`
 	ToDay   string `json:"toDay"`
-}
-
-type EnsureHistoryResponse struct {
-	Count int    `json:"count"`
-	Error string `json:"error,omitempty"`
 }
 
 // VerifySessionRequest payload for verifying credentials with bank
@@ -88,7 +85,8 @@ type VerifySessionRequest struct {
 // Handler interface implemented by worker
 type WorkerHandler interface {
 	RequestSync(ctx context.Context) error
-	EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error)
+	CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error)
+	CancelHistoryJob(ctx context.Context, jobID string) error
 	NotifySettingsChanged(ctx context.Context) error
 	WakeDispatcher(ctx context.Context) error
 	VerifySession(ctx context.Context, account string, generation int64, password []byte) error
@@ -146,7 +144,7 @@ func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOptio
 		token:         trimmedToken,
 		mux:           http.NewServeMux(),
 		maxBodyBytes:  1 << 20, // 1MB
-		serverTimeout: 120 * time.Second,
+		serverTimeout: 30 * time.Second,
 		sem:           make(chan struct{}, 32),
 	}
 	for _, opt := range opts {
@@ -261,24 +259,74 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
 	}))
 
-	s.mux.HandleFunc("/rpc/ensure-history", s.auth(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("/rpc/history-jobs", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
 			return
 		}
-		var req EnsureHistoryRequest
+		var req CreateHistoryJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "bad request", reqID)
 			return
 		}
-		count, err := s.handler.EnsureHistory(r.Context(), req.FromDay, req.ToDay)
+		fromT, err := time.Parse("2006-01-02", req.FromDay)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid fromDay: "+err.Error(), reqID)
+			return
+		}
+		toT, err := time.Parse("2006-01-02", req.ToDay)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid toDay: "+err.Error(), reqID)
+			return
+		}
+		if fromT.After(toT) {
+			writeError(w, http.StatusBadRequest, "fromDay must not be after toDay", reqID)
+			return
+		}
+		if toT.Sub(fromT) > 31*24*time.Hour {
+			writeError(w, http.StatusBadRequest, "range too large (max 31 days)", reqID)
+			return
+		}
+		job, err := s.handler.CreateHistoryJob(r.Context(), req.FromDay, req.ToDay)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
 			return
 		}
-		writeJSON(w, http.StatusOK, EnsureHistoryResponse{Count: count})
+		writeJSON(w, http.StatusOK, job)
 	}))
+
+	cancelHistoryJobHandler := s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		jobID := r.PathValue("jobID")
+		if jobID == "" {
+			path := strings.TrimPrefix(r.URL.Path, "/rpc/history-jobs/")
+			jobID = strings.TrimSuffix(path, "/cancel")
+		}
+		if jobID == "" {
+			writeError(w, http.StatusBadRequest, "job ID is required", reqID)
+			return
+		}
+		if err := s.handler.CancelHistoryJob(r.Context(), jobID); err != nil {
+			if errors.Is(err, storage.ErrJobNotFound) {
+				writeError(w, http.StatusNotFound, err.Error(), reqID)
+				return
+			}
+			if errors.Is(err, storage.ErrJobTerminal) {
+				writeError(w, http.StatusConflict, err.Error(), reqID)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
+	})
+	s.mux.HandleFunc("/rpc/history-jobs/{jobID}/cancel", cancelHistoryJobHandler)
+	s.mux.HandleFunc("/rpc/history-jobs/cancel", cancelHistoryJobHandler)
 
 	s.mux.HandleFunc("/rpc/notify-settings-changed", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
@@ -340,7 +388,7 @@ func NewClient(baseURL, token string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   strings.TrimSpace(token),
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: 35 * time.Second},
 	}
 }
 
@@ -407,15 +455,30 @@ func (c *Client) RequestSync(ctx context.Context) error {
 	return c.post(callCtx, "/rpc/request-sync", nil, nil)
 }
 
-func (c *Client) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
-	callCtx, cancel := c.withTimeout(ctx, 120*time.Second)
+func (c *Client) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
 	defer cancel()
-	var resp EnsureHistoryResponse
-	err := c.post(callCtx, "/rpc/ensure-history", EnsureHistoryRequest{FromDay: fromDay, ToDay: toDay}, &resp)
+	var job storage.HistorySyncJob
+	err := c.post(callCtx, "/rpc/history-jobs", CreateHistoryJobRequest{FromDay: fromDay, ToDay: toDay}, &job)
+	if err != nil {
+		return storage.HistorySyncJob{}, err
+	}
+	return job, nil
+}
+
+func (c *Client) CancelHistoryJob(ctx context.Context, jobID string) error {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.post(callCtx, fmt.Sprintf("/rpc/history-jobs/%s/cancel", jobID), nil, nil)
+}
+
+// EnsureHistory is a transition compatibility helper for callers requiring the HistoryEnsurer interface before PR07.
+func (c *Client) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
+	job, err := c.CreateHistoryJob(ctx, fromDay, toDay)
 	if err != nil {
 		return 0, err
 	}
-	return resp.Count, nil
+	return job.RowsSeen, nil
 }
 
 func (c *Client) NotifySettingsChanged(ctx context.Context) error {

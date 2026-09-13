@@ -193,10 +193,10 @@ const manifest = {
   compatibility: {
     schema_version: 1,
     min_supported_schema_version: 1,
-    worker_rpc_version: 1,
+    worker_rpc_version: 2,
     worker_rpc_endpoints: [
       "/rpc/request-sync",
-      "/rpc/ensure-history",
+      "/rpc/history-jobs",
       "/rpc/notify-settings-changed",
       "/rpc/wake-dispatcher",
       "/rpc/verify-session"
@@ -243,10 +243,10 @@ manifest = {
     "compatibility": {
         "schema_version": 1,
         "min_supported_schema_version": 1,
-        "worker_rpc_version": 1,
+        "worker_rpc_version": 2,
         "worker_rpc_endpoints": [
             "/rpc/request-sync",
-            "/rpc/ensure-history",
+            "/rpc/history-jobs",
             "/rpc/notify-settings-changed",
             "/rpc/wake-dispatcher",
             "/rpc/verify-session"

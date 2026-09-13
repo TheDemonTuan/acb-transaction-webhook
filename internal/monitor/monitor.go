@@ -3,7 +3,6 @@ package monitor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"sync"
@@ -42,7 +41,6 @@ type Monitor struct {
 	settingsCh      chan struct{}
 	cachedSettings  storage.MonitorSettings
 	lastMode        storage.PollMode
-	historyGroup    Group
 	onNewEvents     func([]storage.EventNotification)
 	onPollFinished  func(poll storage.PollRun, insertedCount int)
 	catchUpPending  bool
@@ -286,86 +284,6 @@ func (m *Monitor) ScheduleCatchUp() {
 	if m.scheduler.IsRunning() {
 		_ = m.scheduler.Enqueue(task)
 	}
-}
-
-// EnsureHistory ensures ACB transaction history for the requested [fromDay, toDay] date range is synchronized.
-// It coalesces concurrent requests, checks cached coverage with TTLs, pushes date filters to ACB, and ingests with FILTER_SYNC source.
-func (m *Monitor) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
-	fromT, err := time.Parse("2006-01-02", fromDay)
-	if err != nil {
-		return 0, fmt.Errorf("invalid from date: %w", err)
-	}
-	toT, err := time.Parse("2006-01-02", toDay)
-	if err != nil {
-		return 0, fmt.Errorf("invalid to date: %w", err)
-	}
-	if fromT.After(toT) {
-		return 0, errors.New("from date must not be after to date")
-	}
-	if toT.Sub(fromT) > 31*24*time.Hour {
-		return 0, errors.New("range too large (max 31 days)")
-	}
-
-	conn, err := m.store.Connection(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if conn.State != "MONITORING" {
-		return 0, errors.New("bank connection is not in MONITORING state")
-	}
-
-	// 1. Fast cache check
-	covered, err := m.store.CheckRangeCoverage(ctx, conn.ID, fromDay, toDay)
-	if err == nil && covered {
-		return 0, nil
-	}
-
-	// 2. Coalescing single-flight group
-	flightKey := fmt.Sprintf("%s:%s:%s", conn.ID, fromDay, toDay)
-	val, err := m.historyGroup.Do(flightKey, func() (any, error) {
-		// Re-check coverage under flight
-		if cov, _ := m.store.CheckRangeCoverage(ctx, conn.ID, fromDay, toDay); cov {
-			return 0, nil
-		}
-
-		var jobID string
-		if m.store != nil {
-			jobID, _ = m.store.CreateHistorySyncJob(ctx, conn.ID, fromDay, toDay)
-		}
-
-		task := NewHistorySyncTask(m, conn.ID, conn.Generation, fromDay, toDay, jobID)
-		if !m.scheduler.IsRunning() {
-			for {
-				if err := ctx.Err(); err != nil {
-					return 0, err
-				}
-				res, err := task.Step(ctx)
-				if err != nil {
-					return 0, err
-				}
-				if res.Done {
-					out := <-task.done
-					return out.insertedCount, out.err
-				}
-			}
-		}
-
-		if err := m.scheduler.Enqueue(task); err != nil {
-			return 0, err
-		}
-
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case out := <-task.done:
-			return out.insertedCount, out.err
-		}
-	})
-
-	if err != nil {
-		return 0, err
-	}
-	return val.(int), nil
 }
 
 func (m *Monitor) Run(ctx context.Context) {

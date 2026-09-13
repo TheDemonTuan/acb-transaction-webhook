@@ -78,13 +78,18 @@ func TestEnsureHistoryMultiPageFullSync(t *testing.T) {
 
 	client := &pagedMockClient{failOnPage2: false}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	runner := NewHistoryJobRunner(store, client, mon.Scheduler(), nil)
 
-	count, err := mon.EnsureHistory(ctx, "2026-09-12", "2026-09-12")
+	_, _, err = store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2026-09-12", "2026-09-12")
 	if err != nil {
-		t.Fatalf("EnsureHistory multi-page failed: %v", err)
+		t.Fatalf("CreateOrGetHistorySyncJob: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("expected 2 transactions across 2 pages, got %d", count)
+	processed, err := runner.ProcessNextJob(ctx)
+	if err != nil {
+		t.Fatalf("ProcessNextJob multi-page failed: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
 	}
 	if client.historyCalls.Load() != 2 {
 		t.Fatalf("expected 2 history calls for 2 pages, got %d", client.historyCalls.Load())
@@ -115,11 +120,13 @@ func TestEnsureHistoryIncompleteWithholdsCoverage(t *testing.T) {
 
 	client := &pagedMockClient{failOnPage2: true}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	runner := NewHistoryJobRunner(store, client, mon.Scheduler(), nil)
 
-	_, err = mon.EnsureHistory(ctx, "2026-09-12", "2026-09-12")
-	if err == nil {
-		t.Fatal("expected EnsureHistory to return error when page 2 fails, but got nil")
+	_, _, err = store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2026-09-12", "2026-09-12")
+	if err != nil {
+		t.Fatalf("CreateOrGetHistorySyncJob: %v", err)
 	}
+	_, _ = runner.ProcessNextJob(ctx)
 
 	// Verify coverage was NOT marked COMPLETE
 	covered, err := store.CheckRangeCoverage(ctx, connID, "2026-09-12", "2026-09-12")
@@ -236,13 +243,18 @@ func TestEnsureHistoryGlobalTotalRowsNotTruncated(t *testing.T) {
 
 	client := &globalTotalMockClient{}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	runner := NewHistoryJobRunner(store, client, mon.Scheduler(), nil)
 
-	count, err := mon.EnsureHistory(ctx, "2026-09-12", "2026-09-12")
+	_, _, err = store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2026-09-12", "2026-09-12")
 	if err != nil {
-		t.Fatalf("expected EnsureHistory to succeed when cumulative rows == global total, got err: %v", err)
+		t.Fatalf("CreateOrGetHistorySyncJob: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("expected 2 transactions, got %d", count)
+	processed, err := runner.ProcessNextJob(ctx)
+	if err != nil {
+		t.Fatalf("expected runner to succeed when cumulative rows == global total, got err: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
 	}
 
 	covered, err := store.CheckRangeCoverage(ctx, connID, "2026-09-12", "2026-09-12")
