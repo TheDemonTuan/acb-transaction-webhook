@@ -58,27 +58,18 @@ export const apiErrorMessage = async (response: Response): Promise<string> => {
   return err.message;
 };
 
-export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  let response: Response;
-  try {
-    response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init });
-  } catch {
-    throw new Error('Không thể kết nối máy chủ. Vui lòng kiểm tra kết nối và thử lại.');
-  }
-  if (!response.ok) {
-    throw await parseApiError(response);
-  }
-  try {
-    return (await response.json()) as T;
-  } catch {
-    throw new Error('Máy chủ trả về dữ liệu không hợp lệ. Vui lòng thử lại.');
-  }
+export const isMutation = (method: string): boolean => {
+  const m = method.toUpperCase();
+  return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE';
 };
 
 let cachedCsrfToken: string | null = null;
 let csrfPromise: Promise<string> | null = null;
 
 export const getCsrfToken = async (forceRefresh = false): Promise<string> => {
+  if (forceRefresh) {
+    cachedCsrfToken = null;
+  }
   if (!forceRefresh && cachedCsrfToken) {
     return cachedCsrfToken;
   }
@@ -97,6 +88,57 @@ export const getCsrfToken = async (forceRefresh = false): Promise<string> => {
   return csrfPromise;
 };
 
+export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+  const method = init?.method?.toUpperCase() ?? 'GET';
+  const mutating = isMutation(method);
+
+  const headers = new Headers(init?.headers);
+
+  if (mutating) {
+    const token = await getCsrfToken();
+    if (!headers.has('X-CSRF-Token')) {
+      headers.set('X-CSRF-Token', token);
+    }
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init, headers });
+  } catch (err: any) {
+    if ((err instanceof DOMException && err.name === 'AbortError') || err?.name === 'AbortError') {
+      throw err;
+    }
+    throw new Error('Không thể kết nối máy chủ. Vui lòng kiểm tra kết nối và thử lại.');
+  }
+
+  if (!response.ok) {
+    const error = await parseApiError(response);
+    if (mutating && error.code === CSRF_CODE_TOKEN_INVALID) {
+      const newToken = await getCsrfToken(true);
+      headers.set('X-CSRF-Token', newToken);
+      try {
+        response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init, headers });
+      } catch (err: any) {
+        if ((err instanceof DOMException && err.name === 'AbortError') || err?.name === 'AbortError') {
+          throw err;
+        }
+        throw new Error('Không thể kết nối máy chủ. Vui lòng kiểm tra kết nối và thử lại.');
+      }
+      if (!response.ok) {
+        throw await parseApiError(response);
+      }
+    } else {
+      throw error;
+    }
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new Error('Máy chủ trả về dữ liệu không hợp lệ. Vui lòng thử lại.');
+  }
+};
+
 export interface AudioResponseResult {
   data: ArrayBuffer;
   provider: string;
@@ -107,7 +149,7 @@ export interface AudioResponseResult {
 
 export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioResponseResult> => {
   const method = init?.method?.toUpperCase() ?? 'GET';
-  const isMutating = method !== 'GET' && method !== 'HEAD';
+  const isMutating = isMutation(method);
   let token: string | null = null;
   if (isMutating) {
     try {

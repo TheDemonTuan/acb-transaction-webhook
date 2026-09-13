@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+type RuntimeRole string
+
+const (
+	RuntimeRoleGateway     RuntimeRole = "gateway"
+	RuntimeRoleWorker      RuntimeRole = "worker"
+	RuntimeRoleMonolithDev RuntimeRole = "monolith-dev"
+)
+
 type RoleSubjects struct {
 	Owners    map[string]struct{}
 	Operators map[string]struct{}
@@ -17,6 +25,7 @@ type RoleSubjects struct {
 }
 
 type Config struct {
+	RuntimeRole           RuntimeRole
 	Address               string
 	DatabasePath          string
 	MasterKeyFile         string
@@ -66,6 +75,39 @@ func Load() (Config, error) {
 	}
 	dataDir := value("DATA_DIR", "data")
 	production := value("APP_ENV", "development") == "production"
+
+	rawRole := strings.TrimSpace(os.Getenv("RUNTIME_ROLE"))
+	var runtimeRole RuntimeRole
+	if production {
+		if rawRole == "" {
+			return Config{}, fmt.Errorf("RUNTIME_ROLE is required in production (must be %q or %q)", RuntimeRoleGateway, RuntimeRoleWorker)
+		}
+		switch RuntimeRole(rawRole) {
+		case RuntimeRoleGateway:
+			runtimeRole = RuntimeRoleGateway
+		case RuntimeRoleWorker:
+			runtimeRole = RuntimeRoleWorker
+		case RuntimeRoleMonolithDev:
+			return Config{}, fmt.Errorf("monolith-dev role is forbidden in production")
+		default:
+			return Config{}, fmt.Errorf("invalid RUNTIME_ROLE: %q (must be %q or %q in production)", rawRole, RuntimeRoleGateway, RuntimeRoleWorker)
+		}
+	} else {
+		if rawRole == "" {
+			runtimeRole = RuntimeRoleMonolithDev
+		} else {
+			switch RuntimeRole(rawRole) {
+			case RuntimeRoleGateway:
+				runtimeRole = RuntimeRoleGateway
+			case RuntimeRoleWorker:
+				runtimeRole = RuntimeRoleWorker
+			case RuntimeRoleMonolithDev:
+				runtimeRole = RuntimeRoleMonolithDev
+			default:
+				return Config{}, fmt.Errorf("invalid RUNTIME_ROLE: %q (must be %q, %q, or %q)", rawRole, RuntimeRoleGateway, RuntimeRoleWorker, RuntimeRoleMonolithDev)
+			}
+		}
+	}
 
 	cfTeam := os.Getenv("CLOUDFLARE_ACCESS_TEAM_NAME")
 	cfIssuer := strings.TrimSuffix(os.Getenv("CF_ACCESS_ISSUER"), "/")
@@ -177,6 +219,7 @@ func Load() (Config, error) {
 	releaseCommit := value("RELEASE_COMMIT", value("APP_RELEASE_COMMIT", value("GIT_COMMIT", "unknown")))
 
 	cfg := Config{
+		RuntimeRole:        runtimeRole,
 		Address:            value("LISTEN_ADDR", "0.0.0.0:"+value("PORT", "8090")),
 		DatabasePath:       value("DATABASE_PATH", filepath.Join(dataDir, "gateway.db")),
 		MasterKeyFile:      masterKeyFile,
@@ -224,8 +267,18 @@ func Load() (Config, error) {
 		if cfg.TTSGatewayURL != "" && cfg.TTSInternalToken == "" {
 			return Config{}, fmt.Errorf("TTS_INTERNAL_TOKEN or TTS_INTERNAL_TOKEN_FILE is required in production when TTS_GATEWAY_URL is configured")
 		}
-		if cfg.WorkerRPCURL != "" && cfg.WorkerInternalToken == "" {
-			return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required in production when WORKER_RPC_URL is configured")
+		if cfg.RuntimeRole == RuntimeRoleGateway {
+			if cfg.WorkerRPCURL == "" {
+				return Config{}, fmt.Errorf("WORKER_RPC_URL is required for gateway in production")
+			}
+			if cfg.WorkerInternalToken == "" {
+				return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required for gateway in production")
+			}
+		}
+		if cfg.RuntimeRole == RuntimeRoleWorker {
+			if cfg.WorkerInternalToken == "" {
+				return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required for worker in production")
+			}
 		}
 	}
 	if cfg.MasterKeyFile != "" && !filepath.IsAbs(cfg.MasterKeyFile) {

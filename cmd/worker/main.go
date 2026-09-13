@@ -66,19 +66,28 @@ func (w *workerService) WakeDispatcher(ctx context.Context) error {
 }
 
 func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
-	if w.verifierSessionLoader == nil || w.verifierClient == nil {
-		return fmt.Errorf("session verifier not configured")
-	}
 	if generation <= 0 {
 		return fmt.Errorf("invalid generation %d", generation)
 	}
 	if w.store != nil {
 		conn, err := w.store.Connection(ctx)
-		if err == nil && conn.Generation != generation {
+		if err != nil {
+			slog.Error("session verification fail-closed: failed to lookup connection", "account", account, "generation", generation, "error", err)
+			return fmt.Errorf("failed to lookup connection for session verification: %w", err)
+		}
+		if conn.Generation != generation {
+			slog.Error("session verification generation mismatch", "account", account, "generation", generation, "current_generation", conn.Generation)
 			return fmt.Errorf("stale session verification generation: requested %d, current is %d", generation, conn.Generation)
 		}
 	}
-	verifier := monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient, w.bankMonitor.UpstreamGate())
+	if w.verifierSessionLoader == nil || w.verifierClient == nil {
+		return fmt.Errorf("session verifier not configured")
+	}
+	var gate *sync.Mutex
+	if w.bankMonitor != nil {
+		gate = w.bankMonitor.UpstreamGate()
+	}
+	verifier := monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient, gate)
 	return verifier.VerifySession(ctx, account, generation, password)
 }
 
@@ -137,6 +146,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.Production && cfg.RuntimeRole != config.RuntimeRoleWorker {
+		logger.Error("worker requires RUNTIME_ROLE=worker in production", "role", cfg.RuntimeRole)
+		os.Exit(1)
+	}
+	if cfg.RuntimeRole != config.RuntimeRoleWorker {
+		logger.Error("unsupported runtime role for worker", "role", cfg.RuntimeRole)
+		os.Exit(1)
+	}
 	if cfg.Production && cfg.WorkerInternalToken == "" {
 		logger.Error("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required in production")
 		os.Exit(1)

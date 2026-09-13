@@ -1,4 +1,4 @@
-import { api, getCsrfToken } from '../../api';
+import { api } from '../../api';
 import type {
   AuditLog,
   BarkConfig,
@@ -50,6 +50,7 @@ export const ensureHistory = async (params: {
 }): Promise<{ status: string; coverage: string; synced: boolean; rowsSeen?: number }> => {
   return api('/transactions/ensure-history', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
 };
@@ -92,19 +93,16 @@ export const fetchAuditLogs = async (params?: {
 };
 
 export const configureConnection = async (accountMasked: string): Promise<Connection> => {
-  const csrf = await getCsrfToken();
   return api<Connection>('/connection/configure', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ accountMasked }),
   });
 };
 
 export const sendConnectionAction = async (action: 'pause' | 'resume' | 'sync'): Promise<{ status: string }> => {
-  const csrf = await getCsrfToken();
   return api<{ status: string }>(`/connection/${action}`, {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
   });
 };
 
@@ -114,10 +112,8 @@ export const startAuthSession = async (): Promise<{
   screenUrl: string;
   expiresAt: string;
 }> => {
-  const csrf = await getCsrfToken();
   return api('/connection/auth/start', {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
   });
 };
 
@@ -134,10 +130,9 @@ export const fetchCurrentAuthSession = async (): Promise<{
 };
 
 export const cancelAuthSession = async (attemptId: string): Promise<void> => {
-  const csrf = await getCsrfToken();
   await api('/connection/auth/cancel', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ attemptId }),
   });
 };
@@ -147,10 +142,9 @@ export const fetchMonitorSettings = async (): Promise<any> => {
 };
 
 export const updateMonitorSettings = async (settings: any): Promise<any> => {
-  const csrf = await getCsrfToken();
   return api('/monitor/settings', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
   });
 };
@@ -160,10 +154,8 @@ export const fetchPaymentQR = async (): Promise<any> => {
 };
 
 export const uploadPaymentQR = async (formData: FormData): Promise<any> => {
-  const csrf = await getCsrfToken();
   return api('/payment-qr/upload', {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
     body: formData,
   });
 };
@@ -172,19 +164,16 @@ export const generatePaymentQR = async (params: {
   accountNumber: string;
   accountName: string;
 }): Promise<any> => {
-  const csrf = await getCsrfToken();
   return api('/payment-qr/generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
 };
 
 export const deletePaymentQR = async (): Promise<any> => {
-  const csrf = await getCsrfToken();
   return api('/payment-qr', {
     method: 'DELETE',
-    headers: { 'x-csrf-token': csrf },
   });
 };
 
@@ -197,10 +186,9 @@ export const checkAuthStatus = async (attemptId: string): Promise<{
 };
 
 export const createWebhookEndpoint = async (name: string, url: string): Promise<Endpoint> => {
-  const csrf = await getCsrfToken();
   return api<Endpoint>('/webhooks', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, url }),
   });
 };
@@ -209,10 +197,8 @@ export const toggleWebhookEndpoint = async (
   id: string,
   action: 'enable' | 'disable'
 ): Promise<Endpoint> => {
-  const csrf = await getCsrfToken();
   return api<Endpoint>(`/webhooks/${id}/${action}`, {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
   });
 };
 
@@ -231,10 +217,9 @@ export const createNotificationChannel = async (payload: {
   deviceKey?: string;
   barkConfig?: BarkConfig;
 }): Promise<NotificationChannel> => {
-  const csrf = await getCsrfToken();
   return api<NotificationChannel>('/notification-channels', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
 };
@@ -248,10 +233,9 @@ export const updateNotificationChannel = async (
     barkConfig?: BarkConfig;
   }
 ): Promise<NotificationChannel> => {
-  const csrf = await getCsrfToken();
   return api<NotificationChannel>(`/notification-channels/${id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
 };
@@ -260,10 +244,8 @@ export const toggleNotificationChannel = async (
   id: string,
   action: 'enable' | 'disable'
 ): Promise<{ status: string }> => {
-  const csrf = await getCsrfToken();
   return api<{ status: string }>(`/notification-channels/${id}/${action}`, {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
   });
 };
 
@@ -271,10 +253,9 @@ export const rotateChannelSecret = async (
   id: string,
   deviceKey?: string
 ): Promise<{ secret?: string; status: string }> => {
-  const csrf = await getCsrfToken();
   return api<{ secret?: string; status: string }>(`/notification-channels/${id}/rotate-secret`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceKey }),
   });
 };
@@ -282,19 +263,15 @@ export const rotateChannelSecret = async (
 export const testNotificationChannel = async (
   id: string
 ): Promise<{ status: string; latencyMs?: number; message?: string }> => {
-  const csrf = await getCsrfToken();
   return api<{ status: string; latencyMs?: number; message?: string }>(`/notification-channels/${id}/test`, {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
   });
 };
 
 export const replayDelivery = async (
   id: string
 ): Promise<{ status: string }> => {
-  const csrf = await getCsrfToken();
   return api<{ status: string }>(`/deliveries/${id}/replay`, {
     method: 'POST',
-    headers: { 'x-csrf-token': csrf },
   });
 };

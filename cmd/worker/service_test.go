@@ -2,11 +2,23 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
+
+type roundTripFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestWorkerService_VerifySession_GenerationGuard(t *testing.T) {
 	ctx := context.Background()
@@ -70,5 +82,51 @@ func TestWorkerService_NotifyAndWake_Uninitialized(t *testing.T) {
 	}
 	if _, err := ws.EnsureHistory(ctx, "2026-09-01", "2026-09-02"); err == nil {
 		t.Fatal("expected error when bank monitor is nil, got nil")
+	}
+}
+
+func TestWorkerService_VerifySession_FailsClosedOnStoreError(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_svc_fail_closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.DB().ExecContext(ctx, "UPDATE connections SET generation = 1 WHERE id = ?", conn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var upstreamCalls atomic.Int32
+	mockTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls.Add(1)
+		return nil, errors.New("upstream must not be called on database error")
+	})
+	acbClient, err := acb.NewClient("https://online.acb.com.vn", mockTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ws := &workerService{
+		store:                 store,
+		verifierClient:        acbClient,
+		verifierSessionLoader: monitor.NewSessionLoader(store, nil, nil),
+	}
+
+	// Close store to simulate database failure
+	store.Close()
+
+	err = ws.VerifySession(ctx, conn.ID, 1, []byte("pw"))
+	if err == nil {
+		t.Fatal("expected VerifySession to fail closed on store error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to lookup connection for session verification") {
+		t.Fatalf("expected wrapped store error, got: %v", err)
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("expected zero upstream calls on store error, got %d", upstreamCalls.Load())
 	}
 }

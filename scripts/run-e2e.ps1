@@ -6,6 +6,7 @@ New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 $env:DATA_DIR = $DataDir
 $env:LISTEN_ADDR = "127.0.0.1:18081"
 $env:PORT = "18081"
+$env:RUNTIME_ROLE = "monolith-dev"
 
 Write-Host "Starting gateway in background on 127.0.0.1:18081..."
 $gatewayProc = Start-Process -FilePath "go" -ArgumentList "run", "./cmd/gateway" -PassThru

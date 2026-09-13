@@ -97,3 +97,71 @@ func TestGatewayMigrateOnly_Subprocess(t *testing.T) {
 		t.Errorf("expected stderr to contain 'dbtool --migrate', got: %s", stderrStr)
 	}
 }
+
+func TestGatewayRoleValidation_Subprocess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess test in short mode")
+	}
+
+	tests := []struct {
+		name       string
+		env        []string
+		wantStderr string
+	}{
+		{
+			name: "rejects worker role on gateway",
+			env: []string{
+				"APP_ENV=development",
+				"RUNTIME_ROLE=worker",
+			},
+			wantStderr: "unsupported runtime role for gateway",
+		},
+		{
+			name: "production rejects monolith-dev role",
+			env: []string{
+				"APP_ENV=production",
+				"RUNTIME_ROLE=monolith-dev",
+			},
+			wantStderr: "monolith-dev role is forbidden in production",
+		},
+		{
+			name: "production gateway rejects missing worker RPC URL",
+			env: []string{
+				"APP_ENV=production",
+				"RUNTIME_ROLE=gateway",
+				"APP_MASTER_KEY_FILE=/dev/null",
+				"OWNER_SUBJECTS=owner@example.com",
+				"CF_ACCESS_ISSUER=https://test.cloudflareaccess.com",
+				"CF_ACCESS_AUDIENCE=aud123",
+				"CF_ACCESS_JWKS_URL=https://test.cloudflareaccess.com/certs",
+				"TTS_INTERNAL_TOKEN=token",
+				"WORKER_RPC_URL=",
+			},
+			wantStderr: "WORKER_RPC_URL is required for gateway in production",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("go", "run", ".", "--healthcheck")
+			// We run without healthcheck flag to exercise main role validation
+			cmd = exec.Command("go", "run", ".")
+			cmd.Dir = "."
+			// Clean env plus test env
+			cmd.Env = append(os.Environ(), tc.env...)
+
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			err := cmd.Run()
+			if err == nil {
+				t.Fatalf("expected gateway startup to fail for %s, but it exited 0", tc.name)
+			}
+			out := stderr.String() + stdout.String()
+			if !strings.Contains(out, tc.wantStderr) {
+				t.Fatalf("expected output to contain %q, got %q", tc.wantStderr, out)
+			}
+		})
+	}
+}

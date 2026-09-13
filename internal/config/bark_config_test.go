@@ -21,6 +21,8 @@ func setProductionEnv(t *testing.T) {
 	t.Setenv("CF_ACCESS_JWKS_URL", "https://test.cloudflareaccess.com/certs")
 	t.Setenv("TTS_GATEWAY_URL", "http://tts-gateway:8081")
 	t.Setenv("TTS_INTERNAL_TOKEN", "test-token")
+	t.Setenv("RUNTIME_ROLE", "worker")
+	t.Setenv("WORKER_INTERNAL_TOKEN", "test-worker-token")
 }
 
 func TestLoadRejectsInvalidBarkConfiguration(t *testing.T) {

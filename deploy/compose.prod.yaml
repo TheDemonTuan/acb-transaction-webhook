@@ -14,6 +14,7 @@ services:
       - .env.production
     environment:
       APP_ENV: production
+      RUNTIME_ROLE: worker
       DATABASE_PATH: /data/gateway.db
       TZ: Asia/Ho_Chi_Minh
       WORKER_RPC_ADDR: 0.0.0.0:8190
@@ -203,6 +204,7 @@ services:
       - .env.production
     environment:
       APP_ENV: production
+      RUNTIME_ROLE: gateway
       PORT: 8090
       LISTEN_ADDR: 0.0.0.0:8090
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
@@ -276,6 +278,7 @@ services:
       - .env.production
     environment:
       APP_ENV: production
+      RUNTIME_ROLE: gateway
       PORT: 8090
       LISTEN_ADDR: 0.0.0.0:8090
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}

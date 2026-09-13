@@ -2,8 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 const isWin = process.platform === 'win32';
 const webServerCommand = isWin
-  ? 'powershell -NoProfile -Command "$ErrorActionPreference=\'SilentlyContinue\'; cd ..; $p = Join-Path $env:TEMP \'tbg-playwright\'; Remove-Item -Recurse -Force $p; $env:DATA_DIR=$p; $env:LISTEN_ADDR=\'127.0.0.1:18081\'; $env:APP_MASTER_KEY=\'0123456789012345678901234567890123456789012345678901234567890123\'; go run ./cmd/gateway"'
-  : 'cd .. && rm -rf /tmp/tbg-playwright && DATA_DIR=/tmp/tbg-playwright LISTEN_ADDR=127.0.0.1:18081 APP_MASTER_KEY=0123456789012345678901234567890123456789012345678901234567890123 go run ./cmd/gateway';
+  ? 'powershell -NoProfile -Command "$ErrorActionPreference=\'SilentlyContinue\'; cd ..; $p = Join-Path $env:TEMP \'tbg-playwright\'; Remove-Item -Recurse -Force $p; $env:DATA_DIR=$p; $env:LISTEN_ADDR=\'127.0.0.1:18081\'; $env:RUNTIME_ROLE=\'monolith-dev\'; $env:APP_MASTER_KEY=\'0123456789012345678901234567890123456789012345678901234567890123\'; go run ./cmd/gateway"'
+  : 'cd .. && rm -rf /tmp/tbg-playwright && DATA_DIR=/tmp/tbg-playwright LISTEN_ADDR=127.0.0.1:18081 RUNTIME_ROLE=monolith-dev APP_MASTER_KEY=0123456789012345678901234567890123456789012345678901234567890123 go run ./cmd/gateway';
 
 export default defineConfig({
   testDir: './e2e',

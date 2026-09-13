@@ -462,7 +462,11 @@ func (m *Monitor) pollOnce(ctx context.Context, expected *syncRequest) error {
 	}
 
 	hasActiveAttempt, err := m.store.HasActiveAuthAttempt(ctx, conn.ID)
-	if err == nil && hasActiveAttempt {
+	if err != nil {
+		slog.Error("poll fail-closed: failed to check active auth attempt", "connection_id", conn.ID, "error", err)
+		return fmt.Errorf("check active auth attempt: %w", err)
+	}
+	if hasActiveAttempt {
 		slog.Info("skipping poll: browser authentication in progress", "connection_id", conn.ID)
 		return nil
 	}

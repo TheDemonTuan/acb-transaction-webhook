@@ -137,6 +137,20 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+
+	if cfg.Production && cfg.RuntimeRole != config.RuntimeRoleGateway {
+		logger.Error("gateway requires RUNTIME_ROLE=gateway in production", "role", cfg.RuntimeRole)
+		os.Exit(1)
+	}
+	if cfg.RuntimeRole != config.RuntimeRoleGateway && cfg.RuntimeRole != config.RuntimeRoleMonolithDev {
+		logger.Error("unsupported runtime role for gateway", "role", cfg.RuntimeRole)
+		os.Exit(1)
+	}
+	if cfg.RuntimeRole == config.RuntimeRoleGateway && cfg.WorkerRPCURL == "" {
+		logger.Error("gateway role requires WORKER_RPC_URL", "role", cfg.RuntimeRole)
+		os.Exit(1)
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if err := os.MkdirAll(filepath.Dir(cfg.DatabasePath), 0o750); err != nil {
@@ -144,9 +158,8 @@ func main() {
 		os.Exit(1)
 	}
 	var fileLock *lock.FileLock
-	// When Worker is running as a dedicated service, Gateway operates in concurrent HTTP-only mode
-	// and does not hold a singleton lock on gateway.lock.
-	if cfg.WorkerRPCURL == "" {
+	// In gateway role, Gateway operates in concurrent HTTP-only mode and does not hold a singleton lock on gateway.lock.
+	if cfg.RuntimeRole == config.RuntimeRoleMonolithDev {
 		lockPath := filepath.Join(filepath.Dir(cfg.DatabasePath), "gateway.lock")
 		if flags.checkIntegrity || flags.backupTo != "" {
 			fileLock, err = lock.AcquireShared(lockPath)
@@ -245,7 +258,7 @@ func main() {
 	}
 
 	var server *httpapi.Server
-	if cfg.WorkerRPCURL != "" {
+	if cfg.RuntimeRole == config.RuntimeRoleGateway {
 		logger.Info("starting gateway in HTTP-only mode with worker RPC", "workerRPCURL", cfg.WorkerRPCURL)
 		workerClient := workerrpc.NewClient(cfg.WorkerRPCURL, cfg.WorkerInternalToken)
 		server = httpapi.New(cfg, store).
@@ -259,7 +272,8 @@ func main() {
 			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient)
 		go server.RunJournalWatcher(ctx, 200*time.Millisecond)
-	} else {
+	} else if cfg.RuntimeRole == config.RuntimeRoleMonolithDev {
+		logger.Info("starting gateway in development monolith mode")
 		dispatcher := notification.NewDispatcher(store, notificationRegistry)
 		go dispatcher.Start(ctx)
 

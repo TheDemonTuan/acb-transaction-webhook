@@ -10,6 +10,7 @@ services:
       - "8090:8090"
     environment:
       APP_ENV: development
+      RUNTIME_ROLE: monolith-dev
       LISTEN_ADDR: 0.0.0.0:8090
       DATA_DIR: /data
       DATABASE_PATH: /data/gateway.db

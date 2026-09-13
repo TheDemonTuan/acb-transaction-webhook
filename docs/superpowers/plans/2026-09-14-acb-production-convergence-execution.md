@@ -91,9 +91,9 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | Task ID | Task Title | PR | Status | File Scope | Required Verification Evidence |
 |---|---|:---:|:---:|---|---|
 | **Task 1** | Add final invariant spec & supersede older plans | **PR01** | **COMPLETED** | `docs/**`, `README.md`, `scripts/verify-architecture-docs.sh`, `.github/workflows/ci.yml` | Architecture docs verification script passes; CI verify includes check; baseline suite recorded. |
-| **Task 2** | Explicit runtime roles & forbid production monolith | PR02 | PENDING | `internal/config/*`, `cmd/gateway/*`, `cmd/worker/*` | Gateway fails on missing role/RPC; worker fails without role; production rejects monolith. |
-| **Task 3** | Centralize browser CSRF handling | PR02 | PENDING | `web/src/api.ts`, query/mutation hooks | Single CSRF interceptor; mutations include token; unit tests pass. |
-| **Task 4** | Fail closed on database errors before ACB requests | PR02 | PENDING | `internal/monitor/*`, `internal/storage/*` | DB lookup failure produces zero upstream ACB calls in test mocks. |
+| **Task 2** | Explicit runtime roles & forbid production monolith | **PR02** | **COMPLETED** | `internal/config/*`, `cmd/gateway/*`, `cmd/worker/*` | Gateway fails on missing role/RPC; worker fails without role; production rejects monolith. |
+| **Task 3** | Centralize browser CSRF handling | **PR02** | **COMPLETED** | `web/src/api.ts`, query/mutation hooks | Single CSRF interceptor; mutations include token; unit tests pass. |
+| **Task 4** | Fail closed on database errors before ACB requests | **PR02** | **COMPLETED** | `internal/monitor/*`, `internal/storage/*` | DB lookup failure produces zero upstream ACB calls in test mocks. |
 | **Task 5** | Single-owner ACB upstream scheduler | PR03 | PENDING | `internal/scheduler/*`, `internal/monitor/*` | Priority queue test: interactive > realtime > catchup; single active goroutine. |
 | **Task 6** | Realtime and manual sync tasks | PR04 | PENDING | `internal/monitor/*` | Deduplication and coalescing tests; manual sync returns immediately if poll in flight. |
 | **Task 7** | Bootstrap-only keepalive task | PR04 | PENDING | `internal/monitor/*` | Keepalive runs only when idle; skipped during active polling. |
