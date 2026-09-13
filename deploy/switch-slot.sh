@@ -2,52 +2,40 @@
 # Atomically switch the active Gateway slot in Traefik File Provider
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=deploy/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
 TARGET_SLOT="${1:-blue}"
-TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/edge/dynamic}"
-ACB_CONFIG="${TRAEFIK_DYNAMIC_DIR}/acb.yml"
-ACTIVE_SLOT_FILE="${ACTIVE_SLOT_FILE:-.active-slot}"
 
 if [[ "$TARGET_SLOT" != "blue" && "$TARGET_SLOT" != "green" ]]; then
-  printf "ERROR: Invalid target slot '%s'. Must be 'blue' or 'green'.\n" "$TARGET_SLOT" >&2
+  log_error "Invalid target slot '${TARGET_SLOT}'. Must be 'blue' or 'green'."
   exit 1
 fi
 
-printf "Switching Traefik active route pointer to slot: %s (acb-web-%s)...\n" "$TARGET_SLOT" "$TARGET_SLOT"
+log_info "Switching Traefik active route pointer to slot: ${TARGET_SLOT} (acb-web-${TARGET_SLOT})..."
 
 # Verify candidate readiness before switching route
-bash deploy/smoke-slot.sh "$TARGET_SLOT"
+"$SCRIPT_DIR/smoke-slot.sh" "$TARGET_SLOT"
 
-mkdir -p "$TRAEFIK_DYNAMIC_DIR"
-TMP_CONFIG="${ACB_CONFIG}.tmp.$$"
+# Atomic route switch via shared primitive without nested locking
+if [[ "${DEPLOY_LOCK_HELD:-0}" != "1" && "${SKIP_LOCK:-0}" != "1" ]]; then
+  acquire_deploy_lock
+fi
 
-cat <<EOF > "$TMP_CONFIG"
-http:
-  routers:
-    acb-router:
-      rule: "Host(\`bank.tuannguyenviet.site\`)"
-      entryPoints:
-        - web
-      middlewares:
-        - tunnel-only
-        - security-headers
-      service: acb-service
+CURRENT_ACTIVE="$(get_active_slot)"
+if [[ "$CURRENT_ACTIVE" != "$TARGET_SLOT" ]]; then
+  printf "%s" "$CURRENT_ACTIVE" > "$PREVIOUS_SLOT_FILE"
+fi
 
-  services:
-    acb-service:
-      loadBalancer:
-        passHostHeader: true
-        responseForwarding:
-          flushInterval: "100ms"
-        servers:
-          - url: "http://acb-web-${TARGET_SLOT}:8090"
-        healthCheck:
-          path: "/readyz"
-          interval: "5s"
-          timeout: "2s"
-EOF
+atomic_switch_route "$TARGET_SLOT"
 
-# Atomic replace
-mv -f "$TMP_CONFIG" "$ACB_CONFIG"
-printf "%s" "$TARGET_SLOT" > "$ACTIVE_SLOT_FILE"
+if ! ack_route_identity "$TARGET_SLOT" 15; then
+  log_error "Route identity acknowledgment failed for ${TARGET_SLOT}! Reverting to previous slot ${CURRENT_ACTIVE}..."
+  atomic_switch_route "$CURRENT_ACTIVE"
+  ack_route_identity "$CURRENT_ACTIVE" 15 || true
+  exit 1
+fi
 
-printf "Traefik route pointer successfully updated to %s (acb-web-%s).\n" "$TARGET_SLOT" "$TARGET_SLOT"
+log_info "Traefik route pointer successfully updated and acknowledged for ${TARGET_SLOT} (acb-web-${TARGET_SLOT})."
+exit 0
