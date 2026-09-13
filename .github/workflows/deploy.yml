@@ -297,7 +297,6 @@ jobs:
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
             deploy/compose.prod.yaml "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/compose.prod.yaml.next"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
-            deploy/compose.core.yaml deploy/compose.slot.yaml deploy/compose.dbtool.yaml \
             deploy/deploy-warm.sh deploy/rollback-warm.sh deploy/switch-slot.sh \
             deploy/smoke-slot.sh deploy/check-host.sh \
             deploy/seccomp-auth-browser.json deploy/deploy.sh deploy/rollback.sh \

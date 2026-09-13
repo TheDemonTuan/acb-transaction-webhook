@@ -67,8 +67,8 @@ fi
 
 STANDBY_CONTAINER="acb-gateway-${STANDBY_SLOT}"
 printf "Starting warm standby container %s...\n" "$STANDBY_CONTAINER"
-docker compose -p "acb-${STANDBY_SLOT}" -f deploy/compose.slot.yaml start || \
-  docker compose -p "acb-${STANDBY_SLOT}" -f deploy/compose.slot.yaml up -d
+docker compose -f compose.prod.yaml start "gateway-${STANDBY_SLOT}" || \
+  docker compose -f compose.prod.yaml up -d "gateway-${STANDBY_SLOT}"
 
 # Wait for standby readiness (up to 30s)
 READY=0
