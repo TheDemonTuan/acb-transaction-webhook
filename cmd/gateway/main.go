@@ -264,6 +264,7 @@ func main() {
 		server = httpapi.New(cfg, store).
 			WithSyncRequester(workerClient).
 			WithHistoryEnsurer(workerClient).
+			WithHistoryJobManager(workerClient).
 			WithMonitorNotifier(workerClient).
 			WithEventHub(hub).
 			WithBarkSender(barkSender).
@@ -328,15 +329,18 @@ func main() {
 			})
 		})
 		var sessionLoader *monitor.SessionLoader
+		var historyRunner *monitor.HistoryJobRunner
 		if keyring != nil {
 			sessionLoader = monitor.NewSessionLoader(store, keyring, acbClient)
 			bankMonitor.WithSessionLoader(sessionLoader)
+			historyRunner = monitor.NewHistoryJobRunner(store, acbClient, bankMonitor.Scheduler(), sessionLoader)
+			go historyRunner.Run(ctx)
 		}
 		go bankMonitor.Run(ctx)
 
 		server = httpapi.New(cfg, store).
 			WithSyncRequester(bankMonitor).
-			WithHistoryEnsurer(bankMonitor).
+			WithHistoryJobManager(&monolithHistoryJobManager{store: store, runner: historyRunner}).
 			WithMonitorNotifier(httpapi.MonitorNotifierFunc(func(ctx context.Context) error {
 				bankMonitor.NotifySettingsChanged()
 				return nil
@@ -425,4 +429,37 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+type monolithHistoryJobManager struct {
+	store  *storage.Store
+	runner *monitor.HistoryJobRunner
+}
+
+func (m *monolithHistoryJobManager) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
+	conn, err := m.store.Connection(ctx)
+	if err != nil {
+		return storage.HistorySyncJob{}, fmt.Errorf("failed to lookup connection: %w", err)
+	}
+	if conn.State != "MONITORING" {
+		return storage.HistorySyncJob{}, errors.New("bank connection is not in MONITORING state")
+	}
+	job, _, err := m.store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, fromDay, toDay)
+	if err != nil {
+		return storage.HistorySyncJob{}, err
+	}
+	if m.runner != nil {
+		m.runner.Wake()
+	}
+	return job, nil
+}
+
+func (m *monolithHistoryJobManager) CancelHistoryJob(ctx context.Context, jobID string) error {
+	if err := m.store.CancelHistorySyncJob(ctx, jobID); err != nil {
+		return err
+	}
+	if m.runner != nil {
+		m.runner.CancelJob(jobID)
+	}
+	return nil
 }

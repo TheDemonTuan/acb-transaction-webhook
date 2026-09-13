@@ -46,6 +46,11 @@ type HistoryEnsurer interface {
 	EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error)
 }
 
+type HistoryJobManager interface {
+	CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error)
+	CancelHistoryJob(ctx context.Context, jobID string) error
+}
+
 type MonitorNotifier interface {
 	NotifySettingsChanged(ctx context.Context) error
 }
@@ -67,9 +72,10 @@ type WorkerProber interface {
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
-	syncRequester   SyncRequester
-	historyEnsurer  HistoryEnsurer
-	monitorNotifier MonitorNotifier
+	syncRequester     SyncRequester
+	historyEnsurer    HistoryEnsurer
+	historyJobManager HistoryJobManager
+	monitorNotifier   MonitorNotifier
 	authVerifier    AuthVerifier
 	workerProber    WorkerProber
 	cfg             config.Config
@@ -134,7 +140,13 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/webhooks", s.endpoints)
 		api.Get("/transactions", s.transactions)
 		api.Get("/transactions/{id}", s.transactionDetail)
-		api.Post("/transactions/ensure-history", s.ensureHistory)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/transactions/ensure-history", s.ensureHistory)
+		api.Get("/transactions/history-sync-jobs/{id}", s.getHistoryJob)
+		api.Get("/history-sync-jobs/{id}", s.getHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Delete("/transactions/history-sync-jobs/{id}", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Delete("/history-sync-jobs/{id}", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/transactions/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
 		api.Get("/deliveries", s.deliveries)
 		api.Get("/poll-runs", s.pollRuns)
 		api.Get("/audit", s.auditLogs)
@@ -205,8 +217,16 @@ func (s *Server) WithSyncRequester(requester SyncRequester) *Server {
 	return s
 }
 
+func (s *Server) WithHistoryJobManager(mgr HistoryJobManager) *Server {
+	s.historyJobManager = mgr
+	return s
+}
+
 func (s *Server) WithHistoryEnsurer(ensurer HistoryEnsurer) *Server {
 	s.historyEnsurer = ensurer
+	if ensurer != nil && s.historyJobManager == nil {
+		s.historyJobManager = &legacyHistoryEnsurerAdapter{ensurer: ensurer}
+	}
 	return s
 }
 
@@ -890,53 +910,249 @@ type ensureHistoryRequest struct {
 }
 
 func (s *Server) ensureHistory(w http.ResponseWriter, r *http.Request) {
-	if s.historyEnsurer == nil {
-		writeError(w, http.StatusServiceUnavailable, "history sync unavailable")
-		return
-	}
 	var req ensureHistoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Dữ liệu yêu cầu không hợp lệ.")
 		return
 	}
 	req.From = strings.TrimSpace(req.From)
 	req.To = strings.TrimSpace(req.To)
 	if req.From == "" || req.To == "" {
-		writeError(w, http.StatusBadRequest, "from and to dates are required (YYYY-MM-DD)")
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Ngày bắt đầu và kết thúc là bắt buộc (YYYY-MM-DD).")
 		return
 	}
 	fromT, err := time.Parse("2006-01-02", req.From)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid from date: expected YYYY-MM-DD")
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Định dạng ngày bắt đầu không hợp lệ (YYYY-MM-DD).")
 		return
 	}
 	toT, err := time.Parse("2006-01-02", req.To)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid to date: expected YYYY-MM-DD")
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Định dạng ngày kết thúc không hợp lệ (YYYY-MM-DD).")
 		return
 	}
 	if fromT.After(toT) {
-		writeError(w, http.StatusBadRequest, "from date must not be after to date")
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Ngày bắt đầu không được sau ngày kết thúc.")
 		return
 	}
 	if toT.Sub(fromT) > 31*24*time.Hour {
-		writeError(w, http.StatusBadRequest, "range too large: maximum 31 days")
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Khoảng thời gian vượt quá giới hạn tối đa 31 ngày.")
 		return
 	}
 
-	rowsSeen, err := s.historyEnsurer.EnsureHistory(r.Context(), req.From, req.To)
+	conn, err := s.store.Connection(r.Context())
 	if err != nil {
-		slog.Warn("ensure history failed", "from", req.From, "to", req.To, "error", err)
-		writeError(w, http.StatusBadGateway, "failed to sync history: "+err.Error())
+		if errors.Is(err, sql.ErrNoRows) {
+			writeStandardError(w, r, http.StatusBadRequest, "CONNECTION_NOT_READY", "Chưa cấu hình tài khoản ACB.")
+			return
+		}
+		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Không thể kiểm tra kết nối tài khoản ACB.")
+		return
+	}
+	if conn.State != "MONITORING" {
+		writeStandardError(w, r, http.StatusBadRequest, "CONNECTION_NOT_READY", "Tài khoản ACB chưa sẵn sàng hoặc chưa đăng nhập.")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "COMPLETE",
-		"coverage": "COMPLETE",
-		"synced":   true,
-		"rowsSeen": rowsSeen,
+	// Check if the requested range is already complete in database
+	covered, err := s.store.CheckRangeCoverage(r.Context(), conn.ID, req.From, req.To)
+	if err == nil && covered {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":   "COMPLETED",
+			"coverage": "COMPLETE",
+			"synced":   false,
+			"job":      nil,
+		})
+		return
+	}
+
+	mgr := s.getHistoryJobManager()
+	if mgr == nil {
+		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Dịch vụ đồng bộ lịch sử tạm thời không khả dụng.")
+		return
+	}
+
+	job, err := mgr.CreateHistoryJob(r.Context(), req.From, req.To)
+	if err != nil {
+		slog.Warn("failed to create history job", "from", req.From, "to", req.To, "error", err)
+		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Không thể khởi tạo tiến trình đồng bộ: "+err.Error())
+		return
+	}
+
+	audit(s.store, r, "history_sync.create", job.ID)
+	s.publishStateEvent("history_sync.queued", job.ID, job)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id":       job.ID,
+		"status":   job.Status,
+		"coverage": "PENDING",
+		"synced":   false,
+		"job":      job,
 	})
+}
+
+func (s *Server) getHistoryJob(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "id")
+	if jobID == "" {
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Mã công việc không được để trống.")
+		return
+	}
+	if jobID == "latest" {
+		s.getLatestHistoryJob(w, r)
+		return
+	}
+
+	conn, err := s.store.Connection(r.Context())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Lỗi kiểm tra kết nối.")
+		return
+	}
+
+	job, err := s.store.GetHistorySyncJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, storage.ErrJobNotFound) {
+			writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
+			return
+		}
+		writeStandardError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Lỗi truy vấn tiến trình đồng bộ.")
+		return
+	}
+
+	// Validate ownership/context: singleton connection
+	if (conn.ID != "" && job.ConnectionID != "" && job.ConnectionID != conn.ID) || (conn.ID == "" && job.ConnectionID != "") {
+		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) getLatestHistoryJob(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.store.Connection(r.Context())
+	if err != nil || conn.ID == "" {
+		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Chưa có kết nối ACB.")
+		return
+	}
+
+	job, found, err := s.store.GetLatestHistorySyncJob(r.Context(), conn.ID)
+	if err != nil || !found {
+		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Chưa có tiến trình đồng bộ nào.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) cancelHistoryJob(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "id")
+	if jobID == "" {
+		writeStandardError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Mã công việc không được để trống.")
+		return
+	}
+
+	conn, err := s.store.Connection(r.Context())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Lỗi kiểm tra kết nối.")
+		return
+	}
+
+	job, err := s.store.GetHistorySyncJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, storage.ErrJobNotFound) {
+			writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
+			return
+		}
+		writeStandardError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Lỗi truy vấn tiến trình đồng bộ.")
+		return
+	}
+
+	if (conn.ID != "" && job.ConnectionID != "" && job.ConnectionID != conn.ID) || (conn.ID == "" && job.ConnectionID != "") {
+		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
+		return
+	}
+
+	if job.Status == storage.HistoryJobStatusCompleted || job.Status == storage.HistoryJobStatusFailed {
+		writeStandardError(w, r, http.StatusConflict, "JOB_TERMINAL", "Tiến trình đồng bộ đã ở trạng thái kết thúc, không thể hủy.")
+		return
+	}
+
+	mgr := s.getHistoryJobManager()
+	if mgr == nil {
+		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Dịch vụ đồng bộ lịch sử tạm thời không khả dụng.")
+		return
+	}
+
+	if err := mgr.CancelHistoryJob(r.Context(), jobID); err != nil {
+		if errors.Is(err, storage.ErrJobNotFound) {
+			writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
+			return
+		}
+		if errors.Is(err, storage.ErrJobTerminal) {
+			writeStandardError(w, r, http.StatusConflict, "JOB_TERMINAL", "Tiến trình đồng bộ đã ở trạng thái kết thúc, không thể hủy.")
+			return
+		}
+		writeStandardError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Không thể hủy tiến trình đồng bộ: "+err.Error())
+		return
+	}
+
+	audit(s.store, r, "history_sync.cancel", jobID)
+	s.publishStateEvent("history_sync.canceled", jobID, map[string]any{"id": jobID, "status": "CANCELED"})
+
+	job.Status = storage.HistoryJobStatusCanceled
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) getHistoryJobManager() HistoryJobManager {
+	if s.historyJobManager != nil {
+		return s.historyJobManager
+	}
+	if s.store != nil {
+		return &defaultStoreHistoryJobManager{store: s.store}
+	}
+	return nil
+}
+
+type defaultStoreHistoryJobManager struct {
+	store *storage.Store
+}
+
+func (m *defaultStoreHistoryJobManager) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
+	conn, err := m.store.Connection(ctx)
+	if err != nil {
+		return storage.HistorySyncJob{}, fmt.Errorf("lookup connection: %w", err)
+	}
+	if conn.State != "MONITORING" {
+		return storage.HistorySyncJob{}, errors.New("bank connection is not in MONITORING state")
+	}
+	job, _, err := m.store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, fromDay, toDay)
+	return job, err
+}
+
+func (m *defaultStoreHistoryJobManager) CancelHistoryJob(ctx context.Context, jobID string) error {
+	return m.store.CancelHistorySyncJob(ctx, jobID)
+}
+
+type legacyHistoryEnsurerAdapter struct {
+	ensurer HistoryEnsurer
+}
+
+func (a *legacyHistoryEnsurerAdapter) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
+	rowsSeen, err := a.ensurer.EnsureHistory(ctx, fromDay, toDay)
+	if err != nil {
+		return storage.HistorySyncJob{}, err
+	}
+	return storage.HistorySyncJob{
+		ID:        "syncjob_legacy",
+		Status:    storage.HistoryJobStatusCompleted,
+		RangeFrom: fromDay,
+		RangeTo:   toDay,
+		RowsSeen:  rowsSeen,
+		PagesDone: 1,
+	}, nil
+}
+
+func (a *legacyHistoryEnsurerAdapter) CancelHistoryJob(ctx context.Context, jobID string) error {
+	return nil
 }
 
 func (s *Server) getMonitorSettings(w http.ResponseWriter, r *http.Request) {
@@ -1457,7 +1673,25 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	writeJSON(w, status, map[string]string{"error": code})
+	writeJSON(w, status, map[string]string{"error": code, "code": code})
+}
+
+func writeStandardError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	reqID := ""
+	if r != nil {
+		reqID = r.Header.Get("X-Request-Id")
+		if reqID == "" {
+			reqID = requestIDFromContext(r.Context())
+		}
+	}
+	resp := map[string]any{
+		"error": message,
+		"code":  code,
+	}
+	if reqID != "" {
+		resp["requestId"] = reqID
+	}
+	writeJSON(w, status, resp)
 }
 func spa(files fs.FS) http.Handler {
 	static := http.FileServer(http.FS(files))

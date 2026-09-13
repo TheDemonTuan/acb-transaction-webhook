@@ -167,3 +167,35 @@ export type RealtimeEvent = {
   type: string;
   data: unknown;
 };
+
+export type HistoryJobStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELED';
+
+export type HistorySyncJob = {
+  id: string;
+  connectionId?: string;
+  generation?: number;
+  rangeFrom: string;
+  rangeTo: string;
+  status: HistoryJobStatus;
+  currentDay?: string | null;
+  pagesDone: number;
+  rowsSeen: number;
+  attempts?: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt?: string;
+  startedAt?: string | null;
+  heartbeatAt?: string | null;
+  finishedAt?: string | null;
+  updatedAt?: string;
+};
+
+export type EnsureHistoryResponse = {
+  id?: string;
+  status: string;
+  coverage?: string;
+  synced: boolean;
+  job?: HistorySyncJob | null;
+  rowsSeen?: number;
+};
+

@@ -5,6 +5,8 @@ import type {
   Connection,
   Delivery,
   Endpoint,
+  EnsureHistoryResponse,
+  HistorySyncJob,
   NotificationChannel,
   NotificationProvider,
   PageResponse,
@@ -47,11 +49,29 @@ export const fetchTransactionDetail = async (id: string): Promise<Transaction> =
 export const ensureHistory = async (params: {
   from: string;
   to: string;
-}): Promise<{ status: string; coverage: string; synced: boolean; rowsSeen?: number }> => {
-  return api('/transactions/ensure-history', {
+}): Promise<EnsureHistoryResponse> => {
+  return api<EnsureHistoryResponse>('/transactions/ensure-history', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
+  });
+};
+
+export const fetchHistorySyncJob = async (id: string): Promise<HistorySyncJob> => {
+  return api<HistorySyncJob>(`/transactions/history-sync-jobs/${encodeURIComponent(id)}`);
+};
+
+export const fetchLatestHistorySyncJob = async (): Promise<HistorySyncJob | null> => {
+  try {
+    return await api<HistorySyncJob>('/transactions/history-sync-jobs/latest');
+  } catch {
+    return null;
+  }
+};
+
+export const cancelHistorySyncJob = async (id: string): Promise<HistorySyncJob> => {
+  return api<HistorySyncJob>(`/transactions/history-sync-jobs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   });
 };
 

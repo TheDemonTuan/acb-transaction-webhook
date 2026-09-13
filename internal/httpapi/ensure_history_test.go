@@ -35,6 +35,13 @@ func TestEnsureHistoryEndpointAndValidation(t *testing.T) {
 	}
 	defer store.Close()
 
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatalf("ConfigureConnection: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING'`); err != nil {
+		t.Fatalf("update connection state: %v", err)
+	}
+
 	ensurer := &mockHistoryEnsurer{}
 	srv := New(config.Config{Timezone: time.UTC, DevelopmentSubject: "owner"}, store).
 		WithHistoryEnsurer(ensurer)
@@ -62,6 +69,11 @@ func TestEnsureHistoryEndpointAndValidation(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid date, got %d", rec.Code)
 	}
+	var errResp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &errResp)
+	if errResp["code"] != "INVALID_RANGE" {
+		t.Errorf("expected code INVALID_RANGE, got %q", errResp["code"])
+	}
 
 	// 2. From after to
 	rec = post(`{"from":"2026-09-15","to":"2026-09-12"}`)
@@ -75,16 +87,22 @@ func TestEnsureHistoryEndpointAndValidation(t *testing.T) {
 		t.Errorf("expected 400 for range > 31 days, got %d", rec.Code)
 	}
 
-	// 4. Valid range
+	// 4. Valid range returns 202 Accepted
 	rec = post(`{"from":"2026-09-06","to":"2026-09-12"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["status"] != "COMPLETE" || resp["synced"] != true {
-		t.Errorf("unexpected response: %v", resp)
+	if resp["status"] != "QUEUED" && resp["status"] != "RUNNING" && resp["status"] != "COMPLETED" {
+		t.Errorf("unexpected status: %v", resp["status"])
+	}
+	if resp["synced"] != false {
+		t.Errorf("unexpected synced flag for async job: %v", resp["synced"])
+	}
+	if resp["id"] == nil || resp["id"] == "" {
+		t.Errorf("expected job id in response: %v", resp)
 	}
 }
 

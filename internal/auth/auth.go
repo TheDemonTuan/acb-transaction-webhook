@@ -144,9 +144,6 @@ func (m *Middleware) identity(r *http.Request) (Identity, error) {
 	return identity, nil
 }
 func (m *Middleware) role(subject string) (Role, bool) {
-	if !m.cfg.Production && subject == m.cfg.DevelopmentSubject {
-		return Owner, true
-	}
 	subLower := strings.ToLower(subject)
 	for s := range m.cfg.Roles.Owners {
 		if s == subject || strings.ToLower(s) == subLower {
@@ -162,6 +159,9 @@ func (m *Middleware) role(subject string) (Role, bool) {
 		if s == subject || strings.ToLower(s) == subLower {
 			return Viewer, true
 		}
+	}
+	if !m.cfg.Production && subject == m.cfg.DevelopmentSubject {
+		return Owner, true
 	}
 	return "", false
 }

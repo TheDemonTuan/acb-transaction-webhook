@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ensureHistory,
+  fetchHistorySyncJob,
+  fetchLatestHistorySyncJob,
+  cancelHistorySyncJob,
   configureConnection,
   sendConnectionAction,
   startAuthSession,
@@ -36,7 +39,49 @@ describe('queries and mutations with centralized CSRF', () => {
         expect(init?.body).toBe(JSON.stringify({ from: '2026-09-01', to: '2026-09-02' }));
 
         return new Response(
-          JSON.stringify({ status: 'COMPLETE', coverage: 'FULL', synced: true, rowsSeen: 5 }),
+          JSON.stringify({
+            status: 'QUEUED',
+            coverage: 'PENDING',
+            synced: false,
+            job: {
+              id: 'job-123',
+              status: 'QUEUED',
+              rangeFrom: '2026-09-01',
+              rangeTo: '2026-09-02',
+              pagesDone: 0,
+              rowsSeen: 0,
+            },
+          }),
+          {
+            status: 202,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await ensureHistory({ from: '2026-09-01', to: '2026-09-02' });
+    expect(res.status).toBe('QUEUED');
+    expect(res.synced).toBe(false);
+    expect(res.job?.id).toBe('job-123');
+    expect(fetchMock).toHaveBeenCalledTimes(2); // 1. /csrf, 2. /transactions/ensure-history
+  });
+
+  it('fetchHistorySyncJob performs GET for job descriptor', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === '/api/v1/transactions/history-sync-jobs/job-123') {
+        return new Response(
+          JSON.stringify({
+            id: 'job-123',
+            status: 'RUNNING',
+            rangeFrom: '2026-09-01',
+            rangeTo: '2026-09-02',
+            pagesDone: 2,
+            rowsSeen: 15,
+            currentDay: '2026-09-01',
+          }),
           {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -47,10 +92,47 @@ describe('queries and mutations with centralized CSRF', () => {
     });
     globalThis.fetch = fetchMock;
 
-    const res = await ensureHistory({ from: '2026-09-01', to: '2026-09-02' });
-    expect(res.status).toBe('COMPLETE');
-    expect(res.synced).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2); // 1. /csrf, 2. /transactions/ensure-history
+    const job = await fetchHistorySyncJob('job-123');
+    expect(job.id).toBe('job-123');
+    expect(job.status).toBe('RUNNING');
+    expect(job.pagesDone).toBe(2);
+    expect(job.rowsSeen).toBe(15);
+  });
+
+  it('cancelHistorySyncJob sends DELETE with auto-injected CSRF token', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/csrf') {
+        return new Response(JSON.stringify({ token: 'test-csrf-token' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/v1/transactions/history-sync-jobs/job-123') {
+        expect(init?.method).toBe('DELETE');
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-CSRF-Token')).toBe('test-csrf-token');
+        return new Response(
+          JSON.stringify({
+            id: 'job-123',
+            status: 'CANCELED',
+            rangeFrom: '2026-09-01',
+            rangeTo: '2026-09-02',
+            pagesDone: 2,
+            rowsSeen: 15,
+          }),
+          {
+            status: 202,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const canceled = await cancelHistorySyncJob('job-123');
+    expect(canceled.id).toBe('job-123');
+    expect(canceled.status).toBe('CANCELED');
   });
 
   it('configureConnection sends POST with masked account and CSRF token', async () => {
