@@ -1,0 +1,23 @@
+http:
+  routers:
+    bark-router:
+      rule: "Host(`bark.tuannguyenviet.site`)"
+      entryPoints:
+        - web
+      middlewares:
+        - tunnel-only
+        - security-headers
+      service: bark-service
+
+  services:
+    bark-service:
+      loadBalancer:
+        passHostHeader: true
+        responseForwarding:
+          flushInterval: "100ms"
+        servers:
+          - url: "http://acb-bark:8080"
+        healthCheck:
+          path: "/ping"
+          interval: "10s"
+          timeout: "3s"
