@@ -577,7 +577,7 @@ jobs:
           set -euo pipefail
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -r \
             deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
