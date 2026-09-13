@@ -83,7 +83,9 @@ func (w *workerService) VerifySession(ctx context.Context, account string, gener
 }
 
 func main() {
-	healthcheck := flag.Bool("healthcheck", false, "verify worker health via HTTP")
+	healthcheck := flag.Bool("healthcheck", false, "verify worker health via HTTP (readiness first, then liveness)")
+	livenessCheck := flag.Bool("liveness-check", false, "verify worker liveness via HTTP /healthz")
+	readinessCheck := flag.Bool("readiness-check", false, "verify worker readiness via HTTP /readyz")
 	flag.Parse()
 
 	rpcAddr := os.Getenv("WORKER_RPC_ADDR")
@@ -95,11 +97,25 @@ func main() {
 		rpcAddr = "0.0.0.0:" + rpcPort
 	}
 
-	if *healthcheck {
+	if *healthcheck || *livenessCheck || *readinessCheck {
 		client := &http.Client{Timeout: 3 * time.Second}
 		_, port, err := net.SplitHostPort(rpcAddr)
 		if err != nil {
 			port = "8190"
+		}
+		if *livenessCheck {
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
+			if err == nil && resp.StatusCode == http.StatusOK {
+				return
+			}
+			os.Exit(1)
+		}
+		if *readinessCheck {
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz", port))
+			if err == nil && resp.StatusCode == http.StatusOK {
+				return
+			}
+			os.Exit(1)
 		}
 		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz", port))
 		if err == nil && resp.StatusCode == http.StatusOK {

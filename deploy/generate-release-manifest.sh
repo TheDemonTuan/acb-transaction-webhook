@@ -136,6 +136,7 @@ compute_hash() {
 # Collect deploy bundle files
 bundle_files=(
   "compose.prod.yaml"
+  "lib.sh"
   "deploy-warm.sh"
   "rollback-warm.sh"
   "switch-slot.sh"

@@ -547,8 +547,7 @@ jobs:
   deploy:
     name: Deploy to VPS
     needs: [verify, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
-    # Hard freeze: automatic deploy on push is disabled. Explicit workflow_dispatch approval required.
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -579,17 +578,9 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
-            deploy/compose.prod.yaml "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/compose.prod.yaml.next"
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes \
-            deploy/deploy-warm.sh deploy/rollback-warm.sh deploy/switch-slot.sh \
-            deploy/smoke-slot.sh deploy/check-host.sh \
-            deploy/seccomp-auth-browser.json deploy/deploy.sh deploy/rollback.sh \
-            deploy/verify-deployment.sh deploy/backup.sh deploy/bark-entrypoint.sh \
-            deploy/smoke-test-bark.sh deploy/README.md \
-            deploy/release-manifest.json deploy/release-manifest.bundle deploy/verify-manifest.sh \
-            "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
+            deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
+            "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
       - name: Deploy immutable image
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}

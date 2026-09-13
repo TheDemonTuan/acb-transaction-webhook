@@ -258,7 +258,7 @@ func main() {
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient)
-		go server.RunJournalWatcher(ctx, 1*time.Second)
+		go server.RunJournalWatcher(ctx, 200*time.Millisecond)
 	} else {
 		dispatcher := notification.NewDispatcher(store, notificationRegistry)
 		go dispatcher.Start(ctx)
