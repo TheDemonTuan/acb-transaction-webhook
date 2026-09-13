@@ -1,10 +1,10 @@
 http:
   middlewares:
-    # Restrict ingress only to Cloudflare Tunnel connector IP
+    # Restrict ingress only to Cloudflare Tunnel connector IP and internal edge proxy
     tunnel-only:
       ipAllowList:
         sourceRange:
-          - "172.31.250.2/32"
+          - "172.31.250.0/28"
         rejectStatusCode: 403
 
     # Security headers
