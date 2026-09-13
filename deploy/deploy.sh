@@ -229,7 +229,7 @@ bark_pass="$(tr -d '\r\n' < "$script_dir/secrets/bark_basic_auth_password")"
 docker run --rm --network acb-transaction-webhook_default \
   -v "$script_dir/smoke-test-bark.sh:/smoke-test-bark.sh:ro" \
   -e BARK_HOST=bark -e BARK_PORT=8080 -e BARK_USER="$bark_user" -e BARK_PASS="$bark_pass" \
-  bash:5.3 /bin/bash /smoke-test-bark.sh
+  "$tts_image_ref" /bin/bash /smoke-test-bark.sh
 if [[ -n "$gateway_current" && "$gateway_current" != "$image_ref" ]]; then
   printf '%s\n' "$gateway_current" > "$script_dir/.previous-image"
 fi
