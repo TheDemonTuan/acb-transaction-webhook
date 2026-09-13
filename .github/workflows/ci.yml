@@ -41,8 +41,30 @@ jobs:
         run: |
           pip install -r requirements.txt
           pytest -v
-      - name: Verify deployment scripts
-        run: bash -n deploy/*.sh
+      - name: Verify failover controller
+        run: |
+          python3 -m py_compile platform/failover/vps-failover-controller.py
+          python3 -c "import importlib.util; spec = importlib.util.spec_from_file_location('controller', 'platform/failover/vps-failover-controller.py'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)"
+      - name: Verify deployment and platform script syntax
+        run: |
+          shopt -s nullglob
+          scripts=(deploy/*.sh scripts/ops/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+      - name: Lint deployment and platform scripts
+        run: |
+          shopt -s nullglob
+          scripts=(deploy/*.sh scripts/ops/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          shellcheck --severity=error "${scripts[@]}"
       - name: Check generated source and whitespace
         run: git diff --check
 
@@ -56,6 +78,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
+          target: gateway
           push: false
           tags: acb-transaction-webhook:smoke-test
           load: true
