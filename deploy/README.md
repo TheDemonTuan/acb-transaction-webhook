@@ -90,18 +90,42 @@ Or via primary entrypoint:
 
 ## 3. Canonical Environment Variables & Image References
 
-All production images must be specified as **explicit immutable digests** (`image@sha256:<64-hex>`). Tags such as `:latest` are rejected.
+All production images must be specified as **explicit immutable digests** (`image@sha256:<64-hex>`). Tags such as `:latest` or `:-` fallback values are strictly forbidden and rejected at preflight.
 
-| Component | Canonical Env Var | Compose Variable Aliases |
-|-----------|-------------------|--------------------------|
-| Gateway | `IMAGE_REF` | `GATEWAY_IMAGE_REF`, `IMAGE_REF_BLUE`, `IMAGE_REF_GREEN` |
-| Worker | `WORKER_IMAGE_REF` | `WORKER_IMAGE_REF` |
-| DB Tool | `DBTOOL_IMAGE_REF` | `DBTOOL_IMAGE_REF` |
-| Auth Browser | `AUTH_BROWSER_IMAGE_REF` | `BROWSER_IMAGE_REF` |
-| TTS Gateway | `TTS_GATEWAY_IMAGE_REF` | `TTS_IMAGE_REF` |
-| Bark Server | `BARK_IMAGE_REF` | `BARK_IMAGE_REF` |
-| Gateway Data | `DATA_VOLUME_NAME` | `bank-event-gateway_gateway_data` |
-| Bark Data | `BARK_VOLUME_NAME` | `bank-event-gateway_bark_data` |
+Production state is separated into two canonical files:
+1. **Runtime Host Configuration**: `/opt/acb-transaction-webhook/deploy/.env.production` (chmod 600, host-managed, no secret/image churn)
+2. **Release Component State**: `/opt/acb-transaction-webhook/deploy/.release.env` (chmod 600, atomic read/write via `deploy/release-env.sh`)
+
+| Component | Canonical Release Key | Compose Variable Requirement |
+|-----------|-----------------------|------------------------------|
+| Gateway Active (Blue) | `IMAGE_REF_BLUE` | `${IMAGE_REF_BLUE:?IMAGE_REF_BLUE is required}` |
+| Gateway Standby (Green) | `IMAGE_REF_GREEN` | `${IMAGE_REF_GREEN:?IMAGE_REF_GREEN is required}` |
+| Worker Singleton | `WORKER_IMAGE_REF` | `${WORKER_IMAGE_REF:?WORKER_IMAGE_REF is required}` |
+| Database Migration Tool | `DBTOOL_IMAGE_REF` | `${DBTOOL_IMAGE_REF:?DBTOOL_IMAGE_REF is required}` |
+| Auth Browser Headless | `BROWSER_IMAGE_REF` | `${BROWSER_IMAGE_REF:?BROWSER_IMAGE_REF is required}` |
+| TTS Gateway | `TTS_IMAGE_REF` | `${TTS_IMAGE_REF:?TTS_IMAGE_REF is required}` |
+| Bark Server (Push) | `BARK_IMAGE_REF` | `${BARK_IMAGE_REF:?BARK_IMAGE_REF is required}` |
+| Gateway Data Volume | `DATA_VOLUME_NAME` | `bank-event-gateway_gateway_data` |
+| Bark Data Volume | `BARK_VOLUME_NAME` | `bank-event-gateway_bark_data` |
+
+---
+
+## 4. Runtime Hardening & Isolation Policy
+
+Production Docker Compose enforces the following security and isolation invariants:
+- **Read-Only Root Filesystems**: All first-party services (`worker`, `tts-gateway`, `bark`, `gateway-blue`, `gateway-green`, `dbtool`) enforce `read_only: true`.
+- **Non-Root Execution**: First-party services execute under non-root UID `1000:1000`.
+- **Zero Linux Capabilities**: All containers drop all capabilities (`cap_drop: [ALL]`).
+- **No Privilege Escalation**: Every container enforces `no-new-privileges:true`.
+- **Dedicated Seccomp**: `auth-browser` attaches `seccomp-auth-browser.json`.
+- **Network Segmentation**:
+  - `edge-acb`: Internal network joined only by gateway slots and Bark. `worker` is strictly prohibited from `edge-acb`.
+  - `acb-core`: Internal mesh for inter-service communication (`worker`, `auth-browser`, `tts-gateway`, `bark`, `gateway-blue`, `gateway-green`).
+  - `acb-egress`: Outbound-capable external network for upstream bank and API calls.
+  - `none`: Isolated zero-network namespace for `dbtool`.
+- **Resource Constraints**: Strict limits on CPUs, memory, and PIDs enforced at both service-level (`cpus`, `mem_limit`, `pids_limit`) and `deploy.resources.limits`.
+- **No Published Ports & No Source Mounts**: Containers expose internal ports only to internal networks; no development source trees or Docker socket mounts are permitted.
+- **Audit Verification**: Preflight validation via `deploy/verify-compose-runtime.sh`.
 
 ---
 

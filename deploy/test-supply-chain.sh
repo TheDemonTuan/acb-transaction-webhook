@@ -273,6 +273,19 @@ assert_failure "Reject manifest with mismatched worker RPC compatibility version
     --deploy-dir "$manifest_test_dir" \
     --expected-rpc-version 1
 
+printf "\n"
+
+# ----------------------------------------------------
+# 4. Compose Immutability & Missing Digest Fail-Closed (GATE-14)
+# ----------------------------------------------------
+printf "4. Testing Compose Immutability & Missing Digest Fail-Closed (GATE-14)...\n"
+
+assert_success "Compose immutability policy tests pass (test_compose_policy.sh)" \
+  bash "$script_dir/tests/test_compose_policy.sh"
+
+assert_success "Compose runtime isolation policy tests pass (test_runtime_policy.sh)" \
+  bash "$script_dir/tests/test_runtime_policy.sh"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"

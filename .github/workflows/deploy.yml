@@ -649,18 +649,22 @@ jobs:
             --tts-image "$TTS_IMAGE" \
             --bark-image "$BARK_IMAGE_REF"
 
-          env_file="$DEPLOY_PATH/.env.production"
-          [[ -f "$env_file" ]] || { printf 'Missing production env file: %s\n' "$env_file" >&2; exit 1; }
-          tmp="$(mktemp "${env_file}.XXXXXX")"
+          env_file="$DEPLOY_PATH/deploy/.env.production"
+          [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
+          chmod 600 "$env_file"
           staged_compose="$DEPLOY_PATH/deploy/compose.prod.yaml.next"
           [[ -f "$staged_compose" ]] || { printf 'Missing staged compose file: %s\n' "$staged_compose" >&2; exit 1; }
-          trap 'rm -f "$tmp"' EXIT
-          grep -v -E '^(OWNER_SUBJECTS|CLOUDFLARE_ACCESS_OWNER_EMAIL)=' "$env_file" > "$tmp" || true
-          printf 'OWNER_SUBJECTS=%s\n' "$OWNER" >> "$tmp"
-          chmod 600 "$tmp"
-          mv "$tmp" "$env_file"
-          cp -p "$env_file" "$DEPLOY_PATH/deploy/.env.production"
-          chmod 600 "$DEPLOY_PATH/deploy/.env.production"
+
+          # Initialize canonical immutable release state
+          bash "$DEPLOY_PATH/deploy/release-env.sh" init \
+            --file "$DEPLOY_PATH/deploy/.release.env" \
+            --gateway-blue "$IMAGE" \
+            --gateway-green "$IMAGE" \
+            --worker-image "$WORKER_IMAGE" \
+            --dbtool-image "$DBTOOL_IMAGE" \
+            --auth-browser-image "$BROWSER_IMAGE" \
+            --tts-image "$TTS_IMAGE" \
+            --bark-image "$BARK_IMAGE_REF"
           if [[ -d "$DEPLOY_PATH/secrets/tts_internal_token" ]]; then
             rmdir "$DEPLOY_PATH/secrets/tts_internal_token" 2>/dev/null || rm -rf "$DEPLOY_PATH/secrets/tts_internal_token" 2>/dev/null || docker run --rm --user 0:0 -v "$DEPLOY_PATH/secrets:/s" --entrypoint /bin/sh "$TTS_IMAGE" -c 'rm -rf /s/tts_internal_token' 2>/dev/null || true
           fi

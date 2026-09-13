@@ -61,6 +61,8 @@ if [[ "$resume_soak" -eq 1 ]]; then
   exit 0
 fi
 
+validate_canonical_env
+
 # Determine positional arguments: $1=gateway, $2=auth-browser, $3=tts-gateway, $4=staged_compose
 image_ref="${positional[0]:-${IMAGE_REF:-${GATEWAY_IMAGE_REF:-}}}"
 browser_image_ref="${positional[1]:-${AUTH_BROWSER_IMAGE_REF:-${BROWSER_IMAGE_REF:-}}}"
@@ -96,26 +98,41 @@ if [[ -z "${DBTOOL_IMAGE_REF:-}" && -n "${DBTOOL_IMAGE:-}" ]]; then
   export DBTOOL_IMAGE_REF="$DBTOOL_IMAGE"
 fi
 
+if [[ -n "${WORKER_IMAGE_REF:-}" ]]; then
+  validate_digest "$WORKER_IMAGE_REF" "worker"
+  set_release_env "WORKER_IMAGE_REF" "$WORKER_IMAGE_REF" 2>/dev/null || true
+fi
+
+if [[ -n "${DBTOOL_IMAGE_REF:-}" ]]; then
+  validate_digest "$DBTOOL_IMAGE_REF" "dbtool"
+  set_release_env "DBTOOL_IMAGE_REF" "$DBTOOL_IMAGE_REF" 2>/dev/null || true
+fi
+
 if [[ -n "$browser_image_ref" ]]; then
+  validate_digest "$browser_image_ref" "auth-browser"
   export AUTH_BROWSER_IMAGE_REF="$browser_image_ref"
   export BROWSER_IMAGE_REF="$browser_image_ref"
+  set_release_env "BROWSER_IMAGE_REF" "$browser_image_ref" 2>/dev/null || true
 fi
 
 if [[ -n "$tts_image_ref" ]]; then
+  validate_digest "$tts_image_ref" "tts-gateway"
   export TTS_GATEWAY_IMAGE_REF="$tts_image_ref"
   export TTS_IMAGE_REF="$tts_image_ref"
+  set_release_env "TTS_IMAGE_REF" "$tts_image_ref" 2>/dev/null || true
 fi
 
 bark_image_ref="${BARK_IMAGE_REF:-}"
 if [[ -n "$bark_image_ref" ]]; then
   validate_digest "$bark_image_ref" "bark"
   export BARK_IMAGE_REF="$bark_image_ref"
+  set_release_env "BARK_IMAGE_REF" "$bark_image_ref" 2>/dev/null || true
 fi
 
 # If staged compose file was provided, validate and install it atomically
 if [[ -n "$staged_compose" && -f "$staged_compose" ]]; then
   log_info "Validating staged Compose file: ${staged_compose}"
-  docker compose --env-file "$env_file" -f "$staged_compose" config --quiet
+  docker compose --env-file "$env_file" --env-file "$RELEASE_ENV_FILE" -f "$staged_compose" config --quiet
   [[ -f "$compose_file" ]] && cp -p "$compose_file" "$SCRIPT_DIR/.previous-compose.yaml"
   mv -f "$staged_compose" "$compose_file"
 fi

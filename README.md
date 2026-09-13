@@ -80,24 +80,34 @@ cd acb-transaction-webhook
 
 ### 2. Configure Environment
 
-Copy `.env.example` to `deploy/.env.production` and generate an encryption master key:
+Copy `.env.example` to canonical path `deploy/.env.production` and generate an encryption master key:
 
 ```bash
 cp .env.example deploy/.env.production
+chmod 600 deploy/.env.production
 
-# Generate a 32-byte base64 master key
-mkdir -p deploy/secrets
-openssl rand -base64 32 > deploy/secrets/app_master_key
-chmod 600 deploy/secrets/app_master_key
+# Provision secrets
+deploy/provision-secrets.sh --confirm-fresh-provision
 ```
 
 Edit `deploy/.env.production` with your preferred configuration (domains, Cloudflare Access audience/team, etc.).
 
-### 3. Start the services
+### 3. Initialize Release State and Start Services
+
+Populate immutable container digests in `deploy/.release.env`:
 
 ```bash
+deploy/release-env.sh init \
+  --gateway-blue ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest> \
+  --gateway-green ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest> \
+  --worker-image ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:<worker-digest> \
+  --dbtool-image ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:<dbtool-digest> \
+  --browser-image ghcr.io/thedemontuan/acb-transaction-webhook-auth-browser@sha256:<browser-digest> \
+  --tts-image ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway@sha256:<tts-digest> \
+  --bark-image ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
+
 cd deploy
-docker compose -f compose.prod.yaml up -d
+docker compose --env-file .env.production --env-file .release.env -f compose.prod.yaml up -d
 ```
 
 The gateway will be accessible on `http://127.0.0.1:8090` (or through your configured Cloudflare Tunnel hostname).

@@ -51,9 +51,18 @@ if command -v getenforce >/dev/null 2>&1; then
 fi
 
 # 5. Check Required External Docker Networks
-for net in edge-acb acb-core acb-egress; do
+for net in edge-acb acb-core; do
   if docker network inspect "$net" >/dev/null 2>&1; then
-    log_info "Network [${net}]: OK"
+    is_int="$(docker network inspect "$net" --format '{{.Internal}}' 2>/dev/null || echo "unknown")"
+    log_info "Network [${net}]: OK (Internal=${is_int})"
+  else
+    log_warn "Network [${net}]: NOT FOUND (must be created before first container run)"
+  fi
+done
+for net in acb-egress; do
+  if docker network inspect "$net" >/dev/null 2>&1; then
+    is_int="$(docker network inspect "$net" --format '{{.Internal}}' 2>/dev/null || echo "unknown")"
+    log_info "Network [${net}]: OK (Egress, Internal=${is_int})"
   else
     log_warn "Network [${net}]: NOT FOUND (must be created before first container run)"
   fi

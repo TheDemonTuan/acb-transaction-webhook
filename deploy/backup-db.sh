@@ -14,7 +14,7 @@ OFFHOST_BACKUP_HOOK="${OFFHOST_BACKUP_HOOK:-}"
 REQUIRE_OFFHOST_BACKUP="${REQUIRE_OFFHOST_BACKUP:-0}"
 ACTIVE_SLOT="${ACTIVE_SLOT:-$(get_active_slot 2>/dev/null || echo "monolith")}"
 RELEASE_COMMIT="${RELEASE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo "unknown")}"
-DBTOOL_IMAGE="${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}"
+DBTOOL_IMAGE="${DBTOOL_IMAGE_REF:-$(get_release_env DBTOOL_IMAGE_REF 2>/dev/null || true)}"
 
 # 1. Preflight tool and recipient validation (Fail-closed)
 if [[ -z "$BACKUP_AGE_RECIPIENT" ]]; then
@@ -76,6 +76,11 @@ if ! command -v "$DBTOOL_BIN" >/dev/null 2>&1; then
 fi
 
 if docker volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1; then
+  if [[ -z "$DBTOOL_IMAGE" ]]; then
+    log_error "DBTOOL_IMAGE_REF immutable digest is required for volume backup."
+    exit 1
+  fi
+  validate_digest "$DBTOOL_IMAGE" "dbtool"
   docker run --rm --user 1000:1000 \
     -e APP_ENV=production -e DATA_DIR=/data -e DATABASE_PATH=/data/gateway.db \
     -v "${DATA_VOLUME_NAME}:/data:rw" \

@@ -6,15 +6,45 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
 
-# Canonical environment variable defaults
+# Canonical environment and release paths
+# Production configuration lives strictly in deploy/.env.production.
+# Root-level .env.production is deprecated and strictly ignored.
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env.production}"
-if [[ -f "$SCRIPT_DIR/../.env.production" && ! -f "$SCRIPT_DIR/.env.production" ]]; then
-  cp -p "$SCRIPT_DIR/../.env.production" "$SCRIPT_DIR/.env.production" 2>/dev/null || true
-  chmod 600 "$SCRIPT_DIR/.env.production" 2>/dev/null || true
-elif [[ -f "$SCRIPT_DIR/.env.production" && ! -f "$SCRIPT_DIR/../.env.production" ]]; then
-  cp -p "$SCRIPT_DIR/.env.production" "$SCRIPT_DIR/../.env.production" 2>/dev/null || true
-  chmod 600 "$SCRIPT_DIR/../.env.production" 2>/dev/null || true
+RELEASE_ENV_FILE="${RELEASE_ENV_FILE:-$SCRIPT_DIR/.release.env}"
+
+# Source release environment helper if available
+if [[ -f "$SCRIPT_DIR/release-env.sh" ]]; then
+  # shellcheck source=deploy/release-env.sh
+  source "$SCRIPT_DIR/release-env.sh"
+  if [[ -f "$RELEASE_ENV_FILE" ]]; then
+    export_release_env "$RELEASE_ENV_FILE"
+  fi
 fi
+
+validate_canonical_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    log_error "Canonical production environment file '$ENV_FILE' does not exist. Aborting to prevent unconfigured container execution."
+    return 1
+  fi
+  # Refuse root-level env file if explicitly targeted
+  local root_env="$SCRIPT_DIR/../.env.production"
+  if [[ -f "$root_env" && "$ENV_FILE" == "$root_env" ]]; then
+    log_error "Root-level .env.production is forbidden. Canonical configuration must reside at '$SCRIPT_DIR/.env.production'."
+    return 1
+  fi
+  return 0
+}
+
+compose_prod() {
+  local compose_flags=()
+  if [[ -f "$ENV_FILE" ]]; then
+    compose_flags+=(--env-file "$ENV_FILE")
+  fi
+  if [[ -f "$RELEASE_ENV_FILE" ]]; then
+    compose_flags+=(--env-file "$RELEASE_ENV_FILE")
+  fi
+  docker compose "${compose_flags[@]}" -f "$COMPOSE_FILE" "$@"
+}
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/compose.prod.yaml}"
 SECRETS_DIR="${SECRETS_DIR:-$SCRIPT_DIR/secrets}"
 BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/data/backups}"
@@ -320,7 +350,12 @@ check_active_auth_gate() {
   if [[ -n "${ACTIVE_AUTH_CHECK_CMD:-}" ]]; then
     active_count="$($ACTIVE_AUTH_CHECK_CMD)"
   elif command -v docker >/dev/null 2>&1 && docker volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1; then
-    local dbtool_img="${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}"
+    local dbtool_img="${DBTOOL_IMAGE_REF:-$(get_release_env DBTOOL_IMAGE_REF 2>/dev/null || true)}"
+    if [[ -z "$dbtool_img" ]]; then
+      log_error "check_active_auth_gate: DBTOOL_IMAGE_REF immutable digest is required for active auth check."
+      return 1
+    fi
+    validate_digest "$dbtool_img" "dbtool"
     local auth_json
     auth_json="$(
       docker run --rm \
@@ -628,7 +663,7 @@ stop_standby_container() {
   local slot="$1"
   log_info "Stopping container for slot [${slot}]..."
   mark_intentional_stop "$slot"
-  docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || docker stop "acb-gateway-${slot}" 2>/dev/null || true
+  compose_prod stop "gateway-${slot}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || docker stop "acb-gateway-${slot}" 2>/dev/null || true
   clear_intentional_stop "$slot"
   log_info "Slot [${slot}] stopped into warm standby state."
 }

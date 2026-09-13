@@ -68,6 +68,26 @@ setup_mock_env() {
   mkdir -p "$test_dir/bin" "$test_dir/secrets" "$test_dir/data/backups" "$test_dir/dynamic" "$test_dir/failover"
   touch "$test_dir/data/gateway.db"
 
+  # Canonical production env file and release env file
+  cat <<EOF > "$test_dir/.env.production"
+APP_ENV=production
+RUNTIME_ROLE=gateway
+DATA_VOLUME_NAME=bank-event-gateway_gateway_data
+EOF
+
+  cat <<EOF > "$test_dir/.release.env"
+IMAGE_REF_BLUE=ghcr.io/test/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+IMAGE_REF_GREEN=ghcr.io/test/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+WORKER_IMAGE_REF=ghcr.io/test/worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+DBTOOL_IMAGE_REF=ghcr.io/test/dbtool@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BROWSER_IMAGE_REF=ghcr.io/test/browser@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+TTS_IMAGE_REF=ghcr.io/test/tts@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BARK_IMAGE_REF=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
+EOF
+
+  export ENV_FILE="$test_dir/.env.production"
+  export RELEASE_ENV_FILE="$test_dir/.release.env"
+
   # Default secret files
   printf 'mock-master-key\n' > "$test_dir/secrets/app_master_key"
   printf 'mock-tts-token\n' > "$test_dir/secrets/tts_internal_token"
@@ -471,6 +491,63 @@ set -e
 
 assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Core upgrade aborted by active-auth gate"
 assert_eq "blue" "$(cat "$T8/.active-slot")" "Active slot remains blue"
+
+# ==============================================================================
+# TEST 9: Deployment aborts if canonical deploy/.env.production is missing
+# ==============================================================================
+printf '\n=== TEST 9: Missing canonical .env.production aborts deployment ===\n'
+T9="$TEST_TMP/t9"
+setup_mock_env "$T9"
+rm -f "$T9/.env.production"
+
+set +e
+(
+  export ACTIVE_SLOT_FILE="$T9/.active-slot"
+  export PREVIOUS_SLOT_FILE="$T9/.previous-slot"
+  export TRAEFIK_DYNAMIC_DIR="$T9/dynamic"
+  export ACB_CONFIG="$T9/dynamic/acb.yml"
+  export SECRETS_DIR="$T9/secrets"
+  export ENV_FILE="$T9/.env.production"
+  "$DEPLOY_DIR/deploy-warm.sh" "ghcr.io/test/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+exit_code=$?
+set -e
+
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Deployment aborted when canonical env file was missing"
+
+# ==============================================================================
+# TEST 10: Root-level .env.production is not read or rewritten
+# ==============================================================================
+printf '\n=== TEST 10: No root-level .env.production mutation ===\n'
+T10="$TEST_TMP/t10"
+setup_mock_env "$T10"
+mkdir -p "$T10/deploy"
+cp -p "$DEPLOY_DIR/"*.sh "$T10/deploy/"
+cp -p "$T10/.env.production" "$T10/deploy/.env.production"
+printf 'ROOT_ENV_SENTINEL=original\n' > "$T10/.env.production"
+
+set +e
+(
+  export PATH="$T10/bin:$PATH"
+  export MOCK_STATE_DIR="$T10"
+  export ACTIVE_SLOT_FILE="$T10/deploy/.active-slot"
+  export PREVIOUS_SLOT_FILE="$T10/deploy/.previous-slot"
+  export TRAEFIK_DYNAMIC_DIR="$T10/dynamic"
+  export ACB_CONFIG="$T10/dynamic/acb.yml"
+  export SECRETS_DIR="$T10/secrets"
+  export BACKUP_DIR="$T10/data/backups"
+  export FAILOVER_STATE_DIR="$T10/failover"
+  export DEPLOY_LOCK_FILE="$T10/.deploy.lock"
+  export SOAK_DURATION_SEC=1
+  export ENV_FILE="$T10/deploy/.env.production"
+  export RELEASE_ENV_FILE="$T10/.release.env"
+  "$T10/deploy/deploy-warm.sh" "ghcr.io/test/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+exit_code=$?
+set -e
+
+assert_eq "0" "$exit_code" "Deployment succeeded using deploy/.env.production"
+assert_file_contains "$T10/.env.production" "ROOT_ENV_SENTINEL=original" "Root-level .env.production was untouched"
 
 printf '\n==================================================\n'
 printf 'TEST RESULTS: %d PASSED, %d FAILED\n' "$TESTS_PASSED" "$TESTS_FAILED"

@@ -13,7 +13,12 @@ validate_data_volume "$DATA_VOLUME_NAME"
 validate_secrets
 
 active_slot="$(get_active_slot)"
-dbtool_img="${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}"
+dbtool_img="${DBTOOL_IMAGE_REF:-$(get_release_env DBTOOL_IMAGE_REF 2>/dev/null || true)}"
+if [[ -z "$dbtool_img" ]]; then
+  log_error "DBTOOL_IMAGE_REF immutable digest is required for preflight backup."
+  exit 1
+fi
+validate_digest "$dbtool_img" "dbtool"
 
 backup_file="$(create_preflight_backup "$DATA_VOLUME_NAME" "$dbtool_img" "$active_slot")"
 

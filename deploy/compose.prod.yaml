@@ -2,7 +2,7 @@ name: acb
 
 services:
   worker:
-    image: ${WORKER_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-worker:latest}
+    image: ${WORKER_IMAGE_REF:?WORKER_IMAGE_REF is required}
     container_name: acb-worker
     restart: unless-stopped
     init: true
@@ -53,6 +53,9 @@ services:
       timeout: 3s
       retries: 3
       start_period: 15s
+    cpus: "0.75"
+    mem_limit: 512M
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -66,7 +69,7 @@ services:
           pids: 100
 
   auth-browser:
-    image: ${BROWSER_IMAGE_REF:-${AUTH_BROWSER_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-auth-browser:latest}}
+    image: ${BROWSER_IMAGE_REF:?BROWSER_IMAGE_REF is required}
     container_name: acb-auth-browser
     restart: unless-stopped
     init: true
@@ -95,7 +98,17 @@ services:
       acb-egress:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
+      - /home/gateway/.config:rw,noexec,nosuid,size=64m
       - /home/appuser/.config:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test: ["CMD", "/auth-browser", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    cpus: "1.50"
+    mem_limit: 1536M
+    pids_limit: 300
     logging:
       driver: "json-file"
       options:
@@ -109,7 +122,7 @@ services:
           pids: 300
 
   tts-gateway:
-    image: ${TTS_IMAGE_REF:-${TTS_GATEWAY_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway:latest}}
+    image: ${TTS_IMAGE_REF:?TTS_IMAGE_REF is required}
     container_name: acb-tts-gateway
     restart: unless-stopped
     read_only: true
@@ -131,6 +144,15 @@ services:
       - tts_internal_token
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: "0.50"
+    mem_limit: 384M
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -144,7 +166,7 @@ services:
           pids: 100
 
   bark:
-    image: ${BARK_IMAGE_REF:-ghcr.io/finb/bark-server:latest}
+    image: ${BARK_IMAGE_REF:?BARK_IMAGE_REF is required}
     container_name: acb-bark
     restart: unless-stopped
     init: true
@@ -177,6 +199,15 @@ services:
       - bark_basic_auth_password
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: "0.25"
+    mem_limit: 192M
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -190,7 +221,7 @@ services:
           pids: 100
 
   gateway-blue:
-    image: ${IMAGE_REF_BLUE:-${IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook:latest}}
+    image: ${IMAGE_REF_BLUE:?IMAGE_REF_BLUE is required}
     container_name: acb-gateway-blue
     restart: unless-stopped
     init: true
@@ -245,6 +276,15 @@ services:
       - "platform.failover.peer=acb-gateway-green"
       - "platform.workload.class=http"
       - "platform.failover.mode=warm"
+    healthcheck:
+      test: ["CMD", "/gateway", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: "0.75"
+    mem_limit: 512M
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -258,7 +298,7 @@ services:
           pids: 100
 
   gateway-green:
-    image: ${IMAGE_REF_GREEN:-${IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook:latest}}
+    image: ${IMAGE_REF_GREEN:?IMAGE_REF_GREEN is required}
     container_name: acb-gateway-green
     restart: unless-stopped
     init: true
@@ -313,6 +353,15 @@ services:
       - "platform.failover.peer=acb-gateway-blue"
       - "platform.workload.class=http"
       - "platform.failover.mode=warm"
+    healthcheck:
+      test: ["CMD", "/gateway", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: "0.75"
+    mem_limit: 512M
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -326,18 +375,34 @@ services:
           pids: 100
 
   dbtool:
-    image: ${DBTOOL_IMAGE_REF:-ghcr.io/thedemontuan/acb-transaction-webhook-dbtool:latest}
+    image: ${DBTOOL_IMAGE_REF:?DBTOOL_IMAGE_REF is required}
     container_name: acb-dbtool
     profiles:
       - tools
     user: "1000:1000"
     read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       DATABASE_PATH: /data/gateway.db
     volumes:
       - gateway_data:/data
     networks:
       - none
+    cpus: "0.50"
+    mem_limit: 256M
+    pids_limit: 50
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 50
 
 volumes:
   gateway_data:

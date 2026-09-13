@@ -113,9 +113,9 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 21** | Least-privilege secret distribution | **PR09** | **COMPLETED** | `deploy/compose.prod.yaml`, `internal/config/*` | Container mounts inspect proves each service sees only permitted secret files. |
 | **Task 22** | age encrypted backup & restore scripts | **PR09** | **COMPLETED** | `deploy/backup-db.sh`, `deploy/backup-secrets.sh`, `deploy/restore-db.sh` | Plaintext tmpfs securely unlinked; backup artifact encrypted; manifest valid. |
 | **Task 23** | Disaster recovery restore drill | **PR09** | **COMPLETED** | `scripts/ops/restore-drill.sh`, `deploy/tests/test_restore_drill.sh` | Isolated container restores `.db.age`, verifies integrity, starts application. |
-| **Task 24** | Segregate Docker networks (edge, core, egress) | PR10 | PENDING | `deploy/compose.prod.yaml` | Docker network inspect proves strict network isolation. |
-| **Task 25** | Hardened container runtime profiles | PR10 | PENDING | `deploy/compose.prod.yaml`, `Dockerfile*` | Read-only rootfs, `no-new-privileges`, capability drop, memory/PID limits. |
-| **Task 26** | Health & readiness probe alignment | PR10 | PENDING | `deploy/compose.prod.yaml`, `internal/httpapi/*` | Liveness (/healthz) vs Readiness (/readyz) vs Deploy (/internal/deployz). |
+| **Task 24** | Segregate Docker networks (edge, core, egress) | **PR10** | **COMPLETED** | `deploy/compose.prod.yaml`, `deploy/verify-compose-runtime.sh` | Docker network inspection and test_runtime_policy.sh prove strict network isolation. |
+| **Task 25** | Hardened container runtime profiles | **PR10** | **COMPLETED** | `deploy/compose.prod.yaml`, `deploy/verify-compose-runtime.sh` | Read-only rootfs, `no-new-privileges`, capability drop, dual-level CPU/memory/PID limits verified. |
+| **Task 26** | Health & readiness probe alignment | **PR10** | **COMPLETED** | `deploy/compose.prod.yaml`, `deploy/verify-compose-runtime.sh` | Liveness (/healthz, /ping) vs Readiness (/readyz) vs Deploy (/internal/deployz) verified. |
 | **Task 27** | CI promotion scope classifier | PR11 | PENDING | `.github/workflows/ci.yml`, `scripts/ci/*` | Diff calculation identifies changed components; matches promotion scope. |
 | **Task 28** | Cosign keyless signing & SBOM generation | PR11 | PENDING | `.github/workflows/ci.yml` | Images and release manifest signed with GitHub Actions OIDC. |
 | **Task 29** | Signed release manifest verification on VPS | PR11 | PENDING | `deploy/verify-manifest.sh` | Cosign fails closed on invalid signature or unauthorized subject identity. |
@@ -161,7 +161,7 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **GATE-11** | Off-host disaster recovery drill succeeds using recovery private key | Isolated Container Drill | **VERIFIED** | Platform Operator | `deploy/tests/test_restore_drill.sh` |
 | **GATE-12** | Traefik route switch positively acknowledged via X-Platform-Slot header | Live Route Probe | PENDING (Host Blocker) | Edge Platform Lead | `deploy/switch-slot.sh` probe trace |
 | **GATE-13** | SSE subscriber across Blue/Green cutover replays all sequence events | Browser E2E Replay Test | PENDING | Frontend Lead | `web/tests/e2e/sse_cutover.spec.ts` |
-| **GATE-14** | Missing immutable image digest fails deployment before container mutation | Compose Validation Test | PENDING | Release Engineer | `deploy/test-supply-chain.sh` |
+| **GATE-14** | Missing immutable image digest fails deployment before container mutation | Compose Validation Test | **VERIFIED** | Release Engineer | `deploy/test-supply-chain.sh`, `deploy/tests/test_compose_policy.sh` |
 | **GATE-15** | Missing Cosign on VPS causes signed manifest verification to fail closed | Verifier Harness | PENDING (Host Blocker) | Security Lead | `deploy/verify-manifest.sh` negative test |
 | **GATE-16** | All automated test, lint, and security gates pass on final commit | GitHub Actions CI Run | PENDING | Repository Lead | CI run workflow URL & artifact digest |
 

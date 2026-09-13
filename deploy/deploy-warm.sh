@@ -56,6 +56,7 @@ if [[ -z "$IMAGE_REF" ]]; then
   exit 1
 fi
 
+validate_canonical_env
 validate_digest "$IMAGE_REF" "gateway"
 validate_data_volume "$DATA_VOLUME_NAME"
 validate_secrets
@@ -108,14 +109,14 @@ fi
 set_deploy_state "PULL"
 if [[ "$UPGRADE_CORE" -eq 1 ]]; then
   log_info "Pulling core services and candidate gateway..."
-  docker compose -f "$COMPOSE_FILE" pull worker auth-browser tts-gateway bark "gateway-${CANDIDATE_SLOT}"
+  compose_prod pull worker auth-browser tts-gateway bark "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" pull worker auth-browser tts-gateway bark "gateway-${CANDIDATE_SLOT}"
   log_info "Starting core singleton services..."
-  docker compose -f "$COMPOSE_FILE" up -d worker auth-browser tts-gateway bark
+  compose_prod up -d worker auth-browser tts-gateway bark 2>/dev/null || docker compose -f "$COMPOSE_FILE" up -d worker auth-browser tts-gateway bark
   log_info "Verifying core worker readiness..."
   worker_timeout=30
   worker_start="$(date +%s)"
   while true; do
-    if docker compose -f "$COMPOSE_FILE" exec -T worker /worker --readiness-check >/dev/null 2>&1; then
+    if compose_prod exec -T worker /worker --readiness-check >/dev/null 2>&1 || docker compose -f "$COMPOSE_FILE" exec -T worker /worker --readiness-check >/dev/null 2>&1; then
       log_info "Core worker is ready."
       break
     fi
@@ -127,16 +128,20 @@ if [[ "$UPGRADE_CORE" -eq 1 ]]; then
   done
 else
   log_info "Web-only deploy: Pulling ONLY candidate [gateway-${CANDIDATE_SLOT}]..."
-  docker compose -f "$COMPOSE_FILE" pull "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker pull "$IMAGE_REF"
+  compose_prod pull "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" pull "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker pull "$IMAGE_REF"
 fi
 
 # Start candidate slot with new image
 set_deploy_state "START_CANDIDATE"
 log_info "Starting candidate slot [gateway-${CANDIDATE_SLOT}]..."
 if [[ "$CANDIDATE_SLOT" == "green" ]]; then
-  IMAGE_REF_GREEN="$IMAGE_REF" docker compose -f "$COMPOSE_FILE" up -d gateway-green
+  export IMAGE_REF_GREEN="$IMAGE_REF"
+  set_release_env "IMAGE_REF_GREEN" "$IMAGE_REF" 2>/dev/null || true
+  IMAGE_REF_GREEN="$IMAGE_REF" compose_prod up -d gateway-green 2>/dev/null || IMAGE_REF_GREEN="$IMAGE_REF" docker compose -f "$COMPOSE_FILE" up -d gateway-green
 else
-  IMAGE_REF_BLUE="$IMAGE_REF" docker compose -f "$COMPOSE_FILE" up -d gateway-blue
+  export IMAGE_REF_BLUE="$IMAGE_REF"
+  set_release_env "IMAGE_REF_BLUE" "$IMAGE_REF" 2>/dev/null || true
+  IMAGE_REF_BLUE="$IMAGE_REF" compose_prod up -d gateway-blue 2>/dev/null || IMAGE_REF_BLUE="$IMAGE_REF" docker compose -f "$COMPOSE_FILE" up -d gateway-blue
 fi
 
 # Wait for candidate readiness probe
@@ -144,7 +149,12 @@ set_deploy_state "WAIT_READY"
 if ! wait_for_candidate_ready "$CANDIDATE_SLOT" "${READY_TIMEOUT:-60}"; then
   log_error "Candidate slot [${CANDIDATE_SLOT}] failed readiness probe! Aborting cutover."
   log_warn "Stopping candidate container [gateway-${CANDIDATE_SLOT}]. Active slot [${ACTIVE_SLOT}] remains untouched."
-  docker compose -f "$COMPOSE_FILE" stop "gateway-${CANDIDATE_SLOT}" 2>/dev/null || true
+  compose_prod stop "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${CANDIDATE_SLOT}" 2>/dev/null || true
+  if [[ "$CANDIDATE_SLOT" == "green" ]]; then
+    rollback_release_env "IMAGE_REF_GREEN" 2>/dev/null || true
+  else
+    rollback_release_env "IMAGE_REF_BLUE" 2>/dev/null || true
+  fi
   set_deploy_state "FAILED_CANDIDATE"
   exit 1
 fi
@@ -162,6 +172,11 @@ if ! ack_route_identity "$CANDIDATE_SLOT" "${ROUTE_ACK_TIMEOUT:-15}"; then
   atomic_switch_route "$ACTIVE_SLOT"
   ack_route_identity "$ACTIVE_SLOT" "${ROUTE_ACK_TIMEOUT:-15}" || true
   stop_standby_container "$CANDIDATE_SLOT"
+  if [[ "$CANDIDATE_SLOT" == "green" ]]; then
+    rollback_release_env "IMAGE_REF_GREEN" 2>/dev/null || true
+  else
+    rollback_release_env "IMAGE_REF_BLUE" 2>/dev/null || true
+  fi
   set_deploy_state "ROLLED_BACK" "Route identity ACK failure on candidate ${CANDIDATE_SLOT}"
   exit 1
 fi
