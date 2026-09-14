@@ -115,7 +115,7 @@ export SECRETS_DIR="$T4/secrets"
 export SCRIPT_DIR="$T4"
 
 rc=0
-"$DEPLOY_DIR/provision-secrets.sh" </dev/null >/dev/null 2>&1 || rc=$?
+bash "$DEPLOY_DIR/provision-secrets.sh" </dev/null >/dev/null 2>&1 || rc=$?
 assert_eq "1" "$rc" "provision-secrets.sh exits non-zero without confirmation"
 
 # ==============================================================================
@@ -148,7 +148,7 @@ export SECRETS_DIR="$T6/secrets"
 export SCRIPT_DIR="$T6"
 
 rc=0
-"$DEPLOY_DIR/provision-secrets.sh" --confirm-fresh-provision >/dev/null 2>&1 || rc=$?
+bash "$DEPLOY_DIR/provision-secrets.sh" --confirm-fresh-provision >/dev/null 2>&1 || rc=$?
 assert_eq "0" "$rc" "provision-secrets.sh succeeds on clean directory"
 
 key_content="$(tr -d '\r\n' < "$SECRETS_DIR/app_master_key")"
