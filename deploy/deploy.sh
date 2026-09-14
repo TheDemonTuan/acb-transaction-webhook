@@ -137,15 +137,23 @@ if [[ -n "$staged_compose" && -f "$staged_compose" ]]; then
   mv -f "$staged_compose" "$compose_file"
 fi
 
-# Build arguments for deploy-warm.sh
-deploy_args=("$image_ref")
+# Build arguments for dispatch-rollout.sh
+rollout_args=()
+if [[ -f "$SCRIPT_DIR/release-manifest.json" ]]; then
+  rollout_args+=(--manifest "$SCRIPT_DIR/release-manifest.json")
+  [[ -f "$SCRIPT_DIR/release-manifest.bundle" ]] && rollout_args+=(--bundle "$SCRIPT_DIR/release-manifest.bundle")
+else
+  rollout_args+=(--skip-manifest-check)
+fi
+
+rollout_args+=(--gateway-image "$image_ref")
 if [[ "$upgrade_core" -eq 1 ]]; then
-  deploy_args+=("--upgrade-core")
+  rollout_args+=(--scope "schema,worker,gateway,auth_browser,tts,bark")
 fi
 if [[ "$detach_soak" -eq 1 ]]; then
-  deploy_args+=("--detach-soak")
+  rollout_args+=(--detach-soak)
 fi
-deploy_args+=("--soak-seconds" "$soak_seconds")
+rollout_args+=(--soak-seconds "$soak_seconds")
 
-log_info "Executing transactional warm deployment..."
-exec "$SCRIPT_DIR/deploy-warm.sh" "${deploy_args[@]}"
+log_info "Executing transactional rollout orchestration via dispatcher..."
+exec "$SCRIPT_DIR/dispatch-rollout.sh" "${rollout_args[@]}"

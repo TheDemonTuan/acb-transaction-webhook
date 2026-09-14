@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   verify:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -49,6 +50,10 @@ jobs:
         run: bash scripts/verify-actions-pinned.sh
       - name: Test component promotion scope classifier
         run: bash scripts/test-promotion-scope.sh
+      - name: Test promotion dispatcher and rollout orchestration
+        run: bash deploy/tests/test_promotion_dispatcher.sh
+      - name: Verify CI workflow timeouts, keepalives, and action pinning
+        run: bash deploy/tests/test_ci_workflow.sh
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
@@ -78,6 +83,7 @@ jobs:
 
   docker-smoke-gateway:
     name: Docker smoke test (gateway)
+    timeout-minutes: 10
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -104,6 +110,7 @@ jobs:
 
   docker-smoke-auth-browser:
     name: Docker smoke test (auth-browser)
+    timeout-minutes: 10
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -123,6 +130,7 @@ jobs:
 
   docker-smoke-tts-gateway:
     name: Docker smoke test (tts-gateway)
+    timeout-minutes: 10
     needs: verify
     runs-on: ubuntu-latest
     steps:

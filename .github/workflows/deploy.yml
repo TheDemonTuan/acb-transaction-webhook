@@ -28,6 +28,7 @@ concurrency:
 jobs:
   verify:
     name: Verify test and build
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -66,6 +67,10 @@ jobs:
         run: bash scripts/verify-actions-pinned.sh
       - name: Test component promotion scope classifier
         run: bash scripts/test-promotion-scope.sh
+      - name: Test promotion dispatcher and rollout orchestration
+        run: bash deploy/tests/test_promotion_dispatcher.sh
+      - name: Verify CI workflow timeouts, keepalives, and action pinning
+        run: bash deploy/tests/test_ci_workflow.sh
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
@@ -93,6 +98,7 @@ jobs:
 
   build-gateway-image:
     name: Build gateway GHCR image
+    timeout-minutes: 15
     needs: verify
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
@@ -135,6 +141,7 @@ jobs:
 
   build-worker-image:
     name: Build worker GHCR image
+    timeout-minutes: 15
     needs: verify
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
@@ -177,6 +184,7 @@ jobs:
 
   build-dbtool-image:
     name: Build dbtool GHCR image
+    timeout-minutes: 15
     needs: verify
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
@@ -219,6 +227,7 @@ jobs:
 
   build-auth-browser-image:
     name: Build auth-browser GHCR image
+    timeout-minutes: 15
     needs: verify
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
@@ -265,6 +274,7 @@ jobs:
 
   build-tts-gateway-image:
     name: Build tts-gateway GHCR image
+    timeout-minutes: 15
     needs: verify
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
@@ -310,6 +320,7 @@ jobs:
 
   scan-and-attest:
     name: Scan, attest, and sign release artifacts
+    timeout-minutes: 20
     needs:
       - verify
       - build-gateway-image
@@ -620,6 +631,7 @@ jobs:
 
   deploy:
     name: Deploy to VPS
+    timeout-minutes: 25
     needs: [verify, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-latest
@@ -641,9 +653,10 @@ jobs:
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
-          printf 'Host *\n  ServerAliveInterval 15\n  ServerAliveCountMax 10\n  TCPKeepAlive yes\n' > ~/.ssh/config
+          printf 'Host *\n  ServerAliveInterval 15\n  ServerAliveCountMax 10\n  TCPKeepAlive yes\n  ConnectTimeout 15\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
       - name: Sync deployment files
+        timeout-minutes: 5
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -651,13 +664,14 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -r \
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
       - name: Deploy immutable image
+        timeout-minutes: 20
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -669,32 +683,12 @@ jobs:
           set -euo pipefail
           [[ -n "$DASHBOARD_OWNER_EMAIL" ]] || { printf 'DASHBOARD_OWNER_EMAIL is required.\n' >&2; exit 1; }
           [[ "$BARK_IMAGE_REF" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || { printf 'BARK_IMAGE_REF must be an immutable digest.\n' >&2; exit 1; }
-          image="${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}"
-          worker_image="${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}"
-          dbtool_image="${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}"
-          browser_image="${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}"
-          tts_image="${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}"
           owner="$(printf '%s' "$DASHBOARD_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
           expected_identity="https://github.com/${{ github.repository }}/.github/workflows/deploy.yml@refs/heads/main"
           expected_issuer="https://token.actions.githubusercontent.com"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' IMAGE='$image' WORKER_IMAGE='$worker_image' DBTOOL_IMAGE='$dbtool_image' BROWSER_IMAGE='$browser_image' TTS_IMAGE='$tts_image' BARK_IMAGE_REF='$BARK_IMAGE_REF' EXPECTED_IDENTITY='$expected_identity' EXPECTED_ISSUER='$expected_issuer' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' OWNER='$owner' EXPECTED_IDENTITY='$expected_identity' EXPECTED_ISSUER='$expected_issuer' bash -s" <<'REMOTE'
           set -Eeuo pipefail
-
-          # Preflight: verify release manifest, artifact checksums, exact Cosign signature identity, and anti-replay before any remote mutation
-          bash "$DEPLOY_PATH/deploy/verify-manifest.sh" \
-            --manifest "$DEPLOY_PATH/deploy/release-manifest.json" \
-            --bundle "$DEPLOY_PATH/deploy/release-manifest.bundle" \
-            --deploy-dir "$DEPLOY_PATH/deploy" \
-            --gateway-image "$IMAGE" \
-            --worker-image "$WORKER_IMAGE" \
-            --dbtool-image "$DBTOOL_IMAGE" \
-            --browser-image "$BROWSER_IMAGE" \
-            --tts-image "$TTS_IMAGE" \
-            --bark-image "$BARK_IMAGE_REF" \
-            --expected-identity "$EXPECTED_IDENTITY" \
-            --expected-issuer "$EXPECTED_ISSUER" \
-            --require-cosign
 
           env_file="$DEPLOY_PATH/deploy/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
@@ -702,23 +696,21 @@ jobs:
           staged_compose="$DEPLOY_PATH/deploy/compose.prod.yaml.next"
           [[ -f "$staged_compose" ]] || { printf 'Missing staged compose file: %s\n' "$staged_compose" >&2; exit 1; }
 
-          # Initialize canonical immutable release state
-          source "$DEPLOY_PATH/deploy/release-env.sh"
-          set_release_env "WORKER_IMAGE_REF" "$WORKER_IMAGE"
-          set_release_env "DBTOOL_IMAGE_REF" "$DBTOOL_IMAGE"
-          set_release_env "BROWSER_IMAGE_REF" "$BROWSER_IMAGE"
-          set_release_env "TTS_IMAGE_REF" "$TTS_IMAGE"
-          set_release_env "BARK_IMAGE_REF" "$BARK_IMAGE_REF"
-
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
-          export WORKER_IMAGE_REF="$WORKER_IMAGE"
-          export DBTOOL_IMAGE_REF="$DBTOOL_IMAGE"
-          export BROWSER_IMAGE_REF="$BROWSER_IMAGE"
-          export TTS_IMAGE_REF="$TTS_IMAGE"
-          export BARK_IMAGE_REF="$BARK_IMAGE_REF"
 
-          bash "$DEPLOY_PATH/deploy/deploy-warm.sh" "$IMAGE"
+          # Dispatch rollout orchestration using trusted minimal dispatcher
+          bash "$DEPLOY_PATH/deploy/dispatch-rollout.sh" \
+            --manifest "$DEPLOY_PATH/deploy/release-manifest.json" \
+            --bundle "$DEPLOY_PATH/deploy/release-manifest.bundle" \
+            --deploy-dir "$DEPLOY_PATH/deploy" \
+            --data-dir "$DEPLOY_PATH/data" \
+            --expected-identity "$EXPECTED_IDENTITY" \
+            --expected-issuer "$EXPECTED_ISSUER" \
+            --require-cosign \
+            --soak-seconds 900 \
+            --detach-soak
+
           cp -f "$staged_compose" "$DEPLOY_PATH/deploy/compose.prod.yaml"
           rm -f "$staged_compose"
-          REMOTE
+REMOTE

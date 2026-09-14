@@ -172,6 +172,103 @@ JSEOF
   pass_count=$((pass_count + 1))
 fi
 
+# 13. Platform-only changes
+printf "\n13. Testing platform-only changes...\n"
+cat <<'EOF' > "$test_tmp/platform_only.txt"
+M	platform/failover/vps-failover-controller.py
+M	platform/edge/haproxy.cfg
+EOF
+plat_out="$(run_case "$test_tmp/platform_only.txt" --format env)"
+assert_eq "platform: PROMOTION_PLATFORM is true" "$(printf '%s' "$plat_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "platform: PROMOTION_GATEWAY is false" "$(printf '%s' "$plat_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "platform: PROMOTION_WORKER is false" "$(printf '%s' "$plat_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "platform: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$plat_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+# 14. Mixed: worker + auth-browser
+printf "\n14. Testing mixed worker + auth-browser...\n"
+cat <<'EOF' > "$test_tmp/worker_and_browser.txt"
+M	cmd/worker/main.go
+M	cmd/auth-browser/main.go
+EOF
+wb_out="$(run_case "$test_tmp/worker_and_browser.txt" --format env)"
+assert_eq "worker+browser: PROMOTION_WORKER is true" "$(printf '%s' "$wb_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "worker+browser: PROMOTION_AUTH_BROWSER is true" "$(printf '%s' "$wb_out" | grep '^PROMOTION_AUTH_BROWSER=' | cut -d= -f2)" "true"
+assert_eq "worker+browser: PROMOTION_GATEWAY is false" "$(printf '%s' "$wb_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+
+# 15. Mixed: gateway + tts
+printf "\n15. Testing mixed gateway + tts...\n"
+cat <<'EOF' > "$test_tmp/gw_and_tts.txt"
+M	cmd/gateway/main.go
+M	tts-gateway/server.py
+EOF
+gt_out="$(run_case "$test_tmp/gw_and_tts.txt" --format env)"
+assert_eq "gw+tts: PROMOTION_GATEWAY is true" "$(printf '%s' "$gt_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "gw+tts: PROMOTION_TTS is true" "$(printf '%s' "$gt_out" | grep '^PROMOTION_TTS=' | cut -d= -f2)" "true"
+assert_eq "gw+tts: PROMOTION_WORKER is false" "$(printf '%s' "$gt_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+
+# 16. Mixed: schema + bark
+printf "\n16. Testing mixed schema + bark...\n"
+cat <<'EOF' > "$test_tmp/schema_and_bark.txt"
+A	internal/storage/migrations/011_custom_alerts.sql
+M	deploy/third-party-allowlist.json
+EOF
+sb_out="$(run_case "$test_tmp/schema_and_bark.txt" --format env)"
+assert_eq "schema+bark: PROMOTION_SCHEMA is true" "$(printf '%s' "$sb_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "true"
+assert_eq "schema+bark: PROMOTION_BARK is true" "$(printf '%s' "$sb_out" | grep '^PROMOTION_BARK=' | cut -d= -f2)" "true"
+assert_eq "schema+bark: PROMOTION_GATEWAY is true" "$(printf '%s' "$sb_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "schema+bark: PROMOTION_WORKER is true" "$(printf '%s' "$sb_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+
+# 17. Full multi-component stack
+printf "\n17. Testing full stack promotion...\n"
+cat <<'EOF' > "$test_tmp/full_stack.txt"
+M	cmd/gateway/main.go
+M	cmd/worker/main.go
+A	internal/storage/migrations/012_full.sql
+M	cmd/auth-browser/main.go
+M	tts-gateway/server.py
+M	deploy/third-party-allowlist.json
+M	platform/edge/haproxy.cfg
+EOF
+full_out="$(run_case "$test_tmp/full_stack.txt" --format env)"
+assert_eq "full-stack: PROMOTION_GATEWAY is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_WORKER is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_SCHEMA is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_AUTH_BROWSER is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_AUTH_BROWSER=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_TTS is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_TTS=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_BARK is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_BARK=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_PLATFORM is true" "$(printf '%s' "$full_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "full-stack: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$full_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+# 18. Docs modified alongside code (code scope preserved, doc-only is false)
+printf "\n18. Testing doc modified alongside code...\n"
+cat <<'EOF' > "$test_tmp/code_and_doc.txt"
+M	README.md
+M	cmd/gateway/main.go
+EOF
+cd_out="$(run_case "$test_tmp/code_and_doc.txt" --format env)"
+assert_eq "code+doc: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$cd_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+assert_eq "code+doc: PROMOTION_GATEWAY is true" "$(printf '%s' "$cd_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "code+doc: PROMOTION_WORKER is false" "$(printf '%s' "$cd_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+
+# 19. Unclassified unknown path (conservative fallback)
+printf "\n19. Testing unknown path fallback...\n"
+cat <<'EOF' > "$test_tmp/unknown_path.txt"
+M	unknown/mystery_tool.go
+EOF
+unk_out="$(run_case "$test_tmp/unknown_path.txt" --format env)"
+assert_eq "unknown: PROMOTION_GATEWAY is true" "$(printf '%s' "$unk_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "unknown: PROMOTION_WORKER is true" "$(printf '%s' "$unk_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "unknown: PROMOTION_PLATFORM is true" "$(printf '%s' "$unk_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "unknown: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$unk_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+# 20. Empty changed files list
+printf "\n20. Testing empty file changes...\n"
+touch "$test_tmp/empty.txt"
+emp_out="$(run_case "$test_tmp/empty.txt" --format env)"
+assert_eq "empty: PROMOTION_DOC_ONLY is true" "$(printf '%s' "$emp_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "true"
+assert_eq "empty: PROMOTION_GATEWAY is false" "$(printf '%s' "$emp_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "empty: PROMOTION_WORKER is false" "$(printf '%s' "$emp_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"

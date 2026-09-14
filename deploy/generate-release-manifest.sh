@@ -235,6 +235,14 @@ bundle_files=(
   "smoke-test-tts-gateway.sh"
   "smoke-test-auth-browser.sh"
   "verify-manifest.sh"
+  "dispatch-rollout.sh"
+  "deploy-gateway.sh"
+  "deploy-schema.sh"
+  "deploy-worker.sh"
+  "deploy-auth-browser.sh"
+  "deploy-tts.sh"
+  "deploy-bark.sh"
+  "render-traefik-route.sh"
   "README.md"
 )
 

@@ -75,7 +75,7 @@ PR01 (Baseline, Docs & Compatibility Contracts)
  │           └─ PR12 (Transactional Deploy & Route ACK)
  │               ├─ PR13 (Worker Singleton Upgrade & Handoff)
  │               ├─ PR14 (Failover Controller Hardening)
- │               └─ PR15 (Full CI Verification Pipeline)
+ │               └─ PR15 (CI Promotion Dispatcher & Bounded Rollout Orchestration)
  └─ PR16 (End-to-End Test Suite & Observability Telemetry)
 
 Tất cả PR01–PR16 ──> PR17 (Production Failure Drills & Acceptance Evidence)
@@ -130,6 +130,10 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 38** | Deploy & failover controller coordination | **PR14** | **COMPLETED** | `deploy/lib.sh`, `deploy/lib/state.sh`, `platform/failover/*` | Shared mutual lock prevents failover during intentional deployment transitions; deployment journal awareness prevents candidate promotion; intentional stop markers respected. |
 | **Task 39** | Hardened Edge Traefik configuration | **PR14** | **COMPLETED** | `platform/edge/*` | Dynamic configuration parsing; TLS termination; header sanitization; HAProxy ACL filtering verified with unit tests. |
 | **Task 40** | Unit tests for failover controller | **PR14** | **COMPLETED** | `platform/failover/test_failover.py`, `deploy/tests/test_aux_deploy.sh` | Python test suite (23 tests) and auxiliary transaction suite (9 tests) cover crash between phases, stale/corrupt state, intentional stop, rollback failure, both hosts degraded, and worker backoff. |
+| **Task 40a** | Trusted CI promotion dispatcher & dependency-ordered rollout orchestration | **PR15** | **COMPLETED** | `deploy/dispatch-rollout.sh`, `deploy/deploy.sh` | Minimal trusted dispatcher consumes verified manifest/scope; enforces strict dependency order (schema -> aux -> worker -> gateway -> platform); docs-only zero runtime promotion; no whole-stack compose shortcuts. |
+| **Task 40b** | Bounded workflow/step/SSH timeouts, keepalives, and remote release locking | **PR15** | **COMPLETED** | `.github/workflows/deploy.yml`, `.github/workflows/ci.yml`, `deploy/lib/state.sh` | Bounded job timeouts (`timeout-minutes`), SSH `ConnectTimeout 15`, `ServerAliveInterval 15`, `ServerAliveCountMax 10`, `TCPKeepAlive yes`; explicit remote release lock held and coordinated with failover controller. |
+| **Task 40c** | Rollout journaling, startup recovery, and cancel/TERM traps | **PR15** | **COMPLETED** | `deploy/dispatch-rollout.sh`, `deploy/lib/state.sh` | Startup recovery resolves dangling transactions via `recover_tx_journal`; signals trapped cleanly with status `INTERRUPTED`; receipts and evidence retained in `data/releases/<release_id>/`. |
+| **Task 40d** | Promotion scope and CI workflow test suites | **PR15** | **COMPLETED** | `scripts/test-promotion-scope.sh`, `deploy/tests/test_promotion_dispatcher.sh`, `deploy/tests/test_ci_workflow.sh` | Table-driven tests covering every scope combination; stale/replay manifest rejection; lock contention; cancel trap and evidence retention verified. |
 | **Task 41** | Long-running history with concurrent realtime test | PR16 | PENDING | `tests/integration/scheduler_interleave_test.go` | 31-day history test runs while realtime polls interleave every 15s. |
 | **Task 42** | Browser cancellation & tab close test | PR16 | PENDING | `tests/integration/history_cancel_test.go` | Explicit cancel sets CANCELED; unmount leaves job running. |
 | **Task 43** | Worker crash recovery test | PR16 | PENDING | `tests/integration/worker_recovery_test.go` | Worker SIGKILL mid-job; successor resumes from checkpoint. |
@@ -194,3 +198,6 @@ Executed on commit `956ca239c0b03f5b8319f7542df111e544ced20c` in isolated worktr
 | **Frontend Vitest Suites** | `bun run test` | **PASSED** | 13 test files passed (42 tests passed). Note: On Windows hosts, invoke via `bun run test` (running `bunx --bun vitest run` triggers Windows UNC path parsing issue). |
 | **Architecture Documentation Verification** | `bash scripts/verify-architecture-docs.sh` | **PASSED** | Verifies canonical specs, bans per-app Caddy/cloudflared stack, and asserts superseded banners. |
 | **Python Test Suites** | `pytest -v` (`tts-gateway/`) | *CI Only* | Local Windows worktree lacks Python runtime; verified via GitHub Actions CI Ubuntu runner. |
+| **Component Promotion Scope Classifier** | `bash scripts/test-promotion-scope.sh` | **PASSED** | 20 test cases covering every scope combination (doc-only, single, shared, mixed, full-stack, empty). |
+| **CI Promotion Dispatcher & Rollout Orchestrator** | `bash deploy/tests/test_promotion_dispatcher.sh` | **PASSED** | 37 assertions covering zero-runtime doc-only, dependency order, unauthorized refusal, anti-replay, stale manifest, startup recovery, cancel trap, and evidence retention. |
+| **CI Workflow Invariant & Security Verification** | `bash deploy/tests/test_ci_workflow.sh` | **PASSED** | 24 assertions covering YAML syntax, bounded job/step timeouts, SSH keepalives, concurrency, environment, and full SHA action pinning. |

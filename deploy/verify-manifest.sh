@@ -377,6 +377,10 @@ if (manifest.promotion) {
 if (Array.isArray(manifest.promotion_scope)) {
   console.log(`PROMOTION_SCOPE=${manifest.promotion_scope.join(',')}`);
 }
+const isDocOnly = (manifest.promotion_doc_only === true) ||
+  (Array.isArray(manifest.promotion_scope) && manifest.promotion_scope.length === 0) ||
+  (manifest.promotion && Object.values(manifest.promotion).every(v => v === false));
+console.log(`PROMOTION_DOC_ONLY=${isDocOnly ? 'true' : 'false'}`);
 
 for (const key of requiredImages) {
   console.log(`IMAGE_${key.toUpperCase()}=${manifest.images[key]}`);
@@ -510,6 +514,12 @@ if isinstance(promotion, dict):
         print(f"PROMOTION_{k.upper()}={v}")
 if isinstance(promotion_scope, list):
     print(f"PROMOTION_SCOPE={','.join(promotion_scope)}")
+is_doc_only = (
+    manifest.get("promotion_doc_only") is True or
+    (isinstance(promotion_scope, list) and len(promotion_scope) == 0) or
+    (isinstance(promotion, dict) and all(v is False for v in promotion.values()))
+)
+print(f"PROMOTION_DOC_ONLY={'true' if is_doc_only else 'false'}")
 
 for k in required:
     print(f"IMAGE_{k.upper()}={images[k]}")
