@@ -710,3 +710,79 @@ func (s *Store) GetLatestHistorySyncJob(ctx context.Context, connectionID string
 	}
 	return job, true, nil
 }
+
+type HistoryJobsSummary struct {
+	CountsByStatus         map[string]int `json:"countsByStatus"`
+	TotalJobs              int            `json:"totalJobs"`
+	OldestQueuedAgeSeconds float64        `json:"oldestQueuedAgeSeconds"`
+	StalledCount           int            `json:"stalledCount"`
+	TotalPagesDone         int            `json:"totalPagesDone"`
+	TotalRowsSeen          int            `json:"totalRowsSeen"`
+}
+
+func (s *Store) HistoryJobsSummary(ctx context.Context, stallThreshold time.Duration) (HistoryJobsSummary, error) {
+	summary := HistoryJobsSummary{
+		CountsByStatus: make(map[string]int),
+	}
+	if s.db == nil {
+		return summary, errors.New("database not open")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT status, COUNT(*), COALESCE(SUM(pages_done), 0), COALESCE(SUM(rows_seen), 0)
+		FROM history_sync_jobs
+		GROUP BY status
+	`)
+	if err != nil {
+		return summary, fmt.Errorf("query history jobs summary: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var count, pages, rowsSeen int
+		if err := rows.Scan(&status, &count, &pages, &rowsSeen); err != nil {
+			return summary, fmt.Errorf("scan history jobs summary: %w", err)
+		}
+		summary.CountsByStatus[status] = count
+		summary.TotalJobs += count
+		summary.TotalPagesDone += pages
+		summary.TotalRowsSeen += rowsSeen
+	}
+	if err := rows.Err(); err != nil {
+		return summary, err
+	}
+
+	var oldestQueuedStr sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT MIN(created_at) FROM history_sync_jobs WHERE status = 'QUEUED'
+	`).Scan(&oldestQueuedStr)
+	if err == nil && oldestQueuedStr.Valid && oldestQueuedStr.String != "" {
+		if t, err := time.Parse(time.RFC3339Nano, oldestQueuedStr.String); err == nil {
+			summary.OldestQueuedAgeSeconds = time.Since(t).Seconds()
+			if summary.OldestQueuedAgeSeconds < 0 {
+				summary.OldestQueuedAgeSeconds = 0
+			}
+		} else if t, err := time.Parse(time.RFC3339, oldestQueuedStr.String); err == nil {
+			summary.OldestQueuedAgeSeconds = time.Since(t).Seconds()
+			if summary.OldestQueuedAgeSeconds < 0 {
+				summary.OldestQueuedAgeSeconds = 0
+			}
+		}
+	}
+
+	if stallThreshold <= 0 {
+		stallThreshold = 5 * time.Minute
+	}
+	staleCutoff := time.Now().UTC().Add(-stallThreshold).Format(time.RFC3339Nano)
+	var stalled int
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM history_sync_jobs
+		WHERE status = 'RUNNING' AND heartbeat_at < ?
+	`, staleCutoff).Scan(&stalled)
+	if err == nil {
+		summary.StalledCount = stalled
+	}
+
+	return summary, nil
+}

@@ -163,6 +163,13 @@ type Server struct {
 	readyChecker  func(ctx context.Context) error
 	drainHandler  func(ctx context.Context) error
 	stateProvider func() workerstate.State
+
+	runtimeRole       string
+	releaseCommit     string
+	slot              string
+	schemaVersion     string
+	heartbeatProvider func() time.Time
+	staleThreshold    time.Duration
 }
 
 func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOption) (*Server, error) {
@@ -174,12 +181,14 @@ func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOptio
 		return nil, errors.New("worker rpc internal token is required")
 	}
 	s := &Server{
-		handler:       handler,
-		token:         trimmedToken,
-		mux:           http.NewServeMux(),
-		maxBodyBytes:  1 << 20, // 1MB
-		serverTimeout: 30 * time.Second,
-		sem:           make(chan struct{}, 32),
+		handler:        handler,
+		token:          trimmedToken,
+		mux:            http.NewServeMux(),
+		maxBodyBytes:   1 << 20, // 1MB
+		serverTimeout:  30 * time.Second,
+		sem:            make(chan struct{}, 32),
+		runtimeRole:    "worker",
+		staleThreshold: 60 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -190,6 +199,31 @@ func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOptio
 
 func NewServer(handler WorkerHandler, token string, opts ...ServerOption) (*Server, error) {
 	return NewValidatedServer(handler, token, opts...)
+}
+
+func (s *Server) SetRuntimeInfo(role, release, slot, schema string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if role != "" {
+		s.runtimeRole = role
+	}
+	s.releaseCommit = release
+	s.slot = slot
+	s.schemaVersion = schema
+}
+
+func (s *Server) SetHeartbeatProvider(provider func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatProvider = provider
+}
+
+func (s *Server) SetStaleThreshold(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d > 0 {
+		s.staleThreshold = d
+	}
 }
 
 func (s *Server) SetReadyChecker(checker func(ctx context.Context) error) {
@@ -272,23 +306,155 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) setPlatformHeaders(w http.ResponseWriter) {
+	s.mu.Lock()
+	role := s.runtimeRole
+	rel := s.releaseCommit
+	slot := s.slot
+	s.mu.Unlock()
+	if role != "" {
+		w.Header().Set("X-Runtime-Role", role)
+	}
+	if rel != "" {
+		w.Header().Set("X-Release-Commit", rel)
+	}
+	if slot != "" {
+		w.Header().Set("X-Platform-Slot", slot)
+	}
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		reqID := validateOrGenerateRequestID(r.Header.Get(HeaderRequestID))
 		w.Header().Set(HeaderRequestID, reqID)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
+		s.setPlatformHeaders(w)
+
+		s.mu.Lock()
+		role := s.runtimeRole
+		rel := s.releaseCommit
+		s.mu.Unlock()
+
+		// Role check
+		reqRole := r.URL.Query().Get("role")
+		if reqRole == "" {
+			reqRole = r.Header.Get("X-Expected-Role")
+		}
+		if reqRole != "" && !strings.EqualFold(reqRole, role) && !strings.EqualFold(role, "all-in-one") {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status":    "error",
+				"error":     fmt.Sprintf("role mismatch: expected %s, got %s", reqRole, role),
+				"role":      role,
+				"requestId": reqID,
+			})
+			return
+		}
+
+		// Release check
+		reqRel := r.URL.Query().Get("release")
+		if reqRel == "" {
+			reqRel = r.Header.Get("X-Expected-Release")
+		}
+		if reqRel != "" && rel != "" && rel != reqRel {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status":    "error",
+				"error":     fmt.Sprintf("release mismatch: expected %s, got %s", reqRel, rel),
+				"release":   rel,
+				"requestId": reqID,
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":    "ok",
+			"role":      role,
+			"release":   rel,
+			"requestId": reqID,
+		})
 	})
 
 	s.mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		reqID := validateOrGenerateRequestID(r.Header.Get(HeaderRequestID))
 		w.Header().Set(HeaderRequestID, reqID)
+		s.setPlatformHeaders(w)
+
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
 			return
 		}
+
 		s.mu.Lock()
+		role := s.runtimeRole
+		rel := s.releaseCommit
+		schema := s.schemaVersion
+		hbProvider := s.heartbeatProvider
+		staleThresh := s.staleThreshold
 		checker := s.readyChecker
+		sp := s.stateProvider
 		s.mu.Unlock()
+
+		// 1. Role check
+		reqRole := r.URL.Query().Get("role")
+		if reqRole == "" {
+			reqRole = r.Header.Get("X-Expected-Role")
+		}
+		if reqRole != "" && !strings.EqualFold(reqRole, role) && !strings.EqualFold(role, "all-in-one") {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status":    "not_ready",
+				"error":     fmt.Sprintf("role mismatch: expected %s, got %s", reqRole, role),
+				"role":      role,
+				"requestId": reqID,
+			})
+			return
+		}
+
+		// 2. Release check
+		reqRel := r.URL.Query().Get("release")
+		if reqRel == "" {
+			reqRel = r.Header.Get("X-Expected-Release")
+		}
+		if reqRel != "" && rel != "" && rel != reqRel {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status":    "not_ready",
+				"error":     fmt.Sprintf("release mismatch: expected %s, got %s", reqRel, rel),
+				"release":   rel,
+				"requestId": reqID,
+			})
+			return
+		}
+
+		// 3. Schema check
+		reqSchema := r.URL.Query().Get("schema")
+		if reqSchema == "" {
+			reqSchema = r.Header.Get("X-Expected-Schema")
+		}
+		if reqSchema != "" && schema != "" && schema != reqSchema {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status":    "not_ready",
+				"error":     fmt.Sprintf("schema mismatch: expected %s, got %s", reqSchema, schema),
+				"schema":    schema,
+				"requestId": reqID,
+			})
+			return
+		}
+
+		// 4. Stale check
+		if hbProvider != nil {
+			lastHb := hbProvider()
+			if staleThresh <= 0 {
+				staleThresh = 60 * time.Second
+			}
+			if !lastHb.IsZero() && time.Since(lastHb) > staleThresh {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"status":    "not_ready",
+					"stale":     true,
+					"error":     fmt.Sprintf("worker is stale: last heartbeat was %.0fs ago", time.Since(lastHb).Seconds()),
+					"requestId": reqID,
+				})
+				return
+			}
+		}
+
+		// 5. Ready checker
 		if checker != nil {
 			if err := checker(r.Context()); err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
@@ -299,11 +465,115 @@ func (s *Server) routes() {
 				return
 			}
 		}
+
+		var stateStr string
+		if sp != nil {
+			stateStr = string(sp())
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status":    "ready",
-			"requestId": reqID,
+			"status":        "ready",
+			"role":          role,
+			"release":       rel,
+			"schemaVersion": schema,
+			"state":         stateStr,
+			"singletonLock": true,
+			"stale":         false,
+			"requestId":     reqID,
 		})
 	})
+
+	s.mux.HandleFunc("/internal/deployz", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := validateOrGenerateRequestID(r.Header.Get(HeaderRequestID))
+		w.Header().Set(HeaderRequestID, reqID)
+		s.setPlatformHeaders(w)
+
+		s.mu.Lock()
+		role := s.runtimeRole
+		rel := s.releaseCommit
+		slot := s.slot
+		schema := s.schemaVersion
+		hbProvider := s.heartbeatProvider
+		staleThresh := s.staleThreshold
+		checker := s.readyChecker
+		sp := s.stateProvider
+		s.mu.Unlock()
+
+		status := "ready"
+		resp := map[string]any{
+			"role":             role,
+			"release":          rel,
+			"slot":             slot,
+			"schemaVersion":    schema,
+			"workerRpcVersion": "v1",
+			"singletonLock":    true,
+			"requestId":        reqID,
+		}
+
+		// Role check
+		reqRole := r.URL.Query().Get("role")
+		if reqRole == "" {
+			reqRole = r.Header.Get("X-Expected-Role")
+		}
+		if reqRole != "" && !strings.EqualFold(reqRole, role) && !strings.EqualFold(role, "all-in-one") {
+			resp["roleError"] = fmt.Sprintf("expected %s, got %s", reqRole, role)
+			status = "not_ready"
+		}
+
+		// Release check
+		reqRel := r.URL.Query().Get("release")
+		if reqRel == "" {
+			reqRel = r.Header.Get("X-Expected-Release")
+		}
+		if reqRel != "" && rel != "" && rel != reqRel {
+			resp["releaseError"] = fmt.Sprintf("expected %s, got %s", reqRel, rel)
+			status = "not_ready"
+		}
+
+		// Schema check
+		reqSchema := r.URL.Query().Get("schema")
+		if reqSchema == "" {
+			reqSchema = r.Header.Get("X-Expected-Schema")
+		}
+		if reqSchema != "" && schema != "" && schema != reqSchema {
+			resp["schemaError"] = fmt.Sprintf("expected %s, got %s", reqSchema, schema)
+			status = "not_ready"
+		}
+
+		// Stale check
+		var isStale bool
+		if hbProvider != nil {
+			lastHb := hbProvider()
+			if staleThresh <= 0 {
+				staleThresh = 60 * time.Second
+			}
+			if !lastHb.IsZero() && time.Since(lastHb) > staleThresh {
+				isStale = true
+				status = "not_ready"
+				resp["staleError"] = fmt.Sprintf("last heartbeat was %.0fs ago", time.Since(lastHb).Seconds())
+			}
+		}
+		resp["stale"] = isStale
+
+		// Readiness checker
+		if checker != nil {
+			if err := checker(r.Context()); err != nil {
+				resp["checkerError"] = err.Error()
+				status = "not_ready"
+			}
+		}
+
+		if sp != nil {
+			resp["state"] = string(sp())
+		}
+
+		resp["status"] = status
+		code := http.StatusOK
+		if status == "not_ready" {
+			code = http.StatusServiceUnavailable
+		}
+		writeJSON(w, code, resp)
+	}))
 
 	s.mux.HandleFunc("/rpc/drain", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)

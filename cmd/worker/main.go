@@ -25,6 +25,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/webhook"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
@@ -363,25 +364,29 @@ func main() {
 		if err != nil {
 			port = "8190"
 		}
+		roleQuery := ""
+		if expectedRole := os.Getenv("EXPECTED_ROLE"); expectedRole != "" {
+			roleQuery = "?role=" + expectedRole
+		}
 		if *livenessCheck {
-			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz%s", port, roleQuery))
 			if err == nil && resp.StatusCode == http.StatusOK {
 				return
 			}
 			os.Exit(1)
 		}
 		if *readinessCheck {
-			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz", port))
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz%s", port, roleQuery))
 			if err == nil && resp.StatusCode == http.StatusOK {
 				return
 			}
 			os.Exit(1)
 		}
-		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz", port))
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz%s", port, roleQuery))
 		if err == nil && resp.StatusCode == http.StatusOK {
 			return
 		}
-		resp, err = client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
+		resp, err = client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz%s", port, roleQuery))
 		if err == nil && resp.StatusCode == http.StatusOK {
 			return
 		}
@@ -566,6 +571,44 @@ func main() {
 	}
 	rpcServer.SetStateProvider(coordinator.State)
 	rpcServer.SetDrainHandler(coordinator.Drain)
+
+	schemaRep, _ := store.SchemaVersion(ctx)
+	schemaVer := ""
+	if schemaRep.Version > 0 {
+		schemaVer = fmt.Sprintf("%d", schemaRep.Version)
+	}
+	var hbMu sync.RWMutex
+	lastWorkerHb := time.Now().UTC()
+	rpcServer.SetRuntimeInfo(string(cfg.RuntimeRole), cfg.ReleaseCommit, cfg.Slot, schemaVer)
+	rpcServer.SetHeartbeatProvider(func() time.Time {
+		hbMu.RLock()
+		defer hbMu.RUnlock()
+		return lastWorkerHb
+	})
+	rpcServer.SetStaleThreshold(60 * time.Second)
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				hbMu.Lock()
+				lastWorkerHb = time.Now().UTC()
+				hbMu.Unlock()
+				telemetry.Default.SetWorkerSingleton(
+					string(cfg.RuntimeRole),
+					string(coordinator.State()),
+					flock != nil,
+					"NONE",
+					lastWorkerHb,
+					60*time.Second,
+				)
+			}
+		}
+	}()
 
 	rpcServer.SetReadyChecker(func(ctx context.Context) error {
 		if !coordinator.IsReady() {

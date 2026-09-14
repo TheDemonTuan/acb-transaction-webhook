@@ -34,6 +34,8 @@ import (
 
 type gatewayFlags struct {
 	healthcheck    bool
+	livenessCheck  bool
+	readinessCheck bool
 	deploycheck    bool
 	checkIntegrity bool
 	migrateOnly    bool
@@ -44,6 +46,8 @@ func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(output)
 	healthcheck := fs.Bool("healthcheck", false, "verify server health via HTTP")
+	livenessCheck := fs.Bool("liveness-check", false, "verify server liveness via HTTP /healthz")
+	readinessCheck := fs.Bool("readiness-check", false, "verify server readiness via HTTP /readyz")
 	deploycheck := fs.Bool("deploycheck", false, "verify server deployment readiness via /internal/deployz")
 	checkIntegrity := fs.Bool("check", false, "run read-only database integrity and inventory check")
 	migrateOnly := fs.Bool("migrate-only", false, "apply database migrations and exit (deprecated: use dbtool --migrate)")
@@ -57,6 +61,8 @@ func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
 	}
 	return gatewayFlags{
 		healthcheck:    *healthcheck,
+		livenessCheck:  *livenessCheck,
+		readinessCheck: *readinessCheck,
 		deploycheck:    *deploycheck,
 		checkIntegrity: *checkIntegrity,
 		migrateOnly:    *migrateOnly,
@@ -70,7 +76,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	if flags.healthcheck {
+	if flags.healthcheck || flags.livenessCheck {
 		client := &http.Client{Timeout: 3 * time.Second}
 		ports := []string{"8090", "8080"}
 		if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -78,8 +84,32 @@ func main() {
 				ports = append([]string{p}, ports...)
 			}
 		}
+		roleQuery := ""
+		if expectedRole := os.Getenv("EXPECTED_ROLE"); expectedRole != "" {
+			roleQuery = "?role=" + expectedRole
+		}
 		for _, p := range ports {
-			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", p))
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz%s", p, roleQuery))
+			if err == nil && resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		os.Exit(1)
+	}
+	if flags.readinessCheck {
+		client := &http.Client{Timeout: 3 * time.Second}
+		ports := []string{"8090", "8080"}
+		if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
+			if _, p, err := net.SplitHostPort(addr); err == nil {
+				ports = append([]string{p}, ports...)
+			}
+		}
+		roleQuery := ""
+		if expectedRole := os.Getenv("EXPECTED_ROLE"); expectedRole != "" {
+			roleQuery = "?role=" + expectedRole
+		}
+		for _, p := range ports {
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/readyz%s", p, roleQuery))
 			if err == nil && resp.StatusCode == http.StatusOK {
 				return
 			}
@@ -127,7 +157,11 @@ func main() {
 						if expectedCommit := os.Getenv("EXPECTED_RELEASE_COMMIT"); expectedCommit != "" {
 							commitOK = (body["release"] == expectedCommit)
 						}
-						if storageOK && schemaOK && workerOK && slotOK && commitOK {
+						roleOK := true
+						if expectedRole := os.Getenv("EXPECTED_ROLE"); expectedRole != "" {
+							roleOK = (body["role"] == expectedRole)
+						}
+						if storageOK && schemaOK && workerOK && slotOK && commitOK && roleOK {
 							fmt.Println("DEPLOYZ_READY")
 							return
 						}

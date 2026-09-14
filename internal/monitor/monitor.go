@@ -92,7 +92,7 @@ func New(store *storage.Store, client BankClient, minInterval, maxInterval time.
 		},
 		settingsCh:     make(chan struct{}, 1),
 		cachedSettings: storage.DefaultMonitorSettings,
-		scheduler:      scheduler.New(nil),
+		scheduler:      scheduler.New(&scheduler.Options{Metrics: telemetry.NewSchedulerAdapter(telemetry.Default)}),
 	}
 }
 

@@ -142,6 +142,8 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
 		api.Get("/status", s.status)
 		api.Get("/csrf", auth.CSRF)
+		api.Get("/telemetry", s.telemetry)
+		api.Get("/ops/alerts", s.operationalAlerts)
 		api.Get("/connection", s.connection)
 		api.Get("/webhooks", s.endpoints)
 		api.Get("/transactions", s.transactions)
@@ -272,15 +274,132 @@ func (s *Server) WithTTSClient(client *ttsclient.Client) *Server {
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Health(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+	roleStr := string(s.cfg.RuntimeRole)
+	// 1. Role check if requested
+	expectedRole := r.URL.Query().Get("role")
+	if expectedRole == "" {
+		expectedRole = r.Header.Get("X-Expected-Role")
+	}
+	if expectedRole != "" && roleStr != "" {
+		if !strings.EqualFold(roleStr, expectedRole) && !strings.EqualFold(roleStr, "all-in-one") {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status": "error",
+				"error":  fmt.Sprintf("role mismatch: expected %s, got %s", expectedRole, roleStr),
+				"role":   roleStr,
+			})
+			return
+		}
+	}
+
+	// 2. Release check if requested
+	expectedRel := r.URL.Query().Get("release")
+	if expectedRel == "" {
+		expectedRel = r.Header.Get("X-Expected-Release")
+	}
+	if expectedRel != "" && s.cfg.ReleaseCommit != "" && s.cfg.ReleaseCommit != expectedRel {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":  "error",
+			"error":   fmt.Sprintf("release mismatch: expected %s, got %s", expectedRel, s.cfg.ReleaseCommit),
+			"release": s.cfg.ReleaseCommit,
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+
+	// 3. Slot check if requested
+	expectedSlot := r.URL.Query().Get("slot")
+	if expectedSlot == "" {
+		expectedSlot = r.Header.Get("X-Expected-Slot")
+	}
+	if expectedSlot != "" && s.cfg.Slot != "" && !strings.EqualFold(s.cfg.Slot, expectedSlot) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "error",
+			"error":  fmt.Sprintf("slot mismatch: expected %s, got %s", expectedSlot, s.cfg.Slot),
+			"slot":   s.cfg.Slot,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  "ok",
+		"role":    roleStr,
+		"slot":    s.cfg.Slot,
+		"release": s.cfg.ReleaseCommit,
+	})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	roleStr := string(s.cfg.RuntimeRole)
+	// 1. Role check if requested
+	expectedRole := r.URL.Query().Get("role")
+	if expectedRole == "" {
+		expectedRole = r.Header.Get("X-Expected-Role")
+	}
+	if expectedRole != "" && roleStr != "" {
+		if !strings.EqualFold(roleStr, expectedRole) && !strings.EqualFold(roleStr, "all-in-one") {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status": "not_ready",
+				"error":  fmt.Sprintf("role mismatch: expected %s, got %s", expectedRole, roleStr),
+				"role":   roleStr,
+			})
+			return
+		}
+	}
+
+	// 2. Release check if requested
+	expectedRel := r.URL.Query().Get("release")
+	if expectedRel == "" {
+		expectedRel = r.Header.Get("X-Expected-Release")
+	}
+	if expectedRel != "" && s.cfg.ReleaseCommit != "" && s.cfg.ReleaseCommit != expectedRel {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":  "not_ready",
+			"error":   fmt.Sprintf("release mismatch: expected %s, got %s", expectedRel, s.cfg.ReleaseCommit),
+			"release": s.cfg.ReleaseCommit,
+		})
+		return
+	}
+
+	// 3. Storage health check
+	if err := s.store.Health(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready",
+			"error":  "storage unhealthy: " + err.Error(),
+		})
+		return
+	}
+
+	// 4. Schema version check
+	schemaReport, err := s.store.SchemaVersion(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready",
+			"error":  "schema check failed: " + err.Error(),
+		})
+		return
+	}
+
+	// 5. Schema check if requested
+	expectedSchema := r.URL.Query().Get("schema")
+	if expectedSchema == "" {
+		expectedSchema = r.Header.Get("X-Expected-Schema")
+	}
+	if expectedSchema != "" && fmt.Sprintf("%d", schemaReport.Version) != expectedSchema {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready",
+			"error":  fmt.Sprintf("schema mismatch: expected %s, got %d", expectedSchema, schemaReport.Version),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ready",
+		"role":          roleStr,
+		"slot":          s.cfg.Slot,
+		"release":       s.cfg.ReleaseCommit,
+		"schemaVersion": schemaReport.Version,
+	})
 }
 
 func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
@@ -297,14 +416,39 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	roleStr := string(s.cfg.RuntimeRole)
 	ctx := r.Context()
 	resp := map[string]any{
-		"release": s.cfg.ReleaseCommit,
-		"slot":    s.cfg.Slot,
-		"nonce":   s.instanceNonce,
+		"role":             roleStr,
+		"release":          s.cfg.ReleaseCommit,
+		"slot":             s.cfg.Slot,
+		"nonce":            s.instanceNonce,
+		"workerRpcVersion": "v1",
 	}
 
 	status := "ready"
+
+	// Role check if requested
+	expectedRole := r.URL.Query().Get("role")
+	if expectedRole == "" {
+		expectedRole = r.Header.Get("X-Expected-Role")
+	}
+	if expectedRole != "" && roleStr != "" {
+		if !strings.EqualFold(roleStr, expectedRole) && !strings.EqualFold(roleStr, "all-in-one") {
+			resp["roleError"] = fmt.Sprintf("expected %s, got %s", expectedRole, roleStr)
+			status = "not_ready"
+		}
+	}
+
+	// Release check if requested
+	expectedRel := r.URL.Query().Get("release")
+	if expectedRel == "" {
+		expectedRel = r.Header.Get("X-Expected-Release")
+	}
+	if expectedRel != "" && s.cfg.ReleaseCommit != "" && s.cfg.ReleaseCommit != expectedRel {
+		resp["releaseError"] = fmt.Sprintf("expected %s, got %s", expectedRel, s.cfg.ReleaseCommit)
+		status = "not_ready"
+	}
 
 	// 1. Storage check
 	if err := s.store.Health(ctx); err != nil {
@@ -322,13 +466,25 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp["schema"] = "compatible"
 		resp["schemaVersion"] = schemaReport.Version
+		expectedSchema := r.URL.Query().Get("schema")
+		if expectedSchema == "" {
+			expectedSchema = r.Header.Get("X-Expected-Schema")
+		}
+		if expectedSchema != "" && fmt.Sprintf("%d", schemaReport.Version) != expectedSchema {
+			resp["schemaError"] = fmt.Sprintf("expected %s, got %d", expectedSchema, schemaReport.Version)
+			status = "not_ready"
+		}
 	}
 
 	// 3. Worker check (if configured)
 	if s.cfg.WorkerRPCURL != "" {
 		if s.workerProber != nil {
 			if err := s.workerProber.Ready(ctx); err != nil {
-				resp["worker"] = "unreachable: " + err.Error()
+				if strings.Contains(strings.ToLower(err.Error()), "stale") {
+					resp["worker"] = "stale: " + err.Error()
+				} else {
+					resp["worker"] = "unreachable: " + err.Error()
+				}
 				status = "not_ready"
 			} else {
 				resp["worker"] = "ready"
@@ -372,7 +528,14 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		resp["tts"] = "disabled"
 	}
 
-	// 6. Mutation gate state
+	// 6. Bark check (if configured)
+	if s.barkSender != nil || s.cfg.BarkServerURL != "" {
+		resp["bark"] = "ready"
+	} else {
+		resp["bark"] = "disabled"
+	}
+
+	// 7. Mutation gate state
 	gate, gateErr := s.store.GetDeploymentGate(ctx)
 	if gateErr == nil && gate != nil {
 		resp["mutationGate"] = gate.GateState
@@ -443,13 +606,84 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"storage":       map[string]string{"status": "READY"},
 		"webhooks":      summary.ByProvider[notification.ProviderWebhook],
 		"notifications": summary,
+		"role":          s.cfg.RuntimeRole,
+		"slot":          s.cfg.Slot,
+		"release":       s.cfg.ReleaseCommit,
 	})
 }
+
 func (s *Server) realtimeStatus(w http.ResponseWriter, r *http.Request) {
 	if s.eventHub != nil {
 		telemetry.Default.SetConnectedClients(int64(s.eventHub.SubscriberCount()))
 	}
 	writeJSON(w, http.StatusOK, telemetry.Default.Report())
+}
+
+func (s *Server) telemetry(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if s.store != nil {
+		if summary, err := s.store.NotificationSummary(ctx); err == nil {
+			byProv := make(map[string]telemetry.ProviderSnapshot, len(summary.ByProvider))
+			for prov, ds := range summary.ByProvider {
+				byProv[prov] = telemetry.ProviderSnapshot{
+					Pending:    ds.Pending,
+					DeadLetter: ds.DeadLetter,
+				}
+			}
+			isStuck := summary.Total.DeadLetter > 10 || summary.Total.Pending > 100
+			telemetry.Default.SetNotificationBacklog(summary.Total.Pending, summary.Total.DeadLetter, isStuck, byProv)
+		}
+		if histSummary, err := s.store.HistoryJobsSummary(ctx, 5*time.Minute); err == nil {
+			telemetry.Default.SetHistoryJobs(
+				histSummary.CountsByStatus,
+				time.Duration(histSummary.OldestQueuedAgeSeconds)*time.Second,
+				histSummary.StalledCount,
+				histSummary.TotalPagesDone,
+				histSummary.TotalRowsSeen,
+			)
+		}
+		if authSummary, err := s.store.AuthLifecycleSummary(ctx, 10*time.Minute); err == nil {
+			telemetry.Default.SetAuthLifecycle(
+				authSummary.HasActiveAttempt,
+				time.Duration(authSummary.ActiveAttemptAgeSeconds)*time.Second,
+				authSummary.ActiveAttemptStuck,
+				authSummary.SessionState,
+				authSummary.RecentAttemptsCount,
+				authSummary.AttemptsByStatus,
+			)
+		}
+		if gate, err := s.store.GetDeploymentGate(ctx); err == nil && gate != nil {
+			var expIn time.Duration
+			if gate.LeaseExpiresAt != "" {
+				if t, err := time.Parse(time.RFC3339Nano, gate.LeaseExpiresAt); err == nil {
+					expIn = time.Until(t)
+				} else if t, err := time.Parse(time.RFC3339, gate.LeaseExpiresAt); err == nil {
+					expIn = time.Until(t)
+				}
+			}
+			telemetry.Default.SetMutationGate(gate.GateState, gate.Owner, gate.Reason, expIn)
+		}
+	}
+	if s.eventHub != nil {
+		telemetry.Default.SetConnectedClients(int64(s.eventHub.SubscriberCount()))
+	}
+	telemetry.Default.SetDeployment(s.cfg.Slot, s.cfg.ReleaseCommit, string(s.cfg.RuntimeRole), "compatible", "SUCCESS", time.Now())
+
+	snap := telemetry.Default.FullSnapshot()
+	alerts := telemetry.EvaluateAlerts(snap)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"telemetry": snap,
+		"alerts":    alerts,
+	})
+}
+
+func (s *Server) operationalAlerts(w http.ResponseWriter, r *http.Request) {
+	snap := telemetry.Default.FullSnapshot()
+	alerts := telemetry.EvaluateAlerts(snap)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"alerts": alerts,
+	})
 }
 func (s *Server) connection(w http.ResponseWriter, r *http.Request) {
 	c, err := s.store.Connection(r.Context())
@@ -1698,6 +1932,9 @@ func (s *Server) platformHeaders(next http.Handler) http.Handler {
 		}
 		if s.cfg.ReleaseCommit != "" {
 			w.Header().Set("X-Release-Commit", s.cfg.ReleaseCommit)
+		}
+		if s.cfg.RuntimeRole != "" {
+			w.Header().Set("X-Runtime-Role", string(s.cfg.RuntimeRole))
 		}
 		next.ServeHTTP(w, r)
 	})

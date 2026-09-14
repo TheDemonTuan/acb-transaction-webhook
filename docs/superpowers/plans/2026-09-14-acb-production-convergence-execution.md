@@ -139,7 +139,7 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 43** | Worker crash recovery test | PR16 | PENDING | `tests/integration/worker_recovery_test.go` | Worker SIGKILL mid-job; successor resumes from checkpoint. |
 | **Task 44** | Fail-closed verifier & poller test | PR16 | PENDING | `tests/integration/fail_closed_test.go` | Store errors cause zero upstream calls in mock server. |
 | **Task 45** | Blue/Green SSE reconnect test | PR16 | PENDING | `tests/integration/sse_cutover_test.go` | Simulated route switch preserves all journal events in browser subscriber. |
-| **Task 46** | Core observability telemetry endpoints | PR16 | PENDING | `internal/telemetry/*`, `internal/httpapi/*` | Metrics exported: queue depth, current quantum, poll latency, job counts. |
+| **Task 46** | Core observability telemetry endpoints | **PR16** | **COMPLETED** | `internal/telemetry/*`, `internal/httpapi/*` | Metrics exported: queue depth, current quantum, poll latency, job counts, auth lifecycle, notification backlog, singleton ownership, deployment and backup age. |
 | **Task 47** | Retire obsolete deployment scripts | PR18 | PENDING | `deploy/*` | Legacy direct-restart scripts safely removed after verified Blue/Green cycles. |
 | **Task 48** | Move historical fix notes to docs archive | PR18 | PENDING | `docs/archive/*` | Superseded root documents moved to `docs/archive/` after complete convergence. |
 | **Task 49** | Automated staging rehearsal | PR17 | PENDING | Staging Environment | Full deployment and failure injection pipeline executed against staging VPS. |

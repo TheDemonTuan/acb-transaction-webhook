@@ -250,3 +250,61 @@ func (s *Store) ActiveAuthAttempts(ctx context.Context) (ActiveAuthReport, error
 	rep.Count = len(rep.Attempts)
 	return rep, nil
 }
+
+type AuthLifecycleSummary struct {
+	HasActiveAttempt        bool           `json:"hasActiveAttempt"`
+	ActiveAttemptAgeSeconds float64        `json:"activeAttemptAgeSeconds"`
+	ActiveAttemptStuck      bool           `json:"activeAttemptStuck"`
+	SessionState            string         `json:"sessionState"`
+	RecentAttemptsCount     int            `json:"recentAttemptsCount"`
+	AttemptsByStatus        map[string]int `json:"attemptsByStatus"`
+}
+
+func (s *Store) AuthLifecycleSummary(ctx context.Context, stuckThreshold time.Duration) (AuthLifecycleSummary, error) {
+	summary := AuthLifecycleSummary{
+		AttemptsByStatus: make(map[string]int),
+		SessionState:     "UNKNOWN",
+	}
+	if s.db == nil {
+		return summary, errors.New("database not open")
+	}
+
+	if conn, err := s.Connection(ctx); err == nil {
+		summary.SessionState = conn.State
+	}
+
+	if stuckThreshold <= 0 {
+		stuckThreshold = 10 * time.Minute
+	}
+	activeReport, err := s.ActiveAuthAttempts(ctx)
+	if err == nil && len(activeReport.Attempts) > 0 {
+		summary.HasActiveAttempt = true
+		oldest := activeReport.Attempts[0]
+		if t, err := time.Parse(time.RFC3339Nano, oldest.CreatedAt); err == nil {
+			summary.ActiveAttemptAgeSeconds = time.Since(t).Seconds()
+		} else if t, err := time.Parse(time.RFC3339, oldest.CreatedAt); err == nil {
+			summary.ActiveAttemptAgeSeconds = time.Since(t).Seconds()
+		}
+		if summary.ActiveAttemptAgeSeconds < 0 {
+			summary.ActiveAttemptAgeSeconds = 0
+		}
+		if summary.ActiveAttemptAgeSeconds > stuckThreshold.Seconds() {
+			summary.ActiveAttemptStuck = true
+		}
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM auth_attempts GROUP BY status`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var st string
+			var cnt int
+			if err := rows.Scan(&st, &cnt); err == nil {
+				summary.AttemptsByStatus[st] = cnt
+				summary.RecentAttemptsCount += cnt
+			}
+		}
+	}
+
+	return summary, nil
+}

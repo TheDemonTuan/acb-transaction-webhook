@@ -110,12 +110,44 @@ func main() {
 	mux.HandleFunc("GET /sessions/{attemptID}/status", controller.status)
 	mux.HandleFunc("POST /sessions/{attemptID}/handoff", controller.handoff)
 	mux.HandleFunc("POST /sessions/{attemptID}/complete", controller.complete)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Runtime-Role", "auth-browser")
+		expectedRole := r.URL.Query().Get("role")
+		if expectedRole == "" {
+			expectedRole = r.Header.Get("X-Expected-Role")
+		}
+		if expectedRole != "" && !strings.EqualFold(expectedRole, "auth-browser") && !strings.EqualFold(expectedRole, "all-in-one") {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "error",
+				"error":  fmt.Sprintf("role mismatch: expected %s, got auth-browser", expectedRole),
+			})
+			return
+		}
 		if err := desktopHealth(); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "role": "auth-browser"})
+	})
+
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Runtime-Role", "auth-browser")
+		expectedRole := r.URL.Query().Get("role")
+		if expectedRole == "" {
+			expectedRole = r.Header.Get("X-Expected-Role")
+		}
+		if expectedRole != "" && !strings.EqualFold(expectedRole, "auth-browser") && !strings.EqualFold(expectedRole, "all-in-one") {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+				"error":  fmt.Sprintf("role mismatch: expected %s, got auth-browser", expectedRole),
+			})
+			return
+		}
+		if err := desktopHealth(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "role": "auth-browser"})
 	})
 
 	httpServer := &http.Server{Addr: ":8181", Handler: mux, ReadHeaderTimeout: 5 * time.Second}

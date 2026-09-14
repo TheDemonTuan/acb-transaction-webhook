@@ -54,6 +54,8 @@ jobs:
         run: bash deploy/tests/test_promotion_dispatcher.sh
       - name: Verify CI workflow timeouts, keepalives, and action pinning
         run: bash deploy/tests/test_ci_workflow.sh
+      - name: Test health endpoints, telemetry and operational alerts
+        run: bash deploy/tests/test_health_telemetry.sh
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
