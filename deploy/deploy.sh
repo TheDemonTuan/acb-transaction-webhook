@@ -11,7 +11,6 @@ env_file="${ENV_FILE:-$SCRIPT_DIR/.env.production}"
 compose_file="${COMPOSE_FILE:-$SCRIPT_DIR/compose.prod.yaml}"
 
 # Options
-upgrade_core=0
 fresh_init=0
 resume_soak=0
 soak_seconds="${SOAK_DURATION_SEC:-900}"
@@ -26,8 +25,8 @@ positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --upgrade-core)
-      upgrade_core=1
-      shift
+      log_error "The --upgrade-core flag is retired and strictly forbidden. Releases are scoped by signed promotion manifest or explicit component scripts."
+      exit 1
       ;;
     --fresh-init)
       fresh_init=1
@@ -147,9 +146,6 @@ else
 fi
 
 rollout_args+=(--gateway-image "$image_ref")
-if [[ "$upgrade_core" -eq 1 ]]; then
-  rollout_args+=(--scope "schema,worker,gateway,auth_browser,tts,bark")
-fi
 if [[ "$detach_soak" -eq 1 ]]; then
   rollout_args+=(--detach-soak)
 fi

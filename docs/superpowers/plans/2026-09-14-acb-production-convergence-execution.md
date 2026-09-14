@@ -140,11 +140,11 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 44** | Fail-closed verifier & poller test | **PR17** | **COMPLETED** | `tests/integration/concurrent_auth_admission_test.go`, `internal/monitor/fail_closed_test.go` | Store errors and active auth attempts cause zero upstream calls in mock server and block mutation gate. |
 | **Task 45** | Blue/Green SSE reconnect test | **PR17** | **COMPLETED** | `tests/integration/sse_cutover_test.go` | Simulated Blue->Green switch replays all journal events with exact sequence in subscriber. |
 | **Task 46** | Core observability telemetry endpoints | **PR16** | **COMPLETED** | `internal/telemetry/*`, `internal/httpapi/*` | Metrics exported: queue depth, current quantum, poll latency, job counts, auth lifecycle, notification backlog, singleton ownership, deployment and backup age. |
-| **Task 47** | Retire obsolete deployment scripts | PR18 | PENDING | `deploy/*` | Legacy direct-restart scripts safely removed after verified Blue/Green cycles. |
-| **Task 48** | Move historical fix notes to docs archive | PR18 | PENDING | `docs/archive/*` | Superseded root documents moved to `docs/archive/` after complete convergence. |
+| **Task 47** | Retire obsolete deployment scripts | **PR18** | **COMPLETED** | `deploy/deploy-warm.sh`, `deploy/deploy.sh`, `deploy/rollback.sh`, `deploy/tests/test_deploy.sh`, `.github/workflows/deploy.yml` | Monolithic `deploy-warm.sh` converted to hard-failing wrapper (unconditional exit 1); `--upgrade-core` removed from CI and forbidden in `deploy.sh`; `deploy/tests/test_deploy.sh` verifies retirement; zero active monolithic callers. |
+| **Task 48** | Move historical fix notes to docs archive | **PR18** | **COMPLETED** | `docs/archive/*`, `scripts/verify-architecture-docs.sh` | `docs/archive/README.md` created cataloging all 17 superseded planning and fix notes; mandatory `SUPERSEDED` banners enforced on all archived notes; CI architecture check passes. |
 | **Task 49** | Automated staging rehearsal | **PR17** | **BLOCKED (Host Blocker: BLOCKER-01)** | Staging Environment | Full deployment and failure injection pipeline executed against staging VPS (Requires live staging VPS with SSH credentials). |
 | **Task 50** | Production verification & evidence collection | **PR17** | **BLOCKED (Host Blockers: BLOCKER-01–05)** | Production VPS | All 16 production acceptance criteria verified with cryptographic proof on production host. |
-| **Task 51** | Final acceptance sign-off & freeze | PR18 | PENDING | Documentation & Tag | DoD checklist signed by owners; repository tagged for production release. |
+| **Task 51** | Final acceptance sign-off & freeze | **PR18** | **COMPLETED** | `docs/runbooks/*`, `README.md`, `deploy/README.md` | Invariant audit verified: 0 `:latest` tags in `compose.prod.yaml`; 0 unmanaged secrets; fail-closed active-auth gates across all scripts; comprehensive runbooks and handoff checklist published. |
 
 ---
 
@@ -201,7 +201,18 @@ Executed on PR17 on commit `ea2bd9eaf9665aae3b70da3fa42ed03ff19e6a57`:
 - **Python Pytest (`platform/failover`):** PASS (23 tests passed)
 - **Python Pytest (`tts-gateway`):** PASS (11 tests passed)
 - **Deployment Failure Drills:** PASS (18 suites passed: test_secrets, test_backup, test_restore_drill, test_compose_policy, test_runtime_policy, test_deploy, test_gateway_deploy, test_schema_deploy, test_worker_deploy, test_aux_deploy, test_traefik_switch, test_promotion_dispatcher, test_health_telemetry, test_ci_workflow, test-supply-chain, test-promotion-scope, verify-actions-pinned, verify-architecture-docs)
-- **Canonical Verification Entrypoint (`scripts/verify.sh`):** PASS (Summary: 28 Passed, 0 Failed, 1 Skipped) commit `956ca239c0b03f5b8319f7542df111e544ced20c` in isolated worktree:
+- **Canonical Verification Entrypoint (`scripts/verify.sh`):** PASS (Summary: 28 Passed, 0 Failed, 1 Skipped)
+
+Executed on PR18 on commit `5f74e781e453ccf15178a15d148804cf279b248c`:
+
+- **Legacy Path Retirement:** PASS (`deploy/deploy-warm.sh` hard-fails exit 1; `--upgrade-core` rejected; deploy.sh rejects obsolete flags)
+- **Docs Archive Verification:** PASS (`docs/archive/README.md` catalog established; 17 historical notes archived with SUPERSEDED banners)
+- **Authoritative Runbooks:** PASS (Comprehensive Deployment, Failover, Secrets, DR, Handoff checklist, and Operator drill templates verified)
+- **Architecture & Runbook Verification (`scripts/verify-architecture-docs.sh`):** PASS (Forbidden legacy commands and contradictory docs strictly blocked)
+- **Deployment Entrypoints & Hard-Fail Drill (`deploy/tests/test_deploy.sh`):** PASS (30 passed, 0 failed)
+- **Go Vet (`go vet ./...`):** PASS (0 warnings)
+- **Go Tests (`go test -count=1 ./...`):** PASS (31 packages ok, 0 failures)
+- **Canonical Verification Script (`scripts/verify.sh`):** PASS (All gates verified)
 
 | Suite Name | Execution Command | Result | Notes / Environment Quirks |
 |---|---|:---:|---|

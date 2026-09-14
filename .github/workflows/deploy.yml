@@ -10,11 +10,6 @@ on:
         required: true
         type: boolean
         default: false
-      upgrade_core:
-        description: Force upgrade core singleton services (worker, auth-browser, tts)
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read

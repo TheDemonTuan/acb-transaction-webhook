@@ -5,6 +5,8 @@
 > - **Canonical Specification:** [`docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md`](superpowers/specs/2026-09-14-acb-final-production-invariants.md)
 > - **Production Architecture:** [`docs/architecture/PRODUCTION_ARCHITECTURE.md`](architecture/PRODUCTION_ARCHITECTURE.md)
 > - **Execution Plan & Tracker:** [`docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md`](superpowers/plans/2026-09-14-acb-production-convergence-execution.md)
+> - **Authoritative Runbook:** [`docs/runbooks/DEPLOYMENT_RUNBOOK.md`](runbooks/DEPLOYMENT_RUNBOOK.md)
+> - **Failover Runbook:** [`docs/runbooks/FAILOVER_RUNBOOK.md`](runbooks/FAILOVER_RUNBOOK.md)
 >
 > Do not implement, deploy, or operate against this document.
 
@@ -55,78 +57,73 @@ Cloudflare Tunnel (172.31.250.2)
 
 ## 2. Quy Trình Cắt Chuyển và Các Chế Độ Triển Khai
 
-Hệ thống hỗ trợ 3 chế độ vận hành chính thông qua file Compose hợp nhất `deploy/compose.prod.yaml`:
+> **LƯU Ý:** Script nguyên khối cũ (`deploy-warm.sh` và cờ `--upgrade-core`) đã chính thức **BỊ BÃI BỎ VÀ HARD-FAIL**.
+> Các hoạt động triển khai hiện tại bắt buộc phải sử dụng các script giao dịch thành phần độc lập hoặc `deploy/dispatch-rollout.sh`. Chi tiết đầy đủ tại [`docs/runbooks/DEPLOYMENT_RUNBOOK.md`](runbooks/DEPLOYMENT_RUNBOOK.md).
 
 ### Chế độ 1: Khởi tạo mới hoàn toàn (Fresh Initialization)
 Khi thiết lập một máy chủ mới chưa có dữ liệu production:
 1. **Khởi tạo Data Volumes có xác nhận an toàn:**
    ```bash
-   cd /opt/bank-event-gateway
+   cd /opt/acb-transaction-webhook
    ./deploy/init-fresh-data.sh --confirm-fresh-init
    ```
-2. **Khởi động Platform Ingress:**
+2. **Khởi tạo Secrets và Runtime Environment:**
    ```bash
-   cd /opt/platform/edge
-   docker compose up -d
+   ./deploy/provision-secrets.sh --confirm-fresh-provision
+   cp .env.example deploy/.env.production && chmod 600 deploy/.env.production
    ```
-3. **Triển khai toàn bộ hệ thống lần đầu:**
+3. **Triển khai các thành phần theo thứ tự phụ thuộc:**
    ```bash
-   cd /opt/bank-event-gateway
-   ./deploy/deploy-warm.sh --upgrade-core ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest>
+   ./deploy/deploy-schema.sh ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:<dbtool-digest>
+   ./deploy/deploy-worker.sh ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:<worker-digest>
+   ./deploy/deploy-gateway.sh ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest>
    ```
 
 ### Chế độ 2: Chuyển đổi từ Monolith cũ (Legacy Monolith Migration)
 Khi nâng cấp từ container monolith `acb-transaction-gateway`:
-1. **Khởi động Traefik Platform:**
+1. **Dừng Monolith cũ để giải phóng lock SQLite:**
    ```bash
-   cd /opt/platform/edge
-   docker compose up -d
-   ```
-2. **Dừng Monolith cũ để giải phóng lock SQLite:**
-   ```bash
-   cd /opt/bank-event-gateway
+   cd /opt/acb-transaction-webhook
    docker stop acb-transaction-gateway || true
    ```
-3. **Sao lưu trực tuyến và chạy Migration qua dbtool:**
+2. **Sao lưu trực tuyến và chạy Migration qua dbtool:**
    ```bash
-   ./deploy/backup.sh
-   docker run --rm --user 1000:1000 \
-     -v bank-event-gateway_gateway_data:/data:rw \
-     ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:<dbtool-digest> \
-     -path /data/gateway.db -migrate
+   ./deploy/backup-db.sh
+   ./deploy/deploy-schema.sh ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:<dbtool-digest>
    ```
-4. **Khởi động hệ thống mới với Worker và Core services:**
+3. **Khởi động hệ thống mới với Worker và Core services:**
    ```bash
-   ./deploy/deploy.sh --upgrade-core \
-     ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest> \
-     ghcr.io/thedemontuan/acb-transaction-webhook-auth-browser@sha256:<browser-digest> \
-     ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway@sha256:<tts-digest>
+   ./deploy/deploy-worker.sh ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:<worker-digest>
+   ./deploy/deploy-gateway.sh ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest>
    ```
 
 ### Chế độ 3: Triển khai thông thường (Already-BlueGreen Warm Standby Release)
 Mặc định triển khai **web-only**, TUYỆT ĐỐI KHÔNG pull hoặc restart Worker/Core singleton:
 ```bash
-cd /opt/bank-event-gateway
-./deploy/deploy-warm.sh ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<new-gateway-digest>
+cd /opt/acb-transaction-webhook
+./deploy/deploy-gateway.sh ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<new-gateway-digest>
 ```
-- Tự động phát hiện slot đang chạy (vd: `blue`) và kích hoạt slot đối ứng (`green`).
-- Kiểm tra `/readyz` và đổi route Traefik nguyên tử.
-- Xác nhận route identity ACK.
-- Giữ slot cũ chạy trong cửa sổ 15 phút (soak) để hỗ trợ rollback tức thì nếu có lỗi.
-- Đánh dấu intentional stop TRƯỚC KHI dừng container cũ về trạng thái Standby.
+- Tự động phát hiện slot đang chạy (vd: `blue`) và triển khai lên slot standby (vd: `green`).
+- Thử nghiệm candidate tại `/internal/deployz` 2 lần liên tiếp.
+- Cắt chuyển tuyến động Traefik tại `/opt/edge/dynamic/acb.yml`.
+- Xác nhận tích cực định danh `X-Platform-Slot: green`. Nếu thất bại, tự động rollback về slot cũ.
+
+### Rollback Khi Cần Thiết:
+```bash
+cd /opt/acb-transaction-webhook
+./deploy/rollback.sh
+```
 
 ---
 
 ## 3. Giao Kèo Bộ Điều Khiển Trung Tâm (Central Controller CLI Contract)
 
-Bộ điều khiển chuyển vùng sự cố (`/opt/platform/failover/vps-failover-controller.py`) giám sát trạng thái realtime của containers.
+Bộ điều khiển chuyển vùng sự cố (`platform/failover/vps-failover-controller.py`) giám sát trạng thái realtime của containers.
 
 ### Giao thức tương tác:
 1. **Lệnh chuyển slot:**
    ```bash
    /bin/bash deploy/switch-slot.sh <blue|green>
-   # hoặc qua wrapper nền tảng:
-   /usr/local/bin/platform-switch acb <blue|green>
    ```
 2. **Không khóa lồng nhau & khóa tương hỗ (Mutual Host Lock):**
    `switch-slot.sh` và failover controller dùng chung tệp khóa `/run/lock/vps-failover/acb.lock`. Kiểm tra biến môi trường `DEPLOY_LOCK_HELD=1` hoặc `SKIP_LOCK=1` để không gây deadlock khi được gọi từ controller hoặc deploy script.
@@ -141,47 +138,23 @@ Bộ điều khiển chuyển vùng sự cố (`/opt/platform/failover/vps-failo
 
 ---
 
-## 4. Giới Hạn Kiến Trúc: Không Có HA Khi Mất Host (No Host-Loss HA)
+## 4. Giới Hạn Kiến Trúc: Không Có HA Khi Mất Host (No Host-Level HA)
 
-**Lưu ý an toàn quan trọng:**
-Kiến trúc đơn VPS với Warm Standby Blue/Green cung cấp khả năng tự phục hồi và triển khai không downtime đối với **lỗi phần mềm trên máy chủ** (container crash, OOM, deploy release).
-
-Kiến trúc này **KHÔNG** cung cấp High Availability khi mất hoàn toàn máy chủ vật lý (Host-Loss):
-- Nếu máy chủ VPS bị mất điện, hỏng phần cứng hoặc mất mạng diện rộng, toàn bộ dịch vụ sẽ ngừng hoạt động.
-- Quy trình khắc phục thảm họa (Disaster Recovery):
-  1. Khởi tạo một máy chủ VPS mới.
-  2. Khôi phục dữ liệu từ bản sao lưu mã hóa ngoài máy chủ (`manifest-*.json` và bản sao lưu SQLite được xuất qua `ENCRYPTED_BACKUP_HOOK`).
-  3. Khôi phục các khóa bí mật trong thư mục `secrets/` (`app_master_key`).
-  4. Triển khai lại stack qua lệnh Chế độ 1 (Fresh Initialization).
+Hệ thống được thiết kế tối ưu trên **đơn VPS**. Vì vậy:
+- **Không có tính sẵn sàng cao khi sập toàn bộ máy chủ (Host Failure):** Nếu VPS bị tắt nguồn, hỏng ổ cứng hoặc mất mạng, toàn bộ hệ thống sẽ ngừng hoạt động cho đến khi được khôi phục.
+- **RPO (Recovery Point Objective):** Bằng chu kỳ sao lưu cơ sở dữ liệu gần nhất (khuyến nghị sao lưu định kỳ mỗi 15-30 phút thông qua cron job gọi `deploy/backup-db.sh`).
+- **RTO (Recovery Time Objective):** Dưới 15 phút nếu có máy chủ dự phòng (cold standby) và thực hiện theo [`docs/runbooks/DISASTER_RECOVERY_RUNBOOK.md`](runbooks/DISASTER_RECOVERY_RUNBOOK.md).
 
 ---
 
-## 5. Quy Trình Rollback Khẩn Cấp
+## 5. Danh Sách Kiểm Tra Khi Sự Cố (Troubleshooting Checklist)
 
-Nếu phiên bản mới phát sinh lỗi, chạy lệnh sau:
-```bash
-bash deploy/rollback-warm.sh
-```
-- Standby slot cũ sẽ tự động được khởi động lại (nếu đang tắt).
-- Chờ đạt `/readyz` (trong vòng 3-5 giây).
-- Route Traefik lập tức được trỏ ngược về slot cũ.
-- Slot lỗi được dừng về standby an toàn.
-
----
-
-## 6. Kích Hoạt Failover Controller & Reconcile Safety Net
-
-Cài đặt systemd services cho failover controller trên máy chủ:
-```bash
-sudo cp platform/failover/vps-failover-controller.service /etc/systemd/system/
-sudo cp platform/failover/vps-failover-reconcile.service /etc/systemd/system/
-sudo cp platform/failover/vps-failover-reconcile.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vps-failover-controller.service
-sudo systemctl enable --now vps-failover-reconcile.timer
-```
-Kiểm tra trạng thái dịch vụ:
-```bash
-systemctl status vps-failover-controller.service
-systemctl status vps-failover-reconcile.timer
-```
+1. **Traefik báo 502 / Bad Gateway:**
+   - Kiểm tra container gateway đang active: `docker ps --filter name=acb-gateway`.
+   - Xem cấu hình động Traefik: `cat /opt/edge/dynamic/acb.yml`.
+   - Kiểm tra log Traefik: `docker logs --tail 50 traefik`.
+2. **Worker không lấy được giao dịch mới:**
+   - Kiểm tra log worker: `docker logs --tail 100 acb-worker`.
+   - Kiểm tra auth session: truy cập `/api/auth/status`. Nếu hết hạn, dùng `cmd/auth-browser` để đăng nhập lại.
+3. **Rollback thủ công khẩn cấp:**
+   - Thực thi `./deploy/rollback.sh`.

@@ -2,41 +2,54 @@
 set -euo pipefail
 
 # scripts/verify-architecture-docs.sh
-# Verifies repository documentation invariants:
-# 1. Canonical specs and architecture documents exist.
+# Verifies repository documentation invariants and enforces strict CI guardrails:
+# 1. Canonical specs, architecture documents, and ops runbooks exist and are non-empty.
 # 2. Authoritative architecture does NOT specify a per-app Caddy/cloudflared stack.
 # 3. Authoritative architecture specifies Traefik, Blue/Green gateways, singleton worker,
 #    auth-browser, TTS, Bark, SQLite WAL, and 3 Docker networks.
-# 4. README points to canonical specifications and does not treat older plans as current.
-# 5. Tracked historical/older plans have superseded banners.
+# 4. README points to canonical specifications and operations runbooks.
+# 5. Obsolete deployment entrypoints (deploy-warm.sh, --upgrade-core) are hard-failed.
+# 6. Active documentation does NOT contain forbidden legacy commands or contradictory guidance.
+# 7. Historical/superseded documents in docs/archive/ have mandatory SUPERSEDED banners.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "==> Checking canonical architecture documents..."
+echo "==> Checking canonical architecture documents & runbooks..."
 
-CANONICAL_SPEC="docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md"
-ARCH_DOC="docs/architecture/PRODUCTION_ARCHITECTURE.md"
-PLAN_DOC="docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md"
-CONTRACTS_DOC="docs/architecture/COMPATIBILITY_CONTRACTS.md"
-INVENTORY_DOC="docs/architecture/SYSTEM_INVENTORY.md"
+CANONICAL_DOCS=(
+  "docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md"
+  "docs/architecture/PRODUCTION_ARCHITECTURE.md"
+  "docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md"
+  "docs/architecture/COMPATIBILITY_CONTRACTS.md"
+  "docs/architecture/SYSTEM_INVENTORY.md"
+  "docs/archive/README.md"
+  "docs/runbooks/DEPLOYMENT_RUNBOOK.md"
+  "docs/runbooks/FAILOVER_RUNBOOK.md"
+  "docs/runbooks/SECRET_PROVISIONING_RUNBOOK.md"
+  "docs/runbooks/BACKUP_RUNBOOK.md"
+  "docs/runbooks/RESTORE_RUNBOOK.md"
+  "docs/runbooks/DISASTER_RECOVERY_RUNBOOK.md"
+  "docs/runbooks/OBSERVABILITY.md"
+  "docs/runbooks/HANDOFF_RELEASE_CHECKLIST.md"
+  "docs/runbooks/OPERATOR_DRILLS_TEMPLATE.md"
+)
 
-for doc in "$CANONICAL_SPEC" "$ARCH_DOC" "$PLAN_DOC" "$CONTRACTS_DOC" "$INVENTORY_DOC"; do
-  if [[ ! -f "$doc" ]]; then
-    echo "ERROR: Missing required canonical document: $doc" >&2
+for doc in "${CANONICAL_DOCS[@]}"; do
+  if [[ ! -f "$doc" || ! -s "$doc" ]]; then
+    echo "ERROR: Missing or empty canonical document: $doc" >&2
     exit 1
   fi
 done
 
-echo "==> Verifying authoritative architecture topology in $ARCH_DOC..."
+echo "==> Verifying authoritative architecture topology in docs/architecture/PRODUCTION_ARCHITECTURE.md..."
+ARCH_DOC="docs/architecture/PRODUCTION_ARCHITECTURE.md"
 
-# Must NOT prescribe a per-app Caddy or per-app cloudflared stack
 if grep -iE 'per-app[[:space:]]+(caddy|cloudflared)' "$ARCH_DOC" >/dev/null; then
   echo "ERROR: $ARCH_DOC mentions a forbidden per-app Caddy or cloudflared production stack." >&2
   exit 1
 fi
 
-# Must name all required platform components
 required_components=(
   "Traefik"
   "Blue/Green"
@@ -57,50 +70,100 @@ for comp in "${required_components[@]}"; do
   fi
 done
 
-echo "==> Verifying README.md references..."
+echo "==> Verifying README.md references and runbooks..."
 
-if ! grep -Fq "docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md" README.md; then
-  echo "ERROR: README.md does not reference canonical invariant spec." >&2
-  exit 1
-fi
+for ref in \
+  "docs/superpowers/specs/2026-09-14-acb-final-production-invariants.md" \
+  "docs/architecture/PRODUCTION_ARCHITECTURE.md" \
+  "docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md" \
+  "docs/runbooks/DEPLOYMENT_RUNBOOK.md" \
+  "docs/runbooks/FAILOVER_RUNBOOK.md" \
+  "docs/runbooks/SECRET_PROVISIONING_RUNBOOK.md" \
+  "docs/runbooks/BACKUP_RUNBOOK.md" \
+  "docs/runbooks/DISASTER_RECOVERY_RUNBOOK.md"; do
+  if ! grep -Fq "$ref" README.md; then
+    echo "ERROR: README.md does not reference required canonical doc: $ref" >&2
+    exit 1
+  fi
+done
 
-if ! grep -Fq "docs/architecture/PRODUCTION_ARCHITECTURE.md" README.md; then
-  echo "ERROR: README.md does not reference production architecture overview." >&2
-  exit 1
-fi
-
-if ! grep -Fq "docs/superpowers/plans/2026-09-14-acb-production-convergence-execution.md" README.md; then
-  echo "ERROR: README.md does not reference canonical execution plan." >&2
-  exit 1
-fi
-
-# Ensure README does not describe an older plan as active/current
 if grep -iE 'current[[:space:]]+plan.*(caddy|fix\.md|fix_2\.md)' README.md >/dev/null; then
   echo "ERROR: README.md points to an older plan as current." >&2
   exit 1
 fi
 
-echo "==> Verifying superseded banners in tracked historical plans..."
+echo "==> Verifying retirement and hard-fail enforcement of obsolete deploy paths..."
 
-historical_docs=(
-  "2026-09-12-caddy-progressive-blue-green-deployment.md"
-  "2026-09-13-acb-secure-single-vps-platform-migration.md"
-  "2026-09-13-single-vps-secure-container-platform-standard.md"
-  "fix.md"
-  "fix_2.md"
-  "fix_3.md"
-  "fix_4.md"
-  "deploy_fix.md"
+# 1. deploy/deploy-warm.sh must hard-fail safely
+if [[ ! -f "deploy/deploy-warm.sh" ]]; then
+  echo "ERROR: deploy/deploy-warm.sh must exist as a compatibility wrapper." >&2
+  exit 1
+fi
+if ! grep -q "exit 1" "deploy/deploy-warm.sh"; then
+  echo "ERROR: deploy/deploy-warm.sh must unconditionally exit 1." >&2
+  exit 1
+fi
+if ! grep -qiE "(retired|obsolete)" "deploy/deploy-warm.sh"; then
+  echo "ERROR: deploy/deploy-warm.sh must state it has been retired/obsolete." >&2
+  exit 1
+fi
+
+# 2. deploy/deploy.sh must forbid --upgrade-core
+if grep -q "upgrade_core=1" "deploy/deploy.sh"; then
+  echo "ERROR: deploy/deploy.sh still enables upgrade_core." >&2
+  exit 1
+fi
+
+# 3. .github/workflows/deploy.yml must not contain unconditional UPGRADE_CORE or obsolete inputs
+if grep -q "UPGRADE_CORE" ".github/workflows/deploy.yml"; then
+  echo "ERROR: .github/workflows/deploy.yml contains forbidden UPGRADE_CORE reference." >&2
+  exit 1
+fi
+if grep -q "upgrade_core:" ".github/workflows/deploy.yml"; then
+  echo "ERROR: .github/workflows/deploy.yml contains forbidden upgrade_core workflow input." >&2
+  exit 1
+fi
+
+echo "==> Verifying that active docs do NOT instruct forbidden legacy commands..."
+
+ACTIVE_DOCS=(
+  "README.md"
+  "deploy/README.md"
+  "docs/runbooks/DEPLOYMENT_RUNBOOK.md"
+  "docs/runbooks/FAILOVER_RUNBOOK.md"
+  "docs/runbooks/SECRET_PROVISIONING_RUNBOOK.md"
+  "docs/runbooks/DISASTER_RECOVERY_RUNBOOK.md"
 )
 
-for hdoc in "${historical_docs[@]}"; do
-  if [[ -f "$hdoc" ]]; then
-    if ! grep -q "SUPERSEDED" "$hdoc"; then
-      echo "ERROR: Historical document $hdoc lacks SUPERSEDED banner." >&2
-      exit 1
-    fi
+for doc in "${ACTIVE_DOCS[@]}"; do
+  # Disallow active instructions containing UPGRADE_CORE=1
+  if grep -E "^[[:space:]]*(\./|bash[[:space:]]+)?deploy/deploy-warm\.sh[[:space:]]+--upgrade-core" "$doc" >/dev/null 2>&1; then
+    echo "ERROR: $doc actively recommends forbidden command: deploy-warm.sh --upgrade-core" >&2
+    exit 1
+  fi
+  if grep -E "^[[:space:]]*(\./|bash[[:space:]]+)?deploy/deploy\.sh[[:space:]]+--upgrade-core" "$doc" >/dev/null 2>&1; then
+    echo "ERROR: $doc actively recommends forbidden command: deploy.sh --upgrade-core" >&2
+    exit 1
+  fi
+  if grep -iE 'caddy[[:space:]]+reload' "$doc" >/dev/null 2>&1; then
+    echo "ERROR: $doc contains forbidden command: caddy reload" >&2
+    exit 1
   fi
 done
 
-echo "==> All architecture and documentation verification checks passed successfully."
+echo "==> Verifying superseded banners in docs/archive/..."
+
+for f in docs/archive/*.md; do
+  [[ -f "$f" ]] || continue
+  base="$(basename "$f")"
+  if [[ "$base" == "README.md" ]]; then
+    continue
+  fi
+  if ! head -n 15 "$f" | grep -q "SUPERSEDED"; then
+    echo "ERROR: Archived document $f lacks SUPERSEDED banner in first 15 lines." >&2
+    exit 1
+  fi
+done
+
+echo "==> All architecture, runbook, and retirement verification checks passed successfully."
 exit 0

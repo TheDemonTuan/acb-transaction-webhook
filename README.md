@@ -69,33 +69,48 @@ All contributors, operators, and automated workers must refer to the canonical p
 
 ---
 
-## Quick Start with Docker Compose
+## Operational Runbooks & Procedures
 
-### 1. Clone the repository
+Authoritative operational guides for production deployment, failover, key management, and disaster recovery:
 
+| Runbook | Scope & Purpose | Link |
+|---|---|---|
+| **Production Deployment Runbook** | Release scope, bootstrap transition, isolated component rollouts, route identity ACK, rollback | [`docs/runbooks/DEPLOYMENT_RUNBOOK.md`](docs/runbooks/DEPLOYMENT_RUNBOOK.md) |
+| **Failover & Standby Runbook** | Host failover controller, shared release locking, split-brain fencing, standby promotion | [`docs/runbooks/FAILOVER_RUNBOOK.md`](docs/runbooks/FAILOVER_RUNBOOK.md) |
+| **Secret Provisioning Runbook** | Secrets directory isolation, `app_master_key` generation, asymmetric `age` keypairs | [`docs/runbooks/SECRET_PROVISIONING_RUNBOOK.md`](docs/runbooks/SECRET_PROVISIONING_RUNBOOK.md) |
+| **Encrypted Backup Runbook** | Online SQLite snapshotting (`VACUUM INTO`), age asymmetric encryption, WAL verification | [`docs/runbooks/BACKUP_RUNBOOK.md`](docs/runbooks/BACKUP_RUNBOOK.md) |
+| **Restore Runbook** | Decrypting backups in staging via private recovery identity, integrity verification | [`docs/runbooks/RESTORE_RUNBOOK.md`](docs/runbooks/RESTORE_RUNBOOK.md) |
+| **Disaster Recovery Runbook** | Catastrophic recovery protocol, cold-iron host provisioning, volume restoration | [`docs/runbooks/DISASTER_RECOVERY_RUNBOOK.md`](docs/runbooks/DISASTER_RECOVERY_RUNBOOK.md) |
+| **Observability & Telemetry** | Prometheus metrics, system health probes, queue depth, scheduler telemetry | [`docs/runbooks/OBSERVABILITY.md`](docs/runbooks/OBSERVABILITY.md) |
+| **Handoff & Release Checklist** | Pre-promotion checklist, verification gates, operator sign-off template | [`docs/runbooks/HANDOFF_RELEASE_CHECKLIST.md`](docs/runbooks/HANDOFF_RELEASE_CHECKLIST.md) |
+| **Operator Drills Record** | Standard drill templates: Blue/Green rollback, worker quiesce, off-host recovery | [`docs/runbooks/OPERATOR_DRILLS_TEMPLATE.md`](docs/runbooks/OPERATOR_DRILLS_TEMPLATE.md) |
+
+---
+
+## Production Deployment: Bootstrap Transition
+
+> **ARCHITECTURAL REQUIREMENT:** Whole-stack compose shortcuts (`docker compose up -d`) and monolithic deployments (`deploy-warm.sh`, `--upgrade-core`) are **RETIRED AND HARD-FAIL**. Production promotions execute via component transactions or the signed rollout dispatcher.
+
+### 1. Host Preparation & Volume Setup
 ```bash
-git clone https://github.com/TheDemonTuan/acb-transaction-webhook.git
-cd acb-transaction-webhook
+git clone https://github.com/TheDemonTuan/acb-transaction-webhook.git /opt/acb-transaction-webhook
+cd /opt/acb-transaction-webhook
+
+# Initialize data volumes with safety confirmation
+deploy/init-fresh-data.sh --confirm-fresh-init
 ```
 
-### 2. Configure Environment
-
-Copy `.env.example` to canonical path `deploy/.env.production` and generate an encryption master key:
-
+### 2. Secret Provisioning & Runtime Configuration
 ```bash
+# Provision isolated secrets (0700 dir, 0600 files, app_master_key)
+deploy/provision-secrets.sh --confirm-fresh-provision
+
 cp .env.example deploy/.env.production
 chmod 600 deploy/.env.production
-
-# Provision secrets
-deploy/provision-secrets.sh --confirm-fresh-provision
+# Edit deploy/.env.production with host domain, Cloudflare credentials, and ACB config
 ```
 
-Edit `deploy/.env.production` with your preferred configuration (domains, Cloudflare Access audience/team, etc.).
-
-### 3. Initialize Release State and Start Services
-
-Populate immutable container digests in `deploy/.release.env`:
-
+### 3. Initialize Release State & Immutable Image References
 ```bash
 deploy/release-env.sh init \
   --gateway-blue ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest> \
@@ -105,12 +120,26 @@ deploy/release-env.sh init \
   --browser-image ghcr.io/thedemontuan/acb-transaction-webhook-auth-browser@sha256:<browser-digest> \
   --tts-image ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway@sha256:<tts-digest> \
   --bark-image ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
-
-cd deploy
-docker compose --env-file .env.production --env-file .release.env -f compose.prod.yaml up -d
 ```
 
-The gateway will be accessible on `http://127.0.0.1:8090` (or through your configured Cloudflare Tunnel hostname).
+### 4. Dependency-Ordered Stack Launch
+```bash
+# 1. Database schema migration
+deploy/deploy-schema.sh ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:<dbtool-digest>
+
+# 2. Auxiliary sidecars
+deploy/deploy-auth-browser.sh ghcr.io/thedemontuan/acb-transaction-webhook-auth-browser@sha256:<browser-digest>
+deploy/deploy-tts.sh ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway@sha256:<tts-digest>
+deploy/deploy-bark.sh ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
+
+# 3. Worker singleton
+deploy/deploy-worker.sh ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:<worker-digest>
+
+# 4. Gateway Blue slot
+deploy/deploy-gateway.sh ghcr.io/thedemontuan/acb-transaction-webhook@sha256:<gateway-digest>
+```
+
+For subsequent updates, execute component-specific scripts or use `deploy/dispatch-rollout.sh` with a signed release manifest. See [`docs/runbooks/DEPLOYMENT_RUNBOOK.md`](docs/runbooks/DEPLOYMENT_RUNBOOK.md).
 
 ---
 
