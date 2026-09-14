@@ -34,16 +34,13 @@ fi
 # 2. Probe health
 wait_for_candidate_ready "$PREVIOUS_SLOT" 30
 
-# 3. Switch Traefik pointer back
-rollback_route "$PREVIOUS_SLOT"
-
-# 4. Acknowledge route identity
-if ! ack_route_identity "$PREVIOUS_SLOT" 15; then
+# 3. Switch Traefik pointer back and acknowledge route identity
+if ! rollback_route "$PREVIOUS_SLOT" "" 15; then
   log_error "CRITICAL: Route identity acknowledgment failed during rollback to [${PREVIOUS_SLOT}]!"
   exit 1
 fi
 
-# 5. Stop faulty current slot into warm standby
+# 4. Stop faulty current slot into warm standby
 stop_standby_container "$CURRENT_SLOT"
 
 printf "%s" "$PREVIOUS_SLOT" > "$ACTIVE_SLOT_FILE"

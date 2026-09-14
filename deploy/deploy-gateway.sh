@@ -97,13 +97,14 @@ cleanup() {
 
   if [[ "$exit_code" -ne 0 ]]; then
     log_warn "Deployment script exiting with error code ${exit_code}."
-    if ! is_tx_committed; then
+    local cur_tx
+    cur_tx="$(get_tx_state 2>/dev/null || echo "")"
+    if ! is_tx_committed && [[ "$cur_tx" != "TX_ROLLED_BACK" && "$cur_tx" != "TX_ROLLBACK_FAILED" ]]; then
       log_warn "Transaction is NOT committed. Executing automatic recovery and cleanup..."
       # If route was switched, revert it
       if [[ -f "$ACB_CONFIG" ]] && grep -q "acb-web-${CANDIDATE_SLOT}" "$ACB_CONFIG" 2>/dev/null; then
         log_warn "Reverting Traefik route pointer back to [${ACTIVE_SLOT}]..."
-        rollback_route "$ACTIVE_SLOT"
-        ack_route_identity "$ACTIVE_SLOT" "" 15 || true
+        rollback_route "$ACTIVE_SLOT" "" 15 || true
       fi
       # Stop candidate container
       log_warn "Stopping candidate container [acb-gateway-${CANDIDATE_SLOT}]..."
@@ -167,11 +168,16 @@ set_deploy_state "ACK_ROUTE"
 if ! ack_route_identity "$CANDIDATE_SLOT" "$EXPECTED_COMMIT" "${ROUTE_ACK_TIMEOUT:-15}"; then
   log_error "Route identity acknowledgment failed for candidate [${CANDIDATE_SLOT}]!"
   log_warn "Executing automatic route rollback to [${ACTIVE_SLOT}]..."
-  rollback_route "$ACTIVE_SLOT"
-  ack_route_identity "$ACTIVE_SLOT" "" 15 || true
-  stop_standby_container "$CANDIDATE_SLOT"
-  set_deploy_state "ROLLED_BACK" "Route identity ACK failed on candidate ${CANDIDATE_SLOT}"
-  update_tx_state "TX_ROLLED_BACK" "Route ACK failed"
+  if rollback_route "$ACTIVE_SLOT" "" 15; then
+    stop_standby_container "$CANDIDATE_SLOT"
+    set_deploy_state "ROLLED_BACK" "Route identity ACK failed on candidate ${CANDIDATE_SLOT}; reverted to ${ACTIVE_SLOT}"
+    update_tx_state "TX_ROLLED_BACK" "Route ACK failed"
+  else
+    log_error "CRITICAL: Route rollback to [${ACTIVE_SLOT}] also failed route identity acknowledgment!"
+    stop_standby_container "$CANDIDATE_SLOT"
+    set_deploy_state "ROLLBACK_FAILED" "Route ACK failed and rollback to ${ACTIVE_SLOT} also failed ACK"
+    update_tx_state "TX_ROLLBACK_FAILED" "Rollback to ${ACTIVE_SLOT} failed ACK"
+  fi
   exit 1
 fi
 update_tx_state "TX_ACK_VERIFIED"

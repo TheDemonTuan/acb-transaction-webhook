@@ -134,6 +134,15 @@ if [[ "$cmd" == "volume" ]]; then
   fi
   exit 0
 elif [[ "$cmd" == "inspect" ]]; then
+  if [[ "$*" == *"edge-traefik"* ]]; then
+    printf '%s\n' "${TRAEFIK_DYNAMIC_DIR:-$STATE_DIR/dynamic}"
+    exit 0
+  fi
+  if [[ "$*" == *"edge-cloudflared"* ]]; then
+    printf 'true\n'
+    exit 0
+  fi
+
   target="${@: -1}"
   fmt=""
   for arg in "$@"; do
@@ -167,6 +176,17 @@ elif [[ "$cmd" == "run" ]]; then
   fi
   if [[ "$*" =~ -backup-to ]]; then
     printf 'BACKUP_CALLED\n' >> "$STATE_DIR/backup_calls.log"
+  fi
+  if [[ "$*" =~ curlimages/curl ]]; then
+    if [[ "${MOCK_ROUTE_ACK_FAIL:-0}" == "1" ]]; then
+      exit 1
+    fi
+    active_slot="blue"
+    if [[ -f "$STATE_DIR/dynamic/acb.yml" ]] && grep -q "acb-web-green" "$STATE_DIR/dynamic/acb.yml" 2>/dev/null; then
+      active_slot="green"
+    fi
+    printf 'HTTP/1.1 200 OK\r\nX-Platform-Slot: %s\r\nX-Release-Commit: %s\r\n\r\n{"status":"ready"}\n__STATUS_SENTINEL__:200\n' "$active_slot" "${EXPECTED_COMMIT:-release-green-commit-1111}"
+    exit 0
   fi
   exit 0
 elif [[ "$cmd" == "compose" ]]; then

@@ -69,7 +69,7 @@ jobs:
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
-          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh deploy/tests/*.sh)
+          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh deploy/tests/*.sh platform/edge/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts found" >&2
             exit 1
@@ -80,7 +80,7 @@ jobs:
       - name: Lint deployment and platform scripts
         run: |
           shopt -s nullglob
-          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh)
+          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh platform/edge/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts found" >&2
             exit 1
@@ -663,6 +663,8 @@ jobs:
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            platform/edge/probe.sh "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/edge-probe.sh"
           cosign_version="v2.4.3"
           target_arch="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" 'uname -m')"
           case "$target_arch" in
