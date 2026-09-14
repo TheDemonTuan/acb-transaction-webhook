@@ -248,7 +248,7 @@ perform_sqlite_backup() {
       -e APP_ENV=production -e DATA_DIR=/data -e DATABASE_PATH=/data/gateway.db \
       -v "${db_volume}:/data:rw" \
       -v "${BACKUP_DIR}:/backup:rw" \
-      "$dbtool_img" -path /data/gateway.db -backup-to "/backup/gateway-${ts}.db"
+      "$dbtool_img" -path /data/gateway.db -backup-to "/backup/gateway-${ts}.db" >&2
   elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]]; then
     if command -v sqlite3 >/dev/null 2>&1; then
       sqlite3 "$SCRIPT_DIR/data/gateway.db" "PRAGMA wal_checkpoint(TRUNCATE);" || true
