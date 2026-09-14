@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,9 +69,9 @@ func TestBrowserScreenCSP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upstreamCalls := 0
+	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamCalls++
+		upstreamCalls.Add(1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'")
 		w.WriteHeader(http.StatusOK)
@@ -170,14 +171,14 @@ func TestBrowserScreenCSP(t *testing.T) {
 	})
 
 	t.Run("nonexistent attempt returns 404 without data CSP", func(t *testing.T) {
-		callsBefore := upstreamCalls
+		callsBefore := upstreamCalls.Load()
 		r := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/connection/auth/nonexistent/screen/vnc.html", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("expected 404, got %d", w.Code)
 		}
-		if upstreamCalls != callsBefore {
+		if upstreamCalls.Load() != callsBefore {
 			t.Fatalf("upstream called for nonexistent attempt")
 		}
 		cspHeaders := w.Result().Header.Values("Content-Security-Policy")

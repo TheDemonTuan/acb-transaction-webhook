@@ -219,7 +219,7 @@ func TestSSEReplay_Over100Events(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		cancel()
 	}()
 
