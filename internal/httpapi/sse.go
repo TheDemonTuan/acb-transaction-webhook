@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
@@ -142,6 +143,7 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			telemetry.Default.RecordSSE(time.Since(start))
+			recordCommitToBrowser(hint)
 			watermark = hint.Seq
 		}
 	}
@@ -164,6 +166,20 @@ func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, 
 		if len(entries) < replayBatch {
 			return true
 		}
+	}
+}
+
+func recordCommitToBrowser(event eventhub.Event) {
+	if event.EventType != "bank.transaction.credit" || event.CommittedAt == "" {
+		return
+	}
+	committedAt, err := time.Parse(time.RFC3339Nano, event.CommittedAt)
+	if err != nil {
+		return
+	}
+	d := time.Since(committedAt)
+	if d >= 0 {
+		telemetry.Default.RecordCommitToBrowserSSE(d)
 	}
 }
 

@@ -640,6 +640,7 @@ func main() {
 				AggregateID: event.TransactionID,
 				Payload:     event.Payload,
 				CreatedAt:   event.CreatedAt,
+				CommittedAt: event.CommittedAt,
 			})
 		}
 		dispatcher.Wake()
@@ -790,12 +791,6 @@ func main() {
 		return nil
 	})
 
-	if err := coordinator.SetReady(); err != nil {
-		logger.Error("failed to mark worker ready", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("singleton worker is READY")
-
 	httpServer := &http.Server{
 		Addr:              rpcAddr,
 		Handler:           rpcServer.Handler(),
@@ -819,22 +814,34 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	go func() {
-		logger.Info("worker private RPC server listening", "addr", rpcAddr)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("worker RPC server failed", "error", err)
-		}
-	}()
-	go func() {
-		logger.Info("worker realtime stream listening", "addr", realtimeAddr)
-		if err := realtimeServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("worker realtime server failed", "error", err)
-		}
-	}()
+	rpcListener, err := net.Listen("tcp", rpcAddr)
+	if err != nil {
+		logger.Error("bind worker RPC server failed", "addr", rpcAddr, "error", err)
+		os.Exit(1)
+	}
+	realtimeListener, err := net.Listen("tcp", realtimeAddr)
+	if err != nil {
+		_ = rpcListener.Close()
+		logger.Error("bind worker realtime server failed", "addr", realtimeAddr, "error", err)
+		os.Exit(1)
+	}
+
+	serverErrors := make(chan error, 2)
+	go serveWorkerHTTP(httpServer, rpcListener, "RPC", logger, serverErrors)
+	go serveWorkerHTTP(realtimeServer, realtimeListener, "realtime", logger, serverErrors)
+
+	if err := coordinator.SetReady(); err != nil {
+		_ = realtimeListener.Close()
+		_ = rpcListener.Close()
+		logger.Error("failed to mark worker ready", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("singleton worker is READY", "rpcAddr", rpcListener.Addr(), "realtimeAddr", realtimeListener.Addr())
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
+	exitFailed := false
 	select {
 	case sig := <-sigCh:
 		logger.Info("received termination signal", "signal", sig)
@@ -842,6 +849,9 @@ func main() {
 		logger.Info("worker drain initiated via RPC")
 	case <-ctx.Done():
 		logger.Info("worker context done")
+	case err := <-serverErrors:
+		exitFailed = true
+		logger.Error("worker internal server stopped unexpectedly", "error", err)
 	}
 
 	logger.Info("shutting down worker...")
@@ -878,4 +888,17 @@ func main() {
 	}
 
 	logger.Info("worker stopped successfully")
+	if exitFailed {
+		os.Exit(1)
+	}
+}
+
+func serveWorkerHTTP(server *http.Server, listener net.Listener, name string, logger *slog.Logger, errors chan<- error) {
+	logger.Info("worker internal server listening", "server", name, "addr", listener.Addr())
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		select {
+		case errors <- fmt.Errorf("%s server: %w", name, err):
+		default:
+		}
+	}
 }

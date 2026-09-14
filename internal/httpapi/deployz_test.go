@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
 type mockWorkerProber struct {
@@ -143,6 +145,33 @@ func TestDeployzEndpoint_WorkerProberIntegration(t *testing.T) {
 	_ = json.Unmarshal(rec2.Body.Bytes(), &respOK)
 	if respOK["status"] != "ready" || respOK["worker"] != "ready" {
 		t.Errorf("expected status ready and worker ready, got: %v", respOK)
+	}
+}
+
+func TestDeployzReportsRealtimeDegradedWithoutFailingReadiness(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "deployz_realtime.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	oldDefault := telemetry.Default
+	telemetry.Default = telemetry.NewRegistry()
+	defer func() { telemetry.Default = oldDefault }()
+	telemetry.Default.SetRealtimeStreamState(true, "degraded", "unauthorized")
+
+	cfg := config.Config{WorkerRealtimeEnabled: true, WorkerInternalToken: "secret"}
+	server := New(cfg, store)
+	req := httptest.NewRequest(http.MethodGet, "/internal/deployz", nil)
+	req.Header.Set("X-Worker-Internal-Token", "secret")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected degraded deployz to remain 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"degraded"`) || !strings.Contains(rec.Body.String(), `"realtime":"degraded"`) {
+		t.Fatalf("expected realtime degraded response, got %s", rec.Body.String())
 	}
 }
 

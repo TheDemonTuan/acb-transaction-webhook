@@ -74,6 +74,8 @@ assert_file_contains "$runbook" "ALERT_BACKUP_OVERDUE" "Runbook documents ALERT_
 assert_file_contains "$runbook" "ALERT_RESTORE_DRILL_OVERDUE" "Runbook documents ALERT_RESTORE_DRILL_OVERDUE"
 assert_file_contains "$runbook" "ALERT_MUTATION_GATE_LOCKED" "Runbook documents ALERT_MUTATION_GATE_LOCKED"
 assert_file_contains "$runbook" "ALERT_WRONG_ROLE_RELEASE_SCHEMA" "Runbook documents ALERT_WRONG_ROLE_RELEASE_SCHEMA"
+assert_file_contains "$runbook" "ALERT_REALTIME_STREAM_DEGRADED" "Runbook documents ALERT_REALTIME_STREAM_DEGRADED"
+assert_file_contains "$runbook" "ALERT_REALTIME_FALLBACK_RECOVERY" "Runbook documents ALERT_REALTIME_FALLBACK_RECOVERY"
 assert_file_contains "$runbook" "Zero Secret Leakage" "Runbook enforces zero secret leakage"
 assert_file_contains "$runbook" "Cardinality Bounds" "Runbook enforces cardinality bounds"
 

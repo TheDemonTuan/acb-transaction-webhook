@@ -16,9 +16,25 @@ In accordance with architectural invariant **Phase 11 (Task 41)** and **Invarian
 
 ---
 
-## 2. Route Identity ACK & Split Role Checks
+## 2. Realtime Fast-Path Health
 
-### 2.1 Response Headers (Route ACK)
+Gateway telemetry exposes bounded process-local fast-path state and counters:
+
+- `streamEnabled`, `streamState`, `streamReason`, and `streamStateSince` describe the Worker-to-Gateway SSE connection. States are `disabled`, `connecting`, `connected`, `degraded`, and `stopped`.
+- `streamReconnectTotal` counts connection attempts after the first. `streamDisconnectTotal` counts established streams that ended outside an intentional shutdown. Counters reset when the Gateway process restarts.
+- `fallbackRecoveryTotal` counts journal events published by coordinator recovery. `gapRepairTotal` counts gap reconciliations that recovered events. An isolated reconnect or deployment cutover can increase these counters without indicating data loss.
+- `p95CommitToGatewayMs` measures an observed successful commit to Gateway publish for live credit events. `p95CommitToBrowserSseMs` ends at successful server flush to the browser connection; it does not measure browser rendering or acknowledgement.
+
+`/readyz` remains based on local serving capability because SQLite recovery keeps the Gateway usable. `/internal/deployz` reports `degraded` when realtime is enabled but disconnected, and `/api/v1/ops/alerts` exposes:
+
+- `ALERT_REALTIME_STREAM_DEGRADED`: warning while connecting/degraded and critical after 120 seconds or for a terminal stop such as unauthorized credentials.
+- `ALERT_REALTIME_FALLBACK_RECOVERY`: warning when at least two separate reconciliations recover events within 60 seconds. A single restart/cutover recovery does not trigger it.
+
+For `unauthorized`, verify that Worker and Gateway use the same `WORKER_INTERNAL_TOKEN`, then restart the Gateway. For `idle_timeout` or `transport_error`, verify the Worker realtime listener, Docker network, and both Blue/Green Gateway telemetry independently. Never place tokens or transaction payloads in logs or telemetry.
+
+## 3. Route Identity ACK & Split Role Checks
+
+### 3.1 Response Headers (Route ACK)
 Every HTTP response from edge services provides identity acknowledgement headers:
 - `X-Platform-Slot`: The active Blue/Green slot (`blue` or `green`).
 - `X-Release-Commit`: The Git commit SHA deployed in the container.
@@ -26,7 +42,7 @@ Every HTTP response from edge services provides identity acknowledgement headers
 
 Traefik route switch scripts (`deploy/switch-slot.sh` and `deploy/lib/traefik.sh`) assert both `X-Platform-Slot` and `X-Release-Commit` before completing candidate promotion.
 
-### 2.2 Split Role Probes
+### 3.2 Split Role Probes
 Endpoints enforce role validation when queried with `?role=<expected>` or header `X-Expected-Role: <expected>`:
 - `GET /healthz?role=gateway` on gateway returns `200 OK`.
 - `GET /healthz?role=worker` on gateway returns `503 Service Unavailable` (`role mismatch`).
@@ -35,7 +51,7 @@ Endpoints enforce role validation when queried with `?role=<expected>` or header
 
 ---
 
-## 3. Privacy & Cardinality Controls
+## 4. Privacy & Cardinality Controls
 
 To ensure production compliance and avoid secret leakage or memory bloat:
 1. **Zero Secret Leakage:**
@@ -48,7 +64,7 @@ To ensure production compliance and avoid secret leakage or memory bloat:
 
 ---
 
-## 4. Operational Alert Thresholds & Runbooks
+## 5. Operational Alert Thresholds & Runbooks
 
 Operational alerts are evaluated continuously and exposed via `/api/v1/telemetry` and `/api/v1/ops/alerts`.
 

@@ -15,6 +15,91 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 )
 
+func TestClientIdleTimeoutReconnects(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	var disconnects atomic.Int32
+	var reconnects atomic.Int32
+	client, err := realtimestream.NewClient(realtimestream.ClientConfig{
+		BaseURL:        ts.URL,
+		IdleTimeout:    30 * time.Millisecond,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+		OnDisconnect: func(err error) {
+			if errors.Is(err, realtimestream.ErrStreamIdle) {
+				disconnects.Add(1)
+			}
+		},
+		OnReconnect: func() { reconnects.Add(1) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_ = client.Run(ctx, nil)
+	if requests.Load() < 2 || disconnects.Load() < 1 || reconnects.Load() < 1 {
+		t.Fatalf("requests=%d disconnects=%d reconnects=%d", requests.Load(), disconnects.Load(), reconnects.Load())
+	}
+}
+
+func TestClientUnauthorizedReportsConnectErrorAndStops(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+	var connectErrors atomic.Int32
+	client, err := realtimestream.NewClient(realtimestream.ClientConfig{
+		BaseURL: ts.URL,
+		OnConnectError: func(err error) {
+			if errors.Is(err, realtimestream.ErrUnauthorized) {
+				connectErrors.Add(1)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Run(context.Background(), nil); !errors.Is(err, realtimestream.ErrUnauthorized) {
+		t.Fatalf("expected unauthorized, got %v", err)
+	}
+	if connectErrors.Load() != 1 {
+		t.Fatalf("expected one reported connect error, got %d", connectErrors.Load())
+	}
+}
+
+func TestClientHeartbeatPreventsIdleTimeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for i := 0; i < 5; i++ {
+			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
+			flusher.Flush()
+			time.Sleep(15 * time.Millisecond)
+		}
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+	client, err := realtimestream.NewClient(realtimestream.ClientConfig{BaseURL: ts.URL, IdleTimeout: 35 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
+	defer cancel()
+	if err := client.Consume(ctx, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected caller deadline, got %v", err)
+	}
+}
+
 func TestClientRoundtripAndJSONPreserved(t *testing.T) {
 	hub := eventhub.New()
 	token := "worker-secret-42"
@@ -56,6 +141,7 @@ func TestClientRoundtripAndJSONPreserved(t *testing.T) {
 		AggregateID: "agg-xyz",
 		Payload:     []byte(`{"status":"success","transactions":3}`),
 		CreatedAt:   "2026-09-14T15:04:05Z",
+		CommittedAt: "2026-09-14T15:04:06Z",
 	}
 	hub.Publish(inputEvent)
 
@@ -75,6 +161,9 @@ func TestClientRoundtripAndJSONPreserved(t *testing.T) {
 		}
 		if string(got.Payload) != string(inputEvent.Payload) {
 			t.Errorf("payload = %q, want %q", string(got.Payload), string(inputEvent.Payload))
+		}
+		if got.CommittedAt != inputEvent.CommittedAt {
+			t.Errorf("committedAt = %q, want %q", got.CommittedAt, inputEvent.CommittedAt)
 		}
 		if got.CreatedAt != inputEvent.CreatedAt {
 			t.Errorf("createdAt = %q, want %q", got.CreatedAt, inputEvent.CreatedAt)

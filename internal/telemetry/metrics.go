@@ -28,19 +28,30 @@ type Registry struct {
 	mu sync.RWMutex
 
 	// Realtime & HTTP samples
-	ingestSamples       []float64
-	sseSamples          []float64
-	webhookSamples      []float64
-	notificationSamples map[string][]float64
-	notificationTotals  map[string]map[string]int
-	connectedClients    int64
-	circuitBreakerOpen  bool
-	lastACBPollAt       time.Time
-	lastPollDuration    time.Duration
-	lastPollStatus      string
-	catchUpDay          string
-	totalIngested       int
-	totalWebhooksSent   int
+	ingestSamples        []float64
+	sseSamples           []float64
+	webhookSamples       []float64
+	notificationSamples  map[string][]float64
+	notificationTotals   map[string]map[string]int
+	connectedClients     int64
+	circuitBreakerOpen   bool
+	lastACBPollAt        time.Time
+	lastPollDuration     time.Duration
+	lastPollStatus       string
+	catchUpDay           string
+	totalIngested        int
+	totalWebhooksSent    int
+	streamEnabled        bool
+	streamState          string
+	streamReason         string
+	streamStateSince     time.Time
+	streamReconnects     int64
+	streamDisconnects    int64
+	fallbackRecoveries   int64
+	gapRepairs           int64
+	fallbackTimes        []time.Time
+	commitGatewaySamples []float64
+	commitBrowserSamples []float64
 
 	// Scheduler telemetry
 	schedQueueDepth      map[string]int
@@ -134,6 +145,10 @@ func NewRegistry() *Registry {
 		workerState:            "READY",
 		workerStaleThreshold:   60 * time.Second,
 		failoverState:          "PRIMARY",
+		streamState:            "disabled",
+		commitGatewaySamples:   make([]float64, 0, 1000),
+		commitBrowserSamples:   make([]float64, 0, 1000),
+		fallbackTimes:          make([]time.Time, 0, 64),
 	}
 }
 
@@ -200,6 +215,74 @@ func (r *Registry) SetCircuitBreaker(open bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.circuitBreakerOpen = open
+}
+
+func (r *Registry) SetRealtimeStreamState(enabled bool, state, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !enabled {
+		state = "disabled"
+		reason = ""
+	}
+	if r.streamEnabled == enabled && r.streamState == state && r.streamReason == reason {
+		return
+	}
+	r.streamEnabled = enabled
+	r.streamState = state
+	r.streamReason = reason
+	r.streamStateSince = time.Now().UTC()
+}
+
+func (r *Registry) RecordRealtimeReconnect() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.streamReconnects++
+}
+
+func (r *Registry) RecordRealtimeDisconnect() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.streamDisconnects++
+}
+
+func (r *Registry) RecordFallbackRecovery(count int, gap bool) {
+	if count <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fallbackRecoveries += int64(count)
+	if gap {
+		r.gapRepairs += int64(count)
+	}
+	now := time.Now().UTC()
+	r.fallbackTimes = append(r.fallbackTimes, now)
+	cutoff := now.Add(-time.Minute)
+	first := 0
+	for first < len(r.fallbackTimes) && r.fallbackTimes[first].Before(cutoff) {
+		first++
+	}
+	if first > 0 {
+		r.fallbackTimes = append([]time.Time(nil), r.fallbackTimes[first:]...)
+	}
+}
+
+func (r *Registry) RecordCommitToGateway(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.commitGatewaySamples) >= 1000 {
+		r.commitGatewaySamples = r.commitGatewaySamples[1:]
+	}
+	r.commitGatewaySamples = append(r.commitGatewaySamples, float64(d.Microseconds())/1000.0)
+}
+
+func (r *Registry) RecordCommitToBrowserSSE(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.commitBrowserSamples) >= 1000 {
+		r.commitBrowserSamples = r.commitBrowserSamples[1:]
+	}
+	r.commitBrowserSamples = append(r.commitBrowserSamples, float64(d.Microseconds())/1000.0)
 }
 
 func (r *Registry) SetLastACBPollAt(t time.Time) {
@@ -465,19 +548,53 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 			pollAgeSec = 0
 		}
 	}
+	stateSince := ""
+	if !r.streamStateSince.IsZero() {
+		stateSince = r.streamStateSince.UTC().Format(time.RFC3339Nano)
+	}
+	recentFallback := 0
+	cutoff := now.Add(-time.Minute)
+	for _, recordedAt := range r.fallbackTimes {
+		if !recordedAt.Before(cutoff) {
+			recentFallback++
+		}
+	}
+	connected := int64(0)
+	disconnectedAge := float64(0)
+	if r.streamEnabled && r.streamState == "connected" {
+		connected = 1
+	} else if r.streamEnabled && !r.streamStateSince.IsZero() {
+		disconnectedAge = now.Sub(r.streamStateSince).Seconds()
+		if disconnectedAge < 0 {
+			disconnectedAge = 0
+		}
+	}
 	rtTele := RealtimeTelemetry{
-		LastACBPollAt:         lastPollAtStr,
-		LastACBPollAgeSeconds: pollAgeSec,
-		LastACBPollDurationMs: float64(r.lastPollDuration.Microseconds()) / 1000.0,
-		LastACBPollStatus:     r.lastPollStatus,
-		CatchUpDay:            r.catchUpDay,
-		CircuitBreakerOpen:    r.circuitBreakerOpen,
-		ConnectedClients:      r.connectedClients,
-		P95IngestMs:           calcP95(r.ingestSamples),
-		P95SSEMs:              calcP95(r.sseSamples),
-		P95WebhookMs:          calcP95(r.webhookSamples),
-		TotalIngested:         r.totalIngested,
-		TotalWebhooksSent:     r.totalWebhooksSent,
+		StreamEnabled:                    r.streamEnabled,
+		StreamState:                      r.streamState,
+		StreamReason:                     r.streamReason,
+		StreamStateSince:                 stateSince,
+		StreamConnected:                  connected,
+		StreamReconnectTotal:             r.streamReconnects,
+		StreamDisconnectTotal:            r.streamDisconnects,
+		FallbackRecoveryTotal:            r.fallbackRecoveries,
+		GapRepairTotal:                   r.gapRepairs,
+		P95CommitToGatewayMs:             calcP95(r.commitGatewaySamples),
+		P95CommitToBrowserSSEMs:          calcP95(r.commitBrowserSamples),
+		RecentFallbackRecoveryReconciles: recentFallback,
+		StreamDisconnectedAgeSeconds:     disconnectedAge,
+		LastACBPollAt:                    lastPollAtStr,
+		LastACBPollAgeSeconds:            pollAgeSec,
+		LastACBPollDurationMs:            float64(r.lastPollDuration.Microseconds()) / 1000.0,
+		LastACBPollStatus:                r.lastPollStatus,
+		CatchUpDay:                       r.catchUpDay,
+		CircuitBreakerOpen:               r.circuitBreakerOpen,
+		ConnectedClients:                 r.connectedClients,
+		P95IngestMs:                      calcP95(r.ingestSamples),
+		P95SSEMs:                         calcP95(r.sseSamples),
+		P95WebhookMs:                     calcP95(r.webhookSamples),
+		TotalIngested:                    r.totalIngested,
+		TotalWebhooksSent:                r.totalWebhooksSent,
 	}
 
 	// 3. History jobs snapshot

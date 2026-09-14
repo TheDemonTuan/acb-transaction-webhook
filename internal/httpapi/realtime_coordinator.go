@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
 // RealtimeCoordinator serializes live hints and journal recovery through one
@@ -19,6 +20,7 @@ type RealtimeCoordinator struct {
 
 	mu      sync.RWMutex
 	lastSeq int64
+	done    chan struct{}
 }
 
 func NewRealtimeCoordinator(server *Server, interval time.Duration) *RealtimeCoordinator {
@@ -31,6 +33,7 @@ func NewRealtimeCoordinator(server *Server, interval time.Duration) *RealtimeCoo
 		reconcileNow: make(chan struct{}, 1),
 		interval:     interval,
 		lastSeq:      -1,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -46,8 +49,12 @@ func (c *RealtimeCoordinator) RequestReconcile() {
 // Submit queues a live hint. Backpressure is bounded by the Worker stream's
 // write deadline; an interrupted connection resumes from the last handled ID.
 func (c *RealtimeCoordinator) Submit(event eventhub.Event) error {
-	c.input <- event
-	return nil
+	select {
+	case c.input <- event:
+		return nil
+	case <-c.done:
+		return context.Canceled
+	}
 }
 
 func (c *RealtimeCoordinator) LastSeq() int64 {
@@ -60,6 +67,7 @@ func (c *RealtimeCoordinator) Run(ctx context.Context) {
 	if c == nil || c.server == nil || c.server.store == nil {
 		return
 	}
+	defer close(c.done)
 	for {
 		lastSeq, err := c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
 		if err == nil {
@@ -83,9 +91,9 @@ func (c *RealtimeCoordinator) Run(ctx context.Context) {
 		case event := <-c.input:
 			c.handle(ctx, event)
 		case <-c.reconcileNow:
-			c.reconcile(ctx, 0)
+			c.reconcile(ctx, 0, false)
 		case <-ticker.C:
-			c.reconcile(ctx, 0)
+			c.reconcile(ctx, 0, false)
 		}
 	}
 }
@@ -97,15 +105,16 @@ func (c *RealtimeCoordinator) handle(ctx context.Context, event eventhub.Event) 
 	}
 	if event.Seq == lastSeq+1 {
 		c.server.eventHub.Publish(event)
+		recordCommitToGateway(event)
 		c.setLastSeq(event.Seq)
 		return
 	}
-	c.reconcile(ctx, event.Seq)
+	c.reconcile(ctx, event.Seq, true)
 }
 
 // reconcile publishes durable journal rows in order up to target. A zero target
 // snapshots the current high-water mark.
-func (c *RealtimeCoordinator) reconcile(ctx context.Context, target int64) {
+func (c *RealtimeCoordinator) reconcile(ctx context.Context, target int64, gap bool) {
 	if target <= 0 {
 		var err error
 		target, err = c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
@@ -114,6 +123,8 @@ func (c *RealtimeCoordinator) reconcile(ctx context.Context, target int64) {
 			return
 		}
 	}
+	recoveredCredits := 0
+	defer func() { telemetry.Default.RecordFallbackRecovery(recoveredCredits, gap) }()
 	for c.LastSeq() < target {
 		entries, err := c.server.store.ReadJournalEvents(ctx, realtimeEpoch, c.LastSeq(), replayBatch)
 		if err != nil {
@@ -139,11 +150,28 @@ func (c *RealtimeCoordinator) reconcile(ctx context.Context, target int64) {
 				Payload:     entry.Payload,
 				CreatedAt:   entry.CreatedAt,
 			})
+			if entry.EventType == "bank.transaction.credit" {
+				recoveredCredits++
+			}
 			c.setLastSeq(entry.Seq)
 		}
 		if len(entries) < replayBatch {
 			return
 		}
+	}
+}
+
+func recordCommitToGateway(event eventhub.Event) {
+	if event.EventType != "bank.transaction.credit" || event.CommittedAt == "" {
+		return
+	}
+	committedAt, err := time.Parse(time.RFC3339Nano, event.CommittedAt)
+	if err != nil {
+		return
+	}
+	d := time.Since(committedAt)
+	if d >= 0 {
+		telemetry.Default.RecordCommitToGateway(d)
 	}
 }
 

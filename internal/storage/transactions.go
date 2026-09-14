@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 )
@@ -47,6 +48,7 @@ type EventNotification struct {
 	TransactionID string `json:"transactionId"`
 	Payload       []byte `json:"payload"`
 	CreatedAt     string `json:"createdAt"`
+	CommittedAt   string `json:"committedAt,omitempty"`
 	JournalSeq    int64  `json:"journalSeq"`
 	Epoch         string `json:"epoch"`
 }
@@ -289,6 +291,12 @@ func (s *Store) IngestTransactionsBatchWithSource(ctx context.Context, connectio
 		}
 		return nil
 	})
+	if err == nil && len(res.NewEvents) > 0 {
+		committedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		for i := range res.NewEvents {
+			res.NewEvents[i].CommittedAt = committedAt
+		}
+	}
 
 	return res, err
 }

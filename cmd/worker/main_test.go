@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,38 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
+
+func TestServeWorkerHTTPReportsUnexpectedFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	serveWorkerHTTP(&http.Server{Handler: http.NotFoundHandler()}, listener, "realtime", slog.Default(), errCh)
+	select {
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "realtime server") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	default:
+		t.Fatal("expected serve failure to be reported")
+	}
+}
+
+func TestWorkerRealtimeAddressMustBindBeforeReady(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	if duplicate, err := net.Listen("tcp", occupied.Addr().String()); err == nil {
+		duplicate.Close()
+		t.Fatal("expected occupied realtime address bind to fail")
+	}
+}
 
 func TestWorkerRoleValidation_Subprocess(t *testing.T) {
 	if testing.Short() {

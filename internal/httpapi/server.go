@@ -517,6 +517,16 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		resp["worker"] = "monolith"
 	}
 
+	if s.cfg.WorkerRealtimeEnabled {
+		realtime := telemetry.Default.FullSnapshot().Realtime
+		resp["realtime"] = realtime.StreamState
+		if realtime.StreamState != "connected" && status == "ready" {
+			status = "degraded"
+		}
+	} else {
+		resp["realtime"] = "disabled"
+	}
+
 	// 4. Auth-browser check (if configured)
 	if s.cfg.AuthBrowserURL != "" {
 		client := &http.Client{Timeout: 1500 * time.Millisecond}

@@ -28,9 +28,25 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/webhook"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
+
+func realtimeStreamReason(err error) string {
+	switch {
+	case errors.Is(err, realtimestream.ErrUnauthorized):
+		return "unauthorized"
+	case errors.Is(err, realtimestream.ErrStreamIdle):
+		return "idle_timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case err == nil:
+		return "stream_closed"
+	default:
+		return "transport_error"
+	}
+}
 
 type gatewayFlags struct {
 	healthcheck    bool
@@ -329,17 +345,41 @@ func main() {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
 			server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
 			go coordinator.Run(ctx)
+			telemetry.Default.SetRealtimeStreamState(true, "connecting", "startup")
 			streamClient, streamErr := realtimestream.NewClient(realtimestream.ClientConfig{
-				BaseURL:   cfg.WorkerRealtimeURL,
-				Token:     cfg.WorkerInternalToken,
-				OnConnect: coordinator.RequestReconcile,
+				BaseURL: cfg.WorkerRealtimeURL,
+				Token:   cfg.WorkerInternalToken,
+				OnConnect: func() {
+					telemetry.Default.SetRealtimeStreamState(true, "connected", "")
+					coordinator.RequestReconcile()
+				},
+				OnConnectError: func(err error) {
+					telemetry.Default.SetRealtimeStreamState(true, "degraded", realtimeStreamReason(err))
+				},
+				OnDisconnect: func(err error) {
+					telemetry.Default.RecordRealtimeDisconnect()
+					telemetry.Default.SetRealtimeStreamState(true, "degraded", realtimeStreamReason(err))
+				},
+				OnReconnect: func() {
+					telemetry.Default.RecordRealtimeReconnect()
+					telemetry.Default.SetRealtimeStreamState(true, "connecting", "reconnect")
+				},
 			})
 			if streamErr != nil {
 				logger.Error("create worker realtime client failed", "error", streamErr)
 				os.Exit(1)
 			}
-			go streamClient.Run(ctx, coordinator.Submit)
+			go func() {
+				err := streamClient.Run(ctx, coordinator.Submit)
+				if ctx.Err() != nil {
+					return
+				}
+				reason := realtimeStreamReason(err)
+				telemetry.Default.SetRealtimeStreamState(true, "stopped", reason)
+				logger.Error("worker realtime stream stopped", "reason", reason)
+			}()
 		} else {
+			telemetry.Default.SetRealtimeStreamState(false, "disabled", "")
 			go server.RunJournalWatcher(ctx, 200*time.Millisecond)
 		}
 	} else if cfg.RuntimeRole == config.RuntimeRoleMonolithDev {
@@ -386,6 +426,7 @@ func main() {
 					AggregateID: ev.TransactionID,
 					Payload:     ev.Payload,
 					CreatedAt:   ev.CreatedAt,
+					CommittedAt: ev.CommittedAt,
 				})
 			}
 			dispatcher.Wake()

@@ -5,6 +5,36 @@ import (
 	"time"
 )
 
+func TestRealtimeStreamTelemetryAndAlerts(t *testing.T) {
+	reg := NewRegistry()
+	reg.SetRealtimeStreamState(true, "stopped", "unauthorized")
+	reg.RecordRealtimeReconnect()
+	reg.RecordRealtimeDisconnect()
+	reg.RecordFallbackRecovery(2, true)
+	reg.RecordFallbackRecovery(1, false)
+	reg.RecordCommitToGateway(12 * time.Millisecond)
+	reg.RecordCommitToBrowserSSE(18 * time.Millisecond)
+
+	snap := reg.FullSnapshot()
+	if snap.Realtime.StreamConnected != 0 || snap.Realtime.StreamReconnectTotal != 1 || snap.Realtime.StreamDisconnectTotal != 1 {
+		t.Fatalf("unexpected stream telemetry: %+v", snap.Realtime)
+	}
+	if snap.Realtime.FallbackRecoveryTotal != 3 || snap.Realtime.GapRepairTotal != 2 || snap.Realtime.RecentFallbackRecoveryReconciles != 2 {
+		t.Fatalf("unexpected recovery telemetry: %+v", snap.Realtime)
+	}
+	if snap.Realtime.P95CommitToGatewayMs != 12 || snap.Realtime.P95CommitToBrowserSSEMs != 18 {
+		t.Fatalf("unexpected commit latency: %+v", snap.Realtime)
+	}
+	alerts := EvaluateAlerts(snap)
+	active := map[string]bool{}
+	for _, alert := range alerts {
+		active[alert.Name] = alert.Active
+	}
+	if !active[AlertRealtimeStreamDegraded] || !active[AlertRealtimeFallbackRecovery] {
+		t.Fatalf("expected realtime alerts active: %+v", active)
+	}
+}
+
 func TestMetricsP95Calculation(t *testing.T) {
 	reg := NewRegistry()
 

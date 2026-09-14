@@ -32,18 +32,31 @@ type SchedulerTelemetry struct {
 }
 
 type RealtimeTelemetry struct {
-	LastACBPollAt         string  `json:"lastAcbPollAt,omitempty"`
-	LastACBPollAgeSeconds float64 `json:"lastAcbPollAgeSeconds"`
-	LastACBPollDurationMs float64 `json:"lastAcbPollDurationMs"`
-	LastACBPollStatus     string  `json:"lastAcbPollStatus"`
-	CatchUpDay            string  `json:"catchUpDay,omitempty"`
-	CircuitBreakerOpen    bool    `json:"circuitBreakerOpen"`
-	ConnectedClients      int64   `json:"connectedClients"`
-	P95IngestMs           float64 `json:"p95IngestMs"`
-	P95SSEMs              float64 `json:"p95SseMs"`
-	P95WebhookMs          float64 `json:"p95WebhookMs"`
-	TotalIngested         int     `json:"totalIngested"`
-	TotalWebhooksSent     int     `json:"totalWebhooksSent"`
+	StreamEnabled                    bool    `json:"streamEnabled"`
+	StreamState                      string  `json:"streamState"`
+	StreamReason                     string  `json:"streamReason,omitempty"`
+	StreamStateSince                 string  `json:"streamStateSince,omitempty"`
+	StreamConnected                  int64   `json:"streamConnected"`
+	StreamReconnectTotal             int64   `json:"streamReconnectTotal"`
+	StreamDisconnectTotal            int64   `json:"streamDisconnectTotal"`
+	FallbackRecoveryTotal            int64   `json:"fallbackRecoveryTotal"`
+	GapRepairTotal                   int64   `json:"gapRepairTotal"`
+	P95CommitToGatewayMs             float64 `json:"p95CommitToGatewayMs"`
+	P95CommitToBrowserSSEMs          float64 `json:"p95CommitToBrowserSseMs"`
+	RecentFallbackRecoveryReconciles int     `json:"recentFallbackRecoveryReconciles"`
+	StreamDisconnectedAgeSeconds     float64 `json:"streamDisconnectedAgeSeconds"`
+	LastACBPollAt                    string  `json:"lastAcbPollAt,omitempty"`
+	LastACBPollAgeSeconds            float64 `json:"lastAcbPollAgeSeconds"`
+	LastACBPollDurationMs            float64 `json:"lastAcbPollDurationMs"`
+	LastACBPollStatus                string  `json:"lastAcbPollStatus"`
+	CatchUpDay                       string  `json:"catchUpDay,omitempty"`
+	CircuitBreakerOpen               bool    `json:"circuitBreakerOpen"`
+	ConnectedClients                 int64   `json:"connectedClients"`
+	P95IngestMs                      float64 `json:"p95IngestMs"`
+	P95SSEMs                         float64 `json:"p95SseMs"`
+	P95WebhookMs                     float64 `json:"p95WebhookMs"`
+	TotalIngested                    int     `json:"totalIngested"`
+	TotalWebhooksSent                int     `json:"totalWebhooksSent"`
 }
 
 type HistoryJobsTelemetry struct {
@@ -65,13 +78,13 @@ type AuthLifecycleTelemetry struct {
 }
 
 type NotificationTelemetry struct {
-	TotalPending      int                         `json:"totalPending"`
-	TotalDeadLetter   int                         `json:"totalDeadLetter"`
-	ByProvider        map[string]ProviderSnapshot `json:"byProvider"`
-	RecentP95Ms       map[string]float64          `json:"recentP95Ms"`
-	TotalDelivered    int                         `json:"totalDelivered"`
-	TotalFailed       int                         `json:"totalFailed"`
-	IsBacklogStuck    bool                        `json:"isBacklogStuck"`
+	TotalPending    int                         `json:"totalPending"`
+	TotalDeadLetter int                         `json:"totalDeadLetter"`
+	ByProvider      map[string]ProviderSnapshot `json:"byProvider"`
+	RecentP95Ms     map[string]float64          `json:"recentP95Ms"`
+	TotalDelivered  int                         `json:"totalDelivered"`
+	TotalFailed     int                         `json:"totalFailed"`
+	IsBacklogStuck  bool                        `json:"isBacklogStuck"`
 }
 
 type ProviderSnapshot struct {
@@ -112,11 +125,11 @@ type DeploymentTelemetry struct {
 }
 
 type BackupAndDrillTelemetry struct {
-	LastBackupArtifact     string  `json:"lastBackupArtifact,omitempty"`
-	LastBackupAt           string  `json:"lastBackupAt,omitempty"`
-	BackupAgeSeconds       float64 `json:"backupAgeSeconds"`
-	IsBackupOverdue        bool    `json:"isBackupOverdue"`
-	LastRestoreDrillAt     string  `json:"lastRestoreDrillAt,omitempty"`
-	LastRestoreDrillSuccess bool   `json:"lastRestoreDrillSuccess"`
-	RestoreDrillAgeDays    float64 `json:"restoreDrillAgeDays"`
+	LastBackupArtifact      string  `json:"lastBackupArtifact,omitempty"`
+	LastBackupAt            string  `json:"lastBackupAt,omitempty"`
+	BackupAgeSeconds        float64 `json:"backupAgeSeconds"`
+	IsBackupOverdue         bool    `json:"isBackupOverdue"`
+	LastRestoreDrillAt      string  `json:"lastRestoreDrillAt,omitempty"`
+	LastRestoreDrillSuccess bool    `json:"lastRestoreDrillSuccess"`
+	RestoreDrillAgeDays     float64 `json:"restoreDrillAgeDays"`
 }

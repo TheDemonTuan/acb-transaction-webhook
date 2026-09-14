@@ -1,6 +1,9 @@
 package telemetry
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type AlertLevel string
 
@@ -11,16 +14,18 @@ const (
 )
 
 const (
-	AlertStaleRealtimePoll         = "ALERT_STALE_REALTIME_POLL"
-	AlertStaleWorker               = "ALERT_STALE_WORKER"
-	AlertAuthStuck                 = "ALERT_AUTH_STUCK"
-	AlertQueueSaturation           = "ALERT_QUEUE_SATURATION"
-	AlertHistoryStall              = "ALERT_HISTORY_STALL"
-	AlertNotificationBacklogStuck  = "ALERT_NOTIFICATION_BACKLOG_STUCK"
-	AlertBackupOverdue             = "ALERT_BACKUP_OVERDUE"
-	AlertRestoreDrillOverdue       = "ALERT_RESTORE_DRILL_OVERDUE"
-	AlertMutationGateLocked        = "ALERT_MUTATION_GATE_LOCKED"
-	AlertWrongRoleReleaseSchema    = "ALERT_WRONG_ROLE_RELEASE_SCHEMA"
+	AlertStaleRealtimePoll        = "ALERT_STALE_REALTIME_POLL"
+	AlertStaleWorker              = "ALERT_STALE_WORKER"
+	AlertAuthStuck                = "ALERT_AUTH_STUCK"
+	AlertQueueSaturation          = "ALERT_QUEUE_SATURATION"
+	AlertHistoryStall             = "ALERT_HISTORY_STALL"
+	AlertNotificationBacklogStuck = "ALERT_NOTIFICATION_BACKLOG_STUCK"
+	AlertBackupOverdue            = "ALERT_BACKUP_OVERDUE"
+	AlertRestoreDrillOverdue      = "ALERT_RESTORE_DRILL_OVERDUE"
+	AlertMutationGateLocked       = "ALERT_MUTATION_GATE_LOCKED"
+	AlertWrongRoleReleaseSchema   = "ALERT_WRONG_ROLE_RELEASE_SCHEMA"
+	AlertRealtimeStreamDegraded   = "ALERT_REALTIME_STREAM_DEGRADED"
+	AlertRealtimeFallbackRecovery = "ALERT_REALTIME_FALLBACK_RECOVERY"
 )
 
 type Alert struct {
@@ -267,6 +272,51 @@ func EvaluateAlerts(s TelemetrySnapshot) []Alert {
 		Message:      roleMsg,
 		Threshold:    "RUNTIME_ROLE must be gateway, worker, or all-in-one",
 		CurrentValue: s.Deployment.RuntimeRole,
+	})
+
+	streamActive := false
+	streamLevel := AlertInfo
+	streamMsg := "Realtime stream disabled"
+	if s.Realtime.StreamEnabled {
+		streamMsg = "Realtime stream connected"
+		if s.Realtime.StreamState != "connected" {
+			age := time.Duration(s.Realtime.StreamDisconnectedAgeSeconds * float64(time.Second))
+			streamMsg = fmt.Sprintf("Realtime stream %s: %s", s.Realtime.StreamState, s.Realtime.StreamReason)
+			if s.Realtime.StreamState == "stopped" {
+				streamActive = true
+				streamLevel = AlertCritical
+			} else if age > 30*time.Second {
+				streamActive = true
+				streamLevel = AlertWarning
+				if age > 120*time.Second {
+					streamLevel = AlertCritical
+				}
+			}
+		}
+	}
+	alerts = append(alerts, Alert{
+		Name:         AlertRealtimeStreamDegraded,
+		Level:        streamLevel,
+		Active:       streamActive,
+		Message:      streamMsg,
+		Threshold:    "enabled stream disconnected > 30s warning, > 120s or stopped critical",
+		CurrentValue: s.Realtime.StreamState,
+	})
+
+	fallbackActive := s.Realtime.StreamEnabled && s.Realtime.RecentFallbackRecoveryReconciles >= 2
+	fallbackLevel := AlertInfo
+	fallbackMsg := "Realtime fallback recovery within normal range"
+	if fallbackActive {
+		fallbackLevel = AlertWarning
+		fallbackMsg = fmt.Sprintf("Realtime fallback recovered events in %d reconciles during the last minute", s.Realtime.RecentFallbackRecoveryReconciles)
+	}
+	alerts = append(alerts, Alert{
+		Name:         AlertRealtimeFallbackRecovery,
+		Level:        fallbackLevel,
+		Active:       fallbackActive,
+		Message:      fallbackMsg,
+		Threshold:    "at least 2 recovery reconciles in 60 seconds",
+		CurrentValue: s.Realtime.RecentFallbackRecoveryReconciles,
 	})
 
 	return alerts

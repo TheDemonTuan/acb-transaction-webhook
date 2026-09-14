@@ -12,6 +12,7 @@ type Event struct {
 	AggregateID string `json:"aggregateId"`
 	Payload     []byte `json:"payload"`
 	CreatedAt   string `json:"createdAt"`
+	CommittedAt string `json:"committedAt,omitempty"`
 }
 
 type Hub struct {

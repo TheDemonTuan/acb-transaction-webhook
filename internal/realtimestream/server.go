@@ -176,6 +176,7 @@ type eventEnvelope struct {
 	AggregateID string          `json:"aggregateId,omitempty"`
 	Payload     json.RawMessage `json:"payload"`
 	CreatedAt   string          `json:"createdAt,omitempty"`
+	CommittedAt string          `json:"committedAt,omitempty"`
 }
 
 func writeSSEEvent(w io.Writer, ev eventhub.Event) error {
@@ -197,6 +198,7 @@ func writeSSEEvent(w io.Writer, ev eventhub.Event) error {
 		AggregateID: ev.AggregateID,
 		Payload:     raw,
 		CreatedAt:   ev.CreatedAt,
+		CommittedAt: ev.CommittedAt,
 	}
 
 	data, err := json.Marshal(env)

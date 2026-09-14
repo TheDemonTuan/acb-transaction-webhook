@@ -21,6 +21,7 @@ import (
 var (
 	ErrUnauthorized  = errors.New("realtimestream: unauthorized")
 	ErrFrameTooLarge = errors.New("realtimestream: frame exceeds max size")
+	ErrStreamIdle    = errors.New("realtimestream: stream idle timeout")
 )
 
 type HandlerError struct {
@@ -42,7 +43,11 @@ type ClientConfig struct {
 	MaxFrameBytes  int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	IdleTimeout    time.Duration
 	OnConnect      func()
+	OnConnectError func(error)
+	OnDisconnect   func(error)
+	OnReconnect    func()
 }
 
 type Client struct {
@@ -52,7 +57,11 @@ type Client struct {
 	maxFrameBytes  int
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
+	idleTimeout    time.Duration
 	onConnect      func()
+	onConnectError func(error)
+	onDisconnect   func(error)
+	onReconnect    func()
 
 	mu          sync.Mutex
 	lastEventID string
@@ -102,6 +111,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if maxBackoff <= 0 {
 		maxBackoff = 5 * time.Second
 	}
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 45 * time.Second
+	}
 
 	return &Client{
 		url:            parsed.String(),
@@ -110,7 +123,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		maxFrameBytes:  maxFrame,
 		initialBackoff: initBackoff,
 		maxBackoff:     maxBackoff,
+		idleTimeout:    idleTimeout,
 		onConnect:      cfg.OnConnect,
+		onConnectError: cfg.OnConnectError,
+		onDisconnect:   cfg.OnDisconnect,
+		onReconnect:    cfg.OnReconnect,
 	}, nil
 }
 
@@ -167,7 +184,9 @@ func (c *Client) Connect(ctx context.Context) (*http.Response, error) {
 
 // Consume streams events from a single connection until ctx is canceled, an error occurs, or handler returns error.
 func (c *Client) Consume(ctx context.Context, handle func(eventhub.Event) error) error {
-	resp, err := c.Connect(ctx)
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resp, err := c.Connect(streamCtx)
 	if err != nil {
 		return err
 	}
@@ -176,22 +195,42 @@ func (c *Client) Consume(ctx context.Context, handle func(eventhub.Event) error)
 		c.onConnect()
 	}
 
-	return c.parseStream(resp.Body, handle)
+	idle := time.AfterFunc(c.idleTimeout, func() {
+		cancel()
+		_ = resp.Body.Close()
+	})
+	defer idle.Stop()
+	err = c.parseStream(resp.Body, handle, func() { idle.Reset(c.idleTimeout) })
+	if streamCtx.Err() != nil && ctx.Err() == nil {
+		err = ErrStreamIdle
+	}
+	if ctx.Err() == nil && c.onDisconnect != nil {
+		c.onDisconnect(err)
+	}
+	return err
 }
 
 // Run persistently consumes events, automatically reconnecting on transient disconnects.
 func (c *Client) Run(ctx context.Context, handle func(eventhub.Event) error) error {
 	backoff := c.initialBackoff
+	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if attempt > 0 && c.onReconnect != nil {
+			c.onReconnect()
+		}
 
 		start := time.Now()
 		err := c.Consume(ctx, handle)
+		attempt++
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if c.onConnectError != nil {
+				c.onConnectError(err)
 			}
 
 			var hErr *HandlerError
@@ -208,17 +247,19 @@ func (c *Client) Run(ctx context.Context, handle func(eventhub.Event) error) err
 			backoff = c.initialBackoff
 		}
 
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 
 		backoff = min(backoff*2, c.maxBackoff)
 	}
 }
 
-func (c *Client) parseStream(r io.Reader, handle func(eventhub.Event) error) error {
+func (c *Client) parseStream(r io.Reader, handle func(eventhub.Event) error, onActivity func()) error {
 	br := bufio.NewReaderSize(r, 64*1024)
 
 	var curID string
@@ -247,6 +288,10 @@ func (c *Client) parseStream(r io.Reader, handle func(eventhub.Event) error) err
 				return io.EOF
 			}
 			return err
+		}
+
+		if onActivity != nil {
+			onActivity()
 		}
 
 		// Comment or heartbeat line starting with ':'
@@ -342,6 +387,7 @@ func parseSSEEvent(id, event string, data []byte) (eventhub.Event, error) {
 		AggregateID string          `json:"aggregateId"`
 		Payload     json.RawMessage `json:"payload"`
 		CreatedAt   string          `json:"createdAt"`
+		CommittedAt string          `json:"committedAt"`
 	}
 
 	if err := json.Unmarshal(data, &env); err == nil && env.Payload != nil {
@@ -350,6 +396,7 @@ func parseSSEEvent(id, event string, data []byte) (eventhub.Event, error) {
 		ev.EventType = env.EventType
 		ev.AggregateID = env.AggregateID
 		ev.CreatedAt = env.CreatedAt
+		ev.CommittedAt = env.CommittedAt
 		if string(env.Payload) != "null" {
 			ev.Payload = []byte(env.Payload)
 		}

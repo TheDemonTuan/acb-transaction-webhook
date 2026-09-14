@@ -11,6 +11,30 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
+func TestRealtimeCoordinatorSubmitStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	coordinator := NewRealtimeCoordinator(New(config.Config{}, store).WithEventHub(eventhub.New()), time.Hour)
+	go coordinator.Run(ctx)
+	waitForCoordinatorSeq(t, coordinator, 0)
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for {
+		err = coordinator.Submit(eventhub.Event{Seq: 1, Epoch: realtimeEpoch})
+		if err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("submit did not observe coordinator cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestRealtimeCoordinatorPublishesContiguousEventDirectly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -94,7 +118,7 @@ func TestRealtimeCoordinatorAdvancesPastPermanentSequenceHole(t *testing.T) {
 	server := New(config.Config{}, store).WithEventHub(hub)
 	coordinator := NewRealtimeCoordinator(server, time.Hour)
 	coordinator.setLastSeq(0)
-	coordinator.reconcile(ctx, 2)
+	coordinator.reconcile(ctx, 2, false)
 	if coordinator.LastSeq() != 2 {
 		t.Fatalf("expected cursor to advance to durable high-water mark 2, got %d", coordinator.LastSeq())
 	}
