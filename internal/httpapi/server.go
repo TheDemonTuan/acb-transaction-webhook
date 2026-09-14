@@ -514,7 +514,7 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 	// 5. TTS gateway check (if configured)
 	if s.cfg.TTSGatewayURL != "" {
 		client := &http.Client{Timeout: 1500 * time.Millisecond}
-		res, err := client.Get(strings.TrimRight(s.cfg.TTSGatewayURL, "/") + "/healthz")
+		res, err := client.Get(strings.TrimRight(s.cfg.TTSGatewayURL, "/") + "/health")
 		if err != nil || res.StatusCode != http.StatusOK {
 			resp["tts"] = "unreachable"
 			if status == "ready" {
