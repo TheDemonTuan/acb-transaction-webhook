@@ -23,6 +23,12 @@ check_active_auth_gate() {
     validate_digest "$dbtool_img" "dbtool"
 
     local auth_json
+    # Pull separately so Docker progress never contaminates the strict JSON probe output.
+    log_info "Pulling immutable dbtool image before active-auth probe..."
+    if ! docker pull "$dbtool_img" >&2; then
+      log_error "check_active_auth_gate: failed to pull immutable dbtool image."
+      return 1
+    fi
     # Execute dbtool strictly read-only with no egress network
     if ! auth_json="$(
       docker run --rm \
