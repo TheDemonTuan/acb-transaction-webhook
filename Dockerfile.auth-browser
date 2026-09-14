@@ -15,4 +15,4 @@ COPY cmd/auth-browser/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /auth-browser /entrypoint.sh
 USER 1000:1000
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=3 CMD ["/auth-browser", "--healthcheck"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
