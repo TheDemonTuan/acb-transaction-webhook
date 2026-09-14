@@ -335,17 +335,30 @@ for forbidden_net in edge-acb acb-core acb-egress; do
 done
 assert_pass "Service 'dbtool' strictly isolated from edge, core, and egress networks"
 
-# gateway slots and bark join edge-acb, acb-core, acb-egress
-for svc in gateway-blue gateway-green bark; do
+# gateway slots join edge-acb and acb-core; strictly isolated from acb-egress
+for svc in gateway-blue gateway-green; do
   svc_block="${SVC_BLOCKS[$svc]:-}"
   if echo "$svc_block" | grep -E '^[[:space:]]+edge-acb:' >/dev/null 2>&1 && \
-     echo "$svc_block" | grep -E '^[[:space:]]+acb-core:' >/dev/null 2>&1 && \
-     echo "$svc_block" | grep -E '^[[:space:]]+acb-egress:' >/dev/null 2>&1; then
-    assert_pass "Service '$svc' joins edge-acb, acb-core, and acb-egress"
+     echo "$svc_block" | grep -E '^[[:space:]]+acb-core:' >/dev/null 2>&1; then
+    if echo "$svc_block" | grep -E '^[[:space:]]+acb-egress:' >/dev/null 2>&1; then
+      assert_fail "Service '$svc' egress isolation" "Service '$svc' must NOT join acb-egress"
+    else
+      assert_pass "Service '$svc' joins edge-acb and acb-core (isolated from acb-egress)"
+    fi
   else
-    assert_fail "Service '$svc' networks" "Service '$svc' must join edge-acb, acb-core, and acb-egress"
+    assert_fail "Service '$svc' networks" "Service '$svc' must join edge-acb and acb-core"
   fi
 done
+
+# bark joins edge-acb, acb-core, and acb-egress
+bark_block="${SVC_BLOCKS[bark]:-}"
+if echo "$bark_block" | grep -E '^[[:space:]]+edge-acb:' >/dev/null 2>&1 && \
+   echo "$bark_block" | grep -E '^[[:space:]]+acb-core:' >/dev/null 2>&1 && \
+   echo "$bark_block" | grep -E '^[[:space:]]+acb-egress:' >/dev/null 2>&1; then
+  assert_pass "Service 'bark' joins edge-acb, acb-core, and acb-egress"
+else
+  assert_fail "Service 'bark' networks" "Service 'bark' must join edge-acb, acb-core, and acb-egress"
+fi
 
 printf "\n"
 

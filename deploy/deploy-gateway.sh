@@ -138,6 +138,9 @@ pull_candidate_image "gateway-${CANDIDATE_SLOT}" "$IMAGE_REF"
 log_info "Starting candidate slot [gateway-${CANDIDATE_SLOT}]..."
 clear_intentional_stop "$CANDIDATE_SLOT"
 export "${CANDIDATE_VAR}=${IMAGE_REF}"
+if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
+  export RELEASE_COMMIT="$EXPECTED_COMMIT"
+fi
 compose_prod up -d "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" up -d "gateway-${CANDIDATE_SLOT}"
 update_tx_state "TX_CANDIDATE_STARTED"
 
@@ -187,6 +190,9 @@ update_tx_state "TX_COMMITTED"
 printf '%s' "$CANDIDATE_SLOT" > "$ACTIVE_SLOT_FILE"
 printf '%s' "$ACTIVE_SLOT" > "$PREVIOUS_SLOT_FILE"
 set_release_env "$CANDIDATE_VAR" "$IMAGE_REF" 2>/dev/null || true
+if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
+  set_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT" 2>/dev/null || true
+fi
 log_info "Transaction COMMITTED: Live traffic routed to [${CANDIDATE_SLOT}]."
 
 # 7. Audit: Core containers must have exact same IDs

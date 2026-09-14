@@ -54,17 +54,27 @@ fi
 for net in edge-acb acb-core; do
   if docker network inspect "$net" >/dev/null 2>&1; then
     is_int="$(docker network inspect "$net" --format '{{.Internal}}' 2>/dev/null || echo "unknown")"
+    if [[ "$is_int" != "true" ]]; then
+      log_error "Network [${net}]: Invalid policy! Must be an internal network (expected Internal=true, got ${is_int}). Aborting deployment."
+      exit 1
+    fi
     log_info "Network [${net}]: OK (Internal=${is_int})"
   else
-    log_warn "Network [${net}]: NOT FOUND (must be created before first container run)"
+    log_error "Network [${net}]: NOT FOUND (must be created before container run: docker network create --internal ${net})"
+    exit 1
   fi
 done
 for net in acb-egress; do
   if docker network inspect "$net" >/dev/null 2>&1; then
     is_int="$(docker network inspect "$net" --format '{{.Internal}}' 2>/dev/null || echo "unknown")"
+    if [[ "$is_int" != "false" ]]; then
+      log_error "Network [${net}]: Invalid policy! Must provide outbound internet egress (expected Internal=false, got ${is_int}). Aborting deployment."
+      exit 1
+    fi
     log_info "Network [${net}]: OK (Egress, Internal=${is_int})"
   else
-    log_warn "Network [${net}]: NOT FOUND (must be created before first container run)"
+    log_error "Network [${net}]: NOT FOUND (must be created before container run: docker network create ${net})"
+    exit 1
   fi
 done
 
