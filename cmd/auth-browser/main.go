@@ -1260,7 +1260,7 @@ func controllerHealth() error {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
+	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("controller returned HTTP %d", response.StatusCode)
 	}
 	return nil
