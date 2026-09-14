@@ -38,7 +38,7 @@ const sanitizeBarkIcon = (value: string | null | undefined): string => {
   if (!candidate || BLOCKED_URL_SCHEME.test(candidate)) {
     return DEFAULT_BARK_ICON;
   }
-  return candidate;
+  return encodeURI(candidate);
 };
 
 export const NotificationChannelsPage: React.FC = () => {

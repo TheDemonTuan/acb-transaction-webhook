@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,14 @@ func isValidAttemptID(value string) bool {
 	return true
 }
 
+func newProfileDirName() (string, error) {
+	token := make([]byte, 18)
+	if _, err := rand.Read(token); err != nil {
+		return "", err
+	}
+	return "profile-" + base64.RawURLEncoding.EncodeToString(token), nil
+}
+
 type browserFormState struct {
 	Action string            `json:"action"`
 	Fields map[string]string `json:"fields"`
@@ -66,6 +75,7 @@ type browserSession struct {
 	ScreenURL string    `json:"screenUrl"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	Error     string    `json:"error,omitempty"`
+	profile   string
 	cancel    context.CancelFunc
 	debugURL  string
 	handoff   string
@@ -280,6 +290,11 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attemptId contains invalid characters"})
 		return
 	}
+	profileDir, err := newProfileDirName()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot prepare browser profile"})
+		return
+	}
 
 	s.mu.Lock()
 	if s.session != nil {
@@ -324,6 +339,7 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 		Status:    "STARTING",
 		ScreenURL: "/",
 		ExpiresAt: expiresAt,
+		profile:   profileDir,
 		cancel:    cancel,
 		debugURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
 		done:      make(chan struct{}),
@@ -357,7 +373,7 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) launch(ctx context.Context, item *browserSession, port int, ready chan<- error) {
-	profile := filepath.Join(s.profiles, item.AttemptID)
+	profile := filepath.Join(s.profiles, item.profile)
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		s.failStartup(item, ready, "cannot prepare Chromium profile", err)
 		item.exitOnce.Do(func() { close(item.done) })
