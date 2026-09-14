@@ -61,6 +61,7 @@ mkdir -p "$T2/secrets"
 export SECRETS_DIR="$T2/secrets"
 for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
   printf 'mock\n' > "$SECRETS_DIR/$s"
+  chmod 600 "$SECRETS_DIR/$s" 2>/dev/null || true
 done
 
 # Baseline all secrets present
@@ -75,6 +76,7 @@ for s in worker_internal_token tts_internal_token bark_basic_auth_user bark_basi
   validate_secrets >/dev/null 2>&1 || rc=$?
   assert_eq "1" "$rc" "validate_secrets fails when $s is missing"
   printf 'mock\n' > "$SECRETS_DIR/$s"
+  chmod 600 "$SECRETS_DIR/$s" 2>/dev/null || true
 done
 
 # ==============================================================================
