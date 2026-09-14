@@ -165,8 +165,14 @@ jobs:
         run: |
           docker run -d --name smoke-test-tts \
             -e TTS_PORT=8081 \
+            -p 127.0.0.1:18081:8081 \
             acb-tts-gateway:smoke-test
-          sleep 3
-          docker exec smoke-test-tts curl -f http://127.0.0.1:8081/health
-          docker stop smoke-test-tts
-          docker rm -f smoke-test-tts
+          trap 'docker rm -f smoke-test-tts >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..15}; do
+            if curl --fail --silent --show-error http://127.0.0.1:18081/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs smoke-test-tts
+          exit 1
