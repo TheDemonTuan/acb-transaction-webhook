@@ -22,6 +22,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
@@ -603,11 +604,22 @@ func main() {
 		logger.Error("create ACB client failed", "error", err)
 		os.Exit(1)
 	}
+	workerRealtimeHub := eventhub.New()
 	bankMonitor := monitor.New(store, acbClient, cfg.PollMinInterval, cfg.PollMaxInterval)
 	bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
+		for _, event := range events {
+			workerRealtimeHub.Publish(eventhub.Event{
+				Seq:         event.JournalSeq,
+				Epoch:       event.Epoch,
+				EventType:   event.EventType,
+				AggregateID: event.TransactionID,
+				Payload:     event.Payload,
+				CreatedAt:   event.CreatedAt,
+			})
+		}
 		dispatcher.Wake()
 	})
-	bankMonitor.WithPollNotifier(newWorkerPollNotifier(store, dispatcher, logger))
+	bankMonitor.WithPollNotifier(newWorkerPollNotifier(store, dispatcher, workerRealtimeHub, logger))
 
 	var sessionLoader *monitor.SessionLoader
 	var verifierClient *acb.Client
@@ -765,11 +777,31 @@ func main() {
 		WriteTimeout:      40 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	realtimeAddr := os.Getenv("WORKER_REALTIME_ADDR")
+	if realtimeAddr == "" {
+		realtimeAddr = "0.0.0.0:8191"
+	}
+	realtimeServer := &http.Server{
+		Addr: realtimeAddr,
+		Handler: realtimestream.NewServer(realtimestream.ServerConfig{
+			Hub:            workerRealtimeHub,
+			Token:          cfg.WorkerInternalToken,
+			MaxSubscribers: 8,
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	go func() {
 		logger.Info("worker private RPC server listening", "addr", rpcAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("worker RPC server failed", "error", err)
+		}
+	}()
+	go func() {
+		logger.Info("worker realtime stream listening", "addr", realtimeAddr)
+		if err := realtimeServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("worker realtime server failed", "error", err)
 		}
 	}()
 
@@ -796,13 +828,14 @@ func main() {
 	_ = coordinator.Stop(shutdownCtx)
 	sCancel()
 
-	// Stop RPC server
+	// Stop producers before closing the internal streams.
+	workerCancel()
+
+	// Stop internal servers.
 	rpcShutdownCtx, rpcCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = realtimeServer.Shutdown(rpcShutdownCtx)
 	_ = httpServer.Shutdown(rpcShutdownCtx)
 	rpcCancel()
-
-	// Cancel background workers
-	workerCancel()
 
 	// Synchronize background worker goroutines shutdown before releasing singleton lock
 	workerWaitCh := make(chan struct{})

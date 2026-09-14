@@ -12,9 +12,10 @@ import (
 // RealtimeCoordinator serializes live hints and journal recovery through one
 // cursor so gateway publishers cannot race each other.
 type RealtimeCoordinator struct {
-	server   *Server
-	input    chan eventhub.Event
-	interval time.Duration
+	server       *Server
+	input        chan eventhub.Event
+	reconcileNow chan struct{}
+	interval     time.Duration
 
 	mu      sync.RWMutex
 	lastSeq int64
@@ -25,13 +26,29 @@ func NewRealtimeCoordinator(server *Server, interval time.Duration) *RealtimeCoo
 		interval = time.Second
 	}
 	return &RealtimeCoordinator{
-		server:   server,
-		input:    make(chan eventhub.Event, 256),
-		interval: interval,
+		server:       server,
+		input:        make(chan eventhub.Event, 256),
+		reconcileNow: make(chan struct{}, 1),
+		interval:     interval,
+		lastSeq:      -1,
 	}
 }
 
 func (c *RealtimeCoordinator) Input() chan<- eventhub.Event { return c.input }
+
+func (c *RealtimeCoordinator) RequestReconcile() {
+	select {
+	case c.reconcileNow <- struct{}{}:
+	default:
+	}
+}
+
+// Submit queues a live hint. Backpressure is bounded by the Worker stream's
+// write deadline; an interrupted connection resumes from the last handled ID.
+func (c *RealtimeCoordinator) Submit(event eventhub.Event) error {
+	c.input <- event
+	return nil
+}
 
 func (c *RealtimeCoordinator) LastSeq() int64 {
 	c.mu.RLock()
@@ -43,12 +60,19 @@ func (c *RealtimeCoordinator) Run(ctx context.Context) {
 	if c == nil || c.server == nil || c.server.store == nil {
 		return
 	}
-	lastSeq, err := c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
-	if err != nil {
+	for {
+		lastSeq, err := c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
+		if err == nil {
+			c.setLastSeq(lastSeq)
+			break
+		}
 		slog.Warn("failed to initialize realtime coordinator", "error", err)
-		lastSeq = 0
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
 	}
-	c.setLastSeq(lastSeq)
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
@@ -58,6 +82,8 @@ func (c *RealtimeCoordinator) Run(ctx context.Context) {
 			return
 		case event := <-c.input:
 			c.handle(ctx, event)
+		case <-c.reconcileNow:
+			c.reconcile(ctx, 0)
 		case <-ticker.C:
 			c.reconcile(ctx, 0)
 		}
@@ -95,6 +121,10 @@ func (c *RealtimeCoordinator) reconcile(ctx context.Context, target int64) {
 			return
 		}
 		if len(entries) == 0 {
+			maxSeq, err := c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
+			if err == nil && maxSeq >= target {
+				c.setLastSeq(target)
+			}
 			return
 		}
 		for _, entry := range entries {

@@ -92,6 +92,7 @@ type Server struct {
 	keyring           *security.Keyring
 	eventHub          *eventhub.Hub
 	realtimeInput     chan<- eventhub.Event
+	realtimeRecover   func()
 	ttsClient         *ttsclient.Client
 	barkSender        *bark.Sender
 	notifRegistry     *notification.Registry
@@ -219,8 +220,9 @@ func (s *Server) WithEventHub(hub *eventhub.Hub) *Server {
 
 // WithRealtimeInput routes journal-backed events through the gateway ordering
 // coordinator before they are published to browser subscribers.
-func (s *Server) WithRealtimeInput(input chan<- eventhub.Event) *Server {
+func (s *Server) WithRealtimeInput(input chan<- eventhub.Event, recover func()) *Server {
 	s.realtimeInput = input
+	s.realtimeRecover = recover
 	return s
 }
 

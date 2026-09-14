@@ -42,6 +42,7 @@ type ClientConfig struct {
 	MaxFrameBytes  int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	OnConnect      func()
 }
 
 type Client struct {
@@ -51,6 +52,7 @@ type Client struct {
 	maxFrameBytes  int
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
+	onConnect      func()
 
 	mu          sync.Mutex
 	lastEventID string
@@ -108,6 +110,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		maxFrameBytes:  maxFrame,
 		initialBackoff: initBackoff,
 		maxBackoff:     maxBackoff,
+		onConnect:      cfg.OnConnect,
 	}, nil
 }
 
@@ -169,6 +172,9 @@ func (c *Client) Consume(ctx context.Context, handle func(eventhub.Event) error)
 		return err
 	}
 	defer resp.Body.Close()
+	if c.onConnect != nil {
+		c.onConnect()
+	}
 
 	return c.parseStream(resp.Body, handle)
 }
@@ -226,8 +232,16 @@ func (c *Client) parseStream(r io.Reader, handle func(eventhub.Event) error) err
 			if errors.Is(err, io.EOF) {
 				if curData.Len() > 0 || curEvent != "" || curID != "" {
 					ev, parseErr := parseSSEEvent(curID, curEvent, curData.Bytes())
-					if parseErr == nil && handle != nil {
-						_ = handle(ev)
+					if parseErr != nil {
+						return parseErr
+					}
+					if handle != nil {
+						if handleErr := handle(ev); handleErr != nil {
+							return &HandlerError{Err: handleErr}
+						}
+					}
+					if curID != "" {
+						c.SetLastEventID(curID)
 					}
 				}
 				return io.EOF
@@ -244,17 +258,16 @@ func (c *Client) parseStream(r io.Reader, handle func(eventhub.Event) error) err
 		if len(line) == 0 {
 			if curData.Len() > 0 || curEvent != "" || curID != "" {
 				ev, err := parseSSEEvent(curID, curEvent, curData.Bytes())
-				if err == nil {
-					if curID != "" {
-						c.mu.Lock()
-						c.lastEventID = curID
-						c.mu.Unlock()
+				if err != nil {
+					return err
+				}
+				if handle != nil {
+					if err := handle(ev); err != nil {
+						return &HandlerError{Err: err}
 					}
-					if handle != nil {
-						if err := handle(ev); err != nil {
-							return &HandlerError{Err: err}
-						}
-					}
+				}
+				if curID != "" {
+					c.SetLastEventID(curID)
 				}
 				curID = ""
 				curEvent = ""

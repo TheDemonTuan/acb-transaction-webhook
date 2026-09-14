@@ -326,20 +326,18 @@ func main() {
 			WithWorkerProber(workerClient)
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
-			server.WithRealtimeInput(coordinator.Input())
+			server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
 			go coordinator.Run(ctx)
 			streamClient, streamErr := realtimestream.NewClient(realtimestream.ClientConfig{
-				BaseURL: cfg.WorkerRealtimeURL,
-				Token:   cfg.WorkerInternalToken,
+				BaseURL:   cfg.WorkerRealtimeURL,
+				Token:     cfg.WorkerInternalToken,
+				OnConnect: coordinator.RequestReconcile,
 			})
 			if streamErr != nil {
 				logger.Error("create worker realtime client failed", "error", streamErr)
 				os.Exit(1)
 			}
-			go streamClient.Run(ctx, func(event eventhub.Event) error {
-				server.Publish(event)
-				return nil
-			})
+			go streamClient.Run(ctx, coordinator.Submit)
 		} else {
 			go server.RunJournalWatcher(ctx, 200*time.Millisecond)
 		}

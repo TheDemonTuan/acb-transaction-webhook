@@ -19,7 +19,7 @@ const (
 	HeaderInternalToken   = "X-Worker-Internal-Token"
 	DefaultWriteTimeout   = 5 * time.Second
 	DefaultHeartbeat      = 15 * time.Second
-	DefaultMaxSubscribers = 32
+	DefaultMaxSubscribers = 8
 )
 
 type ServerConfig struct {
@@ -80,7 +80,7 @@ func (s *Server) Path() string {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.path != "" && r.URL.Path != s.path && r.URL.Path != "/" {
+	if r.URL.Path != s.path {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}

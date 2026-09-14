@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
@@ -213,7 +214,10 @@ func TestWorkerPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
 	defer store.Close()
 
 	waker := &mockWaker{}
-	notifier := newWorkerPollNotifier(store, waker, nil)
+	hub := eventhub.New()
+	_, published, cancelPublished := hub.Subscribe()
+	defer cancelPublished()
+	notifier := newWorkerPollNotifier(store, waker, hub, nil)
 
 	// Poll 1: Initial SUCCEEDED with 0 items (status changed "" -> "SUCCEEDED")
 	poll1 := storage.PollRun{
@@ -223,6 +227,14 @@ func TestWorkerPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
 		RowsSeen:  0,
 	}
 	notifier(poll1, 0)
+	select {
+	case event := <-published:
+		if event.EventType != "poll.completed" || event.AggregateID != poll1.ID || event.Seq <= 0 {
+			t.Fatalf("unexpected published poll event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected poll.completed to be published to realtime hub")
+	}
 
 	if waker.wakeCount != 1 {
 		t.Fatalf("expected waker count 1 after initial poll, got %d", waker.wakeCount)

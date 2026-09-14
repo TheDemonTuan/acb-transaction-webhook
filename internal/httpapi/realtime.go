@@ -13,6 +13,9 @@ func (s *Server) Publish(event eventhub.Event) {
 		select {
 		case s.realtimeInput <- event:
 		default:
+			if s.realtimeRecover != nil {
+				s.realtimeRecover()
+			}
 		}
 		return
 	}

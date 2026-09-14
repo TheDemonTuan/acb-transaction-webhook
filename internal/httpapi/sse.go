@@ -73,6 +73,15 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 			writeSSEError(rc, w, flusher, "storage_error")
 			return
 		}
+		maxSeq, err := s.store.GetMaxJournalSeq(ctx, realtimeEpoch)
+		if err != nil {
+			writeSSEError(rc, w, flusher, "storage_error")
+			return
+		}
+		if afterSeq > maxSeq {
+			writeReset(rc, w, flusher, "invalid_cursor")
+			return
+		}
 		if minSeq > 0 && afterSeq < minSeq-1 {
 			writeReset(rc, w, flusher, "retention_expired")
 			return

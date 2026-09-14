@@ -112,6 +112,24 @@ func TestSSEReplayFromCursor(t *testing.T) {
 	}
 }
 
+func TestSSEFutureCursorReturnsReset(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "future-cursor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	server := New(config.Config{Production: false, DevelopmentSubject: "dev@example.com"}, store).WithEventHub(eventhub.New())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("Last-Event-ID", "ep1:999")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), "event: reset_state") || !strings.Contains(w.Body.String(), "invalid_cursor") {
+		t.Fatalf("expected invalid cursor reset, got %q", w.Body.String())
+	}
+}
+
 func TestSSEResetStateOnInvalidCursor(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway_sse_reset.db"))

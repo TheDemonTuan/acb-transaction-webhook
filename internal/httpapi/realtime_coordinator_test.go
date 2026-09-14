@@ -23,7 +23,7 @@ func TestRealtimeCoordinatorPublishesContiguousEventDirectly(t *testing.T) {
 	hub := eventhub.New()
 	server := New(config.Config{}, store).WithEventHub(hub)
 	coordinator := NewRealtimeCoordinator(server, time.Hour)
-	server.WithRealtimeInput(coordinator.Input())
+	server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
 	go coordinator.Run(ctx)
 	waitForCoordinatorSeq(t, coordinator, 0)
 
@@ -53,7 +53,7 @@ func TestRealtimeCoordinatorRepairsGapFromJournal(t *testing.T) {
 	hub := eventhub.New()
 	server := New(config.Config{}, store).WithEventHub(hub)
 	coordinator := NewRealtimeCoordinator(server, time.Hour)
-	server.WithRealtimeInput(coordinator.Input())
+	server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
 	go coordinator.Run(ctx)
 	waitForCoordinatorSeq(t, coordinator, 0)
 
@@ -75,6 +75,28 @@ func TestRealtimeCoordinatorRepairsGapFromJournal(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("timed out waiting for seq %d", want)
 		}
+	}
+}
+
+func TestRealtimeCoordinatorAdvancesPastPermanentSequenceHole(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "coordinator-hole.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO event_journal(seq, epoch, event_type, aggregate_id, payload_json, created_at) VALUES(2, 'ep1', 'test.event', 'test', '{}', '2026-09-14T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	hub := eventhub.New()
+	server := New(config.Config{}, store).WithEventHub(hub)
+	coordinator := NewRealtimeCoordinator(server, time.Hour)
+	coordinator.setLastSeq(0)
+	coordinator.reconcile(ctx, 2)
+	if coordinator.LastSeq() != 2 {
+		t.Fatalf("expected cursor to advance to durable high-water mark 2, got %d", coordinator.LastSeq())
 	}
 }
 
