@@ -206,7 +206,8 @@ log_info "Old slot [${ACTIVE_SLOT}] remains running during soak (${SOAK_DURATION
 if [[ "$DETACH_SOAK" -eq 1 || "${SOAK_BACKGROUND:-0}" == "1" ]]; then
   log_info "Detaching soak observation to background process..."
   mkdir -p "$SCRIPT_DIR/data"
-  nohup bash -c "source '${SCRIPT_DIR}/lib.sh' && run_resumable_soak '${CANDIDATE_SLOT}' '${ACTIVE_SLOT}' '${SOAK_DURATION_SEC}'" > "$SCRIPT_DIR/data/soak.log" 2>&1 &
+  release_deploy_lock
+  nohup bash -c "source '${SCRIPT_DIR}/lib.sh' && run_resumable_soak '${CANDIDATE_SLOT}' '${ACTIVE_SLOT}' '${SOAK_DURATION_SEC}'" 9>&- > "$SCRIPT_DIR/data/soak.log" 2>&1 &
   log_info "Soak detached (PID: $!). State recorded in $SOAK_STATE_FILE."
 else
   if ! run_resumable_soak "$CANDIDATE_SLOT" "$ACTIVE_SLOT" "$SOAK_DURATION_SEC"; then
