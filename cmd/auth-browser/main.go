@@ -42,6 +42,19 @@ func acbLoginURL() string {
 	return defaultACBLoginURL
 }
 
+func isValidAttemptID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 type browserFormState struct {
 	Action string            `json:"action"`
 	Fields map[string]string `json:"fields"`
@@ -258,8 +271,13 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		AttemptID string `json:"attemptId"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil || strings.TrimSpace(input.AttemptID) == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attemptId is required"})
+		return
+	}
+	attemptID := strings.TrimSpace(input.AttemptID)
+	if !isValidAttemptID(attemptID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attemptId contains invalid characters"})
 		return
 	}
 
@@ -271,7 +289,7 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			s.reapSession(oldSession, 5*time.Second)
 			s.mu.Lock()
-		} else if s.session.AttemptID == input.AttemptID {
+		} else if s.session.AttemptID == attemptID {
 			resp := sessionResponse(s.session)
 			s.mu.Unlock()
 			writeJSON(w, http.StatusOK, resp)
@@ -302,7 +320,7 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	expiresAt := time.Now().UTC().Add(sessionTTL)
 	ctx, cancel := context.WithDeadline(context.Background(), expiresAt)
 	item := &browserSession{
-		AttemptID: input.AttemptID,
+		AttemptID: attemptID,
 		Status:    "STARTING",
 		ScreenURL: "/",
 		ExpiresAt: expiresAt,

@@ -30,6 +30,17 @@ import { queryKeys } from '../../shared/api/query-keys';
 import { formatErrorMessage } from '../../content/error-copy';
 import type { BarkConfig, NotificationChannel } from '../../realtime-types';
 
+const DEFAULT_BARK_ICON = 'https://api.vietqr.io/img/ACB.png';
+const BLOCKED_URL_SCHEME = /^\s*(?:javascript|data|vbscript)\s*:/i;
+
+const sanitizeBarkIcon = (value: string | null | undefined): string => {
+  const candidate = (value || '').trim();
+  if (!candidate || BLOCKED_URL_SCHEME.test(candidate)) {
+    return DEFAULT_BARK_ICON;
+  }
+  return candidate;
+};
+
 export const NotificationChannelsPage: React.FC = () => {
   const queryClient = useQueryClient();
 
@@ -46,7 +57,7 @@ export const NotificationChannelsPage: React.FC = () => {
   const [barkGroup, setBarkGroup] = useState('ACB');
   const [barkLevel, setBarkLevel] = useState<'passive' | 'active' | 'timeSensitive'>('timeSensitive');
   const [barkSound, setBarkSound] = useState('shake');
-  const [barkIcon, setBarkIcon] = useState('https://api.vietqr.io/img/ACB.png');
+  const [barkIcon, setBarkIcon] = useState(DEFAULT_BARK_ICON);
   const [failedBarkIcon, setFailedBarkIcon] = useState<string | null>(null);
   const [includeBalance, setIncludeBalance] = useState(false);
   const [includeDescription, setIncludeDescription] = useState(true);
@@ -75,7 +86,7 @@ export const NotificationChannelsPage: React.FC = () => {
     group: 'ACB',
     level: 'timeSensitive',
     sound: 'shake',
-    icon: 'https://api.vietqr.io/img/ACB.png',
+    icon: DEFAULT_BARK_ICON,
     includeBalance: false,
     includeDescription: true,
     dashboardLink: true,
@@ -177,7 +188,7 @@ export const NotificationChannelsPage: React.FC = () => {
             group: barkGroup.trim() || 'ACB',
             level: barkLevel,
             sound: barkSound.trim() || 'shake',
-            icon: barkIcon.trim() || 'https://api.vietqr.io/img/ACB.png',
+            icon: sanitizeBarkIcon(barkIcon),
             includeBalance,
             includeDescription,
             dashboardLink,
@@ -240,7 +251,7 @@ export const NotificationChannelsPage: React.FC = () => {
         group: 'ACB',
         level: 'timeSensitive',
         sound: 'shake',
-        icon: 'https://api.vietqr.io/img/ACB.png',
+        icon: DEFAULT_BARK_ICON,
         includeBalance: false,
         includeDescription: true,
         dashboardLink: true,
@@ -261,7 +272,9 @@ export const NotificationChannelsPage: React.FC = () => {
         expectedRevision: editingChannel.revision,
         name: editName.trim(),
         url: editingChannel.provider === 'WEBHOOK' ? editUrl.trim() : undefined,
-        barkConfig: editingChannel.provider === 'BARK' ? editBarkConfig : undefined,
+        barkConfig: editingChannel.provider === 'BARK'
+          ? { ...editBarkConfig, icon: sanitizeBarkIcon(editBarkConfig.icon) }
+          : undefined,
       });
       setNotice(`Đã cập nhật kênh "${editName.trim()}".`);
       setEditingChannel(null);
@@ -632,7 +645,7 @@ export const NotificationChannelsPage: React.FC = () => {
                       Icon thông báo (URL ảnh hiển thị trên iPhone)
                     </label>
                     <div className="flex items-center gap-2.5">
-                      {failedBarkIcon === (barkIcon || 'https://api.vietqr.io/img/ACB.png') ? (
+                      {failedBarkIcon === sanitizeBarkIcon(barkIcon) ? (
                         <div
                           role="img"
                           aria-label="Không tải được icon preview"
@@ -642,10 +655,10 @@ export const NotificationChannelsPage: React.FC = () => {
                         </div>
                       ) : (
                         <img
-                          src={barkIcon || 'https://api.vietqr.io/img/ACB.png'}
+                          src={sanitizeBarkIcon(barkIcon)}
                           alt="Icon preview"
                           className="w-8 h-8 rounded-lg border border-stone-200 object-contain bg-white shrink-0 p-0.5 shadow-2xs"
-                          onError={() => setFailedBarkIcon(barkIcon || 'https://api.vietqr.io/img/ACB.png')}
+                          onError={() => setFailedBarkIcon(sanitizeBarkIcon(barkIcon))}
                         />
                       )}
                       <input
@@ -653,7 +666,7 @@ export const NotificationChannelsPage: React.FC = () => {
                         type="url"
                         value={barkIcon}
                         onChange={(e) => setBarkIcon(e.target.value)}
-                        placeholder="https://api.vietqr.io/img/ACB.png"
+                        placeholder={DEFAULT_BARK_ICON}
                         className="w-full px-3 py-2 rounded-lg border border-stone-200 text-xs bg-white focus:outline-none font-mono"
                       />
                     </div>
@@ -738,10 +751,10 @@ export const NotificationChannelsPage: React.FC = () => {
                     <div className="flex flex-wrap items-center gap-2">
                       {isBark && (
                         <img
-                          src={ch.barkConfig?.icon || 'https://api.vietqr.io/img/ACB.png'}
+                          src={sanitizeBarkIcon(ch.barkConfig?.icon)}
                           alt="Icon"
                           className="w-5 h-5 rounded-md border border-stone-200 object-contain bg-white shrink-0"
-                          onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://api.vietqr.io/img/ACB.png'; }}
+                          onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BARK_ICON; }}
                         />
                       )}
                       <span className="font-bold text-sm text-stone-900">{ch.name}</span>
@@ -932,16 +945,16 @@ export const NotificationChannelsPage: React.FC = () => {
                     <label className="block text-2xs font-semibold text-stone-700 mb-1">Icon thông báo (URL ảnh)</label>
                     <div className="flex items-center gap-2">
                       <img
-                        src={editBarkConfig.icon || 'https://api.vietqr.io/img/ACB.png'}
+                        src={sanitizeBarkIcon(editBarkConfig.icon)}
                         alt="Icon"
                         className="w-7 h-7 rounded-md border border-stone-200 object-contain bg-white shrink-0 p-0.5"
-                        onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://api.vietqr.io/img/ACB.png'; }}
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BARK_ICON; }}
                       />
                       <input
                         type="url"
                         value={editBarkConfig.icon || ''}
                         onChange={(e) => setEditBarkConfig({ ...editBarkConfig, icon: e.target.value })}
-                        placeholder="https://api.vietqr.io/img/ACB.png"
+                        placeholder={DEFAULT_BARK_ICON}
                         className="w-full px-3 py-1.5 rounded-lg border border-stone-200 text-xs font-mono focus:outline-none"
                       />
                     </div>

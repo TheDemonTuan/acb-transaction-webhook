@@ -377,7 +377,7 @@ func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction s
 		}
 
 		hasNext = true
-		if href != "" && !strings.HasPrefix(strings.ToLower(href), "javascript:") && href != "#" {
+		if href != "" && !hasBlockedURLScheme(href) && href != "#" {
 			nextAction = href
 		}
 		if form, err := ExtractHistoryForm(markup); err == nil && form.Action != "" {
@@ -435,6 +435,11 @@ func hasAttr(n *html.Node, key string) bool {
 		}
 	}
 	return false
+}
+
+func hasBlockedURLScheme(raw string) bool {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	return strings.HasPrefix(lower, "javascript:") || strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "vbscript:")
 }
 
 func extractEventName(s string) string {
