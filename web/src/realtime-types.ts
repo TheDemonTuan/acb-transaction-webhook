@@ -44,6 +44,7 @@ export type NotificationProvider = {
   description: string;
   configured: boolean;
   publicUrl?: string;
+  status?: 'configured' | 'unconfigured' | 'unknown' | 'error' | string;
 };
 
 export type NotificationChannel = {

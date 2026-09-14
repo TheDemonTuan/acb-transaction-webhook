@@ -93,7 +93,13 @@ export const NotificationChannelsPage: React.FC = () => {
     queryFn: fetchNotificationChannels,
   });
 
-  const { data: providersData } = useQuery({
+  const {
+    data: providersData,
+    isLoading: loadingProviders,
+    isError: errorProviders,
+    isFetching: isFetchingProviders,
+    refetch: refetchProviders,
+  } = useQuery({
     queryKey: queryKeys.notificationProviders,
     queryFn: fetchNotificationProviders,
   });
@@ -101,6 +107,44 @@ export const NotificationChannelsPage: React.FC = () => {
   const channels = channelsData?.items || [];
   const providers = providersData?.providers || [];
   const barkProvider = providers.find((p) => p.id === 'BARK');
+
+  const barkChannels = channels.filter((c) => c.provider === 'BARK');
+  const activeBarkCount = barkChannels.filter((c) => c.status === 'ACTIVE').length;
+  const webhookChannels = channels.filter((c) => c.provider === 'WEBHOOK');
+  const activeWebhookCount = webhookChannels.filter((c) => c.status === 'ACTIVE').length;
+
+  const getBarkStatus = () => {
+    if (loadingProviders) {
+      return {
+        label: 'Đang tải...',
+        className: 'bg-stone-100 text-stone-500 border-stone-200',
+      };
+    }
+    if (errorProviders || !barkProvider || barkProvider.status === 'unknown' || barkProvider.status === 'error') {
+      return {
+        label: 'Không xác định được trạng thái',
+        className: 'bg-stone-100 text-stone-600 border-stone-300',
+      };
+    }
+    if (barkProvider.configured) {
+      return {
+        label: 'Đã cấu hình',
+        className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      };
+    }
+    return {
+      label: 'Chưa cấu hình',
+      className: 'bg-amber-50 text-amber-700 border-amber-200',
+    };
+  };
+
+  const barkStatus = getBarkStatus();
+  const isRefreshing = loadingChannels || isFetchingProviders;
+
+  const handleRefresh = () => {
+    refetchChannels();
+    refetchProviders();
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -282,10 +326,10 @@ export const NotificationChannelsPage: React.FC = () => {
         </div>
         <button
           type="button"
-          onClick={() => refetchChannels()}
+          onClick={handleRefresh}
           className="inline-flex items-center self-start sm:self-auto gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 transition shadow-2xs cursor-pointer"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${loadingChannels ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
           <span>Làm mới</span>
         </button>
       </div>
@@ -305,14 +349,13 @@ export const NotificationChannelsPage: React.FC = () => {
               </div>
             </div>
             <span
-              className={`text-2xs font-bold px-2 py-0.5 rounded-full border ${
-                barkProvider?.configured
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : 'bg-amber-50 text-amber-700 border-amber-200'
-              }`}
+              className={`text-2xs font-bold px-2 py-0.5 rounded-full border ${barkStatus.className}`}
             >
-              {barkProvider?.configured ? 'Đã kết nối' : 'Chưa cấu hình URL'}
+              {barkStatus.label}
             </span>
+          </div>
+          <div className="text-xs text-stone-600">
+            {barkChannels.length} thiết bị đã lưu ({activeBarkCount} đang bật)
           </div>
           {barkProvider?.publicUrl && (
             <div className="text-2xs text-stone-600 bg-stone-50 p-2.5 rounded-xl border border-stone-200/80 flex items-center justify-between">
@@ -344,6 +387,9 @@ export const NotificationChannelsPage: React.FC = () => {
             <span className="text-2xs font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
               Sẵn sàng
             </span>
+          </div>
+          <div className="text-xs text-stone-600">
+            {webhookChannels.length} webhook đã lưu ({activeWebhookCount} đang bật)
           </div>
           <p className="text-2xs text-stone-500">
             Dùng chung cơ chế bảo vệ SSRF, retry và dead-letter với độ bền dữ liệu cao.

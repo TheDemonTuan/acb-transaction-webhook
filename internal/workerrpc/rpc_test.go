@@ -680,3 +680,140 @@ func TestWorkerRPC_WorkerRpcVersion_v2(t *testing.T) {
 		t.Fatalf("expected workerRpcVersion v2, got %v", data["workerRpcVersion"])
 	}
 }
+
+type mockProviderReader struct {
+	configured bool
+	publicURL  string
+	err        error
+}
+
+func (m *mockProviderReader) NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error) {
+	if m.err != nil {
+		return workerrpc.NotificationProvidersResponse{}, m.err
+	}
+	return workerrpc.NotificationProvidersResponse{
+		Providers: []workerrpc.NotificationProviderMetadata{
+			{
+				ID:          "WEBHOOK",
+				Name:        "Webhook",
+				Description: "Gửi JSON có chữ ký HMAC tới hệ thống khác.",
+				Configured:  true,
+				Status:      "configured",
+			},
+			{
+				ID:          "BARK",
+				Name:        "Bark (iOS)",
+				Description: "Đẩy thông báo trực tiếp tới iPhone qua Bark self-host.",
+				Configured:  m.configured,
+				PublicURL:   m.publicURL,
+				Status:      map[bool]string{true: "configured", false: "unconfigured"}[m.configured],
+			},
+		},
+	}, nil
+}
+
+func TestWorkerRPC_NotificationProviders_NotImplemented(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "valid-secret-token"
+	srv, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+	_, err = client.NotificationProviderMetadata(context.Background())
+	if err == nil {
+		t.Fatal("expected error when NotificationProviderReader is not implemented, got nil")
+	}
+	if !strings.Contains(err.Error(), "501") {
+		t.Fatalf("expected 501 Not Implemented error, got: %v", err)
+	}
+}
+
+func TestWorkerRPC_NotificationProviders_SuccessAndAuth(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "valid-secret-token"
+	srv, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &mockProviderReader{
+		configured: true,
+		publicURL:  "https://bark.example.com",
+	}
+	srv.SetProviderReader(reader)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	// 1. Unauthorized call (bad token)
+	badClient := workerrpc.NewClient(ts.URL, "wrong-token")
+	_, err = badClient.NotificationProviderMetadata(ctx)
+	if err == nil {
+		t.Fatal("expected unauthorized error with bad token, got nil")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 unauthorized, got: %v", err)
+	}
+
+	// 2. Authorized call
+	client := workerrpc.NewClient(ts.URL, token)
+	res, err := client.NotificationProviderMetadata(ctx)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	if len(res.Providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(res.Providers))
+	}
+	var barkFound bool
+	for _, p := range res.Providers {
+		if p.ID == "BARK" {
+			barkFound = true
+			if !p.Configured {
+				t.Fatal("expected Bark to be configured")
+			}
+			if p.PublicURL != "https://bark.example.com" {
+				t.Fatalf("expected publicUrl https://bark.example.com, got %q", p.PublicURL)
+			}
+			if p.Status != "configured" {
+				t.Fatalf("expected status configured, got %q", p.Status)
+			}
+		}
+	}
+	if !barkFound {
+		t.Fatal("BARK provider not found in response")
+	}
+
+	// 3. Unconfigured Bark
+	reader.configured = false
+	reader.publicURL = ""
+	resUnconf, err := client.NotificationProviderMetadata(ctx)
+	if err != nil {
+		t.Fatalf("expected success for unconfigured Bark, got: %v", err)
+	}
+	for _, p := range resUnconf.Providers {
+		if p.ID == "BARK" {
+			if p.Configured {
+				t.Fatal("expected Bark to be unconfigured")
+			}
+			if p.Status != "unconfigured" {
+				t.Fatalf("expected status unconfigured, got %q", p.Status)
+			}
+		}
+	}
+
+	// 4. Reader internal error
+	reader.err = errors.New("database failure")
+	_, err = client.NotificationProviderMetadata(ctx)
+	if err == nil {
+		t.Fatal("expected error on reader failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Fatalf("expected 500 error, got: %v", err)
+	}
+}

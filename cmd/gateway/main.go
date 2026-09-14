@@ -321,6 +321,7 @@ func main() {
 			WithMonitorNotifier(workerClient).
 			WithEventHub(hub).
 			WithNotificationTester(workerClient).
+			WithProviderReader(workerClient).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient)

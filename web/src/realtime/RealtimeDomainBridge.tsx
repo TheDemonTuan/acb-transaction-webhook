@@ -41,11 +41,13 @@ export const RealtimeDomainBridge: React.FC = () => {
           source: data.source || 'REALTIME',
         };
 
+        // Optimistically prepend transaction ONLY to the first page (no cursor) to avoid mixing across pages
         queryClient.setQueriesData<PageResponse<Transaction>>(
           {
             predicate: (query) => {
               const [key, params] = query.queryKey as [string, Record<string, any> | undefined];
               if (key !== 'transactions') return false;
+              if (params?.cursor) return false;
               if (params?.direction && params.direction === 'debit') return false;
               if (params?.from && txDay && txDay < String(params.from)) return false;
               if (params?.to && txDay && txDay > String(params.to)) return false;
@@ -75,6 +77,35 @@ export const RealtimeDomainBridge: React.FC = () => {
           }
         );
 
+        // Update aggregate summary on paginated queries (cursor present) without injecting items
+        queryClient.setQueriesData<PageResponse<Transaction>>(
+          {
+            predicate: (query) => {
+              const [key, params] = query.queryKey as [string, Record<string, any> | undefined];
+              if (key !== 'transactions') return false;
+              if (!params?.cursor) return false;
+              if (params?.direction && params.direction === 'debit') return false;
+              if (params?.from && txDay && txDay < String(params.from)) return false;
+              if (params?.to && txDay && txDay > String(params.to)) return false;
+              if (params?.query || params?.q) return false;
+              return true;
+            },
+          },
+          (old) => {
+            if (!old) return old;
+            return {
+              ...old,
+              summary: old.summary
+                ? {
+                    ...old.summary,
+                    count: (old.summary.count || 0) + 1,
+                    incoming: (old.summary.incoming || 0) + (newTx.credit || 0),
+                  }
+                : undefined,
+            };
+          }
+        );
+
         // Invalidate status & overview metrics
         queryClient.invalidateQueries({ queryKey: queryKeys.status });
         queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
@@ -89,7 +120,7 @@ export const RealtimeDomainBridge: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
 
       if (data && (data.insertedCount ?? 0) > 0) {
-        queryClient.invalidateQueries({ queryKey: ['transactions'] });
+        queryClient.invalidateQueries({ queryKey: queryKeys.transactions() });
         queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
       }
     });
@@ -119,13 +150,13 @@ export const RealtimeDomainBridge: React.FC = () => {
     });
 
     const unsubDelivery = subscribe('delivery.changed', () => {
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.deliveries() });
       queryClient.invalidateQueries({ queryKey: queryKeys.status });
     });
 
     // 5. audit.created -> Invalidate audit logs
     const unsubAudit = subscribe('audit.created', () => {
-      queryClient.invalidateQueries({ queryKey: ['auditLogs'] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.auditLogs() });
     });
 
     return () => {

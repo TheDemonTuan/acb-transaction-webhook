@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -595,5 +596,197 @@ func TestBarkAPIEndpointsNeverLeakPlaintext(t *testing.T) {
 	}
 	if strings.Contains(recRotate.Body.String(), newRotatedKey) {
 		t.Fatalf("device key leaked in rotate response!")
+	}
+}
+
+type mockNotificationProviderReader struct {
+	resp workerrpc.NotificationProvidersResponse
+	err  error
+}
+
+func (m *mockNotificationProviderReader) NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error) {
+	return m.resp, m.err
+}
+
+func TestNotificationProviders_WorkerRPCDelegation_Configured(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	reader := &mockNotificationProviderReader{
+		resp: workerrpc.NotificationProvidersResponse{
+			Providers: []workerrpc.NotificationProviderMetadata{
+				{
+					ID:          "WEBHOOK",
+					Name:        "Webhook",
+					Description: "Gửi JSON có chữ ký HMAC tới hệ thống khác.",
+					Configured:  true,
+					Status:      "configured",
+				},
+				{
+					ID:          "BARK",
+					Name:        "Bark (iOS)",
+					Description: "Đẩy thông báo trực tiếp tới iPhone qua Bark self-host.",
+					Configured:  true,
+					PublicURL:   "https://bark.worker.site",
+					Status:      "configured",
+				},
+			},
+		},
+	}
+	srv.WithProviderReader(reader)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/notification-providers", nil)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var provResp struct {
+		Providers []struct {
+			ID         string `json:"id"`
+			Configured bool   `json:"configured"`
+			PublicURL  string `json:"publicUrl"`
+			Status     string `json:"status"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &provResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(provResp.Providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(provResp.Providers))
+	}
+	for _, p := range provResp.Providers {
+		if p.ID == "BARK" {
+			if !p.Configured {
+				t.Fatal("expected Bark to be configured via worker RPC")
+			}
+			if p.PublicURL != "https://bark.worker.site" {
+				t.Fatalf("expected publicUrl https://bark.worker.site, got %q", p.PublicURL)
+			}
+			if p.Status != "configured" {
+				t.Fatalf("expected status configured, got %q", p.Status)
+			}
+		}
+	}
+}
+
+func TestNotificationProviders_WorkerRPCDelegation_Unconfigured(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	reader := &mockNotificationProviderReader{
+		resp: workerrpc.NotificationProvidersResponse{
+			Providers: []workerrpc.NotificationProviderMetadata{
+				{
+					ID:          "WEBHOOK",
+					Name:        "Webhook",
+					Description: "Gửi JSON có chữ ký HMAC tới hệ thống khác.",
+					Configured:  true,
+					Status:      "configured",
+				},
+				{
+					ID:          "BARK",
+					Name:        "Bark (iOS)",
+					Description: "Đẩy thông báo trực tiếp tới iPhone qua Bark self-host.",
+					Configured:  false,
+					Status:      "unconfigured",
+				},
+			},
+		},
+	}
+	srv.WithProviderReader(reader)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/notification-providers", nil)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var provResp struct {
+		Providers []struct {
+			ID         string `json:"id"`
+			Configured bool   `json:"configured"`
+			Status     string `json:"status"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &provResp); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range provResp.Providers {
+		if p.ID == "BARK" {
+			if p.Configured {
+				t.Fatal("expected Bark to be unconfigured via worker RPC")
+			}
+			if p.Status != "unconfigured" {
+				t.Fatalf("expected status unconfigured, got %q", p.Status)
+			}
+		}
+	}
+}
+
+func TestNotificationProviders_WorkerRPCDelegation_WorkerUnavailable(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	reader := &mockNotificationProviderReader{
+		err: errors.New("connection refused to worker"),
+	}
+	srv.WithProviderReader(reader)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/notification-providers", nil)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable when worker is down, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "worker unavailable") {
+		t.Fatalf("expected error message to indicate worker unavailable, got %s", rec.Body.String())
+	}
+}
+
+func TestNotificationProviders_MonolithDevFallback(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	// In monolith dev, providerReader is nil, but barkSender is set
+	barkSender := bark.NewSender(bark.Config{
+		ServerURL: "http://127.0.0.1:8080",
+		PublicURL: "https://bark.local.site",
+	}, nil, "")
+	srv.WithBarkSender(barkSender)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/notification-providers", nil)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var provResp struct {
+		Providers []struct {
+			ID         string `json:"id"`
+			Configured bool   `json:"configured"`
+			PublicURL  string `json:"publicUrl"`
+			Status     string `json:"status"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &provResp); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range provResp.Providers {
+		if p.ID == "BARK" {
+			if !p.Configured {
+				t.Fatal("expected Bark to be configured via local barkSender")
+			}
+			if p.Status != "configured" {
+				t.Fatalf("expected status configured, got %q", p.Status)
+			}
+		}
 	}
 }

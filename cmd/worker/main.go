@@ -45,6 +45,7 @@ type workerService struct {
 	store                 *storage.Store
 	notificationRegistry  *notification.Registry
 	barkSender            *bark.Sender
+	barkPublicURL         string
 	coordinator           *workerstate.Coordinator
 	maintRunner           *maintenance.Runner
 }
@@ -255,6 +256,30 @@ func (w *workerService) TestNotificationChannel(ctx context.Context, channelID s
 		ProviderErrorCode: "UNKNOWN_PROVIDER",
 		SanitizedError:    "unsupported notification provider: " + ch.Provider,
 	}, nil
+}
+
+func (w *workerService) NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error) {
+	barkConfigured := w.barkSender != nil
+	resp := workerrpc.NotificationProvidersResponse{
+		Providers: []workerrpc.NotificationProviderMetadata{
+			{
+				ID:          "WEBHOOK",
+				Name:        "Webhook",
+				Description: "Gửi JSON có chữ ký HMAC tới hệ thống khác.",
+				Configured:  true,
+				Status:      "configured",
+			},
+			{
+				ID:          "BARK",
+				Name:        "Bark (iOS)",
+				Description: "Đẩy thông báo trực tiếp tới iPhone qua Bark self-host.",
+				Configured:  barkConfigured,
+				PublicURL:   w.barkPublicURL,
+				Status:      map[bool]string{true: "configured", false: "unconfigured"}[barkConfigured],
+			},
+		},
+	}
+	return resp, nil
 }
 
 func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse, error) {
@@ -674,6 +699,7 @@ func main() {
 		store:                 store,
 		notificationRegistry:  notificationRegistry,
 		barkSender:            barkSender,
+		barkPublicURL:         cfg.BarkPublicURL,
 		coordinator:           coordinator,
 		maintRunner:           maintRunner,
 	}
@@ -683,6 +709,7 @@ func main() {
 		logger.Error("create worker RPC server failed", "error", err)
 		os.Exit(1)
 	}
+	rpcServer.SetProviderReader(ws)
 	rpcServer.SetStateProvider(coordinator.State)
 	rpcServer.SetDrainHandler(coordinator.Drain)
 

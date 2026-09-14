@@ -14,7 +14,16 @@ test.describe('V3 Features: Schedule, QR, Server-side Transactions & Detail', ()
     await expect(page.getByText(/Đã áp dụng mẫu cấu hình/)).toBeVisible();
 
     await expect(page.getByText(/07:00–23:00 Realtime \(3–10s\)/)).toBeVisible();
-    await expect(page.getByText(/Ngoài giờ Giữ phiên \(2–3p\)/)).toBeVisible();
+    await expect(page.getByText(/Ngoài giờ Giữ phiên \(1–2p\)/)).toBeVisible();
+
+    // Verify draft summary appears immediately upon preset selection
+    await expect(page.getByText(/Tóm tắt bản nháp cấu hình/)).toBeVisible();
+    await expect(page.getByText(/Mẫu chuẩn: hằng ngày 07:00–23:00/)).toBeVisible();
+
+    // Verify day-of-week controls are rendered and interactive
+    const monButton = page.getByRole('button', { name: 'Thứ 2', exact: true }).first();
+    await expect(monButton).toBeVisible();
+    await expect(monButton).toHaveAttribute('aria-pressed', 'true');
 
     const saveResponse = page.waitForResponse(
       (response) => response.url().endsWith('/api/v1/monitor/settings') && response.request().method() === 'POST',
@@ -29,6 +38,40 @@ test.describe('V3 Features: Schedule, QR, Server-side Transactions & Detail', ()
 
     await page.getByRole('button', { name: 'Thêm khung giờ' }).click();
     await expect(page.getByPlaceholder('Tên khung giờ (ví dụ: Ban ngày)').last()).toBeVisible();
+  });
+
+  test('validates schedule days of week and presets interaction', async ({ page }) => {
+    await page.goto('/admin/connection');
+    await expect(page.getByRole('heading', { name: 'Lịch trình quét ACB & Giữ phiên (Schedule Polling)' })).toBeVisible();
+
+    // Click "Giờ hành chính T2-T6"
+    await page.getByRole('button', { name: /Giờ hành chính T2-T6/ }).click();
+    await expect(page.getByText(/Giờ hành chính: Thứ 2–Thứ 6, 08:00–18:00/)).toBeVisible();
+
+    // Verify Saturday and Sunday are NOT pressed, while Monday is pressed
+    const satBtn = page.getByRole('button', { name: 'Thứ 7', exact: true }).first();
+    const sunBtn = page.getByRole('button', { name: 'Chủ nhật', exact: true }).first();
+    const monBtn = page.getByRole('button', { name: 'Thứ 2', exact: true }).first();
+
+    await expect(satBtn).toHaveAttribute('aria-pressed', 'false');
+    await expect(sunBtn).toHaveAttribute('aria-pressed', 'false');
+    await expect(monBtn).toHaveAttribute('aria-pressed', 'true');
+
+    // Deselect all days by clicking T2, T3, T4, T5, T6
+    await monBtn.click();
+    await page.getByRole('button', { name: 'Thứ 3', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Thứ 4', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Thứ 5', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Thứ 6', exact: true }).first().click();
+
+    // Save button should now be disabled due to empty days validation
+    await expect(page.getByText(/Chọn ít nhất 1 ngày/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Lưu thay đổi lịch trình' })).toBeDisabled();
+
+    // Re-enable with quick action "Thứ 2–Thứ 6"
+    await page.getByRole('button', { name: 'Thứ 2–Thứ 6' }).first().click();
+    await expect(monBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: 'Lưu thay đổi lịch trình' })).toBeEnabled();
   });
 
   test('interacts with Payment QR settings in admin', async ({ page }) => {

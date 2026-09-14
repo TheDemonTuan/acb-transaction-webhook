@@ -14,6 +14,17 @@ import (
 )
 
 func (s *Server) notificationProviders(w http.ResponseWriter, r *http.Request) {
+	if s.providerReader != nil {
+		res, err := s.providerReader.NotificationProviderMetadata(r.Context())
+		if err != nil {
+			slog.Warn("failed to fetch notification provider metadata from worker", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "worker unavailable: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+
 	barkConfigured := (s.barkSender != nil) || (s.cfg.BarkServerURL != "")
 	providers := []map[string]any{
 		{
@@ -21,6 +32,7 @@ func (s *Server) notificationProviders(w http.ResponseWriter, r *http.Request) {
 			"name":        "Webhook",
 			"description": "Gửi JSON có chữ ký HMAC tới hệ thống khác.",
 			"configured":  true,
+			"status":      "configured",
 		},
 		{
 			"id":          "BARK",
@@ -28,6 +40,7 @@ func (s *Server) notificationProviders(w http.ResponseWriter, r *http.Request) {
 			"description": "Đẩy thông báo trực tiếp tới iPhone qua Bark self-host.",
 			"configured":  barkConfigured,
 			"publicUrl":   s.cfg.BarkPublicURL,
+			"status":      map[bool]string{true: "configured", false: "unconfigured"}[barkConfigured],
 		},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": providers})

@@ -54,8 +54,8 @@ var DefaultMonitorSettings = MonitorSettings{
 	Timezone: "Asia/Ho_Chi_Minh",
 	DefaultProfile: Profile{
 		Mode:       ModeKeepaliveOnly,
-		MinSeconds: 120,
-		MaxSeconds: 180,
+		MinSeconds: 60,
+		MaxSeconds: 120,
 	},
 	Windows: []Window{
 		{
@@ -97,6 +97,9 @@ func (s *MonitorSettings) Validate() error {
 		}
 		if w.StartTime == w.EndTime {
 			return fmt.Errorf("window %d (%s): startTime must not equal endTime", i, w.Name)
+		}
+		if len(w.DaysOfWeek) == 0 {
+			return fmt.Errorf("window %d (%s): at least one day of week is required", i, w.Name)
 		}
 		for _, day := range w.DaysOfWeek {
 			if day < 0 || day > 6 {

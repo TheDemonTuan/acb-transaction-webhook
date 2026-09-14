@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -19,6 +19,7 @@ import {
 } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { getDeliveryStatus, getPollStatus } from '../../content/status-copy';
+import { useCursorPagination, PaginationControls } from '../../shared/ui/PaginationControls';
 
 export const ActivityPage: React.FC = () => {
   const queryClient = useQueryClient();
@@ -29,23 +30,59 @@ export const ActivityPage: React.FC = () => {
   const activeTab: 'polling' | 'deliveries' | 'audit' =
     tabParam === 'deliveries' ? 'deliveries' : tabParam === 'audit' ? 'audit' : 'polling';
 
+  const pagination = useCursorPagination(20);
+  const resetPagination = pagination.reset;
+
+  // Reset pagination when active tab changes
+  const prevTabRef = useRef(activeTab);
+  useEffect(() => {
+    if (prevTabRef.current !== activeTab) {
+      prevTabRef.current = activeTab;
+      resetPagination();
+    }
+  }, [activeTab, resetPagination]);
+
   const switchTab = (tab: 'polling' | 'deliveries' | 'audit') => {
     setSearchParams({ tab });
   };
 
-  const { data: pollData, isLoading: loadingPolls, refetch: refetchPolls } = useQuery({
-    queryKey: queryKeys.pollRuns(),
-    queryFn: () => fetchPollRuns({ limit: 50 }),
+  const {
+    data: pollData,
+    isLoading: loadingPolls,
+    isFetching: fetchingPolls,
+    isError: isErrorPolls,
+    error: pollError,
+    refetch: refetchPolls,
+  } = useQuery({
+    queryKey: queryKeys.pollRuns({ limit: pagination.pageSize, cursor: pagination.cursor }),
+    queryFn: () => fetchPollRuns({ limit: pagination.pageSize, cursor: pagination.cursor }),
+    enabled: activeTab === 'polling',
   });
 
-  const { data: deliveryData, isLoading: loadingDeliveries, refetch: refetchDeliveries } = useQuery({
-    queryKey: queryKeys.deliveries(),
-    queryFn: () => fetchDeliveries({ limit: 50 }),
+  const {
+    data: deliveryData,
+    isLoading: loadingDeliveries,
+    isFetching: fetchingDeliveries,
+    isError: isErrorDeliveries,
+    error: deliveryError,
+    refetch: refetchDeliveries,
+  } = useQuery({
+    queryKey: queryKeys.deliveries({ limit: pagination.pageSize, cursor: pagination.cursor }),
+    queryFn: () => fetchDeliveries({ limit: pagination.pageSize, cursor: pagination.cursor }),
+    enabled: activeTab === 'deliveries',
   });
 
-  const { data: auditData, isLoading: loadingAudit, refetch: refetchAudit } = useQuery({
-    queryKey: queryKeys.auditLogs(),
-    queryFn: () => fetchAuditLogs({ limit: 50 }),
+  const {
+    data: auditData,
+    isLoading: loadingAudit,
+    isFetching: fetchingAudit,
+    isError: isErrorAudit,
+    error: auditError,
+    refetch: refetchAudit,
+  } = useQuery({
+    queryKey: queryKeys.auditLogs({ limit: pagination.pageSize, cursor: pagination.cursor }),
+    queryFn: () => fetchAuditLogs({ limit: pagination.pageSize, cursor: pagination.cursor }),
+    enabled: activeTab === 'audit',
   });
 
   const handleReplay = async (deliveryId: string) => {
@@ -80,9 +117,9 @@ export const ActivityPage: React.FC = () => {
         <button
           type="button"
           onClick={() => {
-            refetchPolls();
-            refetchDeliveries();
-            refetchAudit();
+            if (activeTab === 'polling') refetchPolls();
+            else if (activeTab === 'deliveries') refetchDeliveries();
+            else if (activeTab === 'audit') refetchAudit();
           }}
           className="inline-flex items-center self-start sm:self-auto gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 transition shadow-2xs cursor-pointer"
         >
@@ -138,12 +175,29 @@ export const ActivityPage: React.FC = () => {
         <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
           <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between">
             <h3 className="font-bold text-stone-900 text-base">Chu kỳ Polling</h3>
-            <span className="text-xs text-stone-500">{polls.length} lượt chạy gần nhất</span>
+            <span className="text-xs text-stone-500">{polls.length} lượt chạy trang này</span>
           </div>
 
-          {polls.length === 0 ? (
+          {loadingPolls ? (
             <div className="p-12 text-center text-xs text-stone-500">
-              {loadingPolls ? 'Đang tải dữ liệu...' : 'Chưa có chu kỳ polling nào được ghi nhận.'}
+              <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-stone-400" />
+              Đang tải dữ liệu...
+            </div>
+          ) : isErrorPolls ? (
+            <div className="p-12 text-center text-xs text-rose-600 space-y-2">
+              <p>Không thể tải dữ liệu: {pollError instanceof Error ? pollError.message : 'Lỗi kết nối'}</p>
+              <button
+                type="button"
+                onClick={() => refetchPolls()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white border border-rose-200 text-rose-700 hover:bg-rose-50 transition cursor-pointer shadow-2xs"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Thử lại</span>
+              </button>
+            </div>
+          ) : polls.length === 0 ? (
+            <div className="p-12 text-center text-xs text-stone-500">
+              Chưa có chu kỳ polling nào được ghi nhận.
             </div>
           ) : (
             <div className="divide-y divide-stone-100">
@@ -154,7 +208,7 @@ export const ActivityPage: React.FC = () => {
                     key={p.id}
                     className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-stone-50/50 transition"
                   >
-                    <div className="space-y-1">
+                    <div>
                       <div className="flex items-center gap-2">
                         <span
                           className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${
@@ -186,6 +240,21 @@ export const ActivityPage: React.FC = () => {
               })}
             </div>
           )}
+
+          {(polls.length > 0 || pagination.hasPrev) && (
+            <PaginationControls
+              pageNumber={pagination.pageNumber}
+              itemCount={polls.length}
+              pageSize={pagination.pageSize}
+              hasNext={Boolean(pollData?.nextCursor)}
+              hasPrev={pagination.hasPrev}
+              isLoading={loadingPolls || fetchingPolls}
+              onNext={() => pagination.handleNext(pollData?.nextCursor)}
+              onPrev={pagination.handlePrev}
+              onFirst={pagination.handleFirst}
+              onPageSizeChange={pagination.setPageSize}
+            />
+          )}
         </div>
       )}
 
@@ -194,7 +263,7 @@ export const ActivityPage: React.FC = () => {
         <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
           <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between">
             <h3 className="font-bold text-stone-900 text-base">Phân phối thông báo</h3>
-            <span className="text-xs text-stone-500">{deliveries.length} lượt gửi</span>
+            <span className="text-xs text-stone-500">{deliveries.length} lượt gửi trang này</span>
           </div>
 
           {actionNotice && (
@@ -203,9 +272,26 @@ export const ActivityPage: React.FC = () => {
             </div>
           )}
 
-          {deliveries.length === 0 ? (
+          {loadingDeliveries ? (
             <div className="p-12 text-center text-xs text-stone-500">
-              {loadingDeliveries ? 'Đang tải dữ liệu...' : 'Chưa có bản ghi phân phối thông báo nào.'}
+              <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-stone-400" />
+              Đang tải dữ liệu...
+            </div>
+          ) : isErrorDeliveries ? (
+            <div className="p-12 text-center text-xs text-rose-600 space-y-2">
+              <p>Không thể tải dữ liệu: {deliveryError instanceof Error ? deliveryError.message : 'Lỗi kết nối'}</p>
+              <button
+                type="button"
+                onClick={() => refetchDeliveries()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white border border-rose-200 text-rose-700 hover:bg-rose-50 transition cursor-pointer shadow-2xs"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Thử lại</span>
+              </button>
+            </div>
+          ) : deliveries.length === 0 ? (
+            <div className="p-12 text-center text-xs text-stone-500">
+              Chưa có bản ghi phân phối thông báo nào.
             </div>
           ) : (
             <div className="divide-y divide-stone-100">
@@ -237,7 +323,7 @@ export const ActivityPage: React.FC = () => {
                         <span
                           className={`text-2xs font-semibold px-2 py-0.5 rounded-md border flex items-center gap-1 ${
                             isBark
-                              ? 'bg-purple-50 text-purple-700 border-purple-200'
+                              ? 'bg-stone-50 text-stone-700 border-stone-200'
                               : 'bg-blue-50 text-blue-700 border-blue-200'
                           }`}
                         >
@@ -282,6 +368,21 @@ export const ActivityPage: React.FC = () => {
               })}
             </div>
           )}
+
+          {(deliveries.length > 0 || pagination.hasPrev) && (
+            <PaginationControls
+              pageNumber={pagination.pageNumber}
+              itemCount={deliveries.length}
+              pageSize={pagination.pageSize}
+              hasNext={Boolean(deliveryData?.nextCursor)}
+              hasPrev={pagination.hasPrev}
+              isLoading={loadingDeliveries || fetchingDeliveries}
+              onNext={() => pagination.handleNext(deliveryData?.nextCursor)}
+              onPrev={pagination.handlePrev}
+              onFirst={pagination.handleFirst}
+              onPageSizeChange={pagination.setPageSize}
+            />
+          )}
         </div>
       )}
 
@@ -290,12 +391,29 @@ export const ActivityPage: React.FC = () => {
         <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
           <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between">
             <h3 className="font-bold text-stone-900 text-base">Audit Logs</h3>
-            <span className="text-xs text-stone-500">{audits.length} bản ghi</span>
+            <span className="text-xs text-stone-500">{audits.length} bản ghi trang này</span>
           </div>
 
-          {audits.length === 0 ? (
+          {loadingAudit ? (
             <div className="p-12 text-center text-xs text-stone-500">
-              {loadingAudit ? 'Đang tải dữ liệu...' : 'Chưa có bản ghi audit nào.'}
+              <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-stone-400" />
+              Đang tải dữ liệu...
+            </div>
+          ) : isErrorAudit ? (
+            <div className="p-12 text-center text-xs text-rose-600 space-y-2">
+              <p>Không thể tải dữ liệu: {auditError instanceof Error ? auditError.message : 'Lỗi kết nối'}</p>
+              <button
+                type="button"
+                onClick={() => refetchAudit()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white border border-rose-200 text-rose-700 hover:bg-rose-50 transition cursor-pointer shadow-2xs"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Thử lại</span>
+              </button>
+            </div>
+          ) : audits.length === 0 ? (
+            <div className="p-12 text-center text-xs text-stone-500">
+              Chưa có bản ghi audit nào.
             </div>
           ) : (
             <div className="divide-y divide-stone-100">
@@ -308,19 +426,35 @@ export const ActivityPage: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-stone-800 text-xs">{a.action}</span>
                       <span className="text-xs text-stone-400 font-mono">
-                        {a.subject} ({a.role})
+                        {a.role} &middot; {a.subject}
                       </span>
                     </div>
-                    <span className="text-xs text-stone-500 font-mono block mt-0.5">
-                      Đối tượng: {a.target}
-                    </span>
+                    <div className="text-xs text-stone-500 font-mono mt-0.5">
+                      Mục tiêu: {a.target}
+                    </div>
                   </div>
-                  <div className="text-xs text-stone-400 font-mono">
+                  <span className="text-xs text-stone-400 font-mono flex items-center gap-1 shrink-0">
+                    <Clock className="w-3 h-3" />
                     {new Date(a.createdAt).toLocaleString('vi-VN')}
-                  </div>
+                  </span>
                 </div>
               ))}
             </div>
+          )}
+
+          {(audits.length > 0 || pagination.hasPrev) && (
+            <PaginationControls
+              pageNumber={pagination.pageNumber}
+              itemCount={audits.length}
+              pageSize={pagination.pageSize}
+              hasNext={Boolean(auditData?.nextCursor)}
+              hasPrev={pagination.hasPrev}
+              isLoading={loadingAudit || fetchingAudit}
+              onNext={() => pagination.handleNext(auditData?.nextCursor)}
+              onPrev={pagination.handlePrev}
+              onFirst={pagination.handleFirst}
+              onPageSizeChange={pagination.setPageSize}
+            />
           )}
         </div>
       )}

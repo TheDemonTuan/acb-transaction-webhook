@@ -161,7 +161,7 @@ func TestScheduleOvernightWindowSingleWeekday(t *testing.T) {
 }
 
 func TestDefaultMonitorSettingsIntervals(t *testing.T) {
-	if got := DefaultMonitorSettings.DefaultProfile; got.Mode != ModeKeepaliveOnly || got.MinSeconds != 120 || got.MaxSeconds != 180 {
+	if got := DefaultMonitorSettings.DefaultProfile; got.Mode != ModeKeepaliveOnly || got.MinSeconds != 60 || got.MaxSeconds != 120 {
 		t.Fatalf("unexpected default keepalive profile: %+v", got)
 	}
 	if len(DefaultMonitorSettings.Windows) != 1 {
@@ -202,6 +202,54 @@ func TestScheduleValidationBounds(t *testing.T) {
 	}
 }
 
+func TestScheduleValidationEmptyDaysOfWeek(t *testing.T) {
+	settings := DefaultMonitorSettings
+	settings.Windows = []Window{
+		{
+			Name:       "Khung gio khong co ngay",
+			DaysOfWeek: []int{},
+			StartTime:  "08:00",
+			EndTime:    "17:00",
+			Profile:    Profile{Mode: ModeRealtime, MinSeconds: 5, MaxSeconds: 10},
+		},
+	}
+	if err := settings.Validate(); err == nil {
+		t.Errorf("expected error when window has empty DaysOfWeek, got nil")
+	}
+}
+
+func TestGetMonitorSettingsKeepsExistingLegacyIntervals(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test_mon_settings_legacy.db")
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	// Insert legacy settings directly into DB (120-180 seconds)
+	legacyProfile := `{"mode":"KEEPALIVE_ONLY","minSeconds":120,"maxSeconds":180}`
+	legacyWindows := `[{"name":"Legacy Window","daysOfWeek":[0,1,2,3,4,5,6],"startTime":"07:00","endTime":"23:00","profile":{"mode":"REALTIME","minSeconds":3,"maxSeconds":10}}]`
+	_, err = store.db.ExecContext(ctx, `
+		INSERT INTO monitor_settings (id, revision, enabled, timezone, default_profile_json, windows_json, updated_at)
+		VALUES ('singleton', 5, 1, 'Asia/Ho_Chi_Minh', ?, ?, '2026-09-01T00:00:00Z')
+	`, legacyProfile, legacyWindows)
+	if err != nil {
+		t.Fatalf("insert legacy settings: %v", err)
+	}
+
+	got, err := store.GetMonitorSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetMonitorSettings: %v", err)
+	}
+	if got.Revision != 5 {
+		t.Errorf("expected revision 5, got %d", got.Revision)
+	}
+	if got.DefaultProfile.MinSeconds != 120 || got.DefaultProfile.MaxSeconds != 180 {
+		t.Errorf("expected legacy keepalive 120-180 preserved, got %d-%d", got.DefaultProfile.MinSeconds, got.DefaultProfile.MaxSeconds)
+	}
+}
+
 func TestSaveMonitorSettingsOptimisticLocking(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test_mon_settings.db")
@@ -230,7 +278,7 @@ func TestSaveMonitorSettingsOptimisticLocking(t *testing.T) {
 	}
 
 	// Second save with matching revision 2 succeeds and increments to 3
-	saved.DefaultProfile.MinSeconds = 130
+	saved.DefaultProfile.MinSeconds = 90
 	saved2, err := store.SaveMonitorSettings(ctx, saved)
 	if err != nil {
 		t.Fatalf("SaveMonitorSettings second save: %v", err)

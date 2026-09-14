@@ -25,6 +25,7 @@ import {
 import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import type { Transaction, HistorySyncJob } from '../../realtime-types';
+import { useCursorPagination, PaginationControls } from '../../shared/ui/PaginationControls';
 
 const formatFriendlyError = (code?: string | null, message?: string | null): string => {
   if (code === 'SESSION_EXPIRED') {
@@ -75,27 +76,28 @@ export const TransactionsPage: React.FC = () => {
   const [customTo, setCustomTo] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedId, setCopiedId] = useState(false);
-  const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [syncNotice, setSyncNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const pagination = useCursorPagination(20);
+  const resetPagination = pagination.reset;
 
   // Debounce search input
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(search);
-      setCursor(undefined); // Reset cursor on new search
+      resetPagination();
     }, 300);
     return () => clearTimeout(timer);
-  }, [search]);
+  }, [search, resetPagination]);
 
   // Reset cursor when filters change
   const handleDateRangeChange = (range: 'today' | '7days' | 'all' | 'custom') => {
     setDateRange(range);
-    setCursor(undefined);
+    pagination.reset();
   };
 
   const handleFilterTypeChange = (type: 'all' | 'credit' | 'debit') => {
     setFilterType(type);
-    setCursor(undefined);
+    pagination.reset();
   };
 
   const queryParams = useMemo(() => {
@@ -116,12 +118,12 @@ export const TransactionsPage: React.FC = () => {
       to,
       direction: filterType,
       query: debouncedSearch.trim() || undefined,
-      limit: 50,
-      cursor,
+      limit: pagination.pageSize,
+      cursor: pagination.cursor,
     };
-  }, [dateRange, customFrom, customTo, filterType, debouncedSearch, cursor]);
+  }, [dateRange, customFrom, customTo, filterType, debouncedSearch, pagination.pageSize, pagination.cursor]);
 
-  const { data, isLoading, isRefetching, refetch } = useQuery({
+  const { data, isLoading, isRefetching, isError, error, refetch } = useQuery({
     queryKey: queryKeys.transactions(queryParams as unknown as Record<string, unknown>),
     queryFn: () => fetchTransactions(queryParams),
   });
@@ -487,7 +489,7 @@ export const TransactionsPage: React.FC = () => {
               value={customFrom}
               onChange={(e) => {
                 setCustomFrom(e.target.value);
-                setCursor(undefined);
+                pagination.reset();
               }}
               className="px-2.5 py-1 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-800"
             />
@@ -497,7 +499,7 @@ export const TransactionsPage: React.FC = () => {
               value={customTo}
               onChange={(e) => {
                 setCustomTo(e.target.value);
-                setCursor(undefined);
+                pagination.reset();
               }}
               className="px-2.5 py-1 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-800"
             />
@@ -548,6 +550,18 @@ export const TransactionsPage: React.FC = () => {
           <div className="py-16 text-center text-xs text-stone-600">
             <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-stone-600" />
             Đang tải dữ liệu giao dịch...
+          </div>
+        ) : isError ? (
+          <div className="py-16 text-center text-xs text-rose-600 space-y-2">
+            <p className="font-semibold">Không thể tải dữ liệu giao dịch: {error instanceof Error ? error.message : 'Lỗi kết nối'}</p>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white border border-rose-200 text-rose-700 hover:bg-rose-50 transition cursor-pointer shadow-2xs"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Thử lại</span>
+            </button>
           </div>
         ) : transactions.length === 0 ? (
           <div className="py-16 text-center text-xs text-stone-600 space-y-2">
@@ -629,18 +643,20 @@ export const TransactionsPage: React.FC = () => {
           </div>
         )}
 
-        {/* Pagination: Load More */}
-        {data?.nextCursor && (
-          <div className="p-4 border-t border-stone-100 text-center bg-stone-50/50">
-            <button
-              type="button"
-              onClick={() => setCursor(data.nextCursor)}
-              disabled={isLoading || isRefetching}
-              className="px-4 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-100 shadow-2xs transition cursor-pointer disabled:opacity-50"
-            >
-              Tải trang tiếp theo ({stats.totalCount - transactions.length} giao dịch còn lại)
-            </button>
-          </div>
+        {/* Pagination Controls */}
+        {(transactions.length > 0 || pagination.hasPrev) && (
+          <PaginationControls
+            pageNumber={pagination.pageNumber}
+            itemCount={transactions.length}
+            pageSize={pagination.pageSize}
+            hasNext={Boolean(data?.nextCursor)}
+            hasPrev={pagination.hasPrev}
+            isLoading={isLoading || isRefetching}
+            onNext={() => pagination.handleNext(data?.nextCursor)}
+            onPrev={pagination.handlePrev}
+            onFirst={pagination.handleFirst}
+            onPageSizeChange={pagination.setPageSize}
+          />
         )}
       </div>
 

@@ -111,6 +111,23 @@ type ResumeResponse struct {
 	Resumed bool   `json:"resumed"`
 }
 
+type NotificationProviderMetadata struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Configured  bool   `json:"configured"`
+	PublicURL   string `json:"publicUrl,omitempty"`
+	Status      string `json:"status,omitempty"`
+}
+
+type NotificationProvidersResponse struct {
+	Providers []NotificationProviderMetadata `json:"providers"`
+}
+
+type NotificationProviderReader interface {
+	NotificationProviderMetadata(ctx context.Context) (NotificationProvidersResponse, error)
+}
+
 // Handler interface implemented by worker
 type WorkerHandler interface {
 	RequestSync(ctx context.Context) error
@@ -170,6 +187,7 @@ type Server struct {
 	schemaVersion     string
 	heartbeatProvider func() time.Time
 	staleThreshold    time.Duration
+	providerReader    NotificationProviderReader
 }
 
 func NewValidatedServer(handler WorkerHandler, token string, opts ...ServerOption) (*Server, error) {
@@ -242,6 +260,12 @@ func (s *Server) SetStateProvider(provider func() workerstate.State) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stateProvider = provider
+}
+
+func (s *Server) SetProviderReader(reader NotificationProviderReader) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerReader = reader
 }
 
 func (s *Server) checkWorkAllowed() error {
@@ -805,6 +829,32 @@ func (s *Server) routes() {
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}))
+
+	s.mux.HandleFunc("/rpc/notification-providers", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		s.mu.Lock()
+		pr := s.providerReader
+		s.mu.Unlock()
+		if pr == nil {
+			if reader, ok := s.handler.(NotificationProviderReader); ok {
+				pr = reader
+			}
+		}
+		if pr == nil {
+			writeError(w, http.StatusNotImplemented, "provider metadata reader not implemented", reqID)
+			return
+		}
+		resp, err := pr.NotificationProviderMetadata(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
 }
 
 // Client calls the worker RPC server from gateway slots
@@ -961,6 +1011,14 @@ func (c *Client) TestNotificationChannel(ctx context.Context, channelID string) 
 	defer cancel()
 	var resp TestNotificationResponse
 	err := c.post(callCtx, "/rpc/notification-channels/test", TestNotificationRequest{ChannelID: channelID}, &resp)
+	return resp, err
+}
+
+func (c *Client) NotificationProviderMetadata(ctx context.Context) (NotificationProvidersResponse, error) {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var resp NotificationProvidersResponse
+	err := c.post(callCtx, "/rpc/notification-providers", nil, &resp)
 	return resp, err
 }
 

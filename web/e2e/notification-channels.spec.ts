@@ -93,4 +93,101 @@ test.describe('Notification Channels & Bark Provider E2E', () => {
     // Channel listed
     await expect(page.getByText(hookName)).toBeVisible();
   });
+
+  test('distinguishes Bark provider status (configured, unconfigured, worker error) and device count with refresh', async ({ page }) => {
+    let providerCalls = 0;
+    let channelCalls = 0;
+
+    const mockChannels = [
+      {
+        id: 'ch_bark_1',
+        name: 'iPhone 15 Pro',
+        provider: 'BARK',
+        status: 'ACTIVE',
+        revision: 1,
+        createdAt: '2026-09-14T00:00:00Z',
+        updatedAt: '2026-09-14T00:00:00Z',
+      },
+      {
+        id: 'ch_bark_2',
+        name: 'iPhone 14',
+        provider: 'BARK',
+        status: 'DISABLED',
+        revision: 1,
+        createdAt: '2026-09-14T00:00:00Z',
+        updatedAt: '2026-09-14T00:00:00Z',
+      },
+    ];
+
+    let currentProvidersResponse: { status: number; body: Record<string, unknown> } = {
+      status: 200,
+      body: {
+        providers: [
+          { id: 'WEBHOOK', name: 'Webhook', configured: true },
+          { id: 'BARK', name: 'Bark (iOS)', configured: true, publicUrl: 'https://bark.worker.site' },
+        ],
+      },
+    };
+
+    await page.route('**/api/v1/notification-channels', async (route) => {
+      channelCalls++;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: mockChannels }),
+      });
+    });
+
+    await page.route('**/api/v1/notification-providers', async (route) => {
+      providerCalls++;
+      await route.fulfill({
+        status: currentProvidersResponse.status,
+        contentType: 'application/json',
+        body: JSON.stringify(currentProvidersResponse.body),
+      });
+    });
+
+    await page.goto('/admin/notifications');
+
+    // 1. Configured state: "Đã cấu hình", public URL, device count (2 đã lưu, 1 đang bật)
+    await expect(page.getByText('Đã cấu hình')).toBeVisible();
+    await expect(page.getByText('Server URL: https://bark.worker.site')).toBeVisible();
+    await expect(page.getByText('2 thiết bị đã lưu (1 đang bật)')).toBeVisible();
+
+    // 2. Refresh button refreshes both channels and providers
+    const initialProviderCalls = providerCalls;
+    const initialChannelCalls = channelCalls;
+    await page.getByRole('button', { name: 'Làm mới' }).click();
+    await expect.poll(() => providerCalls).toBeGreaterThan(initialProviderCalls);
+    await expect.poll(() => channelCalls).toBeGreaterThan(initialChannelCalls);
+
+    // 3. Worker error / version skew (503): displays "Không xác định được trạng thái", devices still usable
+    currentProvidersResponse = {
+      status: 503,
+      body: { error: 'worker_unavailable' },
+    };
+    await page.getByRole('button', { name: 'Làm mới' }).click();
+    await expect(page.getByText('Không xác định được trạng thái')).toBeVisible();
+    // Device list and device count remain usable
+    await expect(page.getByText('2 thiết bị đã lưu (1 đang bật)')).toBeVisible();
+    await expect(page.getByText('iPhone 15 Pro')).toBeVisible();
+    await expect(page.getByText('iPhone 14')).toBeVisible();
+    // Must NOT conclude missing URL or connected
+    await expect(page.locator('body')).not.toContainText('Đã kết nối');
+    await expect(page.locator('body')).not.toContainText('Chưa cấu hình URL');
+
+    // 4. Unconfigured state: displays "Chưa cấu hình"
+    currentProvidersResponse = {
+      status: 200,
+      body: {
+        providers: [
+          { id: 'WEBHOOK', name: 'Webhook', configured: true },
+          { id: 'BARK', name: 'Bark (iOS)', configured: false },
+        ],
+      },
+    };
+    await page.getByRole('button', { name: 'Làm mới' }).click();
+    await expect(page.getByText('Chưa cấu hình')).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('Đã kết nối');
+  });
 });

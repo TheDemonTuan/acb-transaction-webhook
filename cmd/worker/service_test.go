@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -285,5 +286,69 @@ func TestWorkerShutdownGracefulRequeueAndReleaseLock(t *testing.T) {
 	}
 	if claimedJob.ID != job.ID {
 		t.Fatalf("expected reclaimed job %s, got %s", job.ID, claimedJob.ID)
+	}
+}
+
+func TestWorkerService_NotificationProviderMetadata(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Unconfigured Bark (barkSender is nil)
+	wsUnconf := &workerService{
+		barkSender:    nil,
+		barkPublicURL: "",
+	}
+	respUnconf, err := wsUnconf.NotificationProviderMetadata(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(respUnconf.Providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(respUnconf.Providers))
+	}
+	for _, p := range respUnconf.Providers {
+		if p.ID == "BARK" {
+			if p.Configured {
+				t.Fatal("expected Bark to be unconfigured")
+			}
+			if p.Status != "unconfigured" {
+				t.Fatalf("expected status unconfigured, got %q", p.Status)
+			}
+		}
+		if p.ID == "WEBHOOK" {
+			if !p.Configured {
+				t.Fatal("expected Webhook to be configured")
+			}
+		}
+	}
+
+	// 2. Configured Bark
+	barkSender := bark.NewSender(bark.Config{
+		ServerURL: "http://127.0.0.1:8080",
+		PublicURL: "https://bark.example.com",
+	}, nil, "")
+	wsConf := &workerService{
+		barkSender:    barkSender,
+		barkPublicURL: "https://bark.example.com",
+	}
+	respConf, err := wsConf.NotificationProviderMetadata(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var barkFound bool
+	for _, p := range respConf.Providers {
+		if p.ID == "BARK" {
+			barkFound = true
+			if !p.Configured {
+				t.Fatal("expected Bark to be configured")
+			}
+			if p.Status != "configured" {
+				t.Fatalf("expected status configured, got %q", p.Status)
+			}
+			if p.PublicURL != "https://bark.example.com" {
+				t.Fatalf("expected publicUrl https://bark.example.com, got %q", p.PublicURL)
+			}
+		}
+	}
+	if !barkFound {
+		t.Fatal("BARK provider not found in response")
 	}
 }

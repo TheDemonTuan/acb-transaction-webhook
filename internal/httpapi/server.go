@@ -74,6 +74,10 @@ type NotificationChannelTester interface {
 	TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error)
 }
 
+type NotificationProviderReader interface {
+	NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error)
+}
+
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
@@ -84,6 +88,7 @@ type Server struct {
 	authVerifier      AuthVerifier
 	workerProber      WorkerProber
 	channelTester     NotificationChannelTester
+	providerReader    NotificationProviderReader
 	cfg               config.Config
 	store             *storage.Store
 	auth              *auth.Middleware
@@ -260,6 +265,11 @@ func (s *Server) WithNotificationRegistry(reg *notification.Registry) *Server {
 
 func (s *Server) WithNotificationTester(tester NotificationChannelTester) *Server {
 	s.channelTester = tester
+	return s
+}
+
+func (s *Server) WithProviderReader(reader NotificationProviderReader) *Server {
+	s.providerReader = reader
 	return s
 }
 

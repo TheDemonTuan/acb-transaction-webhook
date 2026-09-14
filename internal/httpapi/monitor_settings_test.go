@@ -79,14 +79,14 @@ func TestMonitorSettingsAPIAndHotReloadWake(t *testing.T) {
 	}
 
 	updatePayload := getResp.Settings
-	updatePayload.DefaultProfile.MinSeconds = 130
+	updatePayload.DefaultProfile.MinSeconds = 90
 	payloadBytes, _ := json.Marshal(updatePayload)
 
 	recPut := postSettings(http.MethodPost, string(payloadBytes))
 	if recPut.Code != http.StatusOK {
 		t.Fatalf("expected 200 for POST, got %d: %s", recPut.Code, recPut.Body.String())
 	}
-	if getResp.Settings.DefaultProfile.MinSeconds != 120 || getResp.Settings.DefaultProfile.MaxSeconds != 180 {
+	if getResp.Settings.DefaultProfile.MinSeconds != 60 || getResp.Settings.DefaultProfile.MaxSeconds != 120 {
 		t.Fatalf("unexpected default keepalive interval: %+v", getResp.Settings.DefaultProfile)
 	}
 	if got := updatePayload.Windows[0].Profile; got.MinSeconds != 3 || got.MaxSeconds != 10 {
