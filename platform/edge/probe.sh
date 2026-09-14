@@ -14,10 +14,13 @@ SERVICE="acb"
 CUSTOM_HOST=""
 PATH_URL=""
 EXPECTED_STATUS="200"
+EXPECTED_SLOT=""
+EXPECTED_COMMIT=""
 EXPECTED_DIGEST=""
 EXPECTED_HEADER=""
 EXPECTED_BODY=""
 TIMEOUT_SECONDS="5"
+CHECK_RUNTIME="0"
 DIRECT_MODE="0"
 DRY_RUN="0"
 
@@ -34,12 +37,15 @@ Target selection:
 
 Verification:
   --expected-status <code>          Expected HTTP status code (default: 200)
+  --expected-slot <blue|green>      Expected route slot (X-Platform-Slot header on HTTP 200)
+  --expected-commit <sha/string>    Expected release commit (X-Release-Commit header on HTTP 200)
   --expected-digest <digest>        Expected release digest/SHA in headers or body
   --expected-header <Name:Value>    Expected response header
   --expected-body <string>          Expected substring in response body
   --timeout <seconds>               Request timeout in seconds (default: 5)
 
-Execution mode:
+Preflight & execution mode:
+  --check-runtime                   Validate namespace container and helper image upfront
   --direct                          Execute curl directly (inside container/namespace)
   --dry-run                         Simulate probe without network execution
   --help                            Display this help message
@@ -72,6 +78,22 @@ while [[ $# -gt 0 ]]; do
       EXPECTED_STATUS="${2:-}"
       shift 2
       ;;
+    --expected-slot)
+      EXPECTED_SLOT="${2:-}"
+      if [[ -z "$EXPECTED_SLOT" || "$EXPECTED_SLOT" == "unknown" ]]; then
+        printf "ERROR: --expected-slot must not be empty or 'unknown'\n" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --expected-commit)
+      EXPECTED_COMMIT="${2:-}"
+      if [[ -z "$EXPECTED_COMMIT" || "$EXPECTED_COMMIT" == "unknown" ]]; then
+        printf "ERROR: --expected-commit must not be empty or 'unknown'\n" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
     --expected-digest)
       EXPECTED_DIGEST="${2:-}"
       shift 2
@@ -87,6 +109,10 @@ while [[ $# -gt 0 ]]; do
     --timeout)
       TIMEOUT_SECONDS="${2:-}"
       shift 2
+      ;;
+    --check-runtime)
+      CHECK_RUNTIME="1"
+      shift
       ;;
     --direct)
       DIRECT_MODE="1"
@@ -137,62 +163,181 @@ PROBE_HOST="${CUSTOM_HOST:-$DEFAULT_HOST}"
 PROBE_PATH="${PATH_URL:-$DEFAULT_PATH}"
 FULL_URL="${DEST_URL}${PROBE_PATH}"
 
+# Preflight runtime check
+if [[ "$CHECK_RUNTIME" == "1" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf "DRY_RUN: Preflight runtime check validated for container_ns=%s image=%s\n" "$CONTAINER_NS" "$PINNED_CURL_IMAGE"
+    exit 0
+  fi
+
+  if [[ "$DIRECT_MODE" == "1" ]]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      printf "ERROR: curl binary not found in PATH for direct mode\n" >&2
+      exit 1
+    fi
+    printf "Runtime check passed: curl binary available for direct mode\n"
+    exit 0
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "ERROR: docker command not found in PATH\n" >&2
+    exit 1
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    printf "ERROR: Docker daemon is not accessible\n" >&2
+    exit 1
+  fi
+
+  ns_running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NS" 2>/dev/null || echo "false")"
+  if [[ "$ns_running" != "true" ]]; then
+    printf "ERROR: Target namespace container '%s' is not running\n" "$CONTAINER_NS" >&2
+    exit 1
+  fi
+
+  if ! docker image inspect "$PINNED_CURL_IMAGE" >/dev/null 2>&1; then
+    printf "ERROR: Helper image '%s' not found locally. Pull image before probing: docker pull %s\n" "$PINNED_CURL_IMAGE" "$PINNED_CURL_IMAGE" >&2
+    exit 1
+  fi
+
+  printf "Runtime check passed: container '%s' is running, image '%s' is available\n" "$CONTAINER_NS" "$PINNED_CURL_IMAGE"
+  exit 0
+fi
+
 printf "Probing target=%s container_ns=%s host=%s url=%s\n" \
   "$TARGET" "$CONTAINER_NS" "$PROBE_HOST" "$FULL_URL"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   printf "DRY_RUN: Probe validated parameters successfully.\n"
+  if [[ -n "$EXPECTED_SLOT" ]]; then
+    printf "DRY_RUN: Expecting slot: %s\n" "$EXPECTED_SLOT"
+  fi
+  if [[ -n "$EXPECTED_COMMIT" ]]; then
+    printf "DRY_RUN: Expecting commit: %s\n" "$EXPECTED_COMMIT"
+  fi
   if [[ -n "$EXPECTED_DIGEST" ]]; then
     printf "DRY_RUN: Expecting digest: %s\n" "$EXPECTED_DIGEST"
   fi
   exit 0
 fi
 
-# Prepare temporary files for capturing response headers and body
+# Prepare curl arguments
+# We capture headers, body, and an unambiguous status sentinel from stdout.
+# This eliminates host temp bind mounts, avoiding container SELinux and permission failures.
+CURL_ARGS=(
+  -sS
+  -m "$TIMEOUT_SECONDS"
+  -i
+  -w $'\n__STATUS_SENTINEL__:%{http_code}\n'
+  -H "Host: ${PROBE_HOST}"
+  "$FULL_URL"
+)
+
+HTTP_RAW=""
+HTTP_RC=0
+
+if [[ "$DIRECT_MODE" == "1" ]]; then
+  HTTP_RAW="$(curl "${CURL_ARGS[@]}" 2>&1)" || HTTP_RC=$?
+else
+  # Pinned curl container sharing the target network namespace
+  # curlimages/curl has ENTRYPOINT ["curl"], so do not supply duplicate 'curl' argument
+  HTTP_RAW="$(docker run --rm \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --network "container:${CONTAINER_NS}" \
+    "$PINNED_CURL_IMAGE" \
+    "${CURL_ARGS[@]}" 2>&1)" || HTTP_RC=$?
+fi
+
+HTTP_CODE=""
+if [[ "$HTTP_RAW" =~ __STATUS_SENTINEL__:([0-9]{3}) ]]; then
+  HTTP_CODE="${BASH_REMATCH[1]}"
+fi
+
+printf "HTTP Status: %s (expected: %s)\n" "${HTTP_CODE:-none}" "$EXPECTED_STATUS"
+
+if [[ -z "$HTTP_CODE" || "$HTTP_CODE" != "$EXPECTED_STATUS" ]]; then
+  printf "ERROR: Status mismatch: got %s, expected %s (rc=%d)\n" "${HTTP_CODE:-none}" "$EXPECTED_STATUS" "$HTTP_RC" >&2
+  if [[ -n "$HTTP_RAW" ]]; then
+    printf "Response / output:\n%s\n" "$HTTP_RAW" >&2
+  fi
+  exit 1
+fi
+
+CLEAN_OUTPUT="${HTTP_RAW%%__STATUS_SENTINEL__:*}"
+
+HEADERS=""
+BODY=""
+is_header=1
+while IFS= read -r line || [[ -n "$line" ]]; do
+  clean_line="$(printf '%s' "$line" | tr -d '\r')"
+  if [[ "$is_header" -eq 1 ]]; then
+    if [[ -z "$clean_line" ]]; then
+      is_header=0
+      continue
+    fi
+    HEADERS+="${clean_line}"$'\n'
+  else
+    if [[ "$clean_line" =~ ^HTTP/[12] ]]; then
+      HEADERS="${clean_line}"$'\n'
+      BODY=""
+      is_header=1
+      continue
+    fi
+    BODY+="${line}"$'\n'
+  fi
+done <<< "$CLEAN_OUTPUT"
+
+# Host-only temporary files for regex/grep compatibility without container bind mounts
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 HEADERS_FILE="${TMP_DIR}/headers.txt"
 BODY_FILE="${TMP_DIR}/body.txt"
 
-CURL_CMD=(
-  curl -sS -m "$TIMEOUT_SECONDS"
-  -D "$HEADERS_FILE"
-  -o "$BODY_FILE"
-  -w "%{http_code}"
-  -H "Host: ${PROBE_HOST}"
-  "$FULL_URL"
-)
+printf '%s' "$HEADERS" > "$HEADERS_FILE"
+printf '%s' "$BODY" > "$BODY_FILE"
 
-HTTP_CODE=""
-if [[ "$DIRECT_MODE" == "1" ]]; then
-  HTTP_CODE="$("${CURL_CMD[@]}")"
-else
-  # Run via pinned curl container sharing the target network namespace
-  HTTP_CODE="$(docker run --rm \
-    --network "container:${CONTAINER_NS}" \
-    -v "${TMP_DIR}:${TMP_DIR}" \
-    "$PINNED_CURL_IMAGE" \
-    "${CURL_CMD[@]}")"
+# Strict route identity verification on HTTP 200 response
+if [[ -n "$EXPECTED_SLOT" || -n "$EXPECTED_COMMIT" ]]; then
+  if [[ "$HTTP_CODE" != "200" ]]; then
+    printf "ERROR: Route identity ACK requires HTTP status 200, got %s\n" "$HTTP_CODE" >&2
+    exit 1
+  fi
 fi
 
-printf "HTTP Status: %s (expected: %s)\n" "$HTTP_CODE" "$EXPECTED_STATUS"
-
-if [[ "$HTTP_CODE" != "$EXPECTED_STATUS" ]]; then
-  printf "ERROR: Status mismatch: got %s, expected %s\n" "$HTTP_CODE" "$EXPECTED_STATUS" >&2
-  if [[ -s "$BODY_FILE" ]]; then
-    printf "Response body:\n" >&2
-    cat "$BODY_FILE" >&2
-    printf "\n" >&2
+if [[ -n "$EXPECTED_SLOT" ]]; then
+  slot_header="$(printf '%s\n' "$HEADERS" | grep -i '^x-platform-slot:' | head -n1 | tr -d '\r\n' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' || echo "")"
+  if [[ -z "$slot_header" || "$slot_header" == "unknown" ]]; then
+    printf "ERROR: Route identity ACK missing or unknown X-Platform-Slot header in response\n" >&2
+    exit 1
   fi
-  exit 1
+  if [[ "$slot_header" != "$EXPECTED_SLOT" ]]; then
+    printf "ERROR: Route identity ACK slot mismatch: expected '%s', got '%s'\n" "$EXPECTED_SLOT" "$slot_header" >&2
+    exit 1
+  fi
+  printf "Verified route identity slot: %s\n" "$slot_header"
+fi
+
+if [[ -n "$EXPECTED_COMMIT" ]]; then
+  commit_header="$(printf '%s\n' "$HEADERS" | grep -i '^x-release-commit:' | head -n1 | tr -d '\r\n' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' || echo "")"
+  if [[ -z "$commit_header" || "$commit_header" == "unknown" ]]; then
+    printf "ERROR: Route identity ACK missing or unknown X-Release-Commit header in response\n" >&2
+    exit 1
+  fi
+  if [[ "$commit_header" != "$EXPECTED_COMMIT" ]]; then
+    printf "ERROR: Route identity ACK commit mismatch: expected '%s', got '%s'\n" "$EXPECTED_COMMIT" "$commit_header" >&2
+    exit 1
+  fi
+  printf "Verified route identity commit: %s\n" "$commit_header"
 fi
 
 # Verify expected header if requested
 if [[ -n "$EXPECTED_HEADER" ]]; then
   HEADER_KEY="${EXPECTED_HEADER%%:*}"
   HEADER_VAL="${EXPECTED_HEADER#*:}"
-  HEADER_VAL="$(echo "$HEADER_VAL" | xargs)" # trim whitespace
+  HEADER_VAL="$(printf '%s' "$HEADER_VAL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   if ! grep -i -q "^${HEADER_KEY}:.*${HEADER_VAL}" "$HEADERS_FILE"; then
     printf "ERROR: Missing or mismatched header %s in response\n" "$EXPECTED_HEADER" >&2
     printf "Received headers:\n" >&2
@@ -219,7 +364,7 @@ if [[ -n "$EXPECTED_DIGEST" ]]; then
   DIGEST_FOUND=0
 
   # Check identity headers
-  if grep -i -E "^(x-release-digest|x-release-id|x-commit-sha|x-app-digest):.*${EXPECTED_DIGEST}" "$HEADERS_FILE" >/dev/null 2>&1; then
+  if grep -i -E "^(x-release-digest|x-release-id|x-commit-sha|x-app-digest|x-release-commit):.*${EXPECTED_DIGEST}" "$HEADERS_FILE" >/dev/null 2>&1; then
     DIGEST_FOUND=1
   fi
 

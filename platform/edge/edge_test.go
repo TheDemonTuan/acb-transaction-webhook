@@ -321,7 +321,99 @@ func TestComposeSecurityHardeningAndProbeContainers(t *testing.T) {
 	}
 }
 
+func getBashPath(t *testing.T) string {
+	bashPath, err := exec.LookPath("bash")
+	if err == nil {
+		return bashPath
+	}
+	gitBash := `C:\Program Files\Git\bin\bash.exe`
+	if _, errStat := os.Stat(gitBash); errStat == nil {
+		return gitBash
+	}
+	t.Skip("bash executable not found; skipping bash-dependent tests")
+	return ""
+}
+
+func createMockDocker(t *testing.T) (mockDir string, logFile string) {
+	mockDir = t.TempDir()
+	logFile = filepath.Join(mockDir, "docker.log")
+
+	mockScript := filepath.Join(mockDir, "docker")
+	content := `#!/usr/bin/env bash
+set -e
+
+if [[ -n "${MOCK_DOCKER_LOG:-}" ]]; then
+  printf "%s\n" "$*" >> "${MOCK_DOCKER_LOG}"
+fi
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  info)
+    exit 0
+    ;;
+  inspect)
+    if [[ "${MOCK_CONTAINER_RUNNING:-true}" == "true" ]]; then
+      echo "true"
+      exit 0
+    else
+      echo "false"
+      exit 0
+    fi
+    ;;
+  image)
+    sub="${1:-}"
+    shift || true
+    if [[ "$sub" == "inspect" ]]; then
+      if [[ "${MOCK_IMAGE_EXISTS:-true}" == "true" ]]; then
+        echo '{"Id": "curlimages/curl:8.12.1"}'
+        exit 0
+      else
+        echo "Error: No such image" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  run)
+    if [[ "${MOCK_FAIL_DOCKER:-0}" == "1" ]]; then
+      echo "Error from mock docker daemon" >&2
+      exit 1
+    fi
+    status="${MOCK_HTTP_CODE:-200}"
+    slot="${MOCK_SLOT_HEADER:-blue}"
+    commit="${MOCK_COMMIT_HEADER:-sha256-test1234}"
+    role="${MOCK_ROLE_HEADER:-gateway}"
+    body="${MOCK_RESPONSE_BODY:-{\"status\":\"ok\"}}"
+
+    cat <<RESP
+HTTP/1.1 ${status} OK
+Content-Type: application/json
+X-Platform-Slot: ${slot}
+X-Release-Commit: ${commit}
+X-Runtime-Role: ${role}
+Date: Mon, 14 Sep 2026 12:00:00 GMT
+
+${body}
+__STATUS_SENTINEL__:${status}
+RESP
+    exit 0
+    ;;
+  *)
+    echo "Unknown mock docker command: $cmd" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(mockScript, []byte(content), 0755); err != nil {
+		t.Fatalf("failed to write mock docker script: %v", err)
+	}
+
+	return mockDir, logFile
+}
+
 func TestProbeScriptOptionsAndDryRun(t *testing.T) {
+	bashPath := getBashPath(t)
 	edgeDir := getPlatformEdgeDir(t)
 	probeScript := filepath.Join(edgeDir, "probe.sh")
 
@@ -330,29 +422,382 @@ func TestProbeScriptOptionsAndDryRun(t *testing.T) {
 		t.Fatalf("probe.sh missing at %s", probeScript)
 	}
 
-	// Run dry-run verification
-	bashPath, err := exec.LookPath("bash")
-	if err != nil {
-		// Try Git bash on Windows if available
-		gitBash := `C:\Program Files\Git\bin\bash.exe`
-		if _, errStat := os.Stat(gitBash); errStat == nil {
-			bashPath = gitBash
-		} else {
-			t.Skip("bash executable not found; skipping CLI execution test")
-		}
-	}
-
+	// 1. Slot-probe target dry-run
 	cmd := exec.Command(bashPath, probeScript, "--dry-run", "--target", "slot-probe", "--slot", "green", "--expected-digest", "sha-abc1234")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("probe.sh --dry-run failed: %v, output: %s", err, string(out))
 	}
-
 	output := string(out)
 	if !strings.Contains(output, "target=slot-probe") || !strings.Contains(output, "acb-green.internal.invalid") {
 		t.Errorf("probe.sh output missing expected slot-probe target details: %s", output)
 	}
 	if !strings.Contains(output, "sha-abc1234") {
 		t.Errorf("probe.sh output missing expected digest: %s", output)
+	}
+
+	// 2. Production target dry-run with --expected-slot and --expected-commit
+	cmdProd := exec.Command(bashPath, probeScript, "--dry-run", "--target", "production", "--expected-slot", "blue", "--expected-commit", "sha256-prodcommit123")
+	outProd, errProd := cmdProd.CombinedOutput()
+	if errProd != nil {
+		t.Fatalf("probe.sh production --dry-run failed: %v, output: %s", errProd, string(outProd))
+	}
+	outputProd := string(outProd)
+	if !strings.Contains(outputProd, "target=production") || !strings.Contains(outputProd, "container_ns=edge-cloudflared") {
+		t.Errorf("probe.sh production dry-run missing expected container_ns: %s", outputProd)
+	}
+	if !strings.Contains(outputProd, "Expecting slot: blue") || !strings.Contains(outputProd, "Expecting commit: sha256-prodcommit123") {
+		t.Errorf("probe.sh production dry-run missing expected slot or commit: %s", outputProd)
+	}
+
+	// 3. Preflight check-runtime dry-run
+	cmdCheck := exec.Command(bashPath, probeScript, "--check-runtime", "--dry-run", "--target", "production")
+	outCheck, errCheck := cmdCheck.CombinedOutput()
+	if errCheck != nil {
+		t.Fatalf("probe.sh --check-runtime --dry-run failed: %v, output: %s", errCheck, string(outCheck))
+	}
+	if !strings.Contains(string(outCheck), "Preflight runtime check validated") {
+		t.Errorf("probe.sh --check-runtime --dry-run output unexpected: %s", string(outCheck))
+	}
+}
+
+func TestProbeScriptArgumentValidation(t *testing.T) {
+	bashPath := getBashPath(t)
+	edgeDir := getPlatformEdgeDir(t)
+	probeScript := filepath.Join(edgeDir, "probe.sh")
+
+	tests := []struct {
+		name        string
+		args        []string
+		wantContain string
+	}{
+		{"empty expected-slot", []string{"--dry-run", "--expected-slot", ""}, "--expected-slot must not be empty or 'unknown'"},
+		{"unknown expected-slot", []string{"--dry-run", "--expected-slot", "unknown"}, "--expected-slot must not be empty or 'unknown'"},
+		{"empty expected-commit", []string{"--dry-run", "--expected-commit", ""}, "--expected-commit must not be empty or 'unknown'"},
+		{"unknown expected-commit", []string{"--dry-run", "--expected-commit", "unknown"}, "--expected-commit must not be empty or 'unknown'"},
+		{"invalid target", []string{"--dry-run", "--target", "staging"}, "Invalid target: staging"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmdArgs := append([]string{probeScript}, tc.args...)
+			cmd := exec.Command(bashPath, cmdArgs...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected error for %s, but command succeeded: %s", tc.name, string(out))
+			}
+			if !strings.Contains(string(out), tc.wantContain) {
+				t.Errorf("%s output missing expected string %q, got: %s", tc.name, tc.wantContain, string(out))
+			}
+		})
+	}
+}
+
+func TestProbeScriptPreflightCheckRuntime(t *testing.T) {
+	bashPath := getBashPath(t)
+	edgeDir := getPlatformEdgeDir(t)
+	probeScript := filepath.Join(edgeDir, "probe.sh")
+	mockDir, logFile := createMockDocker(t)
+
+	// Subtest 1: Check runtime passes when container is running and image exists
+	t.Run("runtime check pass", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--check-runtime", "--target", "production")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_DOCKER_LOG="+logFile,
+			"MOCK_CONTAINER_RUNNING=true",
+			"MOCK_IMAGE_EXISTS=true",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("check-runtime failed: %v, output: %s", err, string(out))
+		}
+		if !strings.Contains(string(out), "Runtime check passed") || !strings.Contains(string(out), "edge-cloudflared") {
+			t.Errorf("unexpected output from check-runtime: %s", string(out))
+		}
+	})
+
+	// Subtest 2: Check runtime fails when container is not running
+	t.Run("runtime check container not running", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--check-runtime", "--target", "production")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_DOCKER_LOG="+logFile,
+			"MOCK_CONTAINER_RUNNING=false",
+			"MOCK_IMAGE_EXISTS=true",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error when container not running, but command succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Target namespace container 'edge-cloudflared' is not running") {
+			t.Errorf("output missing expected container not running message: %s", string(out))
+		}
+	})
+
+	// Subtest 3: Check runtime fails when image is missing
+	t.Run("runtime check helper image missing", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--check-runtime", "--target", "production")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_DOCKER_LOG="+logFile,
+			"MOCK_CONTAINER_RUNNING=true",
+			"MOCK_IMAGE_EXISTS=false",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error when image missing, but command succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Helper image 'curlimages/curl:8.12.1' not found locally") ||
+			!strings.Contains(string(out), "docker pull curlimages/curl:8.12.1") {
+			t.Errorf("output missing expected image missing instruction: %s", string(out))
+		}
+	})
+}
+
+func TestProbeScriptMockedDocker(t *testing.T) {
+	bashPath := getBashPath(t)
+	edgeDir := getPlatformEdgeDir(t)
+	probeScript := filepath.Join(edgeDir, "probe.sh")
+	mockDir, logFile := createMockDocker(t)
+
+	// 1. Slot-probe target routing and security flags verification
+	t.Run("slot-probe success and docker args", func(t *testing.T) {
+		_ = os.Remove(logFile)
+		cmd := exec.Command(bashPath, probeScript, "--target", "slot-probe", "--slot", "blue", "--expected-slot", "blue", "--expected-commit", "sha256-test1234")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_DOCKER_LOG="+logFile,
+			"MOCK_SLOT_HEADER=blue",
+			"MOCK_COMMIT_HEADER=sha256-test1234",
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("probe.sh slot-probe failed: %v, output: %s", err, string(out))
+		}
+		output := string(out)
+		if !strings.Contains(output, "Verified route identity slot: blue") {
+			t.Errorf("output missing verified slot: %s", output)
+		}
+		if !strings.Contains(output, "Verified route identity commit: sha256-test1234") {
+			t.Errorf("output missing verified commit: %s", output)
+		}
+		if !strings.Contains(output, "Probe SUCCESS") {
+			t.Errorf("output missing success message: %s", output)
+		}
+
+		// Read mock docker log and verify docker run arguments
+		logBytes, err := os.ReadFile(logFile)
+		if err != nil {
+			t.Fatalf("failed to read mock docker log: %v", err)
+		}
+		logContent := string(logBytes)
+
+		// Verify security arguments
+		for _, arg := range []string{"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges"} {
+			if !strings.Contains(logContent, arg) {
+				t.Errorf("docker run missing required security arg %s; log: %s", arg, logContent)
+			}
+		}
+
+		// Verify network namespace
+		if !strings.Contains(logContent, "--network container:edge-traefik") {
+			t.Errorf("docker run missing container:edge-traefik network; log: %s", logContent)
+		}
+
+		// Verify pinned image
+		if !strings.Contains(logContent, "curlimages/curl:8.12.1") {
+			t.Errorf("docker run missing pinned curl image; log: %s", logContent)
+		}
+
+		// Verify curl argument is NOT duplicated (curlimages/curl already has ENTRYPOINT ["curl"])
+		if strings.Contains(logContent, "curlimages/curl:8.12.1 curl") {
+			t.Errorf("docker run supplied duplicate 'curl' argument after image; log: %s", logContent)
+		}
+		if !strings.Contains(logContent, "curlimages/curl:8.12.1 -sS") {
+			t.Errorf("docker run missing direct curl options after image; log: %s", logContent)
+		}
+
+		// Verify target URL and host header
+		if !strings.Contains(logContent, "Host: acb-blue.internal.invalid") {
+			t.Errorf("docker run missing expected slot Host header; log: %s", logContent)
+		}
+		if !strings.Contains(logContent, "http://127.0.0.1:18080/readyz") {
+			t.Errorf("docker run missing expected slot destination URL; log: %s", logContent)
+		}
+	})
+
+	// 2. Production target routing
+	t.Run("production target acb routing", func(t *testing.T) {
+		_ = os.Remove(logFile)
+		cmd := exec.Command(bashPath, probeScript, "--target", "production", "--expected-slot", "green", "--expected-commit", "sha256-prod999")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_DOCKER_LOG="+logFile,
+			"MOCK_SLOT_HEADER=green",
+			"MOCK_COMMIT_HEADER=sha256-prod999",
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("probe.sh production failed: %v, output: %s", err, string(out))
+		}
+
+		logBytes, err := os.ReadFile(logFile)
+		if err != nil {
+			t.Fatalf("failed to read mock docker log: %v", err)
+		}
+		logContent := string(logBytes)
+
+		if !strings.Contains(logContent, "--network container:edge-cloudflared") {
+			t.Errorf("production probe missing container:edge-cloudflared network; log: %s", logContent)
+		}
+		if !strings.Contains(logContent, "http://172.31.250.4:8080/readyz") {
+			t.Errorf("production probe missing 172.31.250.4:8080/readyz URL; log: %s", logContent)
+		}
+		if !strings.Contains(logContent, "Host: bank.tuannguyenviet.site") {
+			t.Errorf("production probe missing bank.tuannguyenviet.site Host; log: %s", logContent)
+		}
+	})
+
+	// 3. Production bark routing
+	t.Run("production target bark routing", func(t *testing.T) {
+		_ = os.Remove(logFile)
+		cmd := exec.Command(bashPath, probeScript, "--target", "production", "--service", "bark")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_DOCKER_LOG="+logFile,
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("probe.sh bark failed: %v, output: %s", err, string(out))
+		}
+
+		logBytes, err := os.ReadFile(logFile)
+		if err != nil {
+			t.Fatalf("failed to read mock docker log: %v", err)
+		}
+		logContent := string(logBytes)
+
+		if !strings.Contains(logContent, "Host: bark.tuannguyenviet.site") {
+			t.Errorf("bark probe missing bark.tuannguyenviet.site Host; log: %s", logContent)
+		}
+		if !strings.Contains(logContent, "http://172.31.250.4:8080/ping") {
+			t.Errorf("bark probe missing /ping URL; log: %s", logContent)
+		}
+	})
+
+	// 4. Slot mismatch failure
+	t.Run("slot mismatch rejected", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--target", "slot-probe", "--expected-slot", "blue", "--expected-commit", "sha256-test1234")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_SLOT_HEADER=green", // mismatch
+			"MOCK_COMMIT_HEADER=sha256-test1234",
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error on slot mismatch, but probe succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Route identity ACK slot mismatch: expected 'blue', got 'green'") {
+			t.Errorf("output missing expected slot mismatch error: %s", string(out))
+		}
+	})
+
+	// 5. Commit mismatch failure
+	t.Run("commit mismatch rejected", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--target", "slot-probe", "--expected-slot", "blue", "--expected-commit", "sha256-expected123")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_SLOT_HEADER=blue",
+			"MOCK_COMMIT_HEADER=sha256-other456", // mismatch
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error on commit mismatch, but probe succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Route identity ACK commit mismatch: expected 'sha256-expected123', got 'sha256-other456'") {
+			t.Errorf("output missing expected commit mismatch error: %s", string(out))
+		}
+	})
+
+	// 6. Unknown or missing slot header rejected
+	t.Run("unknown slot header rejected", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--target", "slot-probe", "--expected-slot", "blue")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_SLOT_HEADER=unknown",
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error on unknown slot header, but probe succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Route identity ACK missing or unknown X-Platform-Slot header in response") {
+			t.Errorf("output missing unknown slot header error: %s", string(out))
+		}
+	})
+
+	// 7. Unknown or missing commit header rejected
+	t.Run("unknown commit header rejected", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--target", "slot-probe", "--expected-commit", "sha256-test1234")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_COMMIT_HEADER=unknown",
+			"MOCK_HTTP_CODE=200",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error on unknown commit header, but probe succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Route identity ACK missing or unknown X-Release-Commit header in response") {
+			t.Errorf("output missing unknown commit header error: %s", string(out))
+		}
+	})
+
+	// 8. Non-200 HTTP code rejected
+	t.Run("non-200 HTTP response rejected", func(t *testing.T) {
+		cmd := exec.Command(bashPath, probeScript, "--target", "slot-probe", "--expected-slot", "blue", "--expected-commit", "sha256-test1234")
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockDir+string(filepath.ListSeparator)+os.Getenv("PATH"),
+			"MOCK_SLOT_HEADER=blue",
+			"MOCK_COMMIT_HEADER=sha256-test1234",
+			"MOCK_HTTP_CODE=502",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected error on HTTP 502, but probe succeeded: %s", string(out))
+		}
+		if !strings.Contains(string(out), "Status mismatch: got 502, expected 200") {
+			t.Errorf("output missing status mismatch error: %s", string(out))
+		}
+	})
+}
+
+func TestProbeScriptDockerIntegration(t *testing.T) {
+	bashPath := getBashPath(t)
+	edgeDir := getPlatformEdgeDir(t)
+	probeScript := filepath.Join(edgeDir, "probe.sh")
+
+	dockerPath, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("docker binary not found; skipping live Docker integration test")
+	}
+	checkCmd := exec.Command(dockerPath, "info")
+	if err := checkCmd.Run(); err != nil {
+		t.Skip("docker daemon not running or not accessible; skipping live Docker integration test")
+	}
+
+	cmd := exec.Command(bashPath, probeScript, "--check-runtime", "--dry-run")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe.sh --check-runtime --dry-run failed: %v, output: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "Preflight runtime check validated") {
+		t.Errorf("unexpected output from check-runtime dry-run: %s", string(out))
 	}
 }

@@ -18,6 +18,7 @@ services:
       DATABASE_PATH: /data/gateway.db
       TZ: Asia/Ho_Chi_Minh
       WORKER_RPC_ADDR: 0.0.0.0:8190
+      WORKER_REALTIME_ADDR: 0.0.0.0:8191
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       POLL_MIN_INTERVAL_SEC: ${POLL_MIN_INTERVAL_SEC:-3}
@@ -31,6 +32,7 @@ services:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
     expose:
       - "8190"
+      - "8191"
     networks:
       acb-core:
         aliases:
@@ -145,7 +147,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -174,12 +176,10 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "/bark-entrypoint.sh"]
-    command: ["bark-server"]
+    command: ["--addr", "0.0.0.0:8080", "--data", "/data"]
     environment:
       TZ: Asia/Ho_Chi_Minh
       BARK_KEY: ""
-      BARK_SERVER_ADDRESS: 0.0.0.0:8080
-      BARK_SERVER_DATA_DIR: /data
       BARK_SERVER_REDUCE_MEMORY_USAGE: "true"
     expose:
       - "8080"
@@ -244,6 +244,8 @@ services:
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_REALTIME_URL: http://acb-worker:8191
+      WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
@@ -323,6 +325,8 @@ services:
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_REALTIME_URL: http://acb-worker:8191
+      WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
@@ -432,26 +436,11 @@ networks:
 secrets:
   app_master_key:
     file: ./secrets/app_master_key
-    uid: "1000"
-    gid: "1000"
-    mode: 0400
   tts_internal_token:
     file: ./secrets/tts_internal_token
-    uid: "1000"
-    gid: "1000"
-    mode: 0400
   worker_internal_token:
     file: ./secrets/worker_internal_token
-    uid: "1000"
-    gid: "1000"
-    mode: 0400
   bark_basic_auth_user:
     file: ./secrets/bark_basic_auth_user
-    uid: "1000"
-    gid: "1000"
-    mode: 0400
   bark_basic_auth_password:
     file: ./secrets/bark_basic_auth_password
-    uid: "1000"
-    gid: "1000"
-    mode: 0400

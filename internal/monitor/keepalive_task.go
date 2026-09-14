@@ -81,8 +81,8 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 		t.finishDone(clientErr)
 		return scheduler.TaskStepResult{Done: true, Error: clientErr, Outcome: scheduler.OutcomeFatal}, clientErr
 	}
-	if t.m.sessions != nil {
-		if err := t.m.sessions.Restore(ctx, conn.ID, conn.Generation); err != nil {
+	if s := t.m.SessionLoader(); s != nil {
+		if err := s.Restore(ctx, conn.ID, conn.Generation); err != nil {
 			restoreErr := fmt.Errorf("restore ACB session: %w", err)
 			t.finishDone(restoreErr)
 			return scheduler.TaskStepResult{Done: true, Error: restoreErr, Outcome: scheduler.OutcomeAuth}, restoreErr
@@ -136,8 +136,8 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
 	}
 
-	if t.m.sessions != nil {
-		_ = t.m.sessions.Persist(ctx, conn.ID, conn.Generation)
+	if s := t.m.SessionLoader(); s != nil {
+		_ = s.Persist(ctx, conn.ID, conn.Generation)
 	}
 
 	poll.Status = "SUCCEEDED"

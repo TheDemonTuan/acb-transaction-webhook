@@ -165,19 +165,19 @@ type catchUpStepTask struct {
 	id           string
 	stepSequence *[]string
 	seqMu        *sync.Mutex
-	done         bool
+	done         atomic.Bool
 }
 
-func (c *catchUpStepTask) ID() string                    { return c.id }
-func (c *catchUpStepTask) Kind() string                  { return "CATCHUP" }
+func (c *catchUpStepTask) ID() string                           { return c.id }
+func (c *catchUpStepTask) Kind() string                         { return "CATCHUP" }
 func (c *catchUpStepTask) Priority() scheduler.UpstreamPriority { return scheduler.PriorityCatchUp }
-func (c *catchUpStepTask) Generation() int64             { return 1 }
+func (c *catchUpStepTask) Generation() int64                    { return 1 }
 
 func (c *catchUpStepTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	c.seqMu.Lock()
 	*c.stepSequence = append(*c.stepSequence, c.id)
 	c.seqMu.Unlock()
-	c.done = true
+	c.done.Store(true)
 	return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 }
 
@@ -237,7 +237,7 @@ func TestSchedulerInterleave31DayHistoryAndRealtime(t *testing.T) {
 	// Poll until rt1 and cu1 have executed
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if rt1.executed.Load() && cu1.done {
+		if rt1.executed.Load() && cu1.done.Load() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -248,6 +248,7 @@ func TestSchedulerInterleave31DayHistoryAndRealtime(t *testing.T) {
 	}
 
 	// Wait for history to finish all 31 days (31 * 3 = 93 pages)
+	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		history.mu.Lock()
 		done := history.completed
@@ -257,6 +258,8 @@ func TestSchedulerInterleave31DayHistoryAndRealtime(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+
+	_ = sched.Stop()
 
 	history.mu.Lock()
 	defer history.mu.Unlock()

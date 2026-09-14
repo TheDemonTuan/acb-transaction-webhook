@@ -336,6 +336,7 @@ done
 assert_pass "Service 'dbtool' strictly isolated from edge, core, and egress networks"
 
 # gateway slots and bark join edge-acb, acb-core, acb-egress
+# Gateway requires acb-egress to fetch Cloudflare Access JWKS certs for user JWT authentication
 for svc in gateway-blue gateway-green bark; do
   svc_block="${SVC_BLOCKS[$svc]:-}"
   if echo "$svc_block" | grep -E '^[[:space:]]+edge-acb:' >/dev/null 2>&1 && \

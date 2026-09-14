@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-alpine3.23
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -6,18 +6,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install curl for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Upgrade the base image security baseline before installing dependencies.
+RUN apk upgrade --no-cache
 
 # Copy dependencies
 COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
 
 # Create unprivileged user
-RUN groupadd -g 1000 appgroup && \
-    useradd -u 1000 -g appgroup -s /bin/sh appuser
+RUN addgroup -g 1000 -S appgroup && \
+    adduser -u 1000 -S -G appgroup appuser
 
 COPY app ./app
 
@@ -27,6 +25,6 @@ USER appuser
 EXPOSE 8081
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD curl -f http://127.0.0.1:8081/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2)"
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8081"]

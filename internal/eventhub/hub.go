@@ -15,7 +15,7 @@ type Event struct {
 }
 
 type Hub struct {
-	mu          sync.RWMutex
+	mu          sync.Mutex
 	subscribers map[uint64]chan Event
 	nextID      uint64
 	dropped     atomic.Uint64
@@ -37,27 +37,33 @@ func (h *Hub) Subscribe() (uint64, <-chan Event, func()) {
 	ch := make(chan Event, 128)
 	h.subscribers[id] = ch
 
+	var once sync.Once
 	cancel := func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if c, ok := h.subscribers[id]; ok {
-			delete(h.subscribers, id)
-			close(c)
-		}
+		once.Do(func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if c, ok := h.subscribers[id]; ok {
+				delete(h.subscribers, id)
+				close(c)
+			}
+		})
 	}
 
 	return id, ch, cancel
 }
 
-// Publish broadcasts an event to all subscribers without blocking.
+// Publish broadcasts an event without blocking publishers. A subscriber that
+// cannot keep up is disconnected so it can recover from its durable cursor.
 func (h *Hub) Publish(e Event) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
-	for _, ch := range h.subscribers {
+	for id, ch := range h.subscribers {
 		select {
 		case ch <- e:
 		default:
+			delete(h.subscribers, id)
+			close(ch)
 			h.dropped.Add(1)
 		}
 	}
@@ -69,7 +75,7 @@ func (h *Hub) DroppedNotifications() uint64 {
 
 // SubscriberCount returns current active subscriber count.
 func (h *Hub) SubscriberCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return len(h.subscribers)
 }

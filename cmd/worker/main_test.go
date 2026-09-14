@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 func TestWorkerRoleValidation_Subprocess(t *testing.T) {
@@ -112,4 +118,181 @@ func TestWorkerQuiesceDrainFlags(t *testing.T) {
 			t.Errorf("expected quiesce response in stdout, got %s", stdout.String())
 		}
 	})
+
+	t.Run("worker -quiesce sends POST /rpc/quiesce with WORKER_INTERNAL_TOKEN_FILE", func(t *testing.T) {
+		tokenFile := filepath.Join(t.TempDir(), "worker_token")
+		if err := os.WriteFile(tokenFile, []byte("file-token-secret-456\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command("go", "run", ".", "-quiesce")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=",
+			"WORKER_INTERNAL_TOKEN_FILE="+tokenFile,
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("worker -quiesce failed: %v, stderr: %s", err, stderr.String())
+		}
+		if receivedPath != "/rpc/quiesce" {
+			t.Errorf("expected path /rpc/quiesce, got %s", receivedPath)
+		}
+		if receivedToken != "file-token-secret-456" {
+			t.Errorf("expected token file-token-secret-456, got %s", receivedToken)
+		}
+	})
+
+	t.Run("worker -resume sends POST /rpc/resume with WORKER_INTERNAL_TOKEN_FILE", func(t *testing.T) {
+		tokenFile := filepath.Join(t.TempDir(), "worker_token")
+		if err := os.WriteFile(tokenFile, []byte("resume-token-secret-789\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command("go", "run", ".", "-resume")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=",
+			"WORKER_INTERNAL_TOKEN_FILE="+tokenFile,
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("worker -resume failed: %v, stderr: %s", err, stderr.String())
+		}
+		if receivedPath != "/rpc/resume" {
+			t.Errorf("expected path /rpc/resume, got %s", receivedPath)
+		}
+		if receivedToken != "resume-token-secret-789" {
+			t.Errorf("expected token resume-token-secret-789, got %s", receivedToken)
+		}
+	})
+
+	t.Run("worker -quiesce fails when WORKER_INTERNAL_TOKEN_FILE is missing", func(t *testing.T) {
+		cmd := exec.Command("go", "run", ".", "-quiesce")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=",
+			"WORKER_INTERNAL_TOKEN_FILE=/nonexistent/token/file",
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			t.Fatal("expected error with nonexistent token file, got nil")
+		}
+		if !strings.Contains(stderr.String(), "failed to read worker internal token") {
+			t.Fatalf("expected stderr to mention failed to read worker internal token, got %q", stderr.String())
+		}
+	})
+}
+
+type mockWaker struct {
+	wakeCount int
+}
+
+func (m *mockWaker) Wake() {
+	m.wakeCount++
+}
+
+func TestWorkerPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "worker_poll_test.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+
+	waker := &mockWaker{}
+	hub := eventhub.New()
+	_, published, cancelPublished := hub.Subscribe()
+	defer cancelPublished()
+	notifier := newWorkerPollNotifier(store, waker, hub, nil)
+
+	// Poll 1: Initial SUCCEEDED with 0 items (status changed "" -> "SUCCEEDED")
+	poll1 := storage.PollRun{
+		ID:        "poll_001",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Add(-5 * time.Second).Format(time.RFC3339Nano),
+		RowsSeen:  0,
+	}
+	notifier(poll1, 0)
+	select {
+	case event := <-published:
+		if event.EventType != "poll.completed" || event.AggregateID != poll1.ID || event.Seq <= 0 {
+			t.Fatalf("unexpected published poll event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected poll.completed to be published to realtime hub")
+	}
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected waker count 1 after initial poll, got %d", waker.wakeCount)
+	}
+
+	// Poll 2: Repeat SUCCEEDED with 0 items (status unchanged, 0 inserted) -> no wake
+	poll2 := storage.PollRun{
+		ID:        "poll_002",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Add(-2 * time.Second).Format(time.RFC3339Nano),
+		RowsSeen:  0,
+	}
+	notifier(poll2, 0)
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected waker count still 1 after repeat empty poll, got %d", waker.wakeCount)
+	}
+
+	// Poll 3: Another repeat SUCCEEDED with 0 items -> no wake
+	poll3 := storage.PollRun{
+		ID:        "poll_003",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		RowsSeen:  0,
+	}
+	notifier(poll3, 0)
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected waker count still 1 after third empty poll, got %d", waker.wakeCount)
+	}
+
+	// Poll 4: SUCCEEDED with items inserted -> should wake
+	poll4 := storage.PollRun{
+		ID:        "poll_004",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		RowsSeen:  2,
+	}
+	notifier(poll4, 2)
+
+	if waker.wakeCount != 2 {
+		t.Fatalf("expected waker count 2 after poll with items, got %d", waker.wakeCount)
+	}
+
+	// Verify all 4 poll.completed events were appended to journal
+	events, err := store.ReadJournalEvents(ctx, "ep1", 0, 10)
+	if err != nil {
+		t.Fatalf("ReadJournalEvents: %v", err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("expected 4 journal events, got %d", len(events))
+	}
+	for i, expectedID := range []string{"poll_001", "poll_002", "poll_003", "poll_004"} {
+		if events[i].EventType != "poll.completed" {
+			t.Errorf("event %d: expected event type 'poll.completed', got %q", i, events[i].EventType)
+		}
+		if events[i].AggregateID != expectedID {
+			t.Errorf("event %d: expected aggregateID %q, got %q", i, expectedID, events[i].AggregateID)
+		}
+	}
 }

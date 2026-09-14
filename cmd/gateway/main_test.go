@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -227,5 +228,67 @@ func TestTwoGatewaysNoSingletonMaintenance(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].AggregateID != "old_agg_1" {
 		t.Fatalf("expected old journal event to remain untouched by gateways, got %v", events)
+	}
+}
+
+func TestGatewayPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "gateway_poll_test.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+
+	hub := eventhub.New()
+	_, ch, cancel := hub.Subscribe()
+	defer cancel()
+
+	notifier := newGatewayPollNotifier(store, hub, nil)
+
+	// Fire repeated SUCCEEDED polls with 0 items
+	for i := 1; i <= 3; i++ {
+		poll := storage.PollRun{
+			ID:        fmt.Sprintf("gw_poll_%03d", i),
+			Status:    "SUCCEEDED",
+			StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			RowsSeen:  0,
+		}
+		notifier(poll, 0)
+	}
+
+	// Verify journal has all 3 poll.completed events
+	events, err := store.ReadJournalEvents(ctx, "ep1", 0, 10)
+	if err != nil {
+		t.Fatalf("ReadJournalEvents: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 journal events in store, got %d", len(events))
+	}
+	for i, expectedID := range []string{"gw_poll_001", "gw_poll_002", "gw_poll_003"} {
+		if events[i].EventType != "poll.completed" {
+			t.Errorf("event %d: expected event type 'poll.completed', got %q", i, events[i].EventType)
+		}
+		if events[i].AggregateID != expectedID {
+			t.Errorf("event %d: expected aggregateID %q, got %q", i, expectedID, events[i].AggregateID)
+		}
+	}
+
+	// Verify hub received all 3 events
+	for i := 1; i <= 3; i++ {
+		select {
+		case ev := <-ch:
+			expectedID := fmt.Sprintf("gw_poll_%03d", i)
+			if ev.EventType != "poll.completed" {
+				t.Errorf("hub event %d: expected 'poll.completed', got %q", i, ev.EventType)
+			}
+			if ev.AggregateID != expectedID {
+				t.Errorf("hub event %d: expected aggregateID %q, got %q", i, expectedID, ev.AggregateID)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for hub event %d", i)
+		}
 	}
 }

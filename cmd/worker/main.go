@@ -22,10 +22,12 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
@@ -176,6 +178,14 @@ func (w *workerService) TestNotificationChannel(ctx context.Context, channelID s
 		EndpointRevision: ch.Revision,
 	})
 	if err != nil {
+		if ch.Provider == "BARK" && errors.Is(err, storage.ErrBarkDecryptionFailed) {
+			return workerrpc.TestNotificationResponse{
+				Success:           false,
+				Status:            "FAILED",
+				ProviderErrorCode: storage.ErrCodeBarkKeyDecryptionFailed,
+				SanitizedError:    storage.ErrMsgBarkKeyDecryptionFailed,
+			}, nil
+		}
 		return workerrpc.TestNotificationResponse{
 			Success:        false,
 			Status:         "FAILED",
@@ -346,12 +356,52 @@ func (w *workerService) Resume(ctx context.Context) error {
 	return nil
 }
 
+func newWorkerPollNotifier(store *storage.Store, waker interface{ Wake() }, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var pollStatusMu sync.Mutex
+	var lastPollStatus string
+	return func(p storage.PollRun, insertedCount int) {
+		pollStatusMu.Lock()
+		statusChanged := p.Status != lastPollStatus
+		lastPollStatus = p.Status
+		pollStatusMu.Unlock()
+		if waker != nil && (insertedCount > 0 || statusChanged) {
+			waker.Wake()
+		}
+		payload, err := storage.PollCompletedPayload(p, insertedCount)
+		if err != nil {
+			logger.Error("failed to build poll.completed payload", "error", err)
+			return
+		}
+		appendCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer aCancel()
+		seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
+		if err != nil {
+			logger.Error("failed to append poll.completed journal event", "error", err)
+			return
+		}
+		if hub != nil {
+			hub.Publish(eventhub.Event{
+				Seq:         seq,
+				Epoch:       "ep1",
+				EventType:   "poll.completed",
+				AggregateID: p.ID,
+				Payload:     payload,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+}
+
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "verify worker health via HTTP (readiness first, then liveness)")
 	livenessCheck := flag.Bool("liveness-check", false, "verify worker liveness via HTTP /healthz")
 	readinessCheck := flag.Bool("readiness-check", false, "verify worker readiness via HTTP /readyz")
 	quiesceCheck := flag.Bool("quiesce", false, "quiesce running worker via HTTP POST /rpc/quiesce")
 	drainCheck := flag.Bool("drain", false, "drain running worker via HTTP POST /rpc/drain")
+	resumeCheck := flag.Bool("resume", false, "resume quiesced worker via HTTP POST /rpc/resume")
 	flag.Parse()
 
 	rpcAddr := os.Getenv("WORKER_RPC_ADDR")
@@ -363,7 +413,7 @@ func main() {
 		rpcAddr = "0.0.0.0:" + rpcPort
 	}
 
-	if *quiesceCheck || *drainCheck {
+	if *quiesceCheck || *drainCheck || *resumeCheck {
 		client := &http.Client{Timeout: 30 * time.Second}
 		_, port, err := net.SplitHostPort(rpcAddr)
 		if err != nil {
@@ -372,6 +422,8 @@ func main() {
 		path := "/rpc/quiesce"
 		if *drainCheck {
 			path = "/rpc/drain"
+		} else if *resumeCheck {
+			path = "/rpc/resume"
 		}
 		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s%s", port, path), bytes.NewReader([]byte("{}")))
 		if err != nil {
@@ -379,7 +431,11 @@ func main() {
 			os.Exit(1)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		token := os.Getenv("WORKER_INTERNAL_TOKEN")
+		token, err := config.ReadSecret("WORKER_INTERNAL_TOKEN", "WORKER_INTERNAL_TOKEN_FILE")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to read worker internal token: %v\n", err)
+			os.Exit(1)
+		}
 		if token == "" {
 			secretsDir := os.Getenv("SECRETS_DIR")
 			if secretsDir == "" {
@@ -548,31 +604,22 @@ func main() {
 		logger.Error("create ACB client failed", "error", err)
 		os.Exit(1)
 	}
+	workerRealtimeHub := eventhub.New()
 	bankMonitor := monitor.New(store, acbClient, cfg.PollMinInterval, cfg.PollMaxInterval)
 	bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
+		for _, event := range events {
+			workerRealtimeHub.Publish(eventhub.Event{
+				Seq:         event.JournalSeq,
+				Epoch:       event.Epoch,
+				EventType:   event.EventType,
+				AggregateID: event.TransactionID,
+				Payload:     event.Payload,
+				CreatedAt:   event.CreatedAt,
+			})
+		}
 		dispatcher.Wake()
 	})
-	var pollStatusMu sync.Mutex
-	var lastPollStatus string
-	bankMonitor.WithPollNotifier(func(p storage.PollRun, insertedCount int) {
-		pollStatusMu.Lock()
-		statusChanged := p.Status != lastPollStatus
-		lastPollStatus = p.Status
-		pollStatusMu.Unlock()
-		if insertedCount > 0 || statusChanged {
-			dispatcher.Wake()
-		}
-		if insertedCount == 0 && !statusChanged && p.Status == "SUCCEEDED" {
-			return
-		}
-		payload, err := storage.PollCompletedPayload(p, insertedCount)
-		if err != nil {
-			return
-		}
-		appendCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
-		aCancel()
-	})
+	bankMonitor.WithPollNotifier(newWorkerPollNotifier(store, dispatcher, workerRealtimeHub, logger))
 
 	var sessionLoader *monitor.SessionLoader
 	var verifierClient *acb.Client
@@ -730,11 +777,31 @@ func main() {
 		WriteTimeout:      40 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	realtimeAddr := os.Getenv("WORKER_REALTIME_ADDR")
+	if realtimeAddr == "" {
+		realtimeAddr = "0.0.0.0:8191"
+	}
+	realtimeServer := &http.Server{
+		Addr: realtimeAddr,
+		Handler: realtimestream.NewServer(realtimestream.ServerConfig{
+			Hub:            workerRealtimeHub,
+			Token:          cfg.WorkerInternalToken,
+			MaxSubscribers: 8,
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	go func() {
 		logger.Info("worker private RPC server listening", "addr", rpcAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("worker RPC server failed", "error", err)
+		}
+	}()
+	go func() {
+		logger.Info("worker realtime stream listening", "addr", realtimeAddr)
+		if err := realtimeServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("worker realtime server failed", "error", err)
 		}
 	}()
 
@@ -761,13 +828,14 @@ func main() {
 	_ = coordinator.Stop(shutdownCtx)
 	sCancel()
 
-	// Stop RPC server
+	// Stop producers before closing the internal streams.
+	workerCancel()
+
+	// Stop internal servers.
 	rpcShutdownCtx, rpcCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = realtimeServer.Shutdown(rpcShutdownCtx)
 	_ = httpServer.Shutdown(rpcShutdownCtx)
 	rpcCancel()
-
-	// Cancel background workers
-	workerCancel()
 
 	// Synchronize background worker goroutines shutdown before releasing singleton lock
 	workerWaitCh := make(chan struct{})

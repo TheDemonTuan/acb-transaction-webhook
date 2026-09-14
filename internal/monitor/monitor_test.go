@@ -704,10 +704,8 @@ func TestRequestSyncConcurrentNormalPoll(t *testing.T) {
 		t.Fatal("RequestSync blocked unexpectedly during active normal poll")
 	}
 
-	// Start Run to consume the queued sync once normal poll releases
-	go m.Run(ctx)
-
-	// Release normal poll
+	// Wait until normal poll is finished before starting Run to process the queued sync,
+	// preventing concurrent write lock contention on SQLite.
 	close(releaseNormalPoll)
 
 	select {
@@ -715,9 +713,12 @@ func TestRequestSyncConcurrentNormalPoll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("normal poll failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for normal poll to finish")
 	}
+
+	// Start Run to consume the queued sync once normal poll finishes
+	go m.Run(ctx)
 
 	// Wait for the queued sync poll to also execute
 	deadline := time.Now().Add(2 * time.Second)
@@ -730,5 +731,126 @@ func TestRequestSyncConcurrentNormalPoll(t *testing.T) {
 
 	if callCount.Load() < 2 {
 		t.Fatalf("expected at least 2 total calls (normal + queued sync), got %d", callCount.Load())
+	}
+}
+
+func TestMonitorSuccessResetResetSuccessPreservesSessionVsTrueLogin(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	connection, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING'`)
+
+	ep, err := store.CreateEndpointWithSecret(ctx, "Webhook Receiver", "https://example.com/receiver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEndpointStatus(ctx, ep.ID, "ACTIVE"); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &mockBankClient{}
+	m := New(store, mock, 5*time.Second, 5*time.Second)
+
+	historyWithDseErrorPage := "ibkacctDetailProc dse_processorState AccountNbr Số GD Ghi nợ Ghi có\n" + mockHistoryHTML
+	successKind := acb.ClassifyPage("https://online.acb.com.vn/acbib/Request?dse_errorPage=login.jsp", historyWithDseErrorPage)
+	if successKind != acb.HistoryPage {
+		t.Fatalf("expected HistoryPage classification, got %s", successKind)
+	}
+
+	// 1. First poll: success (authenticated with dse_errorPage=login.jsp in URL)
+	mock.getResp = acb.Response{
+		StatusCode: 200,
+		Kind:       successKind,
+		Body:       historyWithDseErrorPage,
+	}
+	mock.getErr = nil
+	if err := m.PollOnce(ctx); err != nil {
+		t.Fatalf("poll 1 (success) failed: %v", err)
+	}
+	conn, err := store.Connection(ctx)
+	if err != nil || conn.State != "MONITORING" || conn.Generation != connection.Generation {
+		t.Fatalf("poll 1: expected state MONITORING with gen %d, got state=%s gen=%d", connection.Generation, conn.State, conn.Generation)
+	}
+
+	// 2. Second poll: connection reset 1
+	mock.getErr = errors.New("read: connection reset by peer")
+	if err := m.PollOnce(ctx); err == nil {
+		t.Fatal("poll 2 (reset 1): expected network error")
+	}
+	conn, err = store.Connection(ctx)
+	if err != nil || conn.State != "MONITORING" || conn.Generation != connection.Generation {
+		t.Fatalf("poll 2: transient reset changed session state: state=%s gen=%d", conn.State, conn.Generation)
+	}
+
+	// 3. Third poll: connection reset 2
+	mock.getErr = errors.New("read: connection reset by peer")
+	if err := m.PollOnce(ctx); err == nil {
+		t.Fatal("poll 3 (reset 2): expected network error")
+	}
+	conn, err = store.Connection(ctx)
+	if err != nil || conn.State != "MONITORING" || conn.Generation != connection.Generation {
+		t.Fatalf("poll 3: transient reset changed session state: state=%s gen=%d", conn.State, conn.Generation)
+	}
+
+	// 4. Fourth poll: success again, verifying session preserved across resets
+	mock.getErr = nil
+	mock.getResp = acb.Response{
+		StatusCode: 200,
+		Kind:       successKind,
+		Body:       historyWithDseErrorPage,
+	}
+	if err := m.PollOnce(ctx); err != nil {
+		t.Fatalf("poll 4 (success) failed: %v", err)
+	}
+	conn, err = store.Connection(ctx)
+	if err != nil || conn.State != "MONITORING" || conn.Generation != connection.Generation {
+		t.Fatalf("poll 4: session was not preserved across resets: state=%s gen=%d", conn.State, conn.Generation)
+	}
+
+	// 5. Fifth poll: true login fixture -> transitions connection to AUTH_REQUIRED
+	trueLoginKind := acb.ClassifyPage("https://online.acb.com.vn/acbib/Request", `<input name="username"><input type="password" name="password">`)
+	if trueLoginKind != acb.LoginPage {
+		t.Fatalf("expected LoginPage classification, got %s", trueLoginKind)
+	}
+	mock.getResp = acb.Response{
+		StatusCode: 200,
+		Kind:       trueLoginKind,
+		Body:       `<input name="username"><input type="password" name="password">`,
+	}
+	if err := m.PollOnce(ctx); err != nil {
+		t.Fatalf("poll 5 (true login) failed: %v", err)
+	}
+	conn, err = store.Connection(ctx)
+	if err != nil || conn.State != "AUTH_REQUIRED" {
+		t.Fatalf("poll 5: expected state AUTH_REQUIRED on true login, got %+v", conn)
+	}
+
+	runs, err := store.ListPollRuns(ctx, 10)
+	if err != nil || len(runs) != 5 {
+		t.Fatalf("expected 5 poll runs, got %d (err: %v)", len(runs), err)
+	}
+	// ListPollRuns returns descending by timestamp: runs[0] is newest (run 5)
+	if runs[0].Status != "AUTH_REQUIRED" {
+		t.Fatalf("expected run 5 status AUTH_REQUIRED, got %s", runs[0].Status)
+	}
+	if runs[1].Status != "SUCCEEDED" {
+		t.Fatalf("expected run 4 status SUCCEEDED, got %s", runs[1].Status)
+	}
+	if runs[2].Status != "FAILED" {
+		t.Fatalf("expected run 3 status FAILED, got %s", runs[2].Status)
+	}
+	if runs[3].Status != "FAILED" {
+		t.Fatalf("expected run 2 status FAILED, got %s", runs[3].Status)
+	}
+	if runs[4].Status != "SUCCEEDED" {
+		t.Fatalf("expected run 1 status SUCCEEDED, got %s", runs[4].Status)
 	}
 }

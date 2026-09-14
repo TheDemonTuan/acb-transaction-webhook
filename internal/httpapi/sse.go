@@ -73,6 +73,15 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 			writeSSEError(rc, w, flusher, "storage_error")
 			return
 		}
+		maxSeq, err := s.store.GetMaxJournalSeq(ctx, realtimeEpoch)
+		if err != nil {
+			writeSSEError(rc, w, flusher, "storage_error")
+			return
+		}
+		if afterSeq > maxSeq {
+			writeReset(rc, w, flusher, "invalid_cursor")
+			return
+		}
 		if minSeq > 0 && afterSeq < minSeq-1 {
 			writeReset(rc, w, flusher, "retention_expired")
 			return
@@ -114,17 +123,26 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !s.drainJournal(ctx, rc, w, flusher, &watermark) {
-				return
+			if hint.Epoch != realtimeEpoch || hint.Seq <= watermark {
+				continue
 			}
-			if hint.Seq > watermark {
-				start := time.Now()
-				if err := writeSSE(rc, w, flusher, fmt.Sprintf("%s:%d", hint.Epoch, hint.Seq), hint.EventType, string(hint.Payload)); err != nil {
+			if hint.Seq > watermark+1 {
+				if !s.drainJournal(ctx, rc, w, flusher, &watermark) {
 					return
 				}
-				telemetry.Default.RecordSSE(time.Since(start))
-				watermark = hint.Seq
+				if hint.Seq <= watermark {
+					continue
+				}
+				if hint.Seq != watermark+1 {
+					return
+				}
 			}
+			start := time.Now()
+			if err := writeJournalEntry(rc, w, flusher, hint.Epoch, hint.Seq, hint.EventType, hint.Payload); err != nil {
+				return
+			}
+			telemetry.Default.RecordSSE(time.Since(start))
+			watermark = hint.Seq
 		}
 	}
 }
@@ -153,14 +171,17 @@ func writeJournalEntry(rc *http.ResponseController, w http.ResponseWriter, flush
 	data := string(payload)
 	if eventType == "bank.transaction.credit" {
 		var raw map[string]any
-		if err := json.Unmarshal(payload, &raw); err == nil {
-			delete(raw, "balance")
-			delete(raw, "accountNumber")
-			delete(raw, "sessionToken")
-			if safe, err := json.Marshal(raw); err == nil {
-				data = string(safe)
-			}
+		if err := json.Unmarshal(payload, &raw); err != nil {
+			return fmt.Errorf("sanitize credit event: %w", err)
 		}
+		delete(raw, "balance")
+		delete(raw, "accountNumber")
+		delete(raw, "sessionToken")
+		safe, err := json.Marshal(raw)
+		if err != nil {
+			return fmt.Errorf("sanitize credit event: %w", err)
+		}
+		data = string(safe)
 	}
 	return writeSSE(rc, w, flusher, fmt.Sprintf("%s:%d", epoch, seq), eventType, data)
 }

@@ -37,9 +37,9 @@ func NewRealtimeTask(m *Monitor, priority UpstreamPriority, connectionID string,
 	}
 }
 
-func (t *RealtimeTask) ID() string                { return t.id }
+func (t *RealtimeTask) ID() string                 { return t.id }
 func (t *RealtimeTask) Priority() UpstreamPriority { return t.priority }
-func (t *RealtimeTask) Generation() int64         { return t.generation }
+func (t *RealtimeTask) Generation() int64          { return t.generation }
 
 func (t *RealtimeTask) Kind() string {
 	if t.priority == PriorityManualSync {
@@ -103,8 +103,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		t.finishDone(clientErr)
 		return scheduler.TaskStepResult{Done: true, Error: clientErr, Outcome: scheduler.OutcomeFatal}, clientErr
 	}
-	if t.m.sessions != nil {
-		if err := t.m.sessions.Restore(ctx, conn.ID, conn.Generation); err != nil {
+	if s := t.m.SessionLoader(); s != nil {
+		if err := s.Restore(ctx, conn.ID, conn.Generation); err != nil {
 			restoreErr := fmt.Errorf("restore ACB session: %w", err)
 			t.finishDone(restoreErr)
 			return scheduler.TaskStepResult{Done: true, Error: restoreErr, Outcome: scheduler.OutcomeAuth}, restoreErr
@@ -249,10 +249,62 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return scheduler.TaskStepResult{Done: true, Error: parseErr, Outcome: scheduler.OutcomeFatal}, parseErr
 	}
 
-	allTxns := pageResult.Transactions
 	pagesCount := 1
+	rowsSeen := len(pageResult.Transactions)
+	totalInserted := 0
 	var pollErr error
 	isPartial := false
+
+	ingestAndNotify := func(txns []acb.Transaction) (int, error) {
+		batchItems := make([]storage.BatchTransactionItem, len(txns))
+		for i, txn := range txns {
+			batchItems[i] = storage.BatchTransactionItem{
+				Number:        txn.Number,
+				Credit:        txn.Credit,
+				Debit:         txn.Debit,
+				Balance:       txn.Balance,
+				TransactionAt: txn.TransactionAt,
+				EffectiveAt:   txn.EffectiveDate,
+				Description:   txn.Description,
+			}
+		}
+
+		startIngest := time.Now()
+		batchRes, err := t.m.store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, conn.AccountMasked, batchItems, false)
+		telemetry.Default.RecordIngest(time.Since(startIngest))
+		telemetry.Default.SetLastACBPollAt(time.Now())
+		if err != nil {
+			return 0, err
+		}
+		t.m.notifyNewEvents(batchRes.NewEvents)
+		return batchRes.InsertedCount, nil
+	}
+
+	failIngest := func(err error) (scheduler.TaskStepResult, error) {
+		if errors.Is(err, storage.ErrGenerationFenceMismatch) {
+			slog.Warn("ingest rejected by generation fence", "error", err)
+		} else {
+			slog.Error("batch ingest failed", "error", err)
+		}
+		poll.RowsSeen = rowsSeen
+		poll.Pages = pagesCount
+		poll.Status = "FAILED"
+		if totalInserted > 0 {
+			poll.Status = "PARTIAL"
+			t.m.ScheduleCatchUp()
+		}
+		poll.Error = err.Error()
+		_ = t.m.finishPoll(ctx, poll, totalInserted)
+		t.m.notifyPollWaiters(err)
+		t.finishDone(err)
+		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+	}
+
+	inserted, err := ingestAndNotify(pageResult.Transactions)
+	if err != nil {
+		return failIngest(err)
+	}
+	totalInserted += inserted
 
 	// If page has next, fetch up to 5 pages for realtime poll
 	if pageResult.HasNext {
@@ -283,7 +335,13 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 					pollErr = err
 					break
 				}
-				allTxns = append(allTxns, nextPage.Transactions...)
+				rowsSeen += len(nextPage.Transactions)
+				nextInserted, nextIngestErr := ingestAndNotify(nextPage.Transactions)
+				if nextIngestErr != nil {
+					return failIngest(nextIngestErr)
+				}
+				totalInserted += nextInserted
+
 				if !nextPage.HasNext {
 					break
 				}
@@ -305,46 +363,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		}
 	}
 
-	poll.RowsSeen = len(allTxns)
+	poll.RowsSeen = rowsSeen
 	poll.Pages = pagesCount
 	slog.Info("ACB history parsed", "rows_seen", poll.RowsSeen, "pages", poll.Pages, "partial", isPartial)
-
-	// Ingest transactions and emit credit events atomically in a single batch transaction
-	batchItems := make([]storage.BatchTransactionItem, len(allTxns))
-	for i, txn := range allTxns {
-		batchItems[i] = storage.BatchTransactionItem{
-			Number:        txn.Number,
-			Credit:        txn.Credit,
-			Debit:         txn.Debit,
-			Balance:       txn.Balance,
-			TransactionAt: txn.TransactionAt,
-			EffectiveAt:   txn.EffectiveDate,
-			Description:   txn.Description,
-		}
-	}
-
-	startIngest := time.Now()
-	batchRes, err := t.m.store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, conn.AccountMasked, batchItems, false)
-	telemetry.Default.RecordIngest(time.Since(startIngest))
-	telemetry.Default.SetLastACBPollAt(time.Now())
-	if err != nil {
-		if errors.Is(err, storage.ErrGenerationFenceMismatch) {
-			slog.Warn("ingest rejected by generation fence", "error", err)
-			poll.Status = "FAILED"
-			poll.Error = err.Error()
-			_ = t.m.finishPoll(ctx, poll, 0)
-			t.m.notifyPollWaiters(err)
-			t.finishDone(err)
-			return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
-		}
-		slog.Error("batch ingest failed", "error", err)
-		poll.Status = "FAILED"
-		poll.Error = err.Error()
-		_ = t.m.finishPoll(ctx, poll, 0)
-		t.m.notifyPollWaiters(err)
-		t.finishDone(err)
-		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
-	}
 
 	if isPartial {
 		poll.Status = "PARTIAL"
@@ -358,17 +379,14 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		poll.Status = "SUCCEEDED"
 	}
 	t.m.ClearBackoff()
-	if err := t.m.finishPoll(ctx, poll, batchRes.InsertedCount); err != nil {
+	if err := t.m.finishPoll(ctx, poll, totalInserted); err != nil {
 		t.m.notifyPollWaiters(err)
 		t.finishDone(err)
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 	}
 
-	if len(batchRes.NewEvents) > 0 && t.m.onNewEvents != nil {
-		t.m.onNewEvents(batchRes.NewEvents)
-	}
-	if t.m.sessions != nil {
-		if err := t.m.sessions.Persist(ctx, conn.ID, conn.Generation); err != nil {
+	if s := t.m.SessionLoader(); s != nil {
+		if err := s.Persist(ctx, conn.ID, conn.Generation); err != nil {
 			slog.Warn("could not persist refreshed ACB session", "error", err)
 		}
 	}

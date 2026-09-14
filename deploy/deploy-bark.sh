@@ -59,7 +59,10 @@ start_bark() {
   fi
   if command -v docker >/dev/null 2>&1; then
     stop_bark
-    BARK_IMAGE_REF="$img" docker compose -f "$SCRIPT_DIR/compose.prod.yaml" up -d --no-deps bark
+    # The upstream image runs as UID 0 and writes only to the dedicated Bark volume;
+    # pre-create its database path without granting host-wide capabilities.
+    docker run --rm --network none --entrypoint /bin/sh -v "${BARK_VOLUME_NAME}:/data:rw" "$img" -c 'touch /data/bark.db && chmod 0600 /data/bark.db'
+    BARK_IMAGE_REF="$img" compose_prod up -d --no-deps bark
   fi
 }
 
@@ -82,13 +85,14 @@ wait_for_bark_ready() {
       for c in acb-bark bark; do
         if docker ps --format '{{.Names}}' | grep -q "^${c}\$"; then
           local st
-          st="$(docker inspect --format '{{.State.Health.Status}}' "$c" 2>/dev/null || echo "")"
+          st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c" 2>/dev/null || echo "")"
           if [[ "$st" == "healthy" ]]; then
             return 0
           fi
-          if docker exec "$c" wget -q --spider http://127.0.0.1:8080/ping >/dev/null 2>&1 || \
-             docker exec "$c" /bin/sh -c "nc -z 127.0.0.1 8080" >/dev/null 2>&1; then
-            return 0
+          if [[ "$st" == "unhealthy" ]] || [[ "$(docker inspect --format '{{.State.Status}}' "$c" 2>/dev/null || true)" == "exited" ]]; then
+            docker inspect --format 'Bark state={{json .State}}' "$c" >&2 || true
+            docker logs --tail 100 "$c" >&2 || true
+            return 1
           fi
         fi
       done

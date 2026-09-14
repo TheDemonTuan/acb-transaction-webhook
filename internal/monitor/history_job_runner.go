@@ -26,6 +26,7 @@ type HistoryJobRunner struct {
 	client         ACBHistoryClient
 	scheduler      *scheduler.Scheduler
 	sessions       *SessionLoader
+	configMu       sync.RWMutex
 	monitor        *Monitor
 	wakeCh         chan struct{}
 	staleThreshold time.Duration
@@ -53,24 +54,62 @@ func NewHistoryJobRunner(store *storage.Store, client ACBHistoryClient, sched *s
 
 // WithMonitor sets the associated monitor for backoff/circuit-breaker awareness.
 func (r *HistoryJobRunner) WithMonitor(m *Monitor) *HistoryJobRunner {
-	r.monitor = m
+	if r != nil {
+		r.configMu.Lock()
+		r.monitor = m
+		r.configMu.Unlock()
+	}
 	return r
+}
+
+// Monitor returns the associated monitor instance.
+func (r *HistoryJobRunner) Monitor() *Monitor {
+	if r == nil {
+		return nil
+	}
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.monitor
 }
 
 // WithStaleThreshold sets the heartbeat staleness threshold for crashed job recovery.
 func (r *HistoryJobRunner) WithStaleThreshold(d time.Duration) *HistoryJobRunner {
-	if d > 0 {
+	if r != nil && d > 0 {
+		r.configMu.Lock()
 		r.staleThreshold = d
+		r.configMu.Unlock()
 	}
 	return r
 }
 
+// StaleThreshold returns the configured heartbeat staleness threshold.
+func (r *HistoryJobRunner) StaleThreshold() time.Duration {
+	if r == nil {
+		return 60 * time.Second
+	}
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.staleThreshold
+}
+
 // WithPollInterval sets the background poll interval for queued jobs.
 func (r *HistoryJobRunner) WithPollInterval(d time.Duration) *HistoryJobRunner {
-	if d > 0 {
+	if r != nil && d > 0 {
+		r.configMu.Lock()
 		r.pollInterval = d
+		r.configMu.Unlock()
 	}
 	return r
+}
+
+// PollInterval returns the configured poll interval.
+func (r *HistoryJobRunner) PollInterval() time.Duration {
+	if r == nil {
+		return 5 * time.Second
+	}
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.pollInterval
 }
 
 // Pause halts the processing of new or claimed history sync jobs.
@@ -102,7 +141,7 @@ func (r *HistoryJobRunner) RecoverStaleJobs(ctx context.Context) (int, error) {
 	if r.store == nil {
 		return 0, errors.New("store not configured")
 	}
-	staleBefore := time.Now().Add(-r.staleThreshold)
+	staleBefore := time.Now().Add(-r.StaleThreshold())
 	count, err := r.store.RequeueStaleHistorySyncJobs(ctx, staleBefore)
 	if err != nil {
 		r.logger.Error("failed to recover stale history jobs", "error", err)
@@ -135,7 +174,7 @@ func (r *HistoryJobRunner) Run(ctx context.Context) {
 	// Startup recovery pass: recover any crashed/stale RUNNING jobs
 	_, _ = r.RecoverStaleJobs(ctx)
 
-	ticker := time.NewTicker(r.pollInterval)
+	ticker := time.NewTicker(r.PollInterval())
 	defer ticker.Stop()
 
 	for {
@@ -185,7 +224,7 @@ func (r *HistoryJobRunner) ProcessNextJob(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	if r.monitor != nil && r.monitor.IsBackoffActive() {
+	if mon := r.Monitor(); mon != nil && mon.IsBackoffActive() {
 		return false, nil
 	}
 
@@ -386,8 +425,8 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 	}
 
 	// 4. Circuit breaker / backoff check
-	if t.runner.monitor != nil && t.runner.monitor.IsBackoffActive() {
-		backoffUntil := t.runner.monitor.BackoffUntil()
+	if mon := t.runner.Monitor(); mon != nil && mon.IsBackoffActive() {
+		backoffUntil := mon.BackoffUntil()
 		return scheduler.TaskStepResult{
 			Done:      false,
 			RequeueAt: backoffUntil,
@@ -474,8 +513,8 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			return scheduler.TaskStepResult{Done: true, Error: authErr, Outcome: scheduler.OutcomeAuth}, authErr
 		}
 		if resp.Kind == acb.MaintenancePage || resp.StatusCode == 429 {
-			if t.runner.monitor != nil {
-				t.runner.monitor.SetBackoff(60 * time.Second)
+			if mon := t.runner.Monitor(); mon != nil {
+				mon.SetBackoff(60 * time.Second)
 			}
 			maintErr := errors.New("ACB maintenance or rate limit active")
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -522,8 +561,8 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		return scheduler.TaskStepResult{Done: true, Error: authErr, Outcome: scheduler.OutcomeAuth}, authErr
 	}
 	if histResp.Kind == acb.MaintenancePage || histResp.StatusCode == 429 {
-		if t.runner.monitor != nil {
-			t.runner.monitor.SetBackoff(60 * time.Second)
+		if mon := t.runner.Monitor(); mon != nil {
+			mon.SetBackoff(60 * time.Second)
 		}
 		maintErr := errors.New("ACB maintenance or rate limit active during history fetch")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

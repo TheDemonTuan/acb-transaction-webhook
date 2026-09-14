@@ -415,6 +415,14 @@ else
   source "$verified_env"
   rm -f "$verified_env"
 
+  for promotion_var in PROMOTION_GATEWAY PROMOTION_WORKER PROMOTION_SCHEMA PROMOTION_AUTH_BROWSER PROMOTION_TTS PROMOTION_BARK PROMOTION_PLATFORM PROMOTION_DOC_ONLY; do
+    promotion_value="${!promotion_var:-}"
+    [[ "$promotion_value" == "true" || "$promotion_value" == "false" ]] || {
+      log_error "Invalid verified promotion flag [$promotion_var=$promotion_value]."
+      exit 1
+    }
+  done
+
   IMAGE_GATEWAY="${IMAGE_GATEWAY:-${IMAGE_GATEWAY:-}}"
   IMAGE_WORKER="${IMAGE_WORKER:-${IMAGE_WORKER:-}}"
   IMAGE_DBTOOL="${IMAGE_DBTOOL:-${IMAGE_DBTOOL:-}}"
@@ -422,6 +430,16 @@ else
   IMAGE_TTS_GATEWAY="${IMAGE_TTS_GATEWAY:-${IMAGE_TTS_GATEWAY:-}}"
   IMAGE_BARK="${IMAGE_BARK:-${IMAGE_BARK:-}}"
 fi
+
+# Compose validates the entire production model even for `up --no-deps <service>`.
+# Export every verified immutable image before any component transaction runs.
+export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
+export WORKER_IMAGE_REF="$IMAGE_WORKER"
+export BROWSER_IMAGE_REF="$IMAGE_AUTH_BROWSER"
+export TTS_IMAGE_REF="$IMAGE_TTS_GATEWAY"
+export BARK_IMAGE_REF="$IMAGE_BARK"
+export IMAGE_REF_BLUE="$IMAGE_GATEWAY"
+export IMAGE_REF_GREEN="$IMAGE_GATEWAY"
 
 # Validate caller-requested scope against manifest authorization
 if [[ -n "$REQUESTED_SCOPE" ]]; then
@@ -579,6 +597,7 @@ if [[ "${PROMOTION_SCHEMA:-false}" == "true" ]]; then
   update_rollout_step "schema" "RUNNING"
   [[ -n "$IMAGE_DBTOOL" ]] || { log_error "DBTOOL image digest is required for schema promotion."; exit 1; }
   validate_digest "$IMAGE_DBTOOL" "dbtool"
+  export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
   bash "$DEPLOY_DIR/deploy-schema.sh" "$IMAGE_DBTOOL"
   update_rollout_step "schema" "STEP_COMPLETED"
   promoted_list+=("schema")

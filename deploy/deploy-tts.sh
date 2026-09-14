@@ -50,7 +50,7 @@ start_tts() {
   fi
   if command -v docker >/dev/null 2>&1; then
     stop_tts
-    TTS_IMAGE_REF="$img" docker compose -f "$SCRIPT_DIR/compose.prod.yaml" up -d --no-deps tts-gateway
+    TTS_IMAGE_REF="$img" compose_prod up -d --no-deps tts-gateway
   fi
 }
 

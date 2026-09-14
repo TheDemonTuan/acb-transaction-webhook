@@ -158,13 +158,106 @@ EOF
 #!/usr/bin/env bash
 set -eu
 cmd="${1:-}"
-if [[ "$cmd" == "exec" ]]; then
+if [[ "$cmd" == "info" || "$cmd" == "network" || "$cmd" == "image" || "$cmd" == "exec" ]]; then
   exit 0
 fi
-printf 'running\n'
+if [[ "$cmd" == "inspect" ]]; then
+  args="$*"
+  if [[ "$args" == *"edge-traefik"* ]]; then
+    if [[ "${MOCK_TRAEFIK_MOUNT_MISMATCH:-0}" == "1" ]]; then
+      printf '/mismatched/nonexistent/dynamic\n'
+      exit 0
+    fi
+    printf '%s\n' "${TRAEFIK_DYNAMIC_DIR:-$MOCK_STATE_DIR/dynamic}"
+    exit 0
+  fi
+  if [[ "$args" == *"edge-cloudflared"* ]]; then
+    printf 'true\n'
+    exit 0
+  fi
+  printf 'running\n'
+  exit 0
+fi
 exit 0
 EOF
   chmod +x "$test_dir/bin/docker"
+
+  # Mock edge-probe.sh CLI
+  cat <<'EOF' > "$test_dir/edge-probe.sh"
+#!/usr/bin/env bash
+set -eu
+target="production"
+expected_slot=""
+expected_commit=""
+check_runtime=0
+expected_status=200
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) target="$2"; shift 2 ;;
+    --expected-slot) expected_slot="$2"; shift 2 ;;
+    --expected-commit) expected_commit="$2"; shift 2 ;;
+    --expected-status) expected_status="$2"; shift 2 ;;
+    --check-runtime) check_runtime=1; shift ;;
+    *) shift ;;
+  esac
+done
+
+if [[ "$check_runtime" -eq 1 ]]; then
+  if [[ "${MOCK_PROBE_RUNTIME_FAIL:-0}" == "1" ]]; then
+    printf "Runtime check failed\n" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "${MOCK_ACK_TIMEOUT:-0}" == "1" ]]; then
+  printf "Mock probe timeout\n" >&2
+  exit 1
+fi
+
+active_slot="blue"
+if [[ -f "${ACB_CONFIG:-}" ]]; then
+  if grep -q "acb-web-green" "$ACB_CONFIG" 2>/dev/null; then
+    active_slot="green"
+  fi
+fi
+
+if [[ "${MOCK_ACK_WRONG_SLOT:-0}" == "1" ]]; then
+  active_slot="wrong-slot-xyz"
+fi
+
+slot_commit="${EXPECTED_COMMIT:-commit-12345}"
+if [[ "${MOCK_ACK_WRONG_COMMIT:-0}" == "1" ]]; then
+  slot_commit="wrong-commit-abc"
+fi
+
+if [[ "${MOCK_ACK_LEGACY:-0}" == "1" ]]; then
+  if [[ -n "$expected_slot" || -n "$expected_commit" ]]; then
+    printf "ERROR: Route identity ACK missing or unknown X-Platform-Slot header in response\n" >&2
+    exit 1
+  fi
+  printf "HTTP Status: 200 (expected: 200)\n"
+  exit 0
+fi
+
+if [[ -n "$expected_slot" && "$expected_slot" != "$active_slot" ]]; then
+  printf "ERROR: Route identity ACK slot mismatch: expected '%s', got '%s'\n" "$expected_slot" "$active_slot" >&2
+  exit 1
+fi
+
+if [[ -n "$expected_commit" && "$expected_commit" != "$slot_commit" ]]; then
+  printf "ERROR: Route identity ACK commit mismatch: expected '%s', got '%s'\n" "$expected_commit" "$slot_commit" >&2
+  exit 1
+fi
+
+printf "HTTP Status: 200 (expected: 200)\n"
+printf "Verified route identity slot: %s\n" "$active_slot"
+printf "Verified route identity commit: %s\n" "$slot_commit"
+exit 0
+EOF
+  chmod +x "$test_dir/edge-probe.sh"
+  export EDGE_PROBE_SCRIPT="$test_dir/edge-probe.sh"
 
   export PATH="$test_dir/bin:$PATH"
 }
@@ -261,6 +354,58 @@ printf 'blue' > "$T5/.previous-slot"
 
 assert_eq "blue" "$(cat "$T5/.active-slot")" "Active slot successfully rolled back to blue"
 assert_file_contains "$T5/dynamic/acb.yml" "acb-web-blue" "Active route successfully reverted to acb-web-blue"
+
+# ==============================================================================
+# TEST 6: Traefik dynamic directory mount mismatch is rejected before cutover
+# ==============================================================================
+printf '\n=== TEST 6: Traefik Dynamic Directory Mount Mismatch Rejection ===\n'
+T6="$TEST_TMP/t6"
+setup_traefik_mock_env "$T6"
+export MOCK_TRAEFIK_MOUNT_MISMATCH=1
+
+set +e
+"$DEPLOY_DIR/switch-slot.sh" green
+mismatch_code=$?
+set -e
+
+assert_eq "1" "$(( mismatch_code != 0 ? 1 : 0 ))" "switch-slot.sh failed closed on dynamic mount mismatch"
+assert_eq "blue" "$(cat "$T6/.active-slot")" "Active slot untouched after preflight failure"
+assert_file_contains "$T6/dynamic/acb.yml" "acb-web-blue" "Route configuration untouched after preflight failure"
+
+# ==============================================================================
+# TEST 7: Route identity ACK failure on wrong commit triggers rollback
+# ==============================================================================
+printf '\n=== TEST 7: Route Identity ACK Commit Mismatch Triggers Rollback ===\n'
+T7="$TEST_TMP/t7"
+setup_traefik_mock_env "$T7"
+export MOCK_ACK_WRONG_COMMIT=1
+export EXPECTED_COMMIT="expected-commit-999"
+
+set +e
+"$DEPLOY_DIR/switch-slot.sh" green
+commit_mismatch_code=$?
+set -e
+
+assert_eq "1" "$(( commit_mismatch_code != 0 ? 1 : 0 ))" "switch-slot.sh failed on commit mismatch"
+assert_eq "blue" "$(cat "$T7/.active-slot")" "Active slot reverted to blue after commit mismatch"
+assert_file_contains "$T7/dynamic/acb.yml" "acb-web-blue" "Route reverted back to blue on commit mismatch"
+
+# ==============================================================================
+# TEST 8: Legacy rollback succeeds with availability confirmation
+# ==============================================================================
+printf '\n=== TEST 8: Legacy Rollback Availability Confirmation ===\n'
+T8="$TEST_TMP/t8"
+setup_traefik_mock_env "$T8"
+printf 'green' > "$T8/.active-slot"
+printf 'blue' > "$T8/.previous-slot"
+"$DEPLOY_DIR/render-traefik-route.sh" green "$T8/dynamic/acb.yml"
+export MOCK_ACK_LEGACY=1
+export EXPECTED_COMMIT=""
+
+"$DEPLOY_DIR/rollback-warm.sh"
+
+assert_eq "blue" "$(cat "$T8/.active-slot")" "Legacy slot successfully rolled back to blue"
+assert_file_contains "$T8/dynamic/acb.yml" "acb-web-blue" "Route reverted to blue on legacy rollback"
 
 printf '\n==================================================\n'
 printf 'TRAEFIK SWITCH TEST RESULTS: %d PASSED, %d FAILED\n' "$TESTS_PASSED" "$TESTS_FAILED"

@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/webhook"
@@ -68,6 +68,36 @@ func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
 		migrateOnly:    *migrateOnly,
 		backupTo:       *backupTo,
 	}, nil
+}
+
+func newGatewayPollNotifier(store *storage.Store, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return func(p storage.PollRun, insertedCount int) {
+		payload, err := storage.PollCompletedPayload(p, insertedCount)
+		if err != nil {
+			logger.Error("failed to build poll.completed payload", "error", err)
+			return
+		}
+		appendCtx, appendCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer appendCancel()
+		seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
+		if err != nil {
+			logger.Error("failed to append poll.completed journal event", "error", err)
+			return
+		}
+		if hub != nil {
+			hub.Publish(eventhub.Event{
+				Seq:         seq,
+				Epoch:       "ep1",
+				EventType:   "poll.completed",
+				AggregateID: p.ID,
+				Payload:     payload,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
 }
 
 func main() {
@@ -294,7 +324,23 @@ func main() {
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient)
-		go server.RunJournalWatcher(ctx, 200*time.Millisecond)
+		if cfg.WorkerRealtimeEnabled {
+			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
+			server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
+			go coordinator.Run(ctx)
+			streamClient, streamErr := realtimestream.NewClient(realtimestream.ClientConfig{
+				BaseURL:   cfg.WorkerRealtimeURL,
+				Token:     cfg.WorkerInternalToken,
+				OnConnect: coordinator.RequestReconcile,
+			})
+			if streamErr != nil {
+				logger.Error("create worker realtime client failed", "error", streamErr)
+				os.Exit(1)
+			}
+			go streamClient.Run(ctx, coordinator.Submit)
+		} else {
+			go server.RunJournalWatcher(ctx, 200*time.Millisecond)
+		}
 	} else if cfg.RuntimeRole == config.RuntimeRoleMonolithDev {
 		notificationRegistry := notification.NewRegistry()
 		notificationRegistry.Register(notification.ProviderWebhook, webhook.NewSender(nil, false))
@@ -343,39 +389,7 @@ func main() {
 			}
 			dispatcher.Wake()
 		})
-		var pollStatusMu sync.Mutex
-		var lastPollStatus string
-		bankMonitor.WithPollNotifier(func(p storage.PollRun, insertedCount int) {
-			pollStatusMu.Lock()
-			statusChanged := p.Status != lastPollStatus
-			lastPollStatus = p.Status
-			pollStatusMu.Unlock()
-
-			// Only push to SSE when there are actually new transactions or when poll status changed.
-			// Suppress routine duplicate polls to avoid noisy repetitive SSE events.
-			if insertedCount == 0 && !statusChanged && p.Status == "SUCCEEDED" {
-				return
-			}
-
-			payload, err := storage.PollCompletedPayload(p, insertedCount)
-			if err != nil {
-				return
-			}
-			appendCtx, appendCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
-			appendCancel()
-			if err != nil {
-				return
-			}
-			hub.Publish(eventhub.Event{
-				Seq:         seq,
-				Epoch:       "ep1",
-				EventType:   "poll.completed",
-				AggregateID: p.ID,
-				Payload:     payload,
-				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
-			})
-		})
+		bankMonitor.WithPollNotifier(newGatewayPollNotifier(store, hub, logger))
 		var sessionLoader *monitor.SessionLoader
 		var historyRunner *monitor.HistoryJobRunner
 		if keyring != nil {

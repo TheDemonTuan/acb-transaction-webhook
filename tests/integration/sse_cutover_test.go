@@ -63,14 +63,6 @@ func TestSSECutoverReplay(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Verify Blue identity headers
-	if slot := recBlue.Header().Get("X-Platform-Slot"); slot != "blue" {
-		t.Errorf("expected Blue slot header 'blue', got %q", slot)
-	}
-	if commit := recBlue.Header().Get("X-Release-Commit"); commit != "commit-blue-1111" {
-		t.Errorf("expected Blue commit header 'commit-blue-1111', got %q", commit)
-	}
-
 	// Phase 2: Insert initial events to SQLite journal
 	seq1, err := store.AppendJournalEvent(ctx, "ep1", "bank.transaction.credit", "txn_001", []byte(`{"amount":100000,"id":"txn_001"}`))
 	if err != nil {
@@ -102,6 +94,14 @@ func TestSSECutoverReplay(t *testing.T) {
 	blueCancel()
 	<-blueDone
 
+	// Verify Blue identity headers
+	if slot := recBlue.Header().Get("X-Platform-Slot"); slot != "blue" {
+		t.Errorf("expected Blue slot header 'blue', got %q", slot)
+	}
+	if commit := recBlue.Header().Get("X-Release-Commit"); commit != "commit-blue-1111" {
+		t.Errorf("expected Blue commit header 'commit-blue-1111', got %q", commit)
+	}
+
 	// Phase 3: During cutover, worker appends events 3 and 4 to SQLite while client is disconnected
 	_, err = store.AppendJournalEvent(ctx, "ep1", "bank.transaction.credit", "txn_003", []byte(`{"amount":300000,"id":"txn_003"}`))
 	if err != nil {
@@ -126,14 +126,6 @@ func TestSSECutoverReplay(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Verify Green identity headers
-	if slot := recGreen.Header().Get("X-Platform-Slot"); slot != "green" {
-		t.Errorf("expected Green slot header 'green', got %q", slot)
-	}
-	if commit := recGreen.Header().Get("X-Release-Commit"); commit != "commit-green-2222" {
-		t.Errorf("expected Green commit header 'commit-green-2222', got %q", commit)
-	}
-
 	// Publish live event 5 on Green
 	seq5, err := store.AppendJournalEvent(ctx, "ep1", "bank.transaction.credit", "txn_005", []byte(`{"amount":500000,"id":"txn_005"}`))
 	if err != nil {
@@ -150,6 +142,14 @@ func TestSSECutoverReplay(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	greenCancel()
 	<-greenDone
+
+	// Verify Green identity headers
+	if slot := recGreen.Header().Get("X-Platform-Slot"); slot != "green" {
+		t.Errorf("expected Green slot header 'green', got %q", slot)
+	}
+	if commit := recGreen.Header().Get("X-Release-Commit"); commit != "commit-green-2222" {
+		t.Errorf("expected Green commit header 'commit-green-2222', got %q", commit)
+	}
 
 	// Phase 5: Assert replay on Green received txn_003, txn_004, txn_005 without duplicates
 	greenBody := recGreen.Body.String()

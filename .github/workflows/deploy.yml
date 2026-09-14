@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -69,7 +69,7 @@ jobs:
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
-          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh deploy/tests/*.sh)
+          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh deploy/tests/*.sh platform/edge/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts found" >&2
             exit 1
@@ -80,7 +80,7 @@ jobs:
       - name: Lint deployment and platform scripts
         run: |
           shopt -s nullglob
-          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh)
+          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh platform/edge/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts found" >&2
             exit 1
@@ -103,7 +103,7 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -146,7 +146,7 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -189,7 +189,7 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -232,7 +232,7 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -279,7 +279,7 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -329,7 +329,7 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Cosign
         id: cosign_installer
         uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
@@ -513,7 +513,7 @@ jobs:
 
       - name: Upload security artifacts
         if: always()
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-artifacts
           path: |
@@ -617,7 +617,7 @@ jobs:
             deploy/release-manifest.json
 
       - name: Upload release manifest artifacts
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-manifest
           path: |
@@ -632,9 +632,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download release manifest
-        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-manifest
           path: deploy/
@@ -663,8 +663,26 @@ jobs:
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            platform/edge/probe.sh "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/edge-probe.sh"
+          cosign_version="v2.4.3"
+          target_arch="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" 'uname -m')"
+          case "$target_arch" in
+            x86_64|amd64) cosign_asset="cosign-linux-amd64" ;;
+            aarch64|arm64) cosign_asset="cosign-linux-arm64" ;;
+            *) printf 'Unsupported VPS architecture for Cosign: %s\n' "$target_arch" >&2; exit 1 ;;
+          esac
+          cosign_bin="$RUNNER_TEMP/$cosign_asset"
+          cosign_checksums="$RUNNER_TEMP/cosign_checksums.txt"
+          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
+            --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/${cosign_asset}"
+          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
+            --output "$cosign_checksums" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign_checksums.txt"
+          grep "  ${cosign_asset}$" "$cosign_checksums" | (cd "$RUNNER_TEMP" && sha256sum --check -)
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$cosign_bin" "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/cosign.next"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
+            "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; install -m 0755 '$DEPLOY_PATH/deploy/cosign.next' '$DEPLOY_PATH/deploy/cosign'; rm -f '$DEPLOY_PATH/deploy/cosign.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
       - name: Deploy immutable image
         timeout-minutes: 20
         env:
@@ -688,11 +706,18 @@ jobs:
           env_file="$DEPLOY_PATH/deploy/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
           chmod 600 "$env_file"
+          [[ -d "$DEPLOY_PATH/deploy/secrets" ]] || { printf 'Missing production secrets directory.\n' >&2; exit 1; }
+          chmod 700 "$DEPLOY_PATH/deploy/secrets"
+          find "$DEPLOY_PATH/deploy/secrets" -maxdepth 1 -type f -exec chmod 600 {} +
+          # Local Compose bind-mounts secrets without applying Swarm uid/mode metadata.
+          # Bark runs as the upstream image user, so grant only its two scoped files read access.
+          chmod 0644 "$DEPLOY_PATH/deploy/secrets/bark_basic_auth_user" "$DEPLOY_PATH/deploy/secrets/bark_basic_auth_password"
           staged_compose="$DEPLOY_PATH/deploy/compose.prod.yaml.next"
           [[ -f "$staged_compose" ]] || { printf 'Missing staged compose file: %s\n' "$staged_compose" >&2; exit 1; }
 
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
+          export PATH="$DEPLOY_PATH/deploy:$PATH"
 
           # Dispatch rollout orchestration using trusted minimal dispatcher
           bash "$DEPLOY_PATH/deploy/dispatch-rollout.sh" \
@@ -708,4 +733,4 @@ jobs:
 
           cp -f "$staged_compose" "$DEPLOY_PATH/deploy/compose.prod.yaml"
           rm -f "$staged_compose"
-REMOTE
+          REMOTE

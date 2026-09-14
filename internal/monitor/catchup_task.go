@@ -143,8 +143,8 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 
 	// Check if entire catch-up range is completed
 	if t.currentDay.After(toT) {
-		if t.m.sessions != nil {
-			_ = t.m.sessions.Persist(ctx, conn.ID, conn.Generation)
+		if s := t.m.SessionLoader(); s != nil {
+			_ = s.Persist(ctx, conn.ID, conn.Generation)
 		}
 		slog.Info("catch-up task completed successfully", "from", t.fromDate, "to", t.toDate)
 		t.finishDone(nil)
@@ -155,8 +155,8 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 
 	// If starting a fresh day, bootstrap if needed to get form tokens
 	if t.dayPageCount == 0 && t.currentResp.Body == "" {
-		if t.m.sessions != nil {
-			if err := t.m.sessions.Restore(ctx, conn.ID, conn.Generation); err != nil {
+		if s := t.m.SessionLoader(); s != nil {
+			if err := s.Restore(ctx, conn.ID, conn.Generation); err != nil {
 				return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeAuth}, err
 			}
 		}
@@ -278,9 +278,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			Error:     ingestErr,
 		}, nil
 	}
-	if t.m.onNewEvents != nil && len(res.NewEvents) > 0 {
-		t.m.onNewEvents(res.NewEvents)
-	}
+	t.m.notifyNewEvents(res.NewEvents)
 	t.dayTxns = append(t.dayTxns, pageItems...)
 
 	if t.cursor == nil {
@@ -332,8 +330,8 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	t.currentDay = t.currentDay.AddDate(0, 0, 1)
 
 	if t.currentDay.After(toT) {
-		if t.m.sessions != nil {
-			_ = t.m.sessions.Persist(ctx, conn.ID, conn.Generation)
+		if s := t.m.SessionLoader(); s != nil {
+			_ = s.Persist(ctx, conn.ID, conn.Generation)
 		}
 		slog.Info("catch-up task finished all days", "from", t.fromDate, "to", t.toDate)
 		t.finishDone(nil)

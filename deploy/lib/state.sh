@@ -5,11 +5,37 @@ set -euo pipefail
 
 TX_JOURNAL_FILE="${TX_JOURNAL_FILE:-$SCRIPT_DIR/data/deploy-journal.json}"
 
+terminate_background_soak() {
+  if [[ -f "${SOAK_STATE_FILE:-}" ]]; then
+    local soak_pid=""
+    if grep -q '^pid=' "$SOAK_STATE_FILE" 2>/dev/null; then
+      soak_pid="$(grep '^pid=' "$SOAK_STATE_FILE" | head -n 1 | cut -d'=' -f2 | tr -d '\r\n')"
+    fi
+    if [[ -n "$soak_pid" && "$soak_pid" =~ ^[0-9]+$ ]]; then
+      if kill -0 "$soak_pid" 2>/dev/null; then
+        log_info "Terminating previous background soak process (PID: $soak_pid)..."
+        kill -TERM "$soak_pid" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$soak_pid" 2>/dev/null; then
+          kill -9 "$soak_pid" 2>/dev/null || true
+        fi
+      fi
+    fi
+    if command -v pkill >/dev/null 2>&1; then
+      pkill -f "run_resumable_soak" 2>/dev/null || true
+    fi
+    rm -f "$SOAK_STATE_FILE" 2>/dev/null || true
+  fi
+}
+
 acquire_deploy_lock() {
   local timeout="${DEPLOY_LOCK_TIMEOUT:-30}"
   if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" || "${SKIP_LOCK:-0}" == "1" ]]; then
     return 0
   fi
+  # Clean up any previous background soak process before acquiring lock
+  terminate_background_soak
+
   local lock_dir
   lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
   if ! mkdir -p "$lock_dir" 2>/dev/null; then
@@ -31,6 +57,9 @@ acquire_deploy_lock() {
 release_deploy_lock() {
   if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" ]]; then
     unset DEPLOY_LOCK_HELD
+    if command -v flock >/dev/null 2>&1; then
+      flock -u 9 2>/dev/null || true
+    fi
     exec 9>&- 2>/dev/null || true
   fi
 }
@@ -318,6 +347,7 @@ candidate=${candidate}
 old_slot=${old_slot}
 start_time=$(date +%s)
 duration=${duration}
+pid=$$
 EOF
 
   log_info "Starting soak observation (${duration}s). Candidate [${candidate}] active, old slot [${old_slot}] running..."

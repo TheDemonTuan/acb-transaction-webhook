@@ -19,8 +19,25 @@ PREVIOUS_SLOT_FILE="${PREVIOUS_SLOT_FILE:-$SCRIPT_DIR/.previous-slot}"
 DEPLOY_STATE_FILE="${DEPLOY_STATE_FILE:-$SCRIPT_DIR/.deploy-state}"
 SOAK_STATE_FILE="${SOAK_STATE_FILE:-$SCRIPT_DIR/.soak-state}"
 DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
-TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/edge/dynamic}"
+if [[ -z "${TRAEFIK_DYNAMIC_DIR:-}" ]]; then
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    _detected_dynamic="$(docker inspect edge-traefik --format '{{range .Mounts}}{{if eq .Destination "/etc/traefik/dynamic"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+    if [[ -n "$_detected_dynamic" ]]; then
+      TRAEFIK_DYNAMIC_DIR="$_detected_dynamic"
+    fi
+  fi
+  TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
+fi
 ACB_CONFIG="${ACB_CONFIG:-$TRAEFIK_DYNAMIC_DIR/acb.yml}"
+
+if [[ -z "${EDGE_PROBE_SCRIPT:-}" ]]; then
+  if [[ -f "$SCRIPT_DIR/edge-probe.sh" ]]; then
+    EDGE_PROBE_SCRIPT="$SCRIPT_DIR/edge-probe.sh"
+  elif [[ -f "$SCRIPT_DIR/../platform/edge/probe.sh" ]]; then
+    EDGE_PROBE_SCRIPT="$SCRIPT_DIR/../platform/edge/probe.sh"
+  fi
+fi
+export TRAEFIK_DYNAMIC_DIR ACB_CONFIG EDGE_PROBE_SCRIPT
 FAILOVER_STATE_DIR="${FAILOVER_STATE_DIR:-/var/lib/vps-failover/apps/acb}"
 DATA_VOLUME_NAME="${DATA_VOLUME_NAME:-bank-event-gateway_gateway_data}"
 BARK_VOLUME_NAME="${BARK_VOLUME_NAME:-bank-event-gateway_bark_data}"
@@ -97,7 +114,14 @@ check_secret_permissions() {
     fi
     if [[ -n "$mode" ]]; then
       local last_two="${mode: -2}"
-      if [[ "$last_two" != "00" ]]; then
+      local base_name
+      base_name="$(basename "$target_path")"
+      if [[ "$base_name" == "bark_basic_auth_user" || "$base_name" == "bark_basic_auth_password" ]]; then
+        if [[ "$mode" != "644" && "$mode" != "600" ]]; then
+          log_error "Bark secret file '$target_path' has unsafe permissions (${mode}); expected 600 or 644 for local Compose bind-mount compatibility."
+          return 1
+        fi
+      elif [[ "$last_two" != "00" ]]; then
         log_error "Secret file '$target_path' has unsafe permissions (${mode}). Secrets must not be group or world readable."
         return 1
       fi

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,13 +43,13 @@ func TestMonitor_UpstreamSchedulerIntegration(t *testing.T) {
 	sched.Start(ctx)
 	defer sched.Stop()
 
-	var executed bool
+	var executed atomic.Bool
 	task := &monitorMockTask{
 		id:       "verify_login",
 		kind:     "INTERACTIVE_VERIFY",
 		priority: PriorityInteractiveVerify,
 		stepFn: func(ctx context.Context) (TaskStepResult, error) {
-			executed = true
+			executed.Store(true)
 			return TaskStepResult{Done: true, Outcome: OutcomeSuccess}, nil
 		},
 	}
@@ -58,7 +59,7 @@ func TestMonitor_UpstreamSchedulerIntegration(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for !executed {
+	for !executed.Load() {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for task execution")
 		}

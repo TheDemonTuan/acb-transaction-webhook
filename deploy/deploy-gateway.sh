@@ -97,13 +97,14 @@ cleanup() {
 
   if [[ "$exit_code" -ne 0 ]]; then
     log_warn "Deployment script exiting with error code ${exit_code}."
-    if ! is_tx_committed; then
+    local cur_tx
+    cur_tx="$(get_tx_state 2>/dev/null || echo "")"
+    if ! is_tx_committed && [[ "$cur_tx" != "TX_ROLLED_BACK" && "$cur_tx" != "TX_ROLLBACK_FAILED" ]]; then
       log_warn "Transaction is NOT committed. Executing automatic recovery and cleanup..."
       # If route was switched, revert it
       if [[ -f "$ACB_CONFIG" ]] && grep -q "acb-web-${CANDIDATE_SLOT}" "$ACB_CONFIG" 2>/dev/null; then
         log_warn "Reverting Traefik route pointer back to [${ACTIVE_SLOT}]..."
-        rollback_route "$ACTIVE_SLOT"
-        ack_route_identity "$ACTIVE_SLOT" "" 15 || true
+        rollback_route "$ACTIVE_SLOT" "" 15 || true
       fi
       # Stop candidate container
       log_warn "Stopping candidate container [acb-gateway-${CANDIDATE_SLOT}]..."
@@ -137,6 +138,9 @@ pull_candidate_image "gateway-${CANDIDATE_SLOT}" "$IMAGE_REF"
 log_info "Starting candidate slot [gateway-${CANDIDATE_SLOT}]..."
 clear_intentional_stop "$CANDIDATE_SLOT"
 export "${CANDIDATE_VAR}=${IMAGE_REF}"
+if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
+  export RELEASE_COMMIT="$EXPECTED_COMMIT"
+fi
 compose_prod up -d "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" up -d "gateway-${CANDIDATE_SLOT}"
 update_tx_state "TX_CANDIDATE_STARTED"
 
@@ -167,11 +171,16 @@ set_deploy_state "ACK_ROUTE"
 if ! ack_route_identity "$CANDIDATE_SLOT" "$EXPECTED_COMMIT" "${ROUTE_ACK_TIMEOUT:-15}"; then
   log_error "Route identity acknowledgment failed for candidate [${CANDIDATE_SLOT}]!"
   log_warn "Executing automatic route rollback to [${ACTIVE_SLOT}]..."
-  rollback_route "$ACTIVE_SLOT"
-  ack_route_identity "$ACTIVE_SLOT" "" 15 || true
-  stop_standby_container "$CANDIDATE_SLOT"
-  set_deploy_state "ROLLED_BACK" "Route identity ACK failed on candidate ${CANDIDATE_SLOT}"
-  update_tx_state "TX_ROLLED_BACK" "Route ACK failed"
+  if rollback_route "$ACTIVE_SLOT" "" 15; then
+    stop_standby_container "$CANDIDATE_SLOT"
+    set_deploy_state "ROLLED_BACK" "Route identity ACK failed on candidate ${CANDIDATE_SLOT}; reverted to ${ACTIVE_SLOT}"
+    update_tx_state "TX_ROLLED_BACK" "Route ACK failed"
+  else
+    log_error "CRITICAL: Route rollback to [${ACTIVE_SLOT}] also failed route identity acknowledgment!"
+    stop_standby_container "$CANDIDATE_SLOT"
+    set_deploy_state "ROLLBACK_FAILED" "Route ACK failed and rollback to ${ACTIVE_SLOT} also failed ACK"
+    update_tx_state "TX_ROLLBACK_FAILED" "Rollback to ${ACTIVE_SLOT} failed ACK"
+  fi
   exit 1
 fi
 update_tx_state "TX_ACK_VERIFIED"
@@ -181,6 +190,9 @@ update_tx_state "TX_COMMITTED"
 printf '%s' "$CANDIDATE_SLOT" > "$ACTIVE_SLOT_FILE"
 printf '%s' "$ACTIVE_SLOT" > "$PREVIOUS_SLOT_FILE"
 set_release_env "$CANDIDATE_VAR" "$IMAGE_REF" 2>/dev/null || true
+if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
+  set_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT" 2>/dev/null || true
+fi
 log_info "Transaction COMMITTED: Live traffic routed to [${CANDIDATE_SLOT}]."
 
 # 7. Audit: Core containers must have exact same IDs
@@ -194,7 +206,8 @@ log_info "Old slot [${ACTIVE_SLOT}] remains running during soak (${SOAK_DURATION
 if [[ "$DETACH_SOAK" -eq 1 || "${SOAK_BACKGROUND:-0}" == "1" ]]; then
   log_info "Detaching soak observation to background process..."
   mkdir -p "$SCRIPT_DIR/data"
-  nohup bash -c "source '${SCRIPT_DIR}/lib.sh' && run_resumable_soak '${CANDIDATE_SLOT}' '${ACTIVE_SLOT}' '${SOAK_DURATION_SEC}'" > "$SCRIPT_DIR/data/soak.log" 2>&1 &
+  release_deploy_lock
+  nohup bash -c "source '${SCRIPT_DIR}/lib.sh' && run_resumable_soak '${CANDIDATE_SLOT}' '${ACTIVE_SLOT}' '${SOAK_DURATION_SEC}'" 9>&- > "$SCRIPT_DIR/data/soak.log" 2>&1 &
   log_info "Soak detached (PID: $!). State recorded in $SOAK_STATE_FILE."
 else
   if ! run_resumable_soak "$CANDIDATE_SLOT" "$ACTIVE_SLOT" "$SOAK_DURATION_SEC"; then

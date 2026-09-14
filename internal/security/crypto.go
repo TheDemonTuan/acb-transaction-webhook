@@ -16,11 +16,28 @@ import (
 
 const EnvelopeVersion = "v1"
 
+var (
+	ErrAuthenticationFailed = errors.New("decryption authentication failed")
+	ErrUnsupportedEnvelope  = errors.New("unsupported envelope version")
+	ErrUnknownKeyID         = errors.New("unknown key id")
+	ErrInvalidNonce         = errors.New("invalid nonce")
+	ErrInvalidCiphertext    = errors.New("invalid ciphertext")
+)
+
 type Keyring struct {
 	currentID string
 	keys      map[string][]byte
 }
 type Envelope struct{ Version, KeyID, Nonce, Ciphertext string }
+
+func NewKeyring(key []byte) (*Keyring, error) {
+	if len(key) != 32 {
+		return nil, errors.New("master key must be 32 bytes")
+	}
+	k := make([]byte, 32)
+	copy(k, key)
+	return &Keyring{currentID: "k1", keys: map[string][]byte{"k1": k}}, nil
+}
 
 func LoadKeyring(path string) (*Keyring, error) {
 	if path == "" {
@@ -49,7 +66,7 @@ func LoadKeyring(path string) (*Keyring, error) {
 	if len(key) != 32 {
 		return nil, errors.New("master key must be 32 bytes (raw, 64-char hex, or base64)")
 	}
-	return &Keyring{currentID: "k1", keys: map[string][]byte{"k1": key}}, nil
+	return NewKeyring(key)
 }
 
 func (k *Keyring) Encrypt(plaintext, aad []byte) (Envelope, error) {
@@ -68,13 +85,14 @@ func (k *Keyring) Encrypt(plaintext, aad []byte) (Envelope, error) {
 	}
 	return Envelope{Version: EnvelopeVersion, KeyID: k.currentID, Nonce: base64.RawStdEncoding.EncodeToString(nonce), Ciphertext: base64.RawStdEncoding.EncodeToString(gcm.Seal(nil, nonce, plaintext, aad))}, nil
 }
+
 func (k *Keyring) Decrypt(e Envelope, aad []byte) ([]byte, error) {
 	if e.Version != EnvelopeVersion {
-		return nil, errors.New("unsupported envelope version")
+		return nil, ErrUnsupportedEnvelope
 	}
 	key, ok := k.keys[e.KeyID]
 	if !ok {
-		return nil, errors.New("unknown key id")
+		return nil, ErrUnknownKeyID
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -86,14 +104,19 @@ func (k *Keyring) Decrypt(e Envelope, aad []byte) ([]byte, error) {
 	}
 	nonce, err := base64.RawStdEncoding.DecodeString(e.Nonce)
 	if err != nil {
-		return nil, errors.New("invalid nonce")
+		return nil, ErrInvalidNonce
 	}
 	ciphertext, err := base64.RawStdEncoding.DecodeString(e.Ciphertext)
 	if err != nil {
-		return nil, errors.New("invalid ciphertext")
+		return nil, ErrInvalidCiphertext
 	}
-	return gcm.Open(nil, nonce, ciphertext, aad)
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAuthenticationFailed, err)
+	}
+	return plaintext, nil
 }
+
 func VerifyHMAC(expected, actual []byte) bool {
 	return subtle.ConstantTimeCompare(expected, actual) == 1
 }

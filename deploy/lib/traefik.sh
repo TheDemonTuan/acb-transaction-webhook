@@ -35,6 +35,38 @@ verify_traefik_prerequisites() {
     if ! docker network inspect edge-acb >/dev/null 2>&1 && ! docker network inspect acb_edge-acb >/dev/null 2>&1; then
       log_warn "Edge network 'edge-acb' not found in Docker. In live production this network is required."
     fi
+
+    # Verify edge-traefik mounts the configured dynamic directory if running
+    if docker inspect edge-traefik >/dev/null 2>&1; then
+      local mounted_source
+      mounted_source="$(docker inspect edge-traefik --format '{{range .Mounts}}{{if eq .Destination "/etc/traefik/dynamic"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+      if [[ -n "$mounted_source" ]]; then
+        local real_dyn real_mount
+        real_dyn="$(readlink -f "$dynamic_dir" 2>/dev/null || echo "$dynamic_dir")"
+        real_mount="$(readlink -f "$mounted_source" 2>/dev/null || echo "$mounted_source")"
+        if [[ "$real_dyn" != "$real_mount" ]]; then
+          log_error "Traefik dynamic directory mismatch! Configured: '$dynamic_dir' (resolved: '$real_dyn'), but running edge-traefik mounts: '$mounted_source' (resolved: '$real_mount'). Aborting before route switch."
+          return 1
+        fi
+      fi
+    fi
+  fi
+
+  # Verify edge probe runtime preflight if probe script is present
+  local probe_script="${EDGE_PROBE_SCRIPT:-}"
+  if [[ -z "$probe_script" ]]; then
+    if [[ -f "${SCRIPT_DIR:-deploy}/edge-probe.sh" ]]; then
+      probe_script="${SCRIPT_DIR:-deploy}/edge-probe.sh"
+    elif [[ -f "${SCRIPT_DIR:-deploy}/../platform/edge/probe.sh" ]]; then
+      probe_script="${SCRIPT_DIR:-deploy}/../platform/edge/probe.sh"
+    fi
+  fi
+  if [[ -n "$probe_script" && -f "$probe_script" ]]; then
+    if [[ "${SKIP_PROBE_RUNTIME_CHECK:-0}" != "1" ]]; then
+      if ! bash "$probe_script" --target production --check-runtime >/dev/null 2>&1; then
+        log_warn "Preflight: edge probe runtime check failed or reported warning. Verify edge-cloudflared container is running."
+      fi
+    fi
   fi
   return 0
 }
@@ -174,18 +206,6 @@ atomic_switch_route() {
   return 0
 }
 
-rollback_route() {
-  local previous_slot="$1"
-  log_warn "Restoring previous Traefik route configuration for [${previous_slot}]..."
-  if [[ -f "${ACB_CONFIG}.prev" ]]; then
-    cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null || true
-    printf '%s' "$previous_slot" > "$ACTIVE_SLOT_FILE"
-  else
-    atomic_switch_route "$previous_slot"
-  fi
-  log_info "Traefik route pointer reverted to [${previous_slot}]."
-}
-
 ack_route_identity() {
   local target_slot="$1"
   local expected_commit=""
@@ -206,7 +226,17 @@ ack_route_identity() {
 
   local route_host
   route_host="$(get_route_host)"
-  local ack_url="${ROUTE_ACK_URL:-http://127.0.0.1:80/readyz}"
+
+  local probe_script="${EDGE_PROBE_SCRIPT:-}"
+  if [[ -z "$probe_script" ]]; then
+    if [[ -f "${SCRIPT_DIR:-deploy}/edge-probe.sh" ]]; then
+      probe_script="${SCRIPT_DIR:-deploy}/edge-probe.sh"
+    elif [[ -f "${SCRIPT_DIR:-deploy}/../platform/edge/probe.sh" ]]; then
+      probe_script="${SCRIPT_DIR:-deploy}/../platform/edge/probe.sh"
+    fi
+  fi
+
+  local ack_url="${ROUTE_ACK_URL:-http://172.31.250.4:8080/readyz}"
 
   local start
   start="$(date +%s)"
@@ -214,7 +244,34 @@ ack_route_identity() {
 
   while true; do
     attempts=$(( attempts + 1 ))
-    if command -v curl >/dev/null 2>&1; then
+
+    # Prefer edge probe helper if available and ROUTE_ACK_URL not explicitly overridden
+    if [[ -n "$probe_script" && -f "$probe_script" && -z "${ROUTE_ACK_URL:-}" ]]; then
+      local probe_cmd=(bash "$probe_script" --target production --host "${route_host}" --timeout 3 --expected-slot "${target_slot}")
+      if [[ -n "${expected_commit}" && "${expected_commit}" != "unknown" ]]; then
+        probe_cmd+=(--expected-commit "${expected_commit}")
+      fi
+
+      local probe_out
+      local probe_rc=0
+      probe_out="$("${probe_cmd[@]}" 2>&1)" || probe_rc=$?
+
+      if [[ "$probe_rc" -eq 0 ]]; then
+        log_info "Route identity ACK VERIFIED for slot [${target_slot}] via edge probe on attempt ${attempts}."
+        return 0
+      fi
+
+      # Fallback check for rollback to legacy deployments lacking identity headers:
+      # If expected_commit was empty (legacy rollback), check if endpoint is answering HTTP 200 via edge ingress
+      if [[ -z "$expected_commit" || "$expected_commit" == "unknown" ]]; then
+        if bash "$probe_script" --target production --host "${route_host}" --timeout 3 --expected-status 200 >/dev/null 2>&1; then
+          log_warn "Route identity ACK: target slot [${target_slot}] responded HTTP 200 via production edge ingress, but lacks identity headers (legacy deployment). Proceeding with availability confirmation."
+          return 0
+        fi
+      fi
+
+      log_warn "Route ACK probe attempt ${attempts} failed (rc=${probe_rc}): $(printf '%s' "$probe_out" | tail -n 2 | tr '\n' ' ')"
+    elif command -v curl >/dev/null 2>&1; then
       local resp_headers
       local http_code
       # Request route probe with host header and capture response headers
@@ -226,9 +283,9 @@ ack_route_identity() {
 
       if [[ "$http_code" == "200" ]]; then
         local slot_header
-        slot_header="$(printf '%s' "$resp_headers" | grep -i '^x-platform-slot:' | head -n1 | tr -d '\r\n' | awk -F': ' '{print $2}' || echo "")"
+        slot_header="$(printf '%s' "$resp_headers" | grep -i '^x-platform-slot:' | head -n1 | tr -d '\r\n' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' || echo "")"
         local commit_header
-        commit_header="$(printf '%s' "$resp_headers" | grep -i '^x-release-commit:' | head -n1 | tr -d '\r\n' | awk -F': ' '{print $2}' || echo "")"
+        commit_header="$(printf '%s' "$resp_headers" | grep -i '^x-release-commit:' | head -n1 | tr -d '\r\n' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' || echo "")"
 
         if [[ "$slot_header" == "$target_slot" ]]; then
           if [[ -z "$expected_commit" || "$expected_commit" == "unknown" || "$commit_header" == "$expected_commit" ]]; then
@@ -237,23 +294,46 @@ ack_route_identity() {
           else
             log_warn "Route ACK probe returned slot [${slot_header}] but commit mismatch: expected '${expected_commit}', got '${commit_header}'"
           fi
+        elif [[ -z "$slot_header" && ( -z "$expected_commit" || "$expected_commit" == "unknown" ) ]]; then
+          log_warn "Route identity ACK: target slot [${target_slot}] responded HTTP 200, but lacks X-Platform-Slot header (legacy deployment). Proceeding with availability confirmation."
+          return 0
         else
           log_warn "Route ACK probe reached slot [${slot_header:-missing}] instead of target [${target_slot}]"
         fi
+      else
+        log_warn "Route ACK probe attempt ${attempts} returned HTTP ${http_code} from ${ack_url}"
       fi
     elif [[ -n "${MOCK_ACK_SUCCESS:-}" && "${MOCK_ACK_SUCCESS}" == "1" ]]; then
       log_info "Mock route identity ACK verified for slot [${target_slot}]."
       return 0
+    else
+      log_warn "Neither edge probe script nor curl available to verify route ACK."
+      return 1
     fi
 
     local now
     now="$(date +%s)"
     if (( now - start >= timeout )); then
-      log_error "Route identity ACK TIMEOUT after ${timeout}s! Target slot [${target_slot}] was not positively acknowledged through edge route."
+      log_error "Route identity ACK TIMEOUT after ${timeout}s (${attempts} attempts)! Target slot [${target_slot}] was not positively acknowledged through edge route."
       return 1
     fi
     sleep 1
   done
+}
+
+rollback_route() {
+  local previous_slot="$1"
+  local expected_commit="${2:-}"
+  local ack_timeout="${3:-15}"
+  log_warn "Restoring previous Traefik route configuration for [${previous_slot}]..."
+  if [[ -f "${ACB_CONFIG}.prev" ]]; then
+    cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null || true
+    printf '%s' "$previous_slot" > "$ACTIVE_SLOT_FILE"
+  else
+    atomic_switch_route "$previous_slot"
+  fi
+  log_info "Traefik route pointer reverted to [${previous_slot}]."
+  ack_route_identity "$previous_slot" "$expected_commit" "$ack_timeout"
 }
 
 central_switch_route() {

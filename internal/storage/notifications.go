@@ -14,11 +14,17 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 )
 
+const (
+	ErrCodeBarkKeyDecryptionFailed = "BARK_KEY_DECRYPTION_FAILED"
+	ErrMsgBarkKeyDecryptionFailed  = "Không thể giải mã Bark device key. Hãy kiểm tra master key trước; nếu master key đúng, hãy nhập lại Bark device key."
+)
+
 var (
 	ErrDeliveryNotDeadLetter = errors.New("delivery is not in dead-letter state")
 	ErrEndpointNotActive     = errors.New("notification channel is not active")
 	ErrRevisionConflict      = errors.New("channel revision conflict")
 	ErrInvalidBarkConfig     = errors.New("invalid Bark configuration")
+	ErrBarkDecryptionFailed  = errors.New("bark device key decryption failed")
 )
 
 type BarkConfig struct {
@@ -457,7 +463,7 @@ func (s *Store) DeliveryTargetForDelivery(ctx context.Context, delivery Delivery
 		}
 		decrypted, err := s.keyring.Decrypt(env, []byte("notification-secret:BARK:"+delivery.EndpointID+":"+keyID))
 		if err != nil {
-			return target, fmt.Errorf("decrypt bark device key: %w", err)
+			return target, fmt.Errorf("%w: %w", ErrBarkDecryptionFailed, err)
 		}
 		target.Secret = decrypted
 

@@ -35,32 +35,35 @@ export class RealtimeClient {
   }
 
   public connect(): void {
-    if (this.disposed || typeof window === 'undefined' || typeof EventSource === 'undefined') {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
       return;
     }
     if (this.eventSource) {
       return;
     }
 
+    this.disposed = false;
     this.setStatus('CONNECTING');
     try {
-      this.eventSource = new EventSource(this.url);
+      const source = new EventSource(this.url);
+      this.eventSource = source;
+      const isCurrent = () => !this.disposed && this.eventSource === source;
 
-      this.eventSource.onopen = () => {
-        if (!this.disposed) {
+      source.onopen = () => {
+        if (isCurrent()) {
           this.setStatus('CONNECTED');
         }
       };
 
-      this.eventSource.onerror = (err) => {
-        if (!this.disposed) {
+      source.onerror = (err) => {
+        if (isCurrent()) {
           this.setStatus('RECONNECTING');
           this.options.onError?.(err);
         }
       };
 
-      this.eventSource.addEventListener('initial_state', (e: MessageEvent) => {
-        if (this.disposed) return;
+      source.addEventListener('initial_state', (e: MessageEvent) => {
+        if (!isCurrent()) return;
         try {
           const parsed = JSON.parse(e.data);
           this.options.onInitialState?.(typeof parsed?.watermark === 'number' ? parsed.watermark : 0);
@@ -69,8 +72,8 @@ export class RealtimeClient {
         }
       });
 
-      this.eventSource.addEventListener('reset_state', (e: MessageEvent) => {
-        if (this.disposed) return;
+      source.addEventListener('reset_state', (e: MessageEvent) => {
+        if (!isCurrent()) return;
         let reason = 'unknown';
         try {
           const parsed = JSON.parse(e.data);
@@ -79,24 +82,25 @@ export class RealtimeClient {
         this.options.onResetState?.(reason);
 
         // Close stale cursor stream and reconnect fresh to avoid retention_expired loops
-        if (this.eventSource) {
-          this.eventSource.close();
+        source.close();
+        if (this.eventSource === source) {
           this.eventSource = null;
         }
         setTimeout(() => {
-          if (!this.disposed) {
+          if (!this.disposed && !this.eventSource) {
             this.connect();
           }
         }, 500);
       });
 
       for (const type of REALTIME_EVENT_TYPES) {
-        this.eventSource.addEventListener(type, (e: MessageEvent) => {
-          if (this.disposed) return;
+        source.addEventListener(type, (e: MessageEvent) => {
+          if (!isCurrent()) return;
           this.dispatch(type, e);
         });
       }
     } catch (err) {
+      this.eventSource = null;
       this.setStatus('DISCONNECTED');
       this.options.onError?.(err);
     }
