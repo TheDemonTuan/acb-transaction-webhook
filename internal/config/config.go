@@ -52,6 +52,8 @@ type Config struct {
 	BarkDefaultLevel      string
 	BarkDefaultSound      string
 	WorkerRPCURL          string
+	WorkerRealtimeURL     string
+	WorkerRealtimeEnabled bool
 	WorkerInternalToken   string
 	Slot                  string
 	ReleaseCommit         string
@@ -223,6 +225,21 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	workerRealtimeEnabled, err := boolean("WORKER_REALTIME_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	workerRealtimeURL := strings.TrimRight(value("WORKER_REALTIME_URL", "http://acb-worker:8191"), "/")
+	if workerRealtimeEnabled {
+		u, parseErr := url.Parse(workerRealtimeURL)
+		if parseErr != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("WORKER_REALTIME_URL must be an absolute http or https URL")
+		}
+		if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return Config{}, fmt.Errorf("WORKER_REALTIME_URL must not contain userinfo, query, or fragment")
+		}
+	}
+
 	slot := value("PLATFORM_SLOT", value("APP_SLOT", value("SLOT", "monolith")))
 	releaseCommit := value("RELEASE_COMMIT", value("APP_RELEASE_COMMIT", value("GIT_COMMIT", "unknown")))
 
@@ -265,6 +282,8 @@ func Load() (Config, error) {
 		BarkDefaultLevel:      barkLevel,
 		BarkDefaultSound:      barkSound,
 		WorkerRPCURL:          value("WORKER_RPC_URL", ""),
+		WorkerRealtimeURL:     workerRealtimeURL,
+		WorkerRealtimeEnabled: workerRealtimeEnabled,
 		WorkerInternalToken:   workerToken,
 		Slot:                  slot,
 		ReleaseCommit:         releaseCommit,
@@ -285,6 +304,9 @@ func Load() (Config, error) {
 			}
 			if cfg.WorkerRPCURL == "" {
 				return Config{}, fmt.Errorf("WORKER_RPC_URL is required for gateway in production")
+			}
+			if cfg.WorkerRealtimeEnabled && cfg.WorkerRealtimeURL == "" {
+				return Config{}, fmt.Errorf("WORKER_REALTIME_URL is required when WORKER_REALTIME_ENABLED is true")
 			}
 			if cfg.WorkerInternalToken == "" {
 				return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required for gateway in production")
@@ -316,6 +338,18 @@ func set(key string) map[string]struct{} {
 	}
 	return result
 }
+func boolean(key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return value, nil
+}
+
 func seconds(key string, fallback, minimum, maximum int) (time.Duration, error) {
 	v, err := strconv.Atoi(value(key, strconv.Itoa(fallback)))
 	if err != nil || v < minimum || v > maximum {
@@ -344,4 +378,3 @@ func ReadSecret(envVar, fileEnvVar string) (string, error) {
 	}
 	return trimmed, nil
 }
-

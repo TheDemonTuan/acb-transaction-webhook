@@ -47,6 +47,7 @@ export const NotificationChannelsPage: React.FC = () => {
   const [barkLevel, setBarkLevel] = useState<'passive' | 'active' | 'timeSensitive'>('timeSensitive');
   const [barkSound, setBarkSound] = useState('shake');
   const [barkIcon, setBarkIcon] = useState('https://api.vietqr.io/img/ACB.png');
+  const [failedBarkIcon, setFailedBarkIcon] = useState<string | null>(null);
   const [includeBalance, setIncludeBalance] = useState(false);
   const [includeDescription, setIncludeDescription] = useState(true);
   const [dashboardLink, setDashboardLink] = useState(true);
@@ -585,12 +586,22 @@ export const NotificationChannelsPage: React.FC = () => {
                       Icon thông báo (URL ảnh hiển thị trên iPhone)
                     </label>
                     <div className="flex items-center gap-2.5">
-                      <img
-                        src={barkIcon || 'https://api.vietqr.io/img/ACB.png'}
-                        alt="Icon preview"
-                        className="w-8 h-8 rounded-lg border border-stone-200 object-contain bg-white shrink-0 p-0.5 shadow-2xs"
-                        onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://api.vietqr.io/img/ACB.png'; }}
-                      />
+                      {failedBarkIcon === (barkIcon || 'https://api.vietqr.io/img/ACB.png') ? (
+                        <div
+                          role="img"
+                          aria-label="Không tải được icon preview"
+                          className="w-8 h-8 rounded-lg border border-stone-200 bg-stone-100 shrink-0 flex items-center justify-center text-stone-400"
+                        >
+                          <Smartphone className="w-4 h-4" />
+                        </div>
+                      ) : (
+                        <img
+                          src={barkIcon || 'https://api.vietqr.io/img/ACB.png'}
+                          alt="Icon preview"
+                          className="w-8 h-8 rounded-lg border border-stone-200 object-contain bg-white shrink-0 p-0.5 shadow-2xs"
+                          onError={() => setFailedBarkIcon(barkIcon || 'https://api.vietqr.io/img/ACB.png')}
+                        />
+                      )}
                       <input
                         id="bark-icon"
                         type="url"

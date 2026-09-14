@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 func TestWorkerRoleValidation_Subprocess(t *testing.T) {
@@ -187,4 +191,96 @@ func TestWorkerQuiesceDrainFlags(t *testing.T) {
 			t.Fatalf("expected stderr to mention failed to read worker internal token, got %q", stderr.String())
 		}
 	})
+}
+
+type mockWaker struct {
+	wakeCount int
+}
+
+func (m *mockWaker) Wake() {
+	m.wakeCount++
+}
+
+func TestWorkerPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "worker_poll_test.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+
+	waker := &mockWaker{}
+	notifier := newWorkerPollNotifier(store, waker, nil)
+
+	// Poll 1: Initial SUCCEEDED with 0 items (status changed "" -> "SUCCEEDED")
+	poll1 := storage.PollRun{
+		ID:        "poll_001",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Add(-5 * time.Second).Format(time.RFC3339Nano),
+		RowsSeen:  0,
+	}
+	notifier(poll1, 0)
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected waker count 1 after initial poll, got %d", waker.wakeCount)
+	}
+
+	// Poll 2: Repeat SUCCEEDED with 0 items (status unchanged, 0 inserted) -> no wake
+	poll2 := storage.PollRun{
+		ID:        "poll_002",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Add(-2 * time.Second).Format(time.RFC3339Nano),
+		RowsSeen:  0,
+	}
+	notifier(poll2, 0)
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected waker count still 1 after repeat empty poll, got %d", waker.wakeCount)
+	}
+
+	// Poll 3: Another repeat SUCCEEDED with 0 items -> no wake
+	poll3 := storage.PollRun{
+		ID:        "poll_003",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		RowsSeen:  0,
+	}
+	notifier(poll3, 0)
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected waker count still 1 after third empty poll, got %d", waker.wakeCount)
+	}
+
+	// Poll 4: SUCCEEDED with items inserted -> should wake
+	poll4 := storage.PollRun{
+		ID:        "poll_004",
+		Status:    "SUCCEEDED",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		RowsSeen:  2,
+	}
+	notifier(poll4, 2)
+
+	if waker.wakeCount != 2 {
+		t.Fatalf("expected waker count 2 after poll with items, got %d", waker.wakeCount)
+	}
+
+	// Verify all 4 poll.completed events were appended to journal
+	events, err := store.ReadJournalEvents(ctx, "ep1", 0, 10)
+	if err != nil {
+		t.Fatalf("ReadJournalEvents: %v", err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("expected 4 journal events, got %d", len(events))
+	}
+	for i, expectedID := range []string{"poll_001", "poll_002", "poll_003", "poll_004"} {
+		if events[i].EventType != "poll.completed" {
+			t.Errorf("event %d: expected event type 'poll.completed', got %q", i, events[i].EventType)
+		}
+		if events[i].AggregateID != expectedID {
+			t.Errorf("event %d: expected aggregateID %q, got %q", i, expectedID, events[i].AggregateID)
+		}
+	}
 }

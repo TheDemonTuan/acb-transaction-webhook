@@ -18,6 +18,7 @@ services:
       DATABASE_PATH: /data/gateway.db
       TZ: Asia/Ho_Chi_Minh
       WORKER_RPC_ADDR: 0.0.0.0:8190
+      WORKER_REALTIME_ADDR: 0.0.0.0:8191
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       POLL_MIN_INTERVAL_SEC: ${POLL_MIN_INTERVAL_SEC:-3}
@@ -31,6 +32,7 @@ services:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
     expose:
       - "8190"
+      - "8191"
     networks:
       acb-core:
         aliases:
@@ -242,6 +244,8 @@ services:
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_REALTIME_URL: http://acb-worker:8191
+      WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
@@ -321,6 +325,8 @@ services:
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_REALTIME_URL: http://acb-worker:8191
+      WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080

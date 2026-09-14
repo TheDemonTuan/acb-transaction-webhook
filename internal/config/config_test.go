@@ -7,6 +7,31 @@ import (
 	"testing"
 )
 
+func TestLoadWorkerRealtimeConfiguration(t *testing.T) {
+	t.Setenv("WORKER_REALTIME_ENABLED", "true")
+	t.Setenv("WORKER_REALTIME_URL", "http://acb-worker:8191")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.WorkerRealtimeEnabled {
+		t.Fatal("expected worker realtime to be enabled")
+	}
+	if cfg.WorkerRealtimeURL != "http://acb-worker:8191" {
+		t.Fatalf("unexpected realtime URL %q", cfg.WorkerRealtimeURL)
+	}
+}
+
+func TestLoadRejectsInvalidWorkerRealtimeConfiguration(t *testing.T) {
+	t.Setenv("WORKER_REALTIME_ENABLED", "true")
+	t.Setenv("WORKER_REALTIME_URL", "http://user:pass@acb-worker:8191?token=secret")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid realtime URL to be rejected")
+	}
+}
+
 func TestLoadTTSInternalTokenFile(t *testing.T) {
 	tempDir := t.TempDir()
 	tokenPath := filepath.Join(tempDir, "token.txt")

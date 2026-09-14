@@ -58,6 +58,44 @@ func TestAdminLifecycle(t *testing.T) {
 	}
 }
 
+func TestSPAContentSecurityPolicy(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "spa-csp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	h := New(config.Config{Timezone: time.UTC, DevelopmentSubject: "owner"}, store).Handler()
+	for _, requestPath := range []string{"/", "/admin/activity", "/transactions/example"} {
+		t.Run(requestPath, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "http://example.test"+requestPath, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", w.Code)
+			}
+			cspHeaders := w.Result().Header.Values("Content-Security-Policy")
+			if len(cspHeaders) != 1 || cspHeaders[0] != spaContentSecurityPolicy {
+				t.Fatalf("unexpected SPA CSP: %v", cspHeaders)
+			}
+		})
+	}
+
+	for _, required := range []string{
+		"script-src 'self' https://static.cloudflareinsights.com",
+		"connect-src 'self' ws: wss: https://cloudflareinsights.com",
+		"img-src 'self' data: blob: https:",
+	} {
+		if !strings.Contains(spaContentSecurityPolicy, required) {
+			t.Fatalf("SPA CSP missing %q: %s", required, spaContentSecurityPolicy)
+		}
+	}
+	if strings.Contains(spaContentSecurityPolicy, "script-src 'self' 'unsafe-inline'") || strings.Contains(spaContentSecurityPolicy, "script-src 'self' 'unsafe-eval'") {
+		t.Fatalf("SPA script policy must remain strict: %s", spaContentSecurityPolicy)
+	}
+}
+
 func TestBrowserScreenCSP(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "csp.db"))

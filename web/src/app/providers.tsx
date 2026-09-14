@@ -7,14 +7,13 @@ import { BankConnectionProvider } from '../features/bank-connection/BankConnecti
 import { RealtimeDomainBridge } from '../realtime/RealtimeDomainBridge';
 
 export const AppProviders: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const handleResetState = () => {
-    // Invalidate all domain queries to recover fresh snapshot
+  const refreshSnapshot = () => {
     queryClient.invalidateQueries();
   };
 
   return (
     <QueryClientProvider client={queryClient}>
-      <RealtimeProvider onResetState={handleResetState}>
+      <RealtimeProvider onInitialState={refreshSnapshot} onResetState={refreshSnapshot}>
         <VoiceAnnouncementProvider>
           <BankConnectionProvider>
             <RealtimeDomainBridge />

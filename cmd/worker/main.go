@@ -26,6 +26,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
@@ -354,6 +355,45 @@ func (w *workerService) Resume(ctx context.Context) error {
 	return nil
 }
 
+func newWorkerPollNotifier(store *storage.Store, waker interface{ Wake() }, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var pollStatusMu sync.Mutex
+	var lastPollStatus string
+	return func(p storage.PollRun, insertedCount int) {
+		pollStatusMu.Lock()
+		statusChanged := p.Status != lastPollStatus
+		lastPollStatus = p.Status
+		pollStatusMu.Unlock()
+		if waker != nil && (insertedCount > 0 || statusChanged) {
+			waker.Wake()
+		}
+		payload, err := storage.PollCompletedPayload(p, insertedCount)
+		if err != nil {
+			logger.Error("failed to build poll.completed payload", "error", err)
+			return
+		}
+		appendCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer aCancel()
+		seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
+		if err != nil {
+			logger.Error("failed to append poll.completed journal event", "error", err)
+			return
+		}
+		if hub != nil {
+			hub.Publish(eventhub.Event{
+				Seq:         seq,
+				Epoch:       "ep1",
+				EventType:   "poll.completed",
+				AggregateID: p.ID,
+				Payload:     payload,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+}
+
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "verify worker health via HTTP (readiness first, then liveness)")
 	livenessCheck := flag.Bool("liveness-check", false, "verify worker liveness via HTTP /healthz")
@@ -567,27 +607,7 @@ func main() {
 	bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
 		dispatcher.Wake()
 	})
-	var pollStatusMu sync.Mutex
-	var lastPollStatus string
-	bankMonitor.WithPollNotifier(func(p storage.PollRun, insertedCount int) {
-		pollStatusMu.Lock()
-		statusChanged := p.Status != lastPollStatus
-		lastPollStatus = p.Status
-		pollStatusMu.Unlock()
-		if insertedCount > 0 || statusChanged {
-			dispatcher.Wake()
-		}
-		if insertedCount == 0 && !statusChanged && p.Status == "SUCCEEDED" {
-			return
-		}
-		payload, err := storage.PollCompletedPayload(p, insertedCount)
-		if err != nil {
-			return
-		}
-		appendCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
-		aCancel()
-	})
+	bankMonitor.WithPollNotifier(newWorkerPollNotifier(store, dispatcher, logger))
 
 	var sessionLoader *monitor.SessionLoader
 	var verifierClient *acb.Client

@@ -84,8 +84,9 @@ export const RealtimeDomainBridge: React.FC = () => {
     // 2. poll.completed -> Invalidate polls, and transactions if insertedCount > 0
     const unsubPoll = subscribe<PollCompletedData>('poll.completed', (envelope) => {
       const data = envelope.data;
-      queryClient.invalidateQueries({ queryKey: ['pollRuns'] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.pollRuns() });
       queryClient.invalidateQueries({ queryKey: queryKeys.status });
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
 
       if (data && (data.insertedCount ?? 0) > 0) {
         queryClient.invalidateQueries({ queryKey: ['transactions'] });

@@ -9,6 +9,13 @@ import (
 )
 
 func (s *Server) Publish(event eventhub.Event) {
+	if s.realtimeInput != nil {
+		select {
+		case s.realtimeInput <- event:
+		default:
+		}
+		return
+	}
 	if s.eventHub != nil {
 		s.eventHub.Publish(event)
 	}
@@ -62,4 +69,3 @@ func (s *Server) RunJournalWatcher(ctx context.Context, interval time.Duration) 
 		}
 	}
 }
-

@@ -51,12 +51,17 @@ func TestHubNonBlockingSlowConsumer(t *testing.T) {
 		hub.Publish(Event{Seq: int64(i)})
 	}
 
-	// Drain one item
-	select {
-	case <-slowCh:
-	default:
-		t.Fatal("expected item in channel")
+	if count := hub.SubscriberCount(); count != 0 {
+		t.Fatalf("expected slow subscriber to be disconnected, got %d", count)
 	}
+	for range slowCh {
+	}
+	if hub.DroppedNotifications() == 0 {
+		t.Fatal("expected overflow counter to increase")
+	}
+
+	// Cancellation remains safe after overflow removed the subscriber.
+	cancel()
 }
 
 func TestHubConcurrentPublishers(t *testing.T) {

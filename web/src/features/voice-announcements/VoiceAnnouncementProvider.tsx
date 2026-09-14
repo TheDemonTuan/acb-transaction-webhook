@@ -1,17 +1,15 @@
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { TransactionAudioEngine } from './transaction-audio-engine';
 import { MultiTabLeader } from './multi-tab-leader';
 import { VoiceDedupe } from './voice-dedupe';
 import type { VoiceEngine, VoiceInfo } from './voice-engine';
 import { VoiceQueue } from './voice-queue';
 import {
-  DEFAULT_VOICE_SETTINGS,
   loadVoiceSettings,
   saveVoiceSettings,
   type VoiceSettings,
 } from './voice-settings';
 import {
-  buildBurstTransactionPhrase,
   buildSingleTransactionPhrase,
 } from './voice-copy';
 import type { BankTransactionCreditData, RealtimeEnvelope } from '../../realtime/realtime.types';
@@ -35,16 +33,6 @@ const VoiceAnnouncementContext = createContext<VoiceAnnouncementContextValue | n
 export interface VoiceAnnouncementProviderProps {
   children: React.ReactNode;
   engine?: VoiceEngine;
-}
-
-interface BurstItem {
-  amount: bigint;
-  desc: string;
-  dedupeOpts: {
-    eventId?: string | null;
-    transactionId?: string | null;
-    semanticKey?: string | null;
-  };
 }
 
 export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps> = ({
@@ -98,14 +86,6 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         const fresh = loadVoiceSettings();
         setSettings(fresh);
         if (fresh.enabled === false) {
-          for (const item of burstBufferRef.current) {
-            dedupe.release(item.dedupeOpts);
-          }
-          burstBufferRef.current = [];
-          if (burstTimerRef.current) {
-            clearTimeout(burstTimerRef.current);
-            burstTimerRef.current = null;
-          }
           queue.cancel();
         }
       }
@@ -114,7 +94,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       window.addEventListener('storage', handleStorage);
       return () => window.removeEventListener('storage', handleStorage);
     }
-  }, [dedupe, queue]);
+  }, [queue]);
 
   // Start leader manager on mount
   useEffect(() => {
@@ -124,89 +104,12 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     };
   }, [leaderManager]);
 
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
-
   // Update settings handler
   const updateSettings = (changes: Partial<VoiceSettings>) => {
     const updated = saveVoiceSettings(changes);
     setSettings(updated);
     if (changes.enabled === false) {
-      for (const item of burstBufferRef.current) {
-        dedupe.release(item.dedupeOpts);
-      }
-      burstBufferRef.current = [];
-      if (burstTimerRef.current) {
-        clearTimeout(burstTimerRef.current);
-        burstTimerRef.current = null;
-      }
       queue.cancel();
-    }
-  };
-
-  // Burst aggregation queue
-  const burstBufferRef = useRef<BurstItem[]>([]);
-  const burstTimerRef = useRef<any>(null);
-
-  const processBurstBuffer = () => {
-    const currentSettings = settingsRef.current;
-    const items = [...burstBufferRef.current];
-    burstBufferRef.current = [];
-    burstTimerRef.current = null;
-
-    if (!currentSettings.enabled || items.length === 0) {
-      for (const item of items) {
-        dedupe.release(item.dedupeOpts);
-      }
-      return;
-    }
-
-    if (items.length === 1 || (items.length <= 3 && currentSettings.burstMode === 'individual')) {
-      for (const item of items) {
-        const text = buildSingleTransactionPhrase(item.amount.toString(), item.desc, {
-          includeDescription: currentSettings.includeDescription,
-        });
-        queue.enqueue({
-          text,
-          volume: currentSettings.volume,
-          rate: currentSettings.rate,
-          pitch: currentSettings.pitch,
-          voiceURI: currentSettings.voiceURI,
-          transactionId: item.dedupeOpts.transactionId || undefined,
-          includeDescription: currentSettings.includeDescription,
-          onSuccess: () => {
-            dedupe.commit(item.dedupeOpts);
-          },
-          onError: () => {
-            dedupe.release(item.dedupeOpts);
-          },
-        });
-      }
-    } else {
-      const total = items.reduce((acc, curr) => acc + curr.amount, 0n);
-      const text = buildBurstTransactionPhrase(items.length, total.toString());
-      const summaryIds = items
-        .map((i) => i.dedupeOpts.transactionId)
-        .filter((id): id is string => Boolean(id));
-
-      queue.enqueue({
-        text,
-        volume: currentSettings.volume,
-        rate: currentSettings.rate,
-        pitch: currentSettings.pitch,
-        voiceURI: currentSettings.voiceURI,
-        summaryTransactionIds: summaryIds.length >= 2 ? summaryIds : undefined,
-        onSuccess: () => {
-          for (const item of items) {
-            dedupe.commit(item.dedupeOpts);
-          }
-        },
-        onError: () => {
-          for (const item of items) {
-            dedupe.release(item.dedupeOpts);
-          }
-        },
-      });
     }
   };
 
@@ -264,17 +167,24 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       return;
     }
 
-    // Push into burst buffer (750ms collection window)
-    burstBufferRef.current.push({
-      amount: amountBigInt,
-      desc: data.description || '',
-      dedupeOpts,
+    const text = buildSingleTransactionPhrase(amountBigInt.toString(), data.description || '', {
+      includeDescription: settings.includeDescription,
     });
-
-    if (burstTimerRef.current) {
-      clearTimeout(burstTimerRef.current);
-    }
-    burstTimerRef.current = setTimeout(processBurstBuffer, 750);
+    queue.enqueue({
+      text,
+      volume: settings.volume,
+      rate: settings.rate,
+      pitch: settings.pitch,
+      voiceURI: settings.voiceURI,
+      transactionId: dedupeOpts.transactionId || undefined,
+      includeDescription: settings.includeDescription,
+      onSuccess: () => {
+        dedupe.commit(dedupeOpts);
+      },
+      onError: () => {
+        dedupe.release(dedupeOpts);
+      },
+    });
   };
 
   const testVoice = async (customPhrase?: string) => {
@@ -323,28 +233,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
 
   const cancelVoice = () => {
     queue.cancel();
-    if (burstTimerRef.current) {
-      clearTimeout(burstTimerRef.current);
-      burstTimerRef.current = null;
-    }
-    for (const item of burstBufferRef.current) {
-      dedupe.release(item.dedupeOpts);
-    }
-    burstBufferRef.current = [];
   };
-
-  useEffect(() => {
-    return () => {
-      if (burstTimerRef.current) {
-        clearTimeout(burstTimerRef.current);
-        burstTimerRef.current = null;
-      }
-      for (const item of burstBufferRef.current) {
-        dedupe.release(item.dedupeOpts);
-      }
-      burstBufferRef.current = [];
-    };
-  }, [dedupe]);
 
   const value: VoiceAnnouncementContextValue = useMemo(() => {
     return {

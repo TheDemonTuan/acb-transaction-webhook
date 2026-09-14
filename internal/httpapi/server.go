@@ -85,21 +85,22 @@ type Server struct {
 	workerProber      WorkerProber
 	channelTester     NotificationChannelTester
 	cfg               config.Config
-	store           *storage.Store
-	auth            *auth.Middleware
-	browser         *authbrowser.Client
-	browserVNCURL   string
-	keyring         *security.Keyring
-	eventHub        *eventhub.Hub
-	ttsClient       *ttsclient.Client
-	barkSender      *bark.Sender
-	notifRegistry   *notification.Registry
-	wakeFn          WakeDispatcherFunc
-	instanceNonce   string
-	testCooldownMu  sync.Mutex
-	lastTestPerCh   map[string]time.Time
-	started         time.Time
-	handler         http.Handler
+	store             *storage.Store
+	auth              *auth.Middleware
+	browser           *authbrowser.Client
+	browserVNCURL     string
+	keyring           *security.Keyring
+	eventHub          *eventhub.Hub
+	realtimeInput     chan<- eventhub.Event
+	ttsClient         *ttsclient.Client
+	barkSender        *bark.Sender
+	notifRegistry     *notification.Registry
+	wakeFn            WakeDispatcherFunc
+	instanceNonce     string
+	testCooldownMu    sync.Mutex
+	lastTestPerCh     map[string]time.Time
+	started           time.Time
+	handler           http.Handler
 }
 
 func New(cfg config.Config, store *storage.Store) *Server {
@@ -213,6 +214,13 @@ func (s *Server) WithAuthVerifier(verifier AuthVerifier) *Server {
 
 func (s *Server) WithEventHub(hub *eventhub.Hub) *Server {
 	s.eventHub = hub
+	return s
+}
+
+// WithRealtimeInput routes journal-backed events through the gateway ordering
+// coordinator before they are published to browser subscribers.
+func (s *Server) WithRealtimeInput(input chan<- eventhub.Event) *Server {
+	s.realtimeInput = input
 	return s
 }
 
@@ -1928,6 +1936,8 @@ func requestIDFromContext(ctx context.Context) string {
 
 const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self'"
 
+const spaContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; script-src 'self' https://static.cloudflareinsights.com; connect-src 'self' ws: wss: https://cloudflareinsights.com; img-src 'self' data: blob: https:; font-src 'self' data:; style-src 'self' 'unsafe-inline'"
+
 const vncContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
 
 func (s *Server) platformHeaders(next http.Handler) http.Handler {
@@ -2017,7 +2027,7 @@ func spa(files fs.FS) http.Handler {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'")
+		w.Header().Set("Content-Security-Policy", spaContentSecurityPolicy)
 		r.URL.Path = "/"
 		static.ServeHTTP(w, r)
 	})
