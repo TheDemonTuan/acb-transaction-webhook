@@ -32,7 +32,6 @@ type syncRequest struct {
 type Monitor struct {
 	store           *storage.Store
 	client          BankClient
-	sessions        *SessionLoader
 	pollMinInterval time.Duration
 	pollMaxInterval time.Duration
 	nextInterval    func(time.Duration, time.Duration) time.Duration
@@ -41,33 +40,58 @@ type Monitor struct {
 	settingsCh      chan struct{}
 	cachedSettings  storage.MonitorSettings
 	lastMode        storage.PollMode
-	onNewEvents     func([]storage.EventNotification)
-	onPollFinished  func(poll storage.PollRun, insertedCount int)
 	catchUpPending  bool
+
+	configMu       sync.RWMutex
+	onNewEvents    func([]storage.EventNotification)
+	onPollFinished func(poll storage.PollRun, insertedCount int)
+	sessions       *SessionLoader
+	scheduler      *scheduler.Scheduler
 
 	backoffMu    sync.RWMutex
 	backoffUntil time.Time
 
 	pollWaitersMu sync.Mutex
 	pollWaiters   []chan error
-
-	scheduler *scheduler.Scheduler
 }
 
 func (m *Monitor) WithEventNotifier(fn func([]storage.EventNotification)) *Monitor {
-	m.onNewEvents = fn
+	if m != nil {
+		m.configMu.Lock()
+		m.onNewEvents = fn
+		m.configMu.Unlock()
+	}
 	return m
 }
 
+func (m *Monitor) notifyNewEvents(events []storage.EventNotification) {
+	if m == nil || len(events) == 0 {
+		return
+	}
+	m.configMu.RLock()
+	fn := m.onNewEvents
+	m.configMu.RUnlock()
+	if fn != nil {
+		fn(events)
+	}
+}
+
 func (m *Monitor) WithPollNotifier(fn func(poll storage.PollRun, insertedCount int)) *Monitor {
-	m.onPollFinished = fn
+	if m != nil {
+		m.configMu.Lock()
+		m.onPollFinished = fn
+		m.configMu.Unlock()
+	}
 	return m
 }
 
 func (m *Monitor) finishPoll(ctx context.Context, poll storage.PollRun, insertedCount int) error {
 	err := m.store.FinishPoll(ctx, poll)
-	if m.onPollFinished != nil {
-		m.onPollFinished(poll, insertedCount)
+	m.configMu.RLock()
+	fn := m.onPollFinished
+	m.configMu.RUnlock()
+	if fn != nil {
+		fn(poll, insertedCount)
 	}
 	return err
 }
@@ -104,13 +128,31 @@ func (m *Monitor) NotifySettingsChanged() {
 }
 
 func (m *Monitor) WithSessionLoader(loader *SessionLoader) *Monitor {
-	m.sessions = loader
+	if m != nil {
+		m.configMu.Lock()
+		m.sessions = loader
+		m.configMu.Unlock()
+	}
 	return m
+}
+
+// SessionLoader returns the configured session loader.
+func (m *Monitor) SessionLoader() *SessionLoader {
+	if m == nil {
+		return nil
+	}
+	m.configMu.RLock()
+	defer m.configMu.RUnlock()
+	return m.sessions
 }
 
 // PersistSession persists the freshest live ACB session snapshot to storage using an independent context.
 func (m *Monitor) PersistSession(ctx context.Context) error {
-	if m == nil || m.sessions == nil || m.store == nil {
+	if m == nil || m.store == nil {
+		return nil
+	}
+	sessions := m.SessionLoader()
+	if sessions == nil {
 		return nil
 	}
 	conn, err := m.store.Connection(ctx)
@@ -120,7 +162,7 @@ func (m *Monitor) PersistSession(ctx context.Context) error {
 	if conn.ID == "" || conn.Generation <= 0 {
 		return nil
 	}
-	return m.sessions.Persist(ctx, conn.ID, conn.Generation)
+	return sessions.Persist(ctx, conn.ID, conn.Generation)
 }
 
 func (m *Monitor) SetBackoff(duration time.Duration) {
@@ -199,7 +241,11 @@ func (m *Monitor) RequestSync(ctx context.Context) error {
 	}
 
 	task := NewRealtimeTask(m, PriorityManualSync, conn.ID, conn.Generation)
-	return m.scheduler.Enqueue(task)
+	sched := m.Scheduler()
+	if sched == nil {
+		return ErrSyncUnavailable
+	}
+	return sched.Enqueue(task)
 }
 
 // PollOnce executes a single poll cycle if the connection is in MONITORING state.
@@ -223,7 +269,8 @@ func (m *Monitor) pollOnce(ctx context.Context, expected *syncRequest) error {
 		connID = expected.connectionID
 	}
 
-	if !m.scheduler.IsRunning() {
+	sched := m.Scheduler()
+	if sched == nil || !sched.IsRunning() {
 		task := NewRealtimeTask(m, PriorityRealtimePoll, connID, gen)
 		res, err := task.Step(ctx)
 		if err != nil {
@@ -234,7 +281,7 @@ func (m *Monitor) pollOnce(ctx context.Context, expected *syncRequest) error {
 
 	waiter := m.registerPollWaiter()
 	task := NewRealtimeTask(m, PriorityRealtimePoll, connID, gen)
-	if err := m.scheduler.Enqueue(task); err != nil {
+	if err := sched.Enqueue(task); err != nil {
 		return err
 	}
 
@@ -296,14 +343,18 @@ func (m *Monitor) ScheduleCatchUp() {
 		return
 	}
 	task := NewCatchUpTask(m, conn.ID, conn.Generation)
-	if m.scheduler.IsRunning() {
-		_ = m.scheduler.Enqueue(task)
+	sched := m.Scheduler()
+	if sched != nil && sched.IsRunning() {
+		_ = sched.Enqueue(task)
 	}
 }
 
 func (m *Monitor) Run(ctx context.Context) {
-	m.scheduler.Start(ctx)
-	defer m.scheduler.Stop()
+	sched := m.Scheduler()
+	if sched != nil {
+		sched.Start(ctx)
+		defer sched.Stop()
+	}
 
 	// Initial load of settings from database
 	if initSettings, err := m.store.GetMonitorSettings(ctx); err == nil {
@@ -320,8 +371,10 @@ func (m *Monitor) Run(ctx context.Context) {
 		if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && schedule.Mode == storage.ModeRealtime {
 			conn, err := m.store.Connection(ctx)
 			if err == nil && conn.State == "MONITORING" {
-				_ = m.scheduler.Enqueue(NewCatchUpTask(m, conn.ID, conn.Generation))
-				_ = m.scheduler.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+				if s := m.Scheduler(); s != nil {
+					_ = s.Enqueue(NewCatchUpTask(m, conn.ID, conn.Generation))
+					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+				}
 			}
 		}
 		m.lastMode = schedule.Mode
@@ -360,13 +413,15 @@ func (m *Monitor) Run(ctx context.Context) {
 				continue
 			}
 
-			switch schedule.Mode {
-			case storage.ModeRealtime:
-				_ = m.scheduler.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
-			case storage.ModeKeepaliveOnly:
-				_ = m.scheduler.Enqueue(NewKeepaliveTask(m, conn.ID, conn.Generation))
-			case storage.ModePaused:
-				// No upstream request
+			if s := m.Scheduler(); s != nil {
+				switch schedule.Mode {
+				case storage.ModeRealtime:
+					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+				case storage.ModeKeepaliveOnly:
+					_ = s.Enqueue(NewKeepaliveTask(m, conn.ID, conn.Generation))
+				case storage.ModePaused:
+					// No upstream request
+				}
 			}
 		}
 	}

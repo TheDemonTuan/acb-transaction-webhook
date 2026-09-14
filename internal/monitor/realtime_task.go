@@ -103,8 +103,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		t.finishDone(clientErr)
 		return scheduler.TaskStepResult{Done: true, Error: clientErr, Outcome: scheduler.OutcomeFatal}, clientErr
 	}
-	if t.m.sessions != nil {
-		if err := t.m.sessions.Restore(ctx, conn.ID, conn.Generation); err != nil {
+	if s := t.m.SessionLoader(); s != nil {
+		if err := s.Restore(ctx, conn.ID, conn.Generation); err != nil {
 			restoreErr := fmt.Errorf("restore ACB session: %w", err)
 			t.finishDone(restoreErr)
 			return scheduler.TaskStepResult{Done: true, Error: restoreErr, Outcome: scheduler.OutcomeAuth}, restoreErr
@@ -364,11 +364,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 	}
 
-	if len(batchRes.NewEvents) > 0 && t.m.onNewEvents != nil {
-		t.m.onNewEvents(batchRes.NewEvents)
-	}
-	if t.m.sessions != nil {
-		if err := t.m.sessions.Persist(ctx, conn.ID, conn.Generation); err != nil {
+	t.m.notifyNewEvents(batchRes.NewEvents)
+	if s := t.m.SessionLoader(); s != nil {
+		if err := s.Persist(ctx, conn.ID, conn.Generation); err != nil {
 			slog.Warn("could not persist refreshed ACB session", "error", err)
 		}
 	}
