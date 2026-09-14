@@ -64,6 +64,7 @@ EOF
   printf 'mock-worker-token\n' > "$test_dir/secrets/worker_internal_token"
   printf 'mock-bark-user\n' > "$test_dir/secrets/bark_basic_auth_user"
   printf 'mock-bark-pass\n' > "$test_dir/secrets/bark_basic_auth_password"
+  chmod 600 "$test_dir/secrets/"* 2>/dev/null || true
 
   cat <<'EOF' > "$test_dir/bin/docker"
 #!/usr/bin/env bash
