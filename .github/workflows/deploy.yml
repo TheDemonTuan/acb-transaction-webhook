@@ -664,13 +664,19 @@ jobs:
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
           cosign_version="v2.4.3"
-          cosign_bin="$RUNNER_TEMP/cosign-linux-amd64"
+          target_arch="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" 'uname -m')"
+          case "$target_arch" in
+            x86_64|amd64) cosign_asset="cosign-linux-amd64" ;;
+            aarch64|arm64) cosign_asset="cosign-linux-arm64" ;;
+            *) printf 'Unsupported VPS architecture for Cosign: %s\n' "$target_arch" >&2; exit 1 ;;
+          esac
+          cosign_bin="$RUNNER_TEMP/$cosign_asset"
           cosign_checksums="$RUNNER_TEMP/cosign_checksums.txt"
           curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
-            --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign-linux-amd64"
+            --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/${cosign_asset}"
           curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
             --output "$cosign_checksums" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign_checksums.txt"
-          grep '  cosign-linux-amd64$' "$cosign_checksums" | (cd "$RUNNER_TEMP" && sha256sum --check -)
+          grep "  ${cosign_asset}$" "$cosign_checksums" | (cd "$RUNNER_TEMP" && sha256sum --check -)
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$cosign_bin" "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/cosign.next"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
