@@ -47,11 +47,16 @@ if [[ -z "$DRILL_DIR" ]]; then
 fi
 
 # 1. Fail closed if drill dir matches or is inside live production volume/path
+if [[ "$DRILL_DIR" == "/data" || "$DRILL_DIR" == "/data/"* ]]; then
+  printf 'RESTORE DRILL REFUSED: Target drill directory (%s) is inside the production data root.\n' "$DRILL_DIR" >&2
+  exit 1
+fi
+
 abs_drill="$(cd -- "$(mkdir -p "$DRILL_DIR" && cd -- "$DRILL_DIR" && pwd)" && pwd)"
 live_data_dir="${DATA_DIR:-$REPO_ROOT/deploy/data}"
 abs_live="$(cd -- "$(mkdir -p "$live_data_dir" && cd -- "$live_data_dir" && pwd)" && pwd)"
 
-if [[ "$abs_drill" == "$abs_live"* || "$abs_drill" == "/data"* || "$abs_drill" == *gateway_data* ]]; then
+if [[ "$abs_drill" == "$abs_live"* || "$abs_drill" == "/data" || "$abs_drill" == "/data/"* || "$abs_drill" == *gateway_data* ]]; then
   printf 'RESTORE DRILL REFUSED: Target drill directory (%s) overlaps with live production data directory (%s).\n' "$abs_drill" "$abs_live" >&2
   exit 1
 fi
