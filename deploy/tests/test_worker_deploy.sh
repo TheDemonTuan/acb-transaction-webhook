@@ -29,6 +29,7 @@ assert_eq() {
 
 setup_worker_mock_env() {
   local test_dir="$1"
+  unset WORKER_STOP_CMD WORKER_START_CMD WORKER_READY_CHECK_CMD WORKER_QUIESCE_CMD WORKER_RESUME_CMD WORKER_ROLLBACK_READY_CHECK_CMD
   export MOCK_STATE_DIR="$test_dir"
   export MOCK_ACTIVE_AUTH=0
   export MOCK_QUIESCE_FAIL=0
@@ -107,6 +108,7 @@ elif [[ "$cmd" == "ps" ]]; then
   exit 0
 elif [[ "$cmd" == "stop" ]]; then
   touch "$STATE_DIR/worker_stopped"
+  touch "$STATE_DIR/stop_was_called"
   exit 0
 elif [[ "$cmd" == "rm" ]]; then
   exit 0
@@ -125,6 +127,9 @@ elif [[ "$cmd" == "inspect" ]]; then
   printf 'ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
   exit 0
 elif [[ "$cmd" == "compose" ]]; then
+  if [[ "$*" =~ up ]]; then
+    rm -f "$STATE_DIR/worker_stopped"
+  fi
   exit 0
 elif [[ "$cmd" == "run" ]]; then
   if [[ "$*" =~ -active-auth-count ]]; then
@@ -365,7 +370,7 @@ assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 # ==============================================================================
 printf '\n=== TEST 9: Bad Quiesce Responses Fail Closed Without Stopping Old Container ===\n'
 
-# 9a: Candidate container returns 404 (endpoint not supported)
+# 9a: Candidate container returns 404 (endpoint not supported on legacy pre-quiesce worker -> graceful fallback)
 T9A="$TEST_TMP/t9a"
 setup_worker_mock_env "$T9A"
 unset WORKER_QUIESCE_CMD
@@ -377,12 +382,14 @@ set +e
 exit_code=$?
 set -e
 
-assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy aborted on 404 quiesce response"
+assert_eq "0" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy succeeds on legacy worker 404 response via graceful stop fallback"
 stopped=0
-if [[ -f "$T9A/worker_stopped" ]]; then
+if [[ -f "$T9A/stop_was_called" ]]; then
   stopped=1
 fi
-assert_eq "0" "$stopped" "Old worker container was NOT stopped on 404 quiesce response"
+assert_eq "1" "$stopped" "Old worker container was stopped via graceful stop"
+committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T9A/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
+assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Legacy worker upgraded and committed"
 
 # 9b: Candidate container returns quiesced: false
 T9B="$TEST_TMP/t9b"

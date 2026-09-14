@@ -247,6 +247,11 @@ quiesce_old_worker() {
         log_error "Candidate container quiesce returned unverified response: ${q_resp}"
       fi
     else
+      if [[ "$q_resp" =~ "404 page not found" || "$q_resp" =~ "status 404" ]]; then
+        log_warn "Running worker container returned HTTP 404 for /rpc/quiesce. Detected legacy pre-quiesce worker."
+        log_warn "Proceeding with graceful container stop (SIGTERM with 30s grace period)..."
+        return 0
+      fi
       log_error "Candidate container quiesce RPC failed: ${q_resp}"
     fi
 
