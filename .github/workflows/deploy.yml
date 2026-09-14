@@ -663,8 +663,18 @@ jobs:
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/deploy'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/"
+          cosign_version="v2.4.3"
+          cosign_bin="$RUNNER_TEMP/cosign-linux-amd64"
+          cosign_checksums="$RUNNER_TEMP/cosign_checksums.txt"
+          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
+            --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign-linux-amd64"
+          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
+            --output "$cosign_checksums" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign_checksums.txt"
+          grep '  cosign-linux-amd64$' "$cosign_checksums" | (cd "$RUNNER_TEMP" && sha256sum --check -)
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$cosign_bin" "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/cosign.next"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
+            "$VPS_USER@$VPS_HOST" "cp -f '$DEPLOY_PATH/deploy/compose.prod.yaml' '$DEPLOY_PATH/deploy/compose.prod.yaml.next'; install -m 0755 '$DEPLOY_PATH/deploy/cosign.next' '$DEPLOY_PATH/deploy/cosign'; rm -f '$DEPLOY_PATH/deploy/cosign.next'; chmod 755 '$DEPLOY_PATH/deploy/'*.sh"
       - name: Deploy immutable image
         timeout-minutes: 20
         env:
@@ -693,6 +703,7 @@ jobs:
 
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
+          export PATH="$DEPLOY_PATH/deploy:$PATH"
 
           # Dispatch rollout orchestration using trusted minimal dispatcher
           bash "$DEPLOY_PATH/deploy/dispatch-rollout.sh" \
