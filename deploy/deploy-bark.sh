@@ -59,7 +59,7 @@ start_bark() {
   fi
   if command -v docker >/dev/null 2>&1; then
     stop_bark
-    BARK_IMAGE_REF="$img" docker compose -f "$SCRIPT_DIR/compose.prod.yaml" up -d --no-deps bark
+    BARK_IMAGE_REF="$img" compose_prod up -d --no-deps bark
   fi
 }
 

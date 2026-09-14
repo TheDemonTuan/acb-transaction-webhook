@@ -51,7 +51,7 @@ start_browser() {
   fi
   if command -v docker >/dev/null 2>&1; then
     stop_browser
-    BROWSER_IMAGE_REF="$img" docker compose -f "$SCRIPT_DIR/compose.prod.yaml" up -d --no-deps auth-browser
+    BROWSER_IMAGE_REF="$img" compose_prod up -d --no-deps auth-browser
   fi
 }
 

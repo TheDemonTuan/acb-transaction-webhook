@@ -133,7 +133,7 @@ start_worker_container() {
   fi
 
   if command -v docker >/dev/null 2>&1; then
-    WORKER_IMAGE_REF="$img" docker compose -f "$SCRIPT_DIR/compose.prod.yaml" up -d --no-deps worker
+    WORKER_IMAGE_REF="$img" compose_prod up -d --no-deps worker
   else
     log_error "docker CLI not available to start worker"
     return 1
