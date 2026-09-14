@@ -84,6 +84,8 @@ func TestSPAContentSecurityPolicy(t *testing.T) {
 
 	for _, required := range []string{
 		"script-src 'self' https://static.cloudflareinsights.com",
+		"script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'",
+		"script-src-attr 'none'",
 		"connect-src 'self' ws: wss: https://cloudflareinsights.com",
 		"img-src 'self' data: blob: https:",
 	} {

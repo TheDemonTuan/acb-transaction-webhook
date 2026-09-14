@@ -6,6 +6,8 @@ test('serves the intended CSP on SPA routes', async ({ request }) => {
     expect(response.status()).toBe(200);
     const csp = response.headers()['content-security-policy'];
     expect(csp).toContain("script-src 'self' https://static.cloudflareinsights.com");
+    expect(csp).toContain("script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'");
+    expect(csp).toContain("script-src-attr 'none'");
     expect(csp).toContain("connect-src 'self' ws: wss: https://cloudflareinsights.com");
     expect(csp).toContain("img-src 'self' data: blob: https:");
     expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
