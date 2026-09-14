@@ -203,6 +203,7 @@ def make_initial_state(app_name: str) -> dict:
         "last_failover_time": None,
         "restarts_count": 0,
         "last_restart_time": None,
+        "healthy_since": None,
         "degraded": False,
         "degraded_reason": None,
     }
@@ -817,14 +818,28 @@ class FailoverEngine:
                 if app_cfg.workload_class == "singleton":
                     insp = self.docker_client.inspect_container(app_cfg.container_name)
                     status = insp.get("State", {}).get("Status") if insp else "missing"
-                    if status != "running":
+                    health = insp.get("State", {}).get("Health", {}).get("Status", "") if insp else ""
+                    if status != "running" or health == "unhealthy":
                         self._handle_singleton_failure(app_cfg, state, insp.get("Id", "") if insp else "", now)
                     else:
+                        healthy_since = state.get("healthy_since")
+                        previous_slot = state.get("slots", {}).get("singleton", {})
+                        same_container = previous_slot.get("container_id") == (insp.get("Id", "") if insp else "")
+                        if health == "healthy":
+                            if not healthy_since or not same_container:
+                                state["healthy_since"] = now
+                            elif now - float(healthy_since) >= max(app_cfg.cooldown_seconds, 60):
+                                state["restarts_count"] = 0
+                                state["last_restart_time"] = None
+                                state["degraded"] = False
+                                state["degraded_reason"] = None
+                        else:
+                            state["healthy_since"] = None
                         state["slots"] = {
                             "singleton": {
                                 "container_id": insp.get("Id", "") if insp else "",
                                 "status": "running",
-                                "health": insp.get("State", {}).get("Health", {}).get("Status", "healthy") if insp else "",
+                                "health": health,
                                 "last_transition": now,
                             }
                         }

@@ -54,7 +54,7 @@ func TestStatusIncludesLastSuccessfulPoll(t *testing.T) {
 	}
 }
 
-func TestHealthStatusAndSPARouting(t *testing.T) {
+func TestHealthStatusAndAPIRouting(t *testing.T) {
 	t.Parallel()
 	store, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
@@ -66,7 +66,7 @@ func TestHealthStatusAndSPARouting(t *testing.T) {
 		path        string
 		code        int
 		contentType string
-	}{{"/healthz", http.StatusOK, "application/json"}, {"/readyz", http.StatusOK, "application/json"}, {"/api/v1/status", http.StatusOK, "application/json"}, {"/transactions", http.StatusOK, "text/html"}, {"/api/v1/missing", http.StatusNotFound, "text/plain"}} {
+	}{{"/healthz", http.StatusOK, "application/json"}, {"/readyz", http.StatusOK, "application/json"}, {"/api/v1/status", http.StatusOK, "application/json"}, {"/transactions", http.StatusNotFound, "text/plain"}, {"/api/v1/missing", http.StatusNotFound, "text/plain"}} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		rec := httptest.NewRecorder()
 		server.ServeHTTP(rec, req)

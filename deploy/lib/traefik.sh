@@ -151,17 +151,37 @@ http:
         - deny-internal
       service: acb-service
 
-    acb-router:
-      rule: "Host(\`${route_host}\`) && !PathPrefix(\`/internal\`)"
+    acb-api-router:
+      rule: "Host(\`${route_host}\`) && (PathPrefix(\`/api\`) || Path(\`/health\`) || Path(\`/healthz\`) || Path(\`/ready\`) || Path(\`/readyz\`))"
+      entryPoints:
+        - web
+      priority: 200
+      middlewares:
+        - tunnel-only
+        - security-headers
+      service: acb-service
+
+    acb-frontend-router:
+      rule: "Host(\`${route_host}\`)"
       entryPoints:
         - web
       priority: 100
       middlewares:
         - tunnel-only
         - security-headers
-      service: acb-service
+      service: acb-frontend-service
 
   services:
+    acb-frontend-service:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: "http://acb-frontend:8080"
+        healthCheck:
+          path: "/readyz"
+          interval: "5s"
+          timeout: "2s"
+
     acb-service:
       loadBalancer:
         passHostHeader: true

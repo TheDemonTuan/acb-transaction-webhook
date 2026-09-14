@@ -483,6 +483,46 @@ def test_singleton_bounded_restart(env):
     assert len(env["docker"].restarted) == restart_count_before  # no new restart
 
 
+def test_singleton_reconcile_restarts_running_unhealthy_only(env):
+    create_app_registry(
+        env["reg_dir"],
+        "worker",
+        workload_class="singleton",
+        container_name="acb-worker",
+        max_restarts=3,
+    )
+    env["docker"].add_container("acb-worker", "cid-worker-1", status="running", health="unhealthy")
+
+    env["engine"].reconcile_app("worker")
+
+    assert env["docker"].restarted == ["acb-worker"]
+    assert not any(name != "acb-worker" for name in env["docker"].restarted)
+
+
+def test_singleton_restart_budget_resets_after_stable_health(env):
+    create_app_registry(
+        env["reg_dir"],
+        "worker",
+        workload_class="singleton",
+        container_name="acb-worker",
+        max_restarts=3,
+        cooldown_seconds=60,
+    )
+    env["docker"].add_container("acb-worker", "cid-worker-2", status="running", health="healthy")
+    state = ctrl.load_state("worker", env["st_dir"])
+    state["restarts_count"] = 3
+    state["last_restart_time"] = env["clock"].now()
+    ctrl.save_state_atomic("worker", state, env["st_dir"])
+
+    env["engine"].reconcile_app("worker")
+    env["clock"].advance(61)
+    env["engine"].reconcile_app("worker")
+
+    state = ctrl.load_state("worker", env["st_dir"])
+    assert state["restarts_count"] == 0
+    assert state["degraded"] is False
+
+
 # 10. Stale Deploy Lease
 def test_stale_deploy_lease_reaping(env):
     """Active lease blocks failover; expired lease is reaped and failover proceeds."""

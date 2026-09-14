@@ -1,10 +1,21 @@
 name: acb-transaction-webhook
 
 services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    container_name: acb-frontend-dev
+    ports:
+      - "5173:8080"
+    depends_on: []
+
   gateway:
     build:
       context: .
       dockerfile: Dockerfile
+      target: gateway
     container_name: acb-gateway-dev
     ports:
       - "8090:8090"

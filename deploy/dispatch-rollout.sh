@@ -49,6 +49,7 @@ DETACH_SOAK="${DETACH_SOAK:-0}"
 RESUME_SOAK="${RESUME_SOAK:-0}"
 REQUESTED_SCOPE="${REQUESTED_SCOPE:-}"
 
+IMAGE_FRONTEND="${FRONTEND_IMAGE_REF:-}"
 IMAGE_GATEWAY="${GATEWAY_IMAGE_REF:-${IMAGE_REF:-}}"
 IMAGE_WORKER="${WORKER_IMAGE_REF:-}"
 IMAGE_DBTOOL="${DBTOOL_IMAGE_REF:-}"
@@ -72,6 +73,7 @@ Options:
   --allow-redeploy                Allow re-deploying currently deployed commit
   --max-age-seconds <sec>         Maximum acceptable manifest age (default: 86400)
   --soak-seconds <sec>            Soak duration for gateway (default: 900)
+  --frontend-image <ref>          Frontend immutable image digest
   --detach-soak                   Detach soak observation in background
   --resume-soak                   Resume active soak observation
   --scope <components>            Explicit comma-separated component scope override
@@ -142,6 +144,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --scope)
       REQUESTED_SCOPE="$2"
+      shift 2
+      ;;
+    --frontend-image)
+      IMAGE_FRONTEND="$2"
       shift 2
       ;;
     --gateway-image)
@@ -330,6 +336,7 @@ fi
 init_rollout_journal "pending" "pending" "unresolved"
 
 # 3. Verify Manifest & Promotion Scope
+PROMOTION_FRONTEND="false"
 PROMOTION_GATEWAY="false"
 PROMOTION_WORKER="false"
 PROMOTION_SCHEMA="false"
@@ -348,6 +355,7 @@ if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
     GIT_SHA="$(grep -o '"git_sha":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
     RELEASE_ID="$(grep -o '"release_id":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
 
+    grep -q '"frontend":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_FRONTEND="true"
     grep -q '"gateway":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_GATEWAY="true"
     grep -q '"worker":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_WORKER="true"
     grep -q '"schema":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_SCHEMA="true"
@@ -357,6 +365,7 @@ if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
     grep -q '"platform":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_PLATFORM="true"
     grep -q '"promotion_doc_only":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_DOC_ONLY="true"
 
+    [[ -z "$IMAGE_FRONTEND" ]] && IMAGE_FRONTEND="$(grep -o '"frontend":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
     [[ -z "$IMAGE_GATEWAY" ]] && IMAGE_GATEWAY="$(grep -o '"gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
     [[ -z "$IMAGE_WORKER" ]] && IMAGE_WORKER="$(grep -o '"worker":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
     [[ -z "$IMAGE_DBTOOL" ]] && IMAGE_DBTOOL="$(grep -o '"dbtool":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
@@ -367,6 +376,7 @@ if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
     IFS=',' read -ra scopes <<< "$REQUESTED_SCOPE"
     for sc in "${scopes[@]}"; do
       case "$sc" in
+        frontend) PROMOTION_FRONTEND="true" ;;
         gateway) PROMOTION_GATEWAY="true" ;;
         worker) PROMOTION_WORKER="true" ;;
         schema) PROMOTION_SCHEMA="true" ;;
@@ -415,7 +425,7 @@ else
   source "$verified_env"
   rm -f "$verified_env"
 
-  for promotion_var in PROMOTION_GATEWAY PROMOTION_WORKER PROMOTION_SCHEMA PROMOTION_AUTH_BROWSER PROMOTION_TTS PROMOTION_BARK PROMOTION_PLATFORM PROMOTION_DOC_ONLY; do
+  for promotion_var in PROMOTION_FRONTEND PROMOTION_GATEWAY PROMOTION_WORKER PROMOTION_SCHEMA PROMOTION_AUTH_BROWSER PROMOTION_TTS PROMOTION_BARK PROMOTION_PLATFORM PROMOTION_DOC_ONLY; do
     promotion_value="${!promotion_var:-}"
     [[ "$promotion_value" == "true" || "$promotion_value" == "false" ]] || {
       log_error "Invalid verified promotion flag [$promotion_var=$promotion_value]."
@@ -423,6 +433,7 @@ else
     }
   done
 
+  IMAGE_FRONTEND="${IMAGE_FRONTEND:-${FRONTEND_IMAGE_REF:-}}"
   IMAGE_GATEWAY="${IMAGE_GATEWAY:-${IMAGE_GATEWAY:-}}"
   IMAGE_WORKER="${IMAGE_WORKER:-${IMAGE_WORKER:-}}"
   IMAGE_DBTOOL="${IMAGE_DBTOOL:-${IMAGE_DBTOOL:-}}"
@@ -433,6 +444,7 @@ fi
 
 # Compose validates the entire production model even for `up --no-deps <service>`.
 # Export every verified immutable image before any component transaction runs.
+export FRONTEND_IMAGE_REF="$IMAGE_FRONTEND"
 export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
 export WORKER_IMAGE_REF="$IMAGE_WORKER"
 export BROWSER_IMAGE_REF="$IMAGE_AUTH_BROWSER"
@@ -446,6 +458,12 @@ if [[ -n "$REQUESTED_SCOPE" ]]; then
   IFS=',' read -ra req_scopes <<< "$REQUESTED_SCOPE"
   for sc in "${req_scopes[@]}"; do
     case "$sc" in
+      frontend)
+        if [[ "$PROMOTION_FRONTEND" != "true" ]]; then
+          log_error "Unauthorized promotion request: component [frontend] is NOT authorized by signed manifest."
+          exit 1
+        fi
+        ;;
       gateway)
         if [[ "$PROMOTION_GATEWAY" != "true" ]]; then
           log_error "Unauthorized promotion request: component [gateway] is NOT authorized by signed manifest."
@@ -501,6 +519,7 @@ if [[ -n "$REQUESTED_SCOPE" ]]; then
   PROMOTION_PLATFORM="false"
   for sc in "${req_scopes[@]}"; do
     case "$sc" in
+      frontend) PROMOTION_FRONTEND="true" ;;
       gateway) PROMOTION_GATEWAY="true" ;;
       worker) PROMOTION_WORKER="true" ;;
       schema) PROMOTION_SCHEMA="true" ;;
@@ -515,7 +534,8 @@ fi
 # 4. Docs-Only Release: Promote zero runtime containers/migrations
 is_docs_only=0
 if [[ "${PROMOTION_DOC_ONLY:-false}" == "true" ]] || \
-   ([[ "${PROMOTION_GATEWAY:-false}" != "true" ]] && \
+   ([[ "${PROMOTION_FRONTEND:-false}" != "true" ]] && \
+    [[ "${PROMOTION_GATEWAY:-false}" != "true" ]] && \
     [[ "${PROMOTION_WORKER:-false}" != "true" ]] && \
     [[ "${PROMOTION_SCHEMA:-false}" != "true" ]] && \
     [[ "${PROMOTION_AUTH_BROWSER:-false}" != "true" ]] && \
@@ -565,6 +585,7 @@ fi
 
 # 5. Dependency-Ordered Rollout Execution
 active_scope_list=()
+[[ "${PROMOTION_FRONTEND:-false}" == "true" ]] && active_scope_list+=("frontend")
 [[ "${PROMOTION_SCHEMA:-false}" == "true" ]] && active_scope_list+=("schema")
 [[ "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]] && active_scope_list+=("auth_browser")
 [[ "${PROMOTION_TTS:-false}" == "true" ]] && active_scope_list+=("tts")
@@ -636,6 +657,18 @@ if [[ "${PROMOTION_BARK:-false}" == "true" ]]; then
   update_rollout_step "bark" "STEP_COMPLETED"
   promoted_list+=("bark")
   log_info "Transaction 2c: Bark Service completed."
+fi
+
+# Step 2d: Frontend-only replacement
+if [[ "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
+  log_info "Executing Transaction 2d: isolated frontend deployment..."
+  update_rollout_step "frontend" "RUNNING"
+  [[ -n "$IMAGE_FRONTEND" ]] || { log_error "FRONTEND image digest is required for frontend promotion."; exit 1; }
+  validate_digest "$IMAGE_FRONTEND" "frontend"
+  bash "$DEPLOY_DIR/deploy-frontend.sh" "$IMAGE_FRONTEND"
+  update_rollout_step "frontend" "STEP_COMPLETED"
+  promoted_list+=("frontend")
+  log_info "Transaction 2d: frontend completed without touching gateway or worker."
 fi
 
 # Step 3: Singleton Worker Upgrade
@@ -717,7 +750,7 @@ EOF
 if [[ -f "$DEPLOY_DIR/release-env.sh" ]]; then
   # shellcheck source=deploy/release-env.sh
   source "$DEPLOY_DIR/release-env.sh"
-  [[ -n "${IMAGE_GATEWAY:-}" && "${PROMOTION_GATEWAY:-false}" == "true" ]] && set_release_env "GATEWAY_IMAGE_REF" "$IMAGE_GATEWAY" 2>/dev/null || true
+  [[ -n "${IMAGE_FRONTEND:-}" && "${PROMOTION_FRONTEND:-false}" == "true" ]] && set_release_env "FRONTEND_IMAGE_REF" "$IMAGE_FRONTEND" 2>/dev/null || true
   [[ -n "${IMAGE_WORKER:-}" && "${PROMOTION_WORKER:-false}" == "true" ]] && set_release_env "WORKER_IMAGE_REF" "$IMAGE_WORKER" 2>/dev/null || true
   [[ -n "${IMAGE_DBTOOL:-}" && "${PROMOTION_SCHEMA:-false}" == "true" ]] && set_release_env "DBTOOL_IMAGE_REF" "$IMAGE_DBTOOL" 2>/dev/null || true
   [[ -n "${IMAGE_AUTH_BROWSER:-}" && "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]] && set_release_env "BROWSER_IMAGE_REF" "$IMAGE_AUTH_BROWSER" 2>/dev/null || true

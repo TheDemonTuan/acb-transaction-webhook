@@ -173,7 +173,8 @@ The release pipeline calculates changes against the latest successfully deployed
 
 | Scope Identifier | Monitored Code Paths | Triggered Promotion Action |
 |---|---|---|
-| `gateway` | `cmd/gateway/**`, `internal/httpapi/**`, `internal/httpui/**`, `web/**` | Blue/Green gateway slot promotion |
+| `frontend` | `web/**`, `deploy/frontend-nginx.conf` | Isolated frontend service replacement; gateway and worker remain untouched |
+| `gateway` | `cmd/gateway/**`, `internal/httpapi/**`, `internal/csrf/**` | Blue/Green gateway slot promotion |
 | `worker` | `cmd/worker/**`, `internal/monitor/**`, `internal/acb/**` | Controlled singleton worker upgrade |
 | `schema` | `internal/storage/migrations/**`, `cmd/dbtool/**` | Offline backup + dbtool migration |
 | `auth-browser` | `cmd/auth-browser/**`, `Dockerfile.auth-browser` | Sandboxed browser container restart |

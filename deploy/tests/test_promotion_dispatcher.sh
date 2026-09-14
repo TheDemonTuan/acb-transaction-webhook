@@ -62,6 +62,7 @@ setup_dispatcher_env() {
   cp "$DEPLOY_DIR/release-env.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/deploy-frontend.sh" "$tdir/deploy/"
   chmod 755 "$tdir/deploy/"*.sh
 
   # Create canonical mock env files
@@ -104,6 +105,13 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'GATEWAY:%s\n' "$@" >> "${TRACE_FILE}"
+exit 0
+EOF
+
+  cat <<'EOF' > "$tdir/deploy/deploy-frontend.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'FRONTEND:%s\n' "$@" >> "${TRACE_FILE}"
 exit 0
 EOF
 
@@ -157,6 +165,7 @@ write_mock_manifest() {
   },
   "promotion": ${scope_json},
   "images": {
+    "frontend": "ghcr.io/test/frontend@sha256:7777777777777777777777777777777777777777777777777777777777777777",
     "gateway": "ghcr.io/test/gateway@sha256:1111111111111111111111111111111111111111111111111111111111111111",
     "worker": "ghcr.io/test/worker@sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "dbtool": "ghcr.io/test/dbtool@sha256:3333333333333333333333333333333333333333333333333333333333333333",
@@ -174,6 +183,24 @@ printf "Running Promotion Dispatcher & Rollout Orchestrator Tests\n"
 printf "========================================================\n\n"
 
 # ----------------------------------------------------
+# 0. Frontend-only Release
+printf "\n0. Testing frontend-only isolated rollout...\n"
+T0="$TEST_TMP/t0"
+setup_dispatcher_env "$T0"
+sha_t0="0000000000000000000000000000000000000000"
+manifest_t0="$T0/deploy/release-manifest.json"
+write_mock_manifest "$manifest_t0" "$sha_t0" '{"frontend":true,"gateway":false,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false}'
+TRACE_FILE="$T0/trace.log" DATA_DIR="$T0/data" SECRETS_DIR="$T0/secrets" DEPLOY_PATH="$T0" RELEASE_ENV_FILE="$T0/deploy/.release.env" SKIP_MANIFEST_CHECK=1 \
+  bash "$T0/deploy/dispatch-rollout.sh" --manifest "$manifest_t0" --deploy-dir "$T0/deploy" --data-dir "$T0/data" --skip-manifest-check --allow-redeploy
+assert_file_contains "$T0/trace.log" '^FRONTEND:' "Frontend-only rollout invokes frontend deploy"
+if grep -Eq '^(GATEWAY|WORKER|TTS|BARK):' "$T0/trace.log"; then
+  printf 'FAIL: frontend-only rollout touched another runtime\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: frontend-only rollout leaves gateway, worker, TTS and Bark untouched\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
 # 1. Documentation-Only Release (Zero runtime promotion)
 # ----------------------------------------------------
 printf "TEST 1: Documentation-Only Promotion (Zero Runtime Mutation)...\n"

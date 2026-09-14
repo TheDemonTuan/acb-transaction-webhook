@@ -403,10 +403,10 @@ printf "10. Checking Container Healthchecks and Role Wiring...\n"
 # Worker healthcheck and role
 worker_block="${SVC_BLOCKS[worker]:-}"
 if echo "$worker_block" | grep -E 'RUNTIME_ROLE:[[:space:]]*worker' >/dev/null 2>&1 && \
-   echo "$worker_block" | grep -E '/worker.*--liveness-check' >/dev/null 2>&1; then
-  assert_pass "Worker specifies RUNTIME_ROLE: worker and --liveness-check health probe"
+   echo "$worker_block" | grep -E '/worker.*--readiness-check' >/dev/null 2>&1; then
+  assert_pass "Worker specifies RUNTIME_ROLE: worker and --readiness-check health probe"
 else
-  assert_fail "Worker role/health" "Worker must specify RUNTIME_ROLE: worker and --liveness-check"
+  assert_fail "Worker role/health" "Worker must specify RUNTIME_ROLE: worker and --readiness-check"
 fi
 
 # Gateways healthcheck and role

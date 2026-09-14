@@ -10,13 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -29,7 +27,6 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/httpui"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
@@ -206,10 +203,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.With(s.auth.Require(auth.Owner)).Post("/notification-channels/{id}/test", s.testNotificationChannel)
 		api.With(s.auth.Require(auth.Owner)).Post("/deliveries/{id}/replay", s.replayDelivery)
 	})
-	ui, err := fs.Sub(httpui.Files, "dist")
-	if err == nil {
-		r.Mount("/", spa(ui))
-	}
 	s.handler = r
 	return s
 }
@@ -517,6 +510,11 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		resp["worker"] = "monolith"
 	}
 
+	// Deployment readiness covers only critical request dependencies. Auxiliary
+	// realtime, auth-browser and TTS outages are reported below but do not evict
+	// a healthy gateway from the blue/green route.
+	criticalStatus := status
+
 	if s.cfg.WorkerRealtimeEnabled {
 		realtime := telemetry.Default.FullSnapshot().Realtime
 		resp["realtime"] = realtime.StreamState
@@ -550,6 +548,9 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 			if status == "ready" {
 				status = "degraded"
 			}
+			if res != nil {
+				_ = res.Body.Close()
+			}
 		} else {
 			resp["tts"] = "ready"
 			_ = res.Body.Close()
@@ -575,7 +576,7 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 
 	resp["status"] = status
 	code := http.StatusOK
-	if status == "not_ready" {
+	if criticalStatus == "not_ready" {
 		code = http.StatusServiceUnavailable
 	}
 	writeJSON(w, code, resp)
@@ -1958,7 +1959,6 @@ func requestIDFromContext(ctx context.Context) string {
 
 const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self'"
 
-const spaContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; script-src 'self' https://static.cloudflareinsights.com; script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'; script-src-attr 'none'; connect-src 'self' ws: wss: https://cloudflareinsights.com; img-src 'self' data: blob: https:; font-src 'self' data:; style-src 'self' 'unsafe-inline'"
 
 const vncContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
 
@@ -2027,30 +2027,4 @@ func writeStandardError(w http.ResponseWriter, r *http.Request, status int, code
 		resp["requestId"] = reqID
 	}
 	writeJSON(w, status, resp)
-}
-func spa(files fs.FS) http.Handler {
-	static := http.FileServer(http.FS(files))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.NotFound(w, r)
-			return
-		}
-		requested := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-		if requested != "." && requested != "" {
-			if f, err := files.Open(requested); err == nil {
-				_ = f.Close()
-				if strings.HasPrefix(requested, "assets/") {
-					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-				}
-				static.ServeHTTP(w, r)
-				return
-			}
-		}
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		w.Header().Set("Content-Security-Policy", spaContentSecurityPolicy)
-		r.URL.Path = "/"
-		static.ServeHTTP(w, r)
-	})
 }

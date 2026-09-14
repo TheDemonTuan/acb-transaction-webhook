@@ -168,16 +168,23 @@ cd ..
 go test -race ./...
 ```
 
-3. **Start the gateway locally:**
+3. **Start the API gateway locally:**
 
 ```bash
 export APP_ENV=development
-export LISTEN_ADDR=127.0.0.1:8080
+export LISTEN_ADDR=127.0.0.1:8090
 export DATA_DIR=/tmp/acb-transaction-webhook
 go run ./cmd/gateway
 ```
 
-Visit `http://127.0.0.1:8080` in your browser.
+4. **Start the frontend separately:**
+
+```bash
+cd web
+bun run dev
+```
+
+Visit `http://127.0.0.1:5173` in your browser. Production routes `/api` to the blue/green gateway and all other public paths to the isolated frontend service.
 
 ---
 

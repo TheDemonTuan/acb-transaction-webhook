@@ -50,7 +50,7 @@ services:
     labels:
       - "platform.workload.class=singleton"
     healthcheck:
-      test: ["CMD", "/worker", "--liveness-check"]
+      test: ["CMD", "/worker", "--readiness-check"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -219,6 +219,39 @@ services:
           cpus: "0.25"
           memory: 192M
           pids: 100
+
+  frontend:
+    image: ${FRONTEND_IMAGE_REF:?FRONTEND_IMAGE_REF is required}
+    container_name: acb-frontend
+    restart: unless-stopped
+    read_only: true
+    user: "101:101"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    expose:
+      - "8080"
+    networks:
+      edge-acb:
+        aliases:
+          - acb-frontend
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=4m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/readyz | grep -qx ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    cpus: "0.20"
+    mem_limit: 64M
+    pids_limit: 50
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   gateway-blue:
     image: ${IMAGE_REF_BLUE:?IMAGE_REF_BLUE is required}

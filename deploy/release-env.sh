@@ -218,6 +218,7 @@ validate_release_env_file() {
 
 init_release_env() {
   local target_file="${RELEASE_ENV_FILE}"
+  local frontend=""
   local gw_blue=""
   local gw_green=""
   local worker=""
@@ -230,6 +231,8 @@ init_release_env() {
     case "$1" in
       --file)
         target_file="$2"; shift 2 ;;
+      --frontend-image)
+        frontend="$2"; shift 2 ;;
       --gateway-image)
         gw_blue="$2"; gw_green="$2"; shift 2 ;;
       --gateway-blue)
@@ -267,6 +270,7 @@ init_release_env() {
     return 1
   fi
 
+  [[ -n "$frontend" ]] && validate_image_ref "$frontend" "FRONTEND_IMAGE_REF"
   validate_image_ref "$gw_blue" "IMAGE_REF_BLUE"
   validate_image_ref "$gw_green" "IMAGE_REF_GREEN"
   validate_image_ref "$worker" "WORKER_IMAGE_REF"
@@ -298,6 +302,7 @@ EOF
 
   chmod 600 "$tmp_file" 2>/dev/null || true
   mv -f "$tmp_file" "$target_file"
+  [[ -n "$frontend" ]] && set_release_env "FRONTEND_IMAGE_REF" "$frontend"
   log_release_info "Initialized canonical release environment at ${target_file}."
   return 0
 }

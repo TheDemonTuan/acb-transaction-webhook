@@ -236,6 +236,9 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(mw, "deny-internal:") || !strings.Contains(mw, "127.0.0.1/32") {
 		t.Errorf("middlewares.yml must contain deny-internal middleware with 127.0.0.1/32")
 	}
+	if !strings.Contains(mw, "Content-Security-Policy") {
+		t.Errorf("middlewares.yml must apply CSP at the edge for the standalone frontend")
+	}
 
 	// 2. Check acb.yml
 	acbPath := filepath.Join(edgeDir, "dynamic", "acb.yml")
@@ -248,8 +251,11 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(acb, "acb-deny-internal:") || !strings.Contains(acb, "PathPrefix(`/internal`)") {
 		t.Errorf("acb.yml must contain higher-priority deny router for /internal")
 	}
-	if !strings.Contains(acb, "!PathPrefix(`/internal`)") {
-		t.Errorf("acb.yml production acb-router must explicitly exclude /internal via !PathPrefix")
+	if !strings.Contains(acb, "acb-api-router:") || !strings.Contains(acb, "PathPrefix(`/api`)") {
+		t.Errorf("acb.yml must route only API and health paths to the blue/green gateway")
+	}
+	if !strings.Contains(acb, "acb-frontend-router:") || !strings.Contains(acb, "http://acb-frontend:8080") {
+		t.Errorf("acb.yml must route public frontend paths to the isolated frontend service")
 	}
 	if !strings.Contains(acb, "priority: 1000") {
 		t.Errorf("acb.yml deny router must have priority 1000")

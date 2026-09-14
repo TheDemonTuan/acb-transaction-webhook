@@ -175,6 +175,36 @@ func TestDeployzReportsRealtimeDegradedWithoutFailingReadiness(t *testing.T) {
 	}
 }
 
+func TestDeployzReportsTTSOutageWithoutEvictingGateway(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "deployz_tts_test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := config.Config{
+		WorkerInternalToken: "token",
+		TTSGatewayURL:       "http://127.0.0.1:1",
+	}
+	server := New(cfg, store)
+	req := httptest.NewRequest(http.MethodGet, "/internal/deployz", nil)
+	req.Header.Set("X-Worker-Internal-Token", "token")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected TTS outage to keep gateway deploy-ready, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "degraded" || body["tts"] != "unreachable" {
+		t.Fatalf("expected degraded TTS telemetry, got %#v", body)
+	}
+}
+
 func TestGatewayReadyzRemainsLocalDBOnly(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "readyz_test.db"))

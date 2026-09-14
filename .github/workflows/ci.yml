@@ -42,10 +42,11 @@ jobs:
         run: |
           pip install -r requirements.txt
           pytest -v
-      - name: Verify failover controller
+      - name: Test failover controller
         run: |
+          python3 -m pip install pytest
           python3 -m py_compile platform/failover/vps-failover-controller.py
-          python3 -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('controller', 'platform/failover/vps-failover-controller.py'); mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = mod; spec.loader.exec_module(mod)"
+          python3 -m pytest -q platform/failover/test_failover.py
       - name: Verify GitHub Actions are pinned to full commit SHAs
         run: bash scripts/verify-actions-pinned.sh
       - name: Test component promotion scope classifier

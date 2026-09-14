@@ -46,16 +46,27 @@ A	docs/runbooks/TEST.md
 M	.github/dependabot.yml
 EOF
 doc_out="$(run_case "$test_tmp/doc_only.txt" --format env)"
+assert_eq "doc-only: PROMOTION_FRONTEND is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "false"
 assert_eq "doc-only: PROMOTION_GATEWAY is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
 assert_eq "doc-only: PROMOTION_WORKER is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
 assert_eq "doc-only: PROMOTION_SCHEMA is false" "$(printf '%s' "$doc_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
 assert_eq "doc-only: PROMOTION_DOC_ONLY is true" "$(printf '%s' "$doc_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "true"
 assert_eq "doc-only: PROMOTION_SCOPE is empty" "$(printf '%s' "$doc_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" ""
 
-# 2. Gateway-only change
-printf "\n2. Testing gateway-only changes...\n"
-cat <<'EOF' > "$test_tmp/gateway_only.txt"
+# 2. Frontend-only change
+printf "\n2. Testing frontend-only changes...\n"
+cat <<'EOF' > "$test_tmp/frontend_only.txt"
 M	web/src/App.tsx
+M	web/src/styles.css
+EOF
+frontend_out="$(run_case "$test_tmp/frontend_only.txt" --format env)"
+assert_eq "frontend-only: PROMOTION_FRONTEND is true" "$(printf '%s' "$frontend_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
+assert_eq "frontend-only: PROMOTION_GATEWAY is false" "$(printf '%s' "$frontend_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "frontend-only: PROMOTION_WORKER is false" "$(printf '%s' "$frontend_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+
+# 3. Gateway-only change
+printf "\n3. Testing gateway-only changes...\n"
+cat <<'EOF' > "$test_tmp/gateway_only.txt"
 M	cmd/gateway/main.go
 M	internal/httpapi/routes.go
 EOF

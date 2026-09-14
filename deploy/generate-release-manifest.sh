@@ -11,6 +11,7 @@ base_sha=""
 promotion_scope_json=""
 promotion_scope_file=""
 
+frontend_image=""
 gateway_image=""
 worker_image=""
 dbtool_image=""
@@ -28,6 +29,7 @@ Options:
   --base-sha <sha>              Base commit SHA to compute promotion scope against
   --promotion-scope <json>      Explicit promotion scope JSON string
   --promotion-scope-file <path> Path to computed promotion scope JSON file
+  --frontend-image <ref>        Exact frontend image digest (required)
   --gateway-image <ref>         Exact gateway image digest (required)
   --worker-image <ref>          Exact worker image digest (required)
   --dbtool-image <ref>          Exact dbtool image digest (required)
@@ -60,6 +62,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --promotion-scope-file)
       promotion_scope_file="$2"
+      shift 2
+      ;;
+    --frontend-image)
+      frontend_image="$2"
       shift 2
       ;;
     --gateway-image)
@@ -146,6 +152,7 @@ else
   cat <<'EOF' > "$tmp_scope_file"
 {
   "promotion": {
+    "frontend": true,
     "gateway": true,
     "worker": true,
     "schema": true,
@@ -155,6 +162,7 @@ else
     "platform": true
   },
   "promotion_scope": [
+    "frontend",
     "gateway",
     "worker",
     "schema",
@@ -168,6 +176,7 @@ EOF
 fi
 
 declare -A images=(
+  ["frontend"]="$frontend_image"
   ["gateway"]="$gateway_image"
   ["worker"]="$worker_image"
   ["dbtool"]="$dbtool_image"
@@ -210,6 +219,8 @@ bundle_files=(
   "compose.prod.yaml"
   "lib.sh"
   "deploy-warm.sh"
+  "deploy-frontend.sh"
+  "frontend-nginx.conf"
   "rollback-warm.sh"
   "switch-slot.sh"
   "smoke-slot.sh"
@@ -258,10 +269,10 @@ done
 
 if command -v node >/dev/null 2>&1; then
   node - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
-    "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'JSEOF'
+    "$frontend_image" "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'JSEOF'
 const fs = require('fs');
 
-const [,, outFile, gitSha, releaseId, createdAt, artifactsFile, scopeFile, gateway, worker, dbtool, authBrowser, tts, bark] = process.argv;
+const [,, outFile, gitSha, releaseId, createdAt, artifactsFile, scopeFile, frontend, gateway, worker, dbtool, authBrowser, tts, bark] = process.argv;
 
 const artifacts = {};
 const lines = fs.readFileSync(artifactsFile, 'utf8').split('\n');
@@ -283,6 +294,7 @@ try {
 }
 
 const defaultPromotion = {
+  frontend: true,
   gateway: true,
   worker: true,
   schema: true,
@@ -316,6 +328,7 @@ const manifest = {
   promotion,
   promotion_scope: promotionScope,
   images: {
+    frontend,
     gateway,
     worker,
     dbtool,
@@ -330,7 +343,7 @@ fs.writeFileSync(outFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 JSEOF
 elif command -v python3 >/dev/null 2>&1; then
   python3 - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
-    "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'PYEOF'
+    "$frontend_image" "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'PYEOF'
 import sys, json
 
 out_file = sys.argv[1]
@@ -339,7 +352,7 @@ release_id = sys.argv[3]
 created_at = sys.argv[4]
 artifacts_file = sys.argv[5]
 scope_file = sys.argv[6]
-gateway, worker, dbtool, auth_browser, tts, bark = sys.argv[7:13]
+frontend, gateway, worker, dbtool, auth_browser, tts, bark = sys.argv[7:14]
 
 artifacts = {}
 with open(artifacts_file, 'r', encoding='utf-8') as f:
@@ -359,6 +372,7 @@ except Exception as e:
     sys.exit(1)
 
 default_promotion = {
+    "frontend": True,
     "gateway": True,
     "worker": True,
     "schema": True,
@@ -392,6 +406,7 @@ manifest = {
     "promotion": promotion,
     "promotion_scope": promotion_scope,
     "images": {
+        "frontend": frontend,
         "gateway": gateway,
         "worker": worker,
         "dbtool": dbtool,

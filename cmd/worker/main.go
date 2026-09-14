@@ -768,6 +768,13 @@ func main() {
 		if flock == nil {
 			return errors.New("singleton worker lock not held")
 		}
+		sched := bankMonitor.Scheduler()
+		if sched == nil || !sched.IsRunning() {
+			return errors.New("poll scheduler is not running")
+		}
+		if kind := sched.CurrentTaskKind(); (kind == "REALTIME_POLL" || kind == "KEEPALIVE") && sched.CurrentTaskDuration() > 2*time.Minute {
+			return fmt.Errorf("poll scheduler task %s stalled for %s", kind, sched.CurrentTaskDuration().Round(time.Second))
+		}
 		return nil
 	})
 

@@ -150,6 +150,7 @@ export RELEASE_ENV_FILE="$T_REL"
 assert_success "init_release_env creates complete .release.env" \
   init_release_env \
     --file "$T_REL" \
+    --frontend-image "$valid_ref" \
     --gateway-blue "$valid_ref" \
     --gateway-green "$valid_ref" \
     --worker-image "ghcr.io/test/worker@sha256:${valid_sha}" \
@@ -215,7 +216,7 @@ eval_compose_interpolation() {
   # Run in clean subshell with environment loaded from env_file
   (
     # Clear any ambient image variables
-    unset WORKER_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF IMAGE_REF_BLUE IMAGE_REF_GREEN DBTOOL_IMAGE_REF || true
+    unset FRONTEND_IMAGE_REF WORKER_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF IMAGE_REF_BLUE IMAGE_REF_GREEN DBTOOL_IMAGE_REF || true
     if [[ -f "$env_file" ]]; then
       # shellcheck disable=SC1090
       set -a

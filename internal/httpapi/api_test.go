@@ -58,9 +58,9 @@ func TestAdminLifecycle(t *testing.T) {
 	}
 }
 
-func TestSPAContentSecurityPolicy(t *testing.T) {
+func TestGatewayDoesNotServeFrontendRoutes(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "spa-csp.db"))
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway-no-spa.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,29 +72,10 @@ func TestSPAContentSecurityPolicy(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "http://example.test"+requestPath, nil)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
-			if w.Code != http.StatusOK {
-				t.Fatalf("expected status 200, got %d", w.Code)
-			}
-			cspHeaders := w.Result().Header.Values("Content-Security-Policy")
-			if len(cspHeaders) != 1 || cspHeaders[0] != spaContentSecurityPolicy {
-				t.Fatalf("unexpected SPA CSP: %v", cspHeaders)
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("gateway must not serve frontend route %s; got %d", requestPath, w.Code)
 			}
 		})
-	}
-
-	for _, required := range []string{
-		"script-src 'self' https://static.cloudflareinsights.com",
-		"script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'",
-		"script-src-attr 'none'",
-		"connect-src 'self' ws: wss: https://cloudflareinsights.com",
-		"img-src 'self' data: blob: https:",
-	} {
-		if !strings.Contains(spaContentSecurityPolicy, required) {
-			t.Fatalf("SPA CSP missing %q: %s", required, spaContentSecurityPolicy)
-		}
-	}
-	if strings.Contains(spaContentSecurityPolicy, "script-src 'self' 'unsafe-inline'") || strings.Contains(spaContentSecurityPolicy, "script-src 'self' 'unsafe-eval'") {
-		t.Fatalf("SPA script policy must remain strict: %s", spaContentSecurityPolicy)
 	}
 }
 

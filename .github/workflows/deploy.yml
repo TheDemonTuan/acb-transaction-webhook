@@ -25,8 +25,49 @@ jobs:
     name: Verify test and build
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.scope.outputs.frontend }}
+      gateway: ${{ steps.scope.outputs.gateway }}
+      worker: ${{ steps.scope.outputs.worker }}
+      schema: ${{ steps.scope.outputs.schema }}
+      auth_browser: ${{ steps.scope.outputs.auth_browser }}
+      tts: ${{ steps.scope.outputs.tts }}
+      bark: ${{ steps.scope.outputs.bark }}
+      platform: ${{ steps.scope.outputs.platform }}
+      base_sha: ${{ steps.baseline.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Resolve verified production baseline
+        id: baseline
+        env:
+          PRODUCTION_BASE_SHA: ${{ vars.PRODUCTION_BASE_SHA }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCTION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "PRODUCTION_BASE_SHA must be the last verified production runtime commit" >&2; exit 1; }
+          git cat-file -e "${PRODUCTION_BASE_SHA}^{commit}"
+          echo "sha=$PRODUCTION_BASE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Compute component scope before builds
+        id: scope
+        env:
+          LAST_RELEASE_COMMIT: ${{ steps.baseline.outputs.sha }}
+        run: |
+          set -euo pipefail
+          scripts/compute-promotion-scope.sh --base "$LAST_RELEASE_COMMIT" --head "$GITHUB_SHA" --format env > scope.env
+          cat scope.env
+          while IFS='=' read -r key value; do
+            case "$key" in
+              PROMOTION_FRONTEND) echo "frontend=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_GATEWAY) echo "gateway=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_WORKER) echo "worker=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_SCHEMA) echo "schema=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_AUTH_BROWSER) echo "auth_browser=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_TTS) echo "tts=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_BARK) echo "bark=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_PLATFORM) echo "platform=$value" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done < scope.env
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -54,10 +95,11 @@ jobs:
         run: |
           pip install -r requirements.txt
           pytest -v
-      - name: Verify failover controller
+      - name: Test failover controller
         run: |
+          python3 -m pip install pytest
           python3 -m py_compile platform/failover/vps-failover-controller.py
-          python3 -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('controller', 'platform/failover/vps-failover-controller.py'); mod = importlib.util.module_from_spec(spec); sys.modules[spec.name] = mod; spec.loader.exec_module(mod)"
+          python3 -m pytest -q platform/failover/test_failover.py
       - name: Verify GitHub Actions are pinned to full commit SHAs
         run: bash scripts/verify-actions-pinned.sh
       - name: Test component promotion scope classifier
@@ -91,10 +133,55 @@ jobs:
       - name: Check generated source and whitespace
         run: git diff --check
 
+  build-frontend-image:
+    name: Build frontend GHCR image
+    timeout-minutes: 15
+    needs: verify
+    if: needs.verify.outputs.frontend == 'true'
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image name
+        id: meta
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${repo_lc}-frontend" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        with:
+          context: .
+          target: frontend
+          push: true
+          platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          tags: |
+            ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
   build-gateway-image:
     name: Build gateway GHCR image
     timeout-minutes: 15
     needs: verify
+    if: needs.verify.outputs.gateway == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -138,6 +225,7 @@ jobs:
     name: Build worker GHCR image
     timeout-minutes: 15
     needs: verify
+    if: needs.verify.outputs.worker == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -181,6 +269,7 @@ jobs:
     name: Build dbtool GHCR image
     timeout-minutes: 15
     needs: verify
+    if: needs.verify.outputs.schema == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -224,6 +313,7 @@ jobs:
     name: Build auth-browser GHCR image
     timeout-minutes: 15
     needs: verify
+    if: needs.verify.outputs.auth_browser == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -271,6 +361,7 @@ jobs:
     name: Build tts-gateway GHCR image
     timeout-minutes: 15
     needs: verify
+    if: needs.verify.outputs.tts == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -316,8 +407,10 @@ jobs:
   scan-and-attest:
     name: Scan, attest, and sign release artifacts
     timeout-minutes: 20
+    if: always() && needs.verify.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     needs:
       - verify
+      - build-frontend-image
       - build-gateway-image
       - build-worker-image
       - build-dbtool-image
@@ -389,22 +482,24 @@ jobs:
           bash deploy/verify-third-party-policy.sh \
             --image "$BARK_IMAGE_REF" \
             --allowlist deploy/third-party-allowlist.json
-      - name: Scan core first-party images with Trivy (gateway, worker, dbtool)
+      - name: Scan core first-party images with Trivy (frontend, gateway, worker, dbtool)
         env:
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
         run: |
           set -euo pipefail
           mkdir -p sbom-artifacts security-reports
 
-          names=(gateway worker dbtool)
-          images=("$GATEWAY_IMAGE" "$WORKER_IMAGE" "$DBTOOL_IMAGE")
+          names=(frontend gateway worker dbtool)
+          images=("$FRONTEND_IMAGE" "$GATEWAY_IMAGE" "$WORKER_IMAGE" "$DBTOOL_IMAGE")
 
           failed=0
           for i in "${!names[@]}"; do
             name="${names[$i]}"
             img="${images[$i]}"
+            [[ "$img" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || { echo "Missing immutable current/candidate digest for $name" >&2; exit 1; }
             echo "=== Scanning core image: $name ($img) ==="
 
             # Always generate machine-readable JSON report and CycloneDX SBOM
@@ -436,8 +531,8 @@ jobs:
 
       - name: Scan sidecar first-party images with Trivy (auth-browser, tts-gateway)
         env:
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
         run: |
           set -euo pipefail
           mkdir -p sbom-artifacts security-reports
@@ -522,14 +617,16 @@ jobs:
 
       - name: Sign first-party images with Cosign keyless OIDC
         env:
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
         run: |
           set -euo pipefail
           first_party=(
+            "$FRONTEND_IMAGE"
             "$GATEWAY_IMAGE"
             "$WORKER_IMAGE"
             "$DBTOOL_IMAGE"
@@ -537,23 +634,26 @@ jobs:
             "$TTS_IMAGE"
           )
           for img in "${first_party[@]}"; do
+            [[ "$img" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || { echo "Missing immutable current/candidate image digest" >&2; exit 1; }
             printf "=== Signing %s with Cosign ===\n" "$img"
             cosign sign --yes "$img"
           done
 
       - name: Verify first-party image signatures
         env:
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           expected_identity="https://github.com/${REPO}/.github/workflows/deploy.yml@refs/heads/main"
           oidc_issuer="https://token.actions.githubusercontent.com"
           first_party=(
+            "$FRONTEND_IMAGE"
             "$GATEWAY_IMAGE"
             "$WORKER_IMAGE"
             "$DBTOOL_IMAGE"
@@ -561,6 +661,7 @@ jobs:
             "$TTS_IMAGE"
           )
           for img in "${first_party[@]}"; do
+            [[ "$img" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || { echo "Missing immutable current/candidate image digest" >&2; exit 1; }
             printf "=== Verifying Cosign signature for %s ===\n" "$img"
             cosign verify \
               --certificate-identity "$expected_identity" \
@@ -570,8 +671,12 @@ jobs:
 
       - name: Compute promotion scope
         id: scope
+        env:
+          LAST_RELEASE_COMMIT: ${{ needs.verify.outputs.base_sha }}
         run: |
           bash scripts/compute-promotion-scope.sh \
+            --base "$LAST_RELEASE_COMMIT" \
+            --head "$GITHUB_SHA" \
             --format json \
             --output deploy/promotion-scope.json
           echo "Promotion scope computed:"
@@ -579,16 +684,19 @@ jobs:
 
       - name: Generate release manifest JSON
         env:
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.image }}@${{ needs.build-gateway-image.outputs.digest }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.image }}@${{ needs.build-worker-image.outputs.digest }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.image }}@${{ needs.build-dbtool-image.outputs.digest }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.image }}@${{ needs.build-auth-browser-image.outputs.digest }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.image }}@${{ needs.build-tts-gateway-image.outputs.digest }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
           BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
         run: |
           bash deploy/generate-release-manifest.sh \
             --git-sha "${{ github.sha }}" \
+            --base-sha "${{ needs.verify.outputs.base_sha }}" \
             --promotion-scope-file deploy/promotion-scope.json \
+            --frontend-image "$FRONTEND_IMAGE" \
             --gateway-image "$GATEWAY_IMAGE" \
             --worker-image "$WORKER_IMAGE" \
             --dbtool-image "$DBTOOL_IMAGE" \
@@ -627,8 +735,8 @@ jobs:
   deploy:
     name: Deploy to VPS
     timeout-minutes: 25
-    needs: [verify, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
+    needs: [verify, build-frontend-image, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
+    if: always() && needs.scan-and-attest.result == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true))
     runs-on: ubuntu-latest
     environment: production
     steps:

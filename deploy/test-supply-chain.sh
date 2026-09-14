@@ -230,6 +230,7 @@ cp "$script_dir"/compose.prod.yaml "$script_dir"/deploy-warm.sh "$script_dir"/ro
 
 manifest_out="$manifest_test_dir/release-manifest.json"
 valid_sha="a4e71ffe29e97e88df6bf25e449c5a0d032a18cb"
+dummy_frontend="ghcr.io/org/frontend@sha256:7777777777777777777777777777777777777777777777777777777777777777"
 dummy_gw="ghcr.io/org/gateway@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 dummy_worker="ghcr.io/org/worker@sha256:2222222222222222222222222222222222222222222222222222222222222222"
 dummy_dbtool="ghcr.io/org/dbtool@sha256:3333333333333333333333333333333333333333333333333333333333333333"
@@ -241,6 +242,7 @@ dummy_bark="$bark_approved_image"
 assert_success "Generate release manifest JSON" \
   bash "$script_dir/generate-release-manifest.sh" \
     --git-sha "$valid_sha" \
+    --frontend-image "$dummy_frontend" \
     --gateway-image "$dummy_gw" \
     --worker-image "$dummy_worker" \
     --dbtool-image "$dummy_dbtool" \
@@ -261,6 +263,7 @@ assert_success "Verify manifest with matching runtime image arguments" \
   bash "$script_dir/verify-manifest.sh" \
     --manifest "$manifest_out" \
     --deploy-dir "$manifest_test_dir" \
+    --frontend-image "$dummy_frontend" \
     --gateway-image "$dummy_gw" \
     --worker-image "$dummy_worker" \
     --bark-image "$dummy_bark"
@@ -338,7 +341,8 @@ gw_only_manifest="$test_tmp/manifest-gw-only.json"
 assert_success "Generate gateway-only scoped release manifest" \
   bash "$script_dir/generate-release-manifest.sh" \
     --git-sha "$valid_sha" \
-    --promotion-scope '{"promotion":{"gateway":true,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false},"promotion_scope":["gateway"]}' \
+    --promotion-scope '{"promotion":{"frontend":false,"gateway":true,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false},"promotion_scope":["gateway"]}' \
+    --frontend-image "$dummy_frontend" \
     --gateway-image "$dummy_gw" \
     --worker-image "$dummy_worker" \
     --dbtool-image "$dummy_dbtool" \

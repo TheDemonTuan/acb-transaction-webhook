@@ -7,13 +7,17 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bunx --bun tsc --noEmit && bunx --bun vite build
 
+FROM nginxinc/nginx-unprivileged:1.29.4-alpine AS frontend
+COPY deploy/frontend-nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=web-builder /src/web/dist /usr/share/nginx/html
+USER 101:101
+
 FROM golang:1.27.1-bookworm AS go-builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-COPY --from=web-builder /src/internal/httpui/dist ./internal/httpui/dist
 RUN mkdir -p -m 0777 /data
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gateway && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker && \

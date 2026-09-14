@@ -120,6 +120,7 @@ else
 fi
 
 # Component flags
+scope_frontend=false
 scope_gateway=false
 scope_worker=false
 scope_schema=false
@@ -163,9 +164,15 @@ classify_path() {
     [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> schema, gateway, worker (migration/dbtool)\n' "$p" >&2
   fi
 
-  # 2. Gateway paths
-  if [[ "$p" =~ ^cmd/gateway/ ]] || [[ "$p" =~ ^web/ ]] || \
-     [[ "$p" =~ ^internal/httpapi/ ]] || [[ "$p" =~ ^internal/httpui/ ]] || \
+  # 2. Frontend paths
+  if [[ "$p" =~ ^web/ ]] || [[ "$p" == "deploy/frontend-nginx.conf" ]]; then
+    scope_frontend=true
+    matched=1
+    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> frontend\n' "$p" >&2
+  fi
+
+  # 3. Gateway paths
+  if [[ "$p" =~ ^cmd/gateway/ ]] || [[ "$p" =~ ^internal/httpapi/ ]] || \
      [[ "$p" =~ ^internal/csrf/ ]]; then
     scope_gateway=true
     matched=1
@@ -226,19 +233,22 @@ classify_path() {
     [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> bark\n' "$p" >&2
   fi
 
-  # 9. Multi-stage Dockerfile (builds gateway, worker, dbtool)
+  # 9. Root Dockerfile edits require an explicit full first-party rebuild review.
   if [[ "$p" == "Dockerfile" ]]; then
+    scope_frontend=true
     scope_gateway=true
     scope_worker=true
     scope_schema=true
+    scope_auth_browser=true
     scope_platform=true
     matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> gateway, worker, schema, platform (root Dockerfile)\n' "$p" >&2
+    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> frontend, gateway, worker, schema, auth-browser, platform (root Dockerfile)\n' "$p" >&2
   fi
 
   # 10. Platform / deploy / CI
   if [[ "$p" =~ ^deploy/ ]] || [[ "$p" =~ ^platform/ ]] || \
-     [[ "$p" =~ ^\.github/workflows/ ]] || [[ "$p" =~ ^scripts/ ]]; then
+     [[ "$p" =~ ^\.github/workflows/ ]] || [[ "$p" =~ ^scripts/ ]] || \
+     [[ "$p" == "compose.yaml" ]]; then
     scope_platform=true
     matched=1
     [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> platform\n' "$p" >&2
@@ -269,6 +279,7 @@ done
 # If there were zero changed files, or all files were documentation-only,
 # all runtime components evaluate to false.
 if [[ $total_files -eq 0 ]] || [[ "$all_doc_only" == "true" ]]; then
+  scope_frontend=false
   scope_gateway=false
   scope_worker=false
   scope_schema=false
@@ -280,6 +291,7 @@ fi
 
 # Build list of active scopes
 active_scopes=()
+[[ "$scope_frontend" == "true" ]] && active_scopes+=("frontend")
 [[ "$scope_gateway" == "true" ]] && active_scopes+=("gateway")
 [[ "$scope_worker" == "true" ]] && active_scopes+=("worker")
 [[ "$scope_schema" == "true" ]] && active_scopes+=("schema")
@@ -294,6 +306,7 @@ format_output() {
       local scope_str
       scope_str="$(IFS=,; echo "${active_scopes[*]}")"
       cat <<EOF
+PROMOTION_FRONTEND=$scope_frontend
 PROMOTION_GATEWAY=$scope_gateway
 PROMOTION_WORKER=$scope_worker
 PROMOTION_SCHEMA=$scope_schema
@@ -325,6 +338,7 @@ EOF
       cat <<EOF
 {
   "promotion": {
+    "frontend": $scope_frontend,
     "gateway": $scope_gateway,
     "worker": $scope_worker,
     "schema": $scope_schema,

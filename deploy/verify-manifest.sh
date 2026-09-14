@@ -9,6 +9,7 @@ manifest_file=""
 bundle_file=""
 deploy_dir=""
 
+expected_frontend=""
 expected_gateway=""
 expected_worker=""
 expected_dbtool=""
@@ -37,6 +38,7 @@ Options:
   --manifest <path>               Path to release-manifest.json
   --bundle <path>                 Path to release-manifest.bundle
   --deploy-dir <dir>              Directory containing deployed files (default: manifest directory)
+  --frontend-image <ref>          Expected frontend image digest (optional)
   --gateway-image <ref>           Expected gateway image digest (optional)
   --worker-image <ref>            Expected worker image digest (optional)
   --dbtool-image <ref>            Expected dbtool image digest (optional)
@@ -70,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --deploy-dir)
       deploy_dir="$2"
+      shift 2
+      ;;
+    --frontend-image)
+      expected_frontend="$2"
       shift 2
       ;;
     --gateway-image)
@@ -229,13 +235,13 @@ fi
 validate_and_extract() {
   if command -v node >/dev/null 2>&1; then
     node - "$manifest_file" \
-      "$expected_gateway" "$expected_worker" "$expected_dbtool" "$expected_browser" "$expected_tts" "$expected_bark" \
+      "$expected_frontend" "$expected_gateway" "$expected_worker" "$expected_dbtool" "$expected_browser" "$expected_tts" "$expected_bark" \
       "$current_deployed_commit" "$current_deployed_time" "$max_age_seconds" "$allow_redeploy" "$required_scope" <<'JSEOF'
 const fs = require('fs');
 
 const [
   ,, manifestPath,
-  expGw, expWk, expDb, expBr, expTts, expBk,
+  expFe, expGw, expWk, expDb, expBr, expTts, expBk,
   curDepCommit, curDepTime, maxAgeSecStr, allowRedeployStr, reqScope
 ] = process.argv;
 
@@ -332,8 +338,9 @@ if (!manifest.images || typeof manifest.images !== 'object') {
   process.exit(1);
 }
 
-const requiredImages = ['gateway', 'worker', 'dbtool', 'auth_browser', 'tts_gateway', 'bark'];
+const requiredImages = ['frontend', 'gateway', 'worker', 'dbtool', 'auth_browser', 'tts_gateway', 'bark'];
 const expectedMap = {
+  frontend: expFe,
   gateway: expGw,
   worker: expWk,
   dbtool: expDb,
@@ -392,15 +399,15 @@ for (const [artFile, artHash] of Object.entries(manifest.artifacts)) {
 JSEOF
   elif command -v python3 >/dev/null 2>&1; then
     python3 - "$manifest_file" \
-      "$expected_gateway" "$expected_worker" "$expected_dbtool" "$expected_browser" "$expected_tts" "$expected_bark" \
+      "$expected_frontend" "$expected_gateway" "$expected_worker" "$expected_dbtool" "$expected_browser" "$expected_tts" "$expected_bark" \
       "$current_deployed_commit" "$current_deployed_time" "$max_age_seconds" "$allow_redeploy" "$required_scope" <<'PYEOF'
 import sys, json, re, datetime
 
 (
   manifest_path,
-  exp_gw, exp_wk, exp_db, exp_br, exp_tts, exp_bk,
+  exp_fe, exp_gw, exp_wk, exp_db, exp_br, exp_tts, exp_bk,
   cur_dep_commit, cur_dep_time, max_age_sec_str, allow_redeploy_str, req_scope
-) = sys.argv[1:13]
+) = sys.argv[1:14]
 
 max_age_sec = int(max_age_sec_str) if max_age_sec_str.isdigit() else 0
 allow_redeploy = (allow_redeploy_str == "1")
@@ -477,8 +484,9 @@ if not isinstance(images, dict):
     print("Error: missing images section in manifest", file=sys.stderr)
     sys.exit(1)
 
-required = ["gateway", "worker", "dbtool", "auth_browser", "tts_gateway", "bark"]
+required = ["frontend", "gateway", "worker", "dbtool", "auth_browser", "tts_gateway", "bark"]
 expected_map = {
+    "frontend": exp_fe,
     "gateway": exp_gw,
     "worker": exp_wk,
     "dbtool": exp_db,
