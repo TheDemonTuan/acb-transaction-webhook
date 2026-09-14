@@ -167,10 +167,10 @@ The VPS failover controller (`/opt/platform/failover/vps-failover-controller.py`
 
 ## 6. Warm Cutover State Machine & Rollback
 
-1. **Candidate Startup**: Candidate slot starts with target image while active slot handles live traffic.
-2. **Readiness Probe**: Candidate must pass health checks (`/gateway --healthcheck` and `/readyz`).
-3. **Atomic Route Switch**: Traefik dynamic configuration is atomically updated (`mv -f`).
-4. **Route Identity ACK**: Active route resolution is verified. If acknowledgement fails, automatic route rollback to the previous slot executes immediately.
+1. **Candidate Startup**: Candidate slot starts with target immutable digest while active slot handles live traffic.
+2. **Readiness Probe**: Candidate must pass health probes (`/internal/deployz`) twice consecutively with slot/schema/worker verification.
+3. **Atomic Route Switch**: Traefik dynamic configuration is rendered, YAML-validated, and atomically updated (`mv -f`).
+4. **Route Identity ACK**: Active edge route identity is verified via `X-Platform-Slot` and `X-Release-Commit` response headers. If acknowledgement fails, automatic route rollback to previous slot executes immediately.
 5. **15-Minute Resumable Soak**: Old slot remains running during the soak period. If candidate fails during soak, automatic rollback restores the previous slot.
 6. **Emergency Rollback**:
    ```bash
@@ -179,7 +179,18 @@ The VPS failover controller (`/opt/platform/failover/vps-failover-controller.py`
 
 ---
 
-## 7. High Availability Scope: No Host-Loss HA
+## 7. Edge Ownership Boundaries & Route Derivation
+
+The ACB repository owns strictly its dynamic route configuration at `/opt/edge/dynamic/acb.yml`.
+- Shared Traefik 3.x and Cloudflare Tunnel infrastructure belong to the host platform and must NEVER be restarted by application deployments.
+- Host routing rule is dynamically derived from `PUBLIC_ORIGIN` (or canonical `PUBLIC_HOST`).
+- Dynamic routing enforces `/internal` denial via `deny-internal` middleware.
+- Internal promotion gates (`/internal/deployz`) require internal worker tokens and cannot be reached through public edge routes.
+- Transaction journal at `deploy/data/deploy-journal.json` tracks deploy lifecycle with automatic trap cleanup and crash recovery.
+
+---
+
+## 8. High Availability Scope: No Host-Loss HA
 
 **Important Architecture Notice**:
 The Single-VPS deployment architecture provides high availability against **software-level failures** on a single host (container crash, memory exhaustion, hung process, zero-downtime release).

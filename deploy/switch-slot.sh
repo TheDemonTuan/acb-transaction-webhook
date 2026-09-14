@@ -32,7 +32,7 @@ atomic_switch_route "$TARGET_SLOT"
 
 if ! ack_route_identity "$TARGET_SLOT" 15; then
   log_error "Route identity acknowledgment failed for ${TARGET_SLOT}! Reverting to previous slot ${CURRENT_ACTIVE}..."
-  atomic_switch_route "$CURRENT_ACTIVE"
+  rollback_route "$CURRENT_ACTIVE"
   ack_route_identity "$CURRENT_ACTIVE" 15 || true
   exit 1
 fi

@@ -132,7 +132,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		started:       time.Now().UTC(),
 	}
 	r := chi.NewRouter()
-	r.Use(requestID, securityHeaders, recoverer)
+	r.Use(requestID, s.platformHeaders, securityHeaders, recoverer)
 	r.Get("/healthz", s.health)
 	r.Get("/health", s.health)
 	r.Get("/readyz", s.ready)
@@ -1663,6 +1663,18 @@ func requestIDFromContext(ctx context.Context) string {
 }
 
 const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self'"
+
+func (s *Server) platformHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.Slot != "" {
+			w.Header().Set("X-Platform-Slot", s.cfg.Slot)
+		}
+		if s.cfg.ReleaseCommit != "" {
+			w.Header().Set("X-Release-Commit", s.cfg.ReleaseCommit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

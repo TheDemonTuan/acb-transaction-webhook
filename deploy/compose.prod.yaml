@@ -234,6 +234,8 @@ services:
     environment:
       APP_ENV: production
       RUNTIME_ROLE: gateway
+      PLATFORM_SLOT: blue
+      RELEASE_COMMIT: ${RELEASE_COMMIT:-unknown}
       PORT: 8090
       LISTEN_ADDR: 0.0.0.0:8090
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
@@ -311,6 +313,8 @@ services:
     environment:
       APP_ENV: production
       RUNTIME_ROLE: gateway
+      PLATFORM_SLOT: green
+      RELEASE_COMMIT: ${RELEASE_COMMIT:-unknown}
       PORT: 8090
       LISTEN_ADDR: 0.0.0.0:8090
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}

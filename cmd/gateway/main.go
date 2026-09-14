@@ -116,7 +116,18 @@ func main() {
 					var body map[string]any
 					if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
 						resp.Body.Close()
-						if body["storage"] == "ready" && body["schema"] == "compatible" {
+						storageOK := body["storage"] == "ready"
+						schemaOK := body["schema"] == "compatible"
+						workerOK := body["worker"] == "ready" || body["worker"] == "monolith"
+						slotOK := true
+						if expectedSlot := os.Getenv("EXPECTED_SLOT"); expectedSlot != "" {
+							slotOK = (body["slot"] == expectedSlot)
+						}
+						commitOK := true
+						if expectedCommit := os.Getenv("EXPECTED_RELEASE_COMMIT"); expectedCommit != "" {
+							commitOK = (body["release"] == expectedCommit)
+						}
+						if storageOK && schemaOK && workerOK && slotOK && commitOK {
 							fmt.Println("DEPLOYZ_READY")
 							return
 						}

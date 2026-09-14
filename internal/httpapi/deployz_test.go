@@ -66,6 +66,12 @@ func TestDeployzEndpoint_AuthenticationAndPayload(t *testing.T) {
 	if recAuth.Code != http.StatusOK {
 		t.Fatalf("expected 200 for authorized deployz, got %d: %s", recAuth.Code, recAuth.Body.String())
 	}
+	if slot := recAuth.Header().Get("X-Platform-Slot"); slot != "blue" {
+		t.Errorf("expected X-Platform-Slot 'blue', got %q", slot)
+	}
+	if rel := recAuth.Header().Get("X-Release-Commit"); rel != "git-commit-abc1234" {
+		t.Errorf("expected X-Release-Commit 'git-commit-abc1234', got %q", rel)
+	}
 
 	var resp map[string]any
 	if err := json.Unmarshal(recAuth.Body.Bytes(), &resp); err != nil {
@@ -150,7 +156,9 @@ func TestGatewayReadyzRemainsLocalDBOnly(t *testing.T) {
 
 	// Gateway with worker URL, but worker is down
 	cfg := config.Config{
-		WorkerRPCURL: "http://nonexistent-worker:8190",
+		WorkerRPCURL:  "http://nonexistent-worker:8190",
+		Slot:          "green",
+		ReleaseCommit: "git-commit-readyz",
 	}
 	server := New(cfg, store)
 	handler := server.Handler()
@@ -161,5 +169,11 @@ func TestGatewayReadyzRemainsLocalDBOnly(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected gateway /readyz to return 200 checking local DB only, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if slot := rec.Header().Get("X-Platform-Slot"); slot != "green" {
+		t.Errorf("expected X-Platform-Slot 'green', got %q", slot)
+	}
+	if rel := rec.Header().Get("X-Release-Commit"); rel != "git-commit-readyz" {
+		t.Errorf("expected X-Release-Commit 'git-commit-readyz', got %q", rel)
 	}
 }

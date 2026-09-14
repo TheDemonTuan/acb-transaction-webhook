@@ -33,7 +33,7 @@ fi
 wait_for_candidate_ready "$PREVIOUS_SLOT" 30
 
 # 3. Switch Traefik pointer back
-atomic_switch_route "$PREVIOUS_SLOT"
+rollback_route "$PREVIOUS_SLOT"
 
 # 4. Acknowledge route identity
 if ! ack_route_identity "$PREVIOUS_SLOT" 15; then

@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# deploy/lib/state.sh
+# Deployment lock, slot state, transaction journal, intentional stop markers, and soak management.
+set -euo pipefail
+
+TX_JOURNAL_FILE="${TX_JOURNAL_FILE:-$SCRIPT_DIR/data/deploy-journal.json}"
+
+acquire_deploy_lock() {
+  local timeout="${DEPLOY_LOCK_TIMEOUT:-30}"
+  if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" || "${SKIP_LOCK:-0}" == "1" ]]; then
+    return 0
+  fi
+  local lock_dir
+  lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
+  if ! mkdir -p "$lock_dir" 2>/dev/null; then
+    DEPLOY_LOCK_FILE="/tmp/vps-failover/acb.lock"
+    lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
+    mkdir -p "$lock_dir" 2>/dev/null || true
+  fi
+  exec 9>"$DEPLOY_LOCK_FILE"
+  if command -v flock >/dev/null 2>&1; then
+    if ! flock -w "$timeout" 9; then
+      log_error "Another deployment or cutover is active (lock timeout ${timeout}s on ${DEPLOY_LOCK_FILE})."
+      return 1
+    fi
+  fi
+  export DEPLOY_LOCK_HELD=1
+  return 0
+}
+
+release_deploy_lock() {
+  if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" ]]; then
+    unset DEPLOY_LOCK_HELD
+    exec 9>&- 2>/dev/null || true
+  fi
+}
+
+get_active_slot() {
+  local slot=""
+  if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
+    slot="$(tr -d ' \r\n[:space:]' < "$ACTIVE_SLOT_FILE")"
+  fi
+  if [[ "$slot" != "blue" && "$slot" != "green" ]]; then
+    if [[ -f "$ACB_CONFIG" ]]; then
+      if grep -q "acb-web-green" "$ACB_CONFIG" 2>/dev/null; then
+        slot="green"
+      elif grep -q "acb-web-blue" "$ACB_CONFIG" 2>/dev/null; then
+        slot="blue"
+      fi
+    fi
+  fi
+  if [[ "$slot" != "blue" && "$slot" != "green" ]]; then
+    local blue_running
+    blue_running="$(docker inspect --format '{{.State.Running}}' acb-gateway-blue 2>/dev/null || echo "false")"
+    local green_running
+    green_running="$(docker inspect --format '{{.State.Running}}' acb-gateway-green 2>/dev/null || echo "false")"
+    if [[ "$green_running" == "true" && "$blue_running" != "true" ]]; then
+      slot="green"
+    else
+      slot="blue"
+    fi
+  fi
+  printf '%s' "$slot"
+}
+
+get_candidate_slot() {
+  local active="$1"
+  if [[ "$active" == "blue" ]]; then
+    printf 'green'
+  else
+    printf 'blue'
+  fi
+}
+
+set_deploy_state() {
+  local state="$1"
+  local details="${2:-}"
+  printf '{"state":"%s","timestamp":"%s","details":"%s"}\n' "$state" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$details" > "$DEPLOY_STATE_FILE"
+}
+
+get_deploy_state() {
+  if [[ -f "$DEPLOY_STATE_FILE" ]]; then
+    cat "$DEPLOY_STATE_FILE"
+  else
+    printf '{"state":"IDLE"}\n'
+  fi
+}
+
+clear_deploy_state() {
+  rm -f "$DEPLOY_STATE_FILE" 2>/dev/null || true
+}
+
+# Transaction Journal Primitives
+init_tx_journal() {
+  local component="$1"
+  local candidate_slot="$2"
+  local active_slot="$3"
+  local candidate_digest="$4"
+  local previous_digest="${5:-}"
+  local expected_commit="${6:-}"
+
+  mkdir -p "$(dirname "$TX_JOURNAL_FILE")"
+  local tx_id
+  tx_id="tx-$(date +%s)-$RANDOM"
+  local now
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+  local tmp="${TX_JOURNAL_FILE}.tmp.$$"
+  cat <<EOF > "$tmp"
+{
+  "tx_id": "${tx_id}",
+  "component": "${component}",
+  "state": "TX_INITIALIZED",
+  "active_slot": "${active_slot}",
+  "candidate_slot": "${candidate_slot}",
+  "candidate_digest": "${candidate_digest}",
+  "previous_digest": "${previous_digest}",
+  "expected_commit": "${expected_commit}",
+  "created_at": "${now}",
+  "updated_at": "${now}",
+  "details": "Transaction initialized"
+}
+EOF
+  mv -f "$tmp" "$TX_JOURNAL_FILE"
+  log_info "Deployment transaction journal initialized: [${tx_id}]"
+}
+
+update_tx_state() {
+  local state="$1"
+  local details="${2:-}"
+  if [[ ! -f "$TX_JOURNAL_FILE" ]]; then
+    return 0
+  fi
+  local now
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  local tmp="${TX_JOURNAL_FILE}.tmp.$$"
+
+  if command -v jq >/dev/null 2>&1; then
+    jq --arg s "$state" --arg d "$details" --arg t "$now" \
+      '.state = $s | .details = $d | .updated_at = $t' "$TX_JOURNAL_FILE" > "$tmp" 2>/dev/null || true
+  fi
+
+  if [[ ! -s "$tmp" ]]; then
+    sed -e "s/\"state\": \"[^\"]*\"/\"state\": \"$state\"/" \
+        -e "s/\"updated_at\": \"[^\"]*\"/\"updated_at\": \"$now\"/" "$TX_JOURNAL_FILE" > "$tmp" 2>/dev/null || true
+  fi
+
+  if [[ -s "$tmp" ]]; then
+    mv -f "$tmp" "$TX_JOURNAL_FILE"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  log_info "Transaction state -> [${state}]"
+}
+
+get_tx_state() {
+  if [[ ! -f "$TX_JOURNAL_FILE" ]]; then
+    printf 'IDLE'
+    return
+  fi
+  local st
+  st="$(grep -o '"state":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" | head -n1 | cut -d'"' -f4 || echo "CORRUPT")"
+  printf '%s' "${st:-CORRUPT}"
+}
+
+is_tx_committed() {
+  local st
+  st="$(get_tx_state)"
+  if [[ "$st" == "TX_COMMITTED" || "$st" == "TX_SOAKING" || "$st" == "TX_COMPLETED" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+archive_tx_journal() {
+  local suffix="${1:-archived}"
+  if [[ -f "$TX_JOURNAL_FILE" ]]; then
+    local ts
+    ts="$(date +%s)"
+    mv -f "$TX_JOURNAL_FILE" "${TX_JOURNAL_FILE}.${suffix}.${ts}" 2>/dev/null || true
+  fi
+}
+
+recover_tx_journal() {
+  if [[ ! -f "$TX_JOURNAL_FILE" ]]; then
+    return 0
+  fi
+
+  local cur_state
+  cur_state="$(get_tx_state)"
+  if [[ "$cur_state" == "TX_COMPLETED" || "$cur_state" == "TX_ROLLED_BACK" || "$cur_state" == "IDLE" ]]; then
+    archive_tx_journal "previous"
+    return 0
+  fi
+
+  log_warn "RECOVERY: Found uncommitted or interrupted transaction journal in state [${cur_state}]!"
+
+  local cand_slot
+  cand_slot="$(grep -o '"candidate_slot":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
+  local act_slot
+  act_slot="$(grep -o '"active_slot":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
+
+  # If state was uncommitted, candidate must be stopped and route verified
+  if [[ -n "$cand_slot" && "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_SOAKING" ]]; then
+    log_info "RECOVERY: Stopping uncommitted candidate container [acb-gateway-${cand_slot}]..."
+    docker compose -f "$COMPOSE_FILE" stop "gateway-${cand_slot}" 2>/dev/null || docker stop "acb-gateway-${cand_slot}" 2>/dev/null || true
+    if [[ -n "$act_slot" && -f "$ACB_CONFIG" ]]; then
+      if ! grep -q "acb-web-${act_slot}" "$ACB_CONFIG" 2>/dev/null; then
+        log_warn "RECOVERY: Restoring Traefik route pointer back to known active slot [${act_slot}]..."
+        if [[ -f "${ACB_CONFIG}.prev" ]]; then
+          cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null || true
+        fi
+        printf '%s' "$act_slot" > "$ACTIVE_SLOT_FILE" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  archive_tx_journal "recovered"
+  clear_deploy_state
+  log_info "RECOVERY: Transaction journal reconciled and recovered."
+  return 0
+}
+
+mark_intentional_stop() {
+  local slot="$1"
+  if ! mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null; then
+    FAILOVER_STATE_DIR="/tmp/vps-failover"
+    mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null || true
+  fi
+  local marker="$FAILOVER_STATE_DIR/intentional-stop-${slot}"
+  local tmp="${marker}.tmp.$$"
+  printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
+    "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
+  mv -f "$tmp" "$marker" 2>/dev/null || true
+  touch "$FAILOVER_STATE_DIR/acb.cooldown" 2>/dev/null || true
+  touch "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
+  log_info "Recorded intentional stop for slot [${slot}] before stopping container."
+}
+
+clear_intentional_stop() {
+  return 0
+}
+
+stop_standby_container() {
+  local slot="$1"
+  log_info "Stopping container for slot [${slot}]..."
+  mark_intentional_stop "$slot"
+  compose_prod stop "gateway-${slot}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || docker stop "acb-gateway-${slot}" 2>/dev/null || true
+  clear_intentional_stop "$slot"
+  log_info "Slot [${slot}] stopped into warm standby state."
+}
+
+run_resumable_soak() {
+  local candidate="$1"
+  local old_slot="$2"
+  local duration="${3:-900}"
+
+  cat <<EOF > "$SOAK_STATE_FILE"
+candidate=${candidate}
+old_slot=${old_slot}
+start_time=$(date +%s)
+duration=${duration}
+EOF
+
+  log_info "Starting soak observation (${duration}s). Candidate [${candidate}] active, old slot [${old_slot}] running..."
+  local elapsed=0
+  local interval=10
+  if [[ "$duration" -le 10 ]]; then
+    interval=1
+  fi
+
+  while [[ "$elapsed" -lt "$duration" ]]; do
+    if ! docker exec "acb-gateway-${candidate}" /gateway --healthcheck >/dev/null 2>&1; then
+      log_error "Candidate [${candidate}] health probe failed during soak! Executing automatic route rollback to [${old_slot}]..."
+      atomic_switch_route "$old_slot"
+      ack_route_identity "$old_slot" "" 15 || true
+      stop_standby_container "$candidate"
+      rm -f "$SOAK_STATE_FILE"
+      return 1
+    fi
+    sleep "$interval"
+    elapsed=$(( elapsed + interval ))
+  done
+
+  log_info "Soak observation completed successfully. Transitioning [${old_slot}] to stopped warm standby..."
+  stop_standby_container "$old_slot"
+  rm -f "$SOAK_STATE_FILE"
+  return 0
+}
+
+resume_soak() {
+  if [[ ! -f "$SOAK_STATE_FILE" ]]; then
+    log_info "No soak state file found ($SOAK_STATE_FILE). Nothing to resume."
+    return 0
+  fi
+  # shellcheck disable=SC1090
+  source "$SOAK_STATE_FILE"
+  local now
+  now="$(date +%s)"
+  local elapsed=$(( now - start_time ))
+  local remaining=$(( duration - elapsed ))
+  if [[ "$remaining" -le 0 ]]; then
+    log_info "Soak period elapsed during disconnection. Stopping [${old_slot}]..."
+    stop_standby_container "$old_slot"
+    rm -f "$SOAK_STATE_FILE"
+    return 0
+  fi
+  log_info "Resuming soak observation with ${remaining}s remaining..."
+  run_resumable_soak "$candidate" "$old_slot" "$remaining"
+}

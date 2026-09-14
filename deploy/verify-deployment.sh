@@ -144,6 +144,12 @@ if command -v docker >/dev/null 2>&1; then
       fi
     fi
   fi
+
+  # Step 6: Verify active slot edge route identity
+  if [[ -f "$ACB_CONFIG" ]]; then
+    log_info "Verifying edge route identity for active slot [${active_slot}]..."
+    ack_route_identity "$active_slot" "${EXPECTED_COMMIT:-}" 15 || true
+  fi
 fi
 
 log_info "Deployment verification completed successfully."

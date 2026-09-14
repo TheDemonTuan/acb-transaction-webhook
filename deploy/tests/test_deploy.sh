@@ -153,7 +153,12 @@ elif [[ "$cmd" == "exec" ]]; then
   exit 0
 elif [[ "$cmd" == "run" ]]; then
   if [[ "$*" =~ -active-auth-count ]]; then
-    if [[ "${MOCK_ACTIVE_AUTH:-0}" == "1" ]]; then
+    if [[ "${MOCK_ACTIVE_AUTH_FAIL:-0}" == "1" ]]; then
+      exit 1
+    elif [[ "${MOCK_ACTIVE_AUTH_CORRUPT:-0}" == "1" ]]; then
+      printf 'invalid-non-json-output\n'
+      exit 0
+    elif [[ "${MOCK_ACTIVE_AUTH:-0}" == "1" ]]; then
       printf '{"activeCount":1}\n'
     else
       printf '{"activeCount":0}\n'
@@ -206,7 +211,40 @@ set -eu
 if [[ "${MOCK_ROUTE_ACK_FAIL:-0}" == "1" ]]; then
   exit 1
 fi
-printf 'healthy slot: green blue\n'
+
+hdr_file=""
+output_code=0
+for ((i=1; i<=$#; i++)); do
+  arg="${!i}"
+  if [[ "$arg" == "-D" ]]; then
+    next=$((i+1))
+    hdr_file="${!next}"
+  elif [[ "$arg" == *"%{http_code}"* ]]; then
+    output_code=1
+  fi
+done
+
+active_slot="blue"
+if [[ -f "${ACB_CONFIG:-}" ]]; then
+  if grep -q "acb-web-green" "$ACB_CONFIG" 2>/dev/null; then
+    active_slot="green"
+  fi
+fi
+
+if [[ -n "$hdr_file" ]]; then
+  cat <<HDR > "$hdr_file"
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Platform-Slot: ${active_slot}
+X-Release-Commit: ${EXPECTED_COMMIT:-test-commit}
+HDR
+fi
+
+if [[ "$output_code" -eq 1 ]]; then
+  printf '200'
+else
+  printf 'healthy slot: %s\n' "$active_slot"
+fi
 exit 0
 EOF
   chmod +x "$test_dir/bin/curl"
@@ -444,6 +482,7 @@ T7="$TEST_TMP/dir with spaces in path"
 setup_mock_env "$T7"
 mkdir -p "$T7/deploy"
 cp -p "$DEPLOY_DIR/"*.sh "$T7/deploy/"
+cp -rp "$DEPLOY_DIR/lib" "$T7/deploy/"
 
 set +e
 (
@@ -492,6 +531,47 @@ set -e
 assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Core upgrade aborted by active-auth gate"
 assert_eq "blue" "$(cat "$T8/.active-slot")" "Active slot remains blue"
 
+# TEST 8B: Fail-closed when dbtool exits 1 (previously converted to 0)
+printf '\n=== TEST 8B: Fail-closed on dbtool exit code 1 ===\n'
+set +e
+(
+  export PATH="$T8/bin:$PATH"
+  export MOCK_ACTIVE_AUTH_FAIL=1
+  # shellcheck source=deploy/lib.sh
+  source "$DEPLOY_DIR/lib.sh"
+  check_active_auth_gate >/dev/null 2>&1
+)
+res=$?
+set -e
+assert_eq "1" "$(( res != 0 ? 1 : 0 ))" "Active auth gate fails closed when dbtool exits 1"
+
+# TEST 8C: Fail-closed when dbtool returns invalid non-JSON output
+printf '\n=== TEST 8C: Fail-closed on invalid JSON ===\n'
+set +e
+(
+  export PATH="$T8/bin:$PATH"
+  export MOCK_ACTIVE_AUTH_CORRUPT=1
+  # shellcheck source=deploy/lib.sh
+  source "$DEPLOY_DIR/lib.sh"
+  check_active_auth_gate >/dev/null 2>&1
+)
+res=$?
+set -e
+assert_eq "1" "$(( res != 0 ? 1 : 0 ))" "Active auth gate fails closed on corrupt/invalid JSON"
+
+# TEST 8D: Read-only WAL probe verification
+printf '\n=== TEST 8D: Read-only WAL probe verification ===\n'
+set +e
+(
+  export PATH="$T8/bin:$PATH"
+  # shellcheck source=deploy/lib.sh
+  source "$DEPLOY_DIR/lib.sh"
+  verify_wal_probe "bank-event-gateway_gateway_data" "$DBTOOL_IMAGE_REF"
+)
+res=$?
+set -e
+assert_eq "0" "$res" "Read-only WAL probe passes with valid DB"
+
 # ==============================================================================
 # TEST 9: Deployment aborts if canonical deploy/.env.production is missing
 # ==============================================================================
@@ -523,6 +603,7 @@ T10="$TEST_TMP/t10"
 setup_mock_env "$T10"
 mkdir -p "$T10/deploy"
 cp -p "$DEPLOY_DIR/"*.sh "$T10/deploy/"
+cp -rp "$DEPLOY_DIR/lib" "$T10/deploy/"
 cp -p "$T10/.env.production" "$T10/deploy/.env.production"
 printf 'ROOT_ENV_SENTINEL=original\n' > "$T10/.env.production"
 

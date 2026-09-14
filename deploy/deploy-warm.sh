@@ -169,7 +169,7 @@ printf "%s" "$ACTIVE_SLOT" > "$PREVIOUS_SLOT_FILE"
 set_deploy_state "ACK_ROUTE"
 if ! ack_route_identity "$CANDIDATE_SLOT" "${ROUTE_ACK_TIMEOUT:-15}"; then
   log_error "Route identity acknowledgment failed for candidate [${CANDIDATE_SLOT}]! Executing automatic rollback to [${ACTIVE_SLOT}]..."
-  atomic_switch_route "$ACTIVE_SLOT"
+  rollback_route "$ACTIVE_SLOT"
   ack_route_identity "$ACTIVE_SLOT" "${ROUTE_ACK_TIMEOUT:-15}" || true
   stop_standby_container "$CANDIDATE_SLOT"
   if [[ "$CANDIDATE_SLOT" == "green" ]]; then

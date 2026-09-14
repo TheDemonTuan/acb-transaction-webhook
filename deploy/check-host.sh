@@ -75,11 +75,16 @@ else
   log_warn "Production Data Volume [${DATA_VOLUME_NAME}]: NOT FOUND (run 'deploy/init-fresh-data.sh --confirm-fresh-init' for fresh setup)"
 fi
 
-# 7. Check Traefik Dynamic Directory
+# 7. Check Traefik Dynamic Directory and Route Derivation
 if [[ -d "$TRAEFIK_DYNAMIC_DIR" ]]; then
   log_info "Traefik dynamic directory [${TRAEFIK_DYNAMIC_DIR}]: OK"
 else
   log_warn "Traefik dynamic directory [${TRAEFIK_DYNAMIC_DIR}] does not exist yet (will be created on switch)"
+fi
+if route_host="$(get_route_host 2>/dev/null)"; then
+  log_info "Traefik Route Host [${route_host}] (derived from PUBLIC_ORIGIN): OK"
+else
+  log_warn "Could not derive valid Traefik route host from PUBLIC_ORIGIN (${PUBLIC_ORIGIN:-unset})"
 fi
 
 # 8. Check Cosign Availability (required for signed manifest verification)
