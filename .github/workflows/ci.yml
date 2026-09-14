@@ -57,6 +57,10 @@ jobs:
         run: bash deploy/tests/test_ci_workflow.sh
       - name: Test health endpoints, telemetry and operational alerts
         run: bash deploy/tests/test_health_telemetry.sh
+      - name: Install restore drill dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y age sqlite3
       - name: Run deployment failure drill tests
         run: |
           bash deploy/tests/test_secrets.sh
