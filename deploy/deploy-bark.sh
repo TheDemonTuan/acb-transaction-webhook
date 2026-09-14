@@ -59,6 +59,9 @@ start_bark() {
   fi
   if command -v docker >/dev/null 2>&1; then
     stop_bark
+    # The upstream image runs as UID 0 and writes only to the dedicated Bark volume;
+    # pre-create its database path without granting host-wide capabilities.
+    docker run --rm --network none --entrypoint /bin/sh -v "${BARK_VOLUME_NAME}:/data:rw" "$img" -c 'touch /data/bark.db && chmod 0600 /data/bark.db'
     BARK_IMAGE_REF="$img" compose_prod up -d --no-deps bark
   fi
 }

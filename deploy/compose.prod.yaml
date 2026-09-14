@@ -171,7 +171,6 @@ services:
     restart: unless-stopped
     init: true
     read_only: true
-    user: "1000:1000"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "/bark-entrypoint.sh"]
