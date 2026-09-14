@@ -371,7 +371,7 @@ console.log(`COMPAT_RPC=${manifest.compatibility.worker_rpc_version}`);
 
 if (manifest.promotion) {
   for (const [k, v] of Object.entries(manifest.promotion)) {
-    console.log(`PROMOTION_${k.toUpperCase()}=${v}`);
+    console.log(`PROMOTION_${k.toUpperCase()}=${v === true ? 'true' : 'false'}`);
   }
 }
 if (Array.isArray(manifest.promotion_scope)) {
@@ -511,7 +511,7 @@ print(f"COMPAT_RPC={compat.get('worker_rpc_version')}")
 
 if isinstance(promotion, dict):
     for k, v in promotion.items():
-        print(f"PROMOTION_{k.upper()}={v}")
+        print(f"PROMOTION_{k.upper()}={'true' if v is True else 'false'}")
 if isinstance(promotion_scope, list):
     print(f"PROMOTION_SCOPE={','.join(promotion_scope)}")
 is_doc_only = (

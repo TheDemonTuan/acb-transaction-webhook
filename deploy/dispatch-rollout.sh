@@ -415,6 +415,14 @@ else
   source "$verified_env"
   rm -f "$verified_env"
 
+  for promotion_var in PROMOTION_GATEWAY PROMOTION_WORKER PROMOTION_SCHEMA PROMOTION_AUTH_BROWSER PROMOTION_TTS PROMOTION_BARK PROMOTION_PLATFORM PROMOTION_DOC_ONLY; do
+    promotion_value="${!promotion_var:-}"
+    [[ "$promotion_value" == "true" || "$promotion_value" == "false" ]] || {
+      log_error "Invalid verified promotion flag [$promotion_var=$promotion_value]."
+      exit 1
+    }
+  done
+
   IMAGE_GATEWAY="${IMAGE_GATEWAY:-${IMAGE_GATEWAY:-}}"
   IMAGE_WORKER="${IMAGE_WORKER:-${IMAGE_WORKER:-}}"
   IMAGE_DBTOOL="${IMAGE_DBTOOL:-${IMAGE_DBTOOL:-}}"
