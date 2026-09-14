@@ -254,6 +254,7 @@ services:
         aliases:
           - acb-web-blue
       acb-core:
+      acb-egress:
     volumes:
       - gateway_data:/data
     secrets:
@@ -332,6 +333,7 @@ services:
         aliases:
           - acb-web-green
       acb-core:
+      acb-egress:
     volumes:
       - gateway_data:/data
     secrets:

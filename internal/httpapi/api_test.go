@@ -150,8 +150,16 @@ func TestBrowserScreenCSP(t *testing.T) {
 		if val, ok := dirs["object-src"]; !ok || len(val) != 1 || val[0] != "'none'" {
 			t.Fatalf("object-src mismatch: %v", dirs["object-src"])
 		}
-		if val, ok := dirs["connect-src"]; !ok || len(val) != 1 || val[0] != "'self'" {
+		if val, ok := dirs["connect-src"]; !ok || !contains(val, "'self'") || !contains(val, "ws:") || !contains(val, "wss:") {
 			t.Fatalf("connect-src mismatch: %v", dirs["connect-src"])
+		}
+		scriptSrc, ok := dirs["script-src"]
+		if !ok || !contains(scriptSrc, "'self'") || !contains(scriptSrc, "'unsafe-inline'") {
+			t.Fatalf("expected script-src with 'self' and 'unsafe-inline', got %v", scriptSrc)
+		}
+		styleSrc, ok := dirs["style-src"]
+		if !ok || !contains(styleSrc, "'self'") || !contains(styleSrc, "'unsafe-inline'") {
+			t.Fatalf("expected style-src with 'self' and 'unsafe-inline', got %v", styleSrc)
 		}
 	})
 
