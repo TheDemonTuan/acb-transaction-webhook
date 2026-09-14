@@ -431,6 +431,16 @@ else
   IMAGE_BARK="${IMAGE_BARK:-${IMAGE_BARK:-}}"
 fi
 
+# Compose validates the entire production model even for `up --no-deps <service>`.
+# Export every verified immutable image before any component transaction runs.
+export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
+export WORKER_IMAGE_REF="$IMAGE_WORKER"
+export BROWSER_IMAGE_REF="$IMAGE_AUTH_BROWSER"
+export TTS_IMAGE_REF="$IMAGE_TTS_GATEWAY"
+export BARK_IMAGE_REF="$IMAGE_BARK"
+export IMAGE_REF_BLUE="$IMAGE_GATEWAY"
+export IMAGE_REF_GREEN="$IMAGE_GATEWAY"
+
 # Validate caller-requested scope against manifest authorization
 if [[ -n "$REQUESTED_SCOPE" ]]; then
   IFS=',' read -ra req_scopes <<< "$REQUESTED_SCOPE"
