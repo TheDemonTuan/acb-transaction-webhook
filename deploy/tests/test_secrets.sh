@@ -91,13 +91,13 @@ for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth
   chmod 600 "$SECRETS_DIR/$s" 2>/dev/null || true
 done
 # Make one secret world-readable (0644)
-chmod 644 "$SECRETS_DIR/bark_basic_auth_password" 2>/dev/null || true
+chmod 644 "$SECRETS_DIR/worker_internal_token" 2>/dev/null || true
 # On Linux/POSIX systems supporting chmod octal bits, check_secret_permissions must reject
 if command -v stat >/dev/null 2>&1 && [[ ! "$(uname -s 2>/dev/null)" =~ MINGW|MSYS|CYGWIN ]]; then
-  mode="$(stat -c '%a' "$SECRETS_DIR/bark_basic_auth_password" 2>/dev/null || stat -f '%Lp' "$SECRETS_DIR/bark_basic_auth_password" 2>/dev/null || echo "")"
+  mode="$(stat -c '%a' "$SECRETS_DIR/worker_internal_token" 2>/dev/null || stat -f '%Lp' "$SECRETS_DIR/worker_internal_token" 2>/dev/null || echo "")"
   if [[ "${mode: -2}" != "00" && -n "$mode" ]]; then
     rc=0
-    check_secret_permissions "$SECRETS_DIR/bark_basic_auth_password" >/dev/null 2>&1 || rc=$?
+    check_secret_permissions "$SECRETS_DIR/worker_internal_token" >/dev/null 2>&1 || rc=$?
     assert_eq "1" "$rc" "check_secret_permissions rejects world-readable secret (mode $mode)"
   fi
 else
