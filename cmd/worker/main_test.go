@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -64,4 +67,49 @@ func TestWorkerRoleValidation_Subprocess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkerQuiesceDrainFlags(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess test in short mode")
+	}
+
+	var receivedPath, receivedToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedToken = r.Header.Get("X-Worker-Internal-Token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"quiesced","quiesced":true}`))
+	}))
+	defer srv.Close()
+
+	_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("worker -quiesce sends POST /rpc/quiesce with internal token", func(t *testing.T) {
+		cmd := exec.Command("go", "run", ".", "-quiesce")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=test-worker-token-xyz",
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("worker -quiesce failed: %v, stderr: %s", err, stderr.String())
+		}
+		if receivedPath != "/rpc/quiesce" {
+			t.Errorf("expected path /rpc/quiesce, got %s", receivedPath)
+		}
+		if receivedToken != "test-worker-token-xyz" {
+			t.Errorf("expected token test-worker-token-xyz, got %s", receivedToken)
+		}
+		if !strings.Contains(stdout.String(), `"quiesced":true`) {
+			t.Errorf("expected quiesce response in stdout, got %s", stdout.String())
+		}
+	})
 }

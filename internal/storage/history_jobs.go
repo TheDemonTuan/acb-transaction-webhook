@@ -283,6 +283,18 @@ func (s *Store) ClaimNextHistorySyncJob(ctx context.Context, nowTime time.Time) 
 			j.HeartbeatAt = heartbeatAt.String
 			j.FinishedAt = finishedAt.String
 
+			if j.Attempts >= 5 {
+				nowTs := now()
+				_, _ = tx.ExecContext(ctx, `
+					UPDATE history_sync_jobs
+					SET status = 'FAILED', error_code = 'MAX_ATTEMPTS_EXCEEDED',
+					    error_message = 'Maximum retry attempts (5) exceeded',
+					    finished_at = ?, updated_at = ?
+					WHERE id = ? AND status = 'QUEUED'
+				`, nowTs, nowTs, j.ID)
+				continue
+			}
+
 			if j.Generation != cGen {
 				nowTs := now()
 				_, _ = tx.ExecContext(ctx, `
@@ -406,8 +418,39 @@ func (s *Store) RequeueHistorySyncJob(ctx context.Context, jobID, errorCode, err
 			fenceErr = err
 			return nil
 		}
+		var attempts int
+		if err := tx.QueryRowContext(ctx, `SELECT attempts FROM history_sync_jobs WHERE id = ?`, jobID).Scan(&attempts); err != nil {
+			return err
+		}
 		nowTs := now()
 		sanitizedErr := sanitizeJobErrorMessage(errorMessage)
+
+		if attempts >= 5 {
+			_, err := tx.ExecContext(ctx, `
+				UPDATE history_sync_jobs
+				SET status = 'FAILED', error_code = 'MAX_ATTEMPTS_EXCEEDED',
+				    error_message = ?, finished_at = ?, updated_at = ?
+				WHERE id = ? AND status = 'RUNNING'
+			`, fmt.Sprintf("Maximum retry attempts (5) exceeded: %s", sanitizedErr), nowTs, nowTs, jobID)
+			return err
+		}
+
+		backoffExponent := attempts - 1
+		if backoffExponent < 0 {
+			backoffExponent = 0
+		}
+		if backoffExponent > 6 {
+			backoffExponent = 6
+		}
+		backoff := 5 * time.Second * time.Duration(1<<uint(backoffExponent))
+		if backoff > 5*time.Minute {
+			backoff = 5 * time.Minute
+		}
+		minNext := time.Now().Add(backoff)
+		if nextAttemptAt.Before(minNext) {
+			nextAttemptAt = minNext
+		}
+
 		nextAtStr := nextAttemptAt.UTC().Format(time.RFC3339Nano)
 		_, err := tx.ExecContext(ctx, `
 			UPDATE history_sync_jobs

@@ -331,3 +331,46 @@ func TestDeploymentControl_BootstrapTransition(t *testing.T) {
 		t.Fatalf("unexpected post-migration gate: %+v", gate)
 	}
 }
+
+func TestDeploymentControl_ConcurrentWriteMuSerialization(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test_writemu.db")
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatalf("configure connection: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				owner := fmt.Sprintf("worker-%d-%d", idx, j)
+				gate, err := store.AcquireMutationGate(ctx, owner, 1*time.Minute, "test")
+				if err != nil {
+					continue
+				}
+				_ = store.RenewMutationGate(ctx, owner, gate.LeaseToken, 1*time.Minute)
+				_ = store.ReleaseMutationGate(ctx, owner, gate.LeaseToken)
+			}
+		}(i)
+	}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				_, _ = store.AppendJournalEvent(ctx, "ep1", "test.event", fmt.Sprintf("t-%d-%d", idx, j), []byte(`{}`))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}

@@ -432,11 +432,26 @@ networks:
 secrets:
   app_master_key:
     file: ./secrets/app_master_key
+    uid: "1000"
+    gid: "1000"
+    mode: 0400
   tts_internal_token:
     file: ./secrets/tts_internal_token
+    uid: "1000"
+    gid: "1000"
+    mode: 0400
   worker_internal_token:
     file: ./secrets/worker_internal_token
+    uid: "1000"
+    gid: "1000"
+    mode: 0400
   bark_basic_auth_user:
     file: ./secrets/bark_basic_auth_user
+    uid: "1000"
+    gid: "1000"
+    mode: 0400
   bark_basic_auth_password:
     file: ./secrets/bark_basic_auth_password
+    uid: "1000"
+    gid: "1000"
+    mode: 0400

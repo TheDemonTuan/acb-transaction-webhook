@@ -5,6 +5,7 @@ import "context"
 // OpenOptions configures SQLite database initialization.
 type OpenOptions struct {
 	RunMigrations bool
+	ReadOnly      bool
 }
 
 // OpenWithOptions opens SQLite with explicit configuration.

@@ -134,8 +134,19 @@ fi
 
 # Verify SQLite integrity
 log_info "Verifying SQLite integrity of decrypted database..."
-integrity="ok"
+integrity="unverified"
 migrations="unknown"
+dbtool_cmd=""
+if command -v dbtool >/dev/null 2>&1; then
+  dbtool_cmd="dbtool"
+elif [[ -n "${DBTOOL_BIN:-}" && -x "${DBTOOL_BIN}" ]]; then
+  dbtool_cmd="${DBTOOL_BIN}"
+elif [[ -x "$SCRIPT_DIR/../cmd/dbtool/dbtool" ]]; then
+  dbtool_cmd="$SCRIPT_DIR/../cmd/dbtool/dbtool"
+elif [[ -x "$SCRIPT_DIR/../cmd/dbtool/dbtool.exe" ]]; then
+  dbtool_cmd="$SCRIPT_DIR/../cmd/dbtool/dbtool.exe"
+fi
+
 if command -v sqlite3 >/dev/null 2>&1; then
   integrity="$(sqlite3 "$restored_db" "PRAGMA integrity_check;" 2>/dev/null || echo "failed")"
   if [[ "$integrity" != "ok" ]]; then
@@ -144,12 +155,17 @@ if command -v sqlite3 >/dev/null 2>&1; then
     exit 1
   fi
   migrations="$(sqlite3 "$restored_db" "SELECT count(*) FROM schema_migrations;" 2>/dev/null || echo "0")"
-elif command -v dbtool >/dev/null 2>&1; then
-  if ! dbtool -path "$restored_db" -check >/dev/null 2>&1; then
+elif [[ -n "$dbtool_cmd" ]]; then
+  if ! "$dbtool_cmd" -path "$restored_db" -readonly -check >/dev/null 2>&1; then
     log_error "dbtool integrity check FAILED on decrypted database"
     rm -f "$restored_db"
     exit 1
   fi
+  integrity="ok"
+else
+  log_error "No SQLite integrity verification tool available. Restore verification fails closed."
+  rm -f "$restored_db"
+  exit 1
 fi
 
 # Verify against manifest if present

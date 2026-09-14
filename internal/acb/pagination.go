@@ -54,6 +54,8 @@ func (c *PaginationCursor) Step(page HistoryPageResult, newRows int) {
 	}
 
 	c.HasNext = true
-	c.Action = page.NextAction
+	if page.NextAction != "" {
+		c.Action = page.NextAction
+	}
 	c.Fields = cloneFields(page.NextFields)
 }

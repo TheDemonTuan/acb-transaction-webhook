@@ -58,9 +58,16 @@ export const WEBHOOK_STATUS_MAP: Record<string, { label: string; tone: Tone }> =
   DISABLED: { label: 'Đang tắt', tone: 'neutral' },
 };
 
+export const NOTIFICATION_CHANNEL_STATUS_MAP: Record<string, { label: string; tone: Tone }> = {
+  ACTIVE: { label: 'Đang hoạt động', tone: 'success' },
+  DISABLED: { label: 'Đang tắt', tone: 'neutral' },
+};
+
 export const DELIVERY_STATUS_MAP: Record<string, { label: string; tone: Tone }> = {
+  DELIVERED: { label: 'Thành công', tone: 'success' },
   SUCCESS: { label: 'Thành công', tone: 'success' },
   PENDING: { label: 'Đang gửi', tone: 'neutral' },
+  IN_FLIGHT: { label: 'Đang xử lý', tone: 'neutral' },
   RETRYING: { label: 'Đang gửi lại', tone: 'warning' },
   FAILED: { label: 'Thất bại', tone: 'danger' },
   DEAD_LETTER: { label: 'Không gửi được', tone: 'danger' },
@@ -104,6 +111,11 @@ export function getServiceStatus(status?: string): { label: string; tone: Tone }
 export function getWebhookStatus(status?: string): { label: string; tone: Tone } {
   const normalized = (status || '').toUpperCase();
   return WEBHOOK_STATUS_MAP[normalized] || { label: status || 'Không rõ', tone: 'neutral' };
+}
+
+export function getNotificationChannelStatus(status?: string): { label: string; tone: Tone } {
+  const normalized = (status || '').toUpperCase();
+  return NOTIFICATION_CHANNEL_STATUS_MAP[normalized] || { label: status || 'Không rõ', tone: 'neutral' };
 }
 
 export function getDeliveryStatus(status?: string): { label: string; tone: Tone } {

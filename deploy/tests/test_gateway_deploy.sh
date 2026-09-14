@@ -287,6 +287,13 @@ assert_eq "green" "$(cat "$T1/.previous-slot")" "Previous slot recorded as green
 assert_file_contains "$T1/dynamic/acb.yml" "acb-web-blue" "Traefik route pointed back to acb-web-blue"
 assert_file_contains "$T1/.release.env" "IMAGE_REF_BLUE=ghcr.io/test/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222" "Release env blue updated"
 assert_file_exists "$T1/failover/intentional-stop-green" "Intentional stop marker set for old slot green"
+if [[ -f "$T1/failover/intentional-stop-blue" ]]; then
+  printf 'FAIL: intentional-stop-blue should have been cleared when blue started\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: intentional-stop-blue was cleared when blue started as candidate\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
 
 # ==============================================================================
 # TEST 5: Candidate Readiness Failure Aborts Cutover and Preserves Active Slot

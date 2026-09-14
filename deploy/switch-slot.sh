@@ -21,6 +21,7 @@ log_info "Switching Traefik active route pointer to slot: ${TARGET_SLOT} (acb-we
 # Atomic route switch via shared primitive without nested locking
 if [[ "${DEPLOY_LOCK_HELD:-0}" != "1" && "${SKIP_LOCK:-0}" != "1" ]]; then
   acquire_deploy_lock
+  trap release_deploy_lock EXIT HUP INT TERM
 fi
 
 CURRENT_ACTIVE="$(get_active_slot)"

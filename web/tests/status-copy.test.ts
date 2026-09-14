@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getAcbStatusDescriptor,
   getDeliveryStatus,
+  getNotificationChannelStatus,
   getServiceStatus,
   getWebhookStatus,
 } from '../src/content/status-copy';
@@ -22,6 +23,10 @@ describe('status-copy', () => {
   it('maps Webhook & Delivery statuses', () => {
     expect(getWebhookStatus('ACTIVE').label).toBe('Đang hoạt động');
     expect(getDeliveryStatus('SUCCESS').label).toBe('Thành công');
+    expect(getDeliveryStatus('DELIVERED').label).toBe('Thành công');
+    expect(getDeliveryStatus('IN_FLIGHT').label).toBe('Đang xử lý');
     expect(getDeliveryStatus('DEAD_LETTER').label).toBe('Không gửi được');
+    expect(getNotificationChannelStatus('ACTIVE').label).toBe('Đang hoạt động');
+    expect(getNotificationChannelStatus('DISABLED').label).toBe('Đang tắt');
   });
 });

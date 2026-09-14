@@ -33,6 +33,7 @@ check_active_auth_gate() {
         -v "${DATA_VOLUME_NAME}:/data:ro" \
         "$dbtool_img" \
         -path /data/gateway.db \
+        -readonly \
         -active-auth-count 2>&1
     )"; then
       log_error "check_active_auth_gate: dbtool execution failed: ${auth_json}"
@@ -181,6 +182,7 @@ verify_schema_compat() {
       -v "${db_volume}:/data:ro" \
       "$dbtool_img" \
       -path /data/gateway.db \
+      -readonly \
       -schema-compat \
       -min-version "$min_version"; then
       log_error "Schema compatibility verification failed via dbtool"
@@ -205,7 +207,7 @@ verify_wal_probe() {
     if [[ -n "$dbtool_img" ]]; then
       if ! docker run --rm --read-only --network none --user 1000:1000 \
         -v "${db_volume}:/data:ro" \
-        "$dbtool_img" -path /data/gateway.db -check >/dev/null 2>&1; then
+        "$dbtool_img" -path /data/gateway.db -readonly -check >/dev/null 2>&1; then
         log_error "Read-only WAL probe failed via dbtool check."
         return 1
       fi

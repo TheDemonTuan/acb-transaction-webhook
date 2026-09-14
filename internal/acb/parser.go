@@ -313,6 +313,7 @@ func normalized(value string) string {
 func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction string, nextFields map[string]string, totalRows int) {
 	var docTextBuilder strings.Builder
 	var nextCandidates []*html.Node
+	var nextDisabled bool
 
 	var visit func(*html.Node)
 	visit = func(n *html.Node) {
@@ -321,6 +322,12 @@ func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction s
 			docTextBuilder.WriteString(" ")
 		}
 		if n.Type == html.ElementNode {
+			name := strings.ToLower(strings.TrimSpace(attrVal(n, "name")))
+			id := strings.ToLower(strings.TrimSpace(attrVal(n, "id")))
+			if name == "next_disabled" || id == "next_disabled" {
+				nextDisabled = true
+			}
+
 			tag := strings.ToLower(n.Data)
 			if tag == "a" || tag == "button" || tag == "input" {
 				t := strings.ToLower(strings.TrimSpace(nodeText(n)))
@@ -345,11 +352,22 @@ func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction s
 	}
 	visit(doc)
 
+	if nextDisabled {
+		return false, "", nil, extractTotalRows(docTextBuilder.String())
+	}
+
 	for _, n := range nextCandidates {
+		name := strings.ToLower(strings.TrimSpace(attrVal(n, "name")))
+		id := strings.ToLower(strings.TrimSpace(attrVal(n, "id")))
+		val := strings.ToLower(strings.TrimSpace(attrVal(n, "value")))
 		class := strings.ToLower(strings.TrimSpace(attrVal(n, "class")))
 		href := strings.TrimSpace(attrVal(n, "href"))
 		onclick := strings.TrimSpace(attrVal(n, "onclick"))
-		disabled := hasAttr(n, "disabled") || containsAny(class, "disabled", "inactive", "hidden")
+		disabled := hasAttr(n, "disabled") ||
+			containsAny(class, "disabled", "inactive", "hidden", "next_disabled", "next-disabled") ||
+			containsAny(name, "next_disabled", "next-disabled") ||
+			containsAny(id, "next_disabled", "next-disabled") ||
+			containsAny(val, "next_disabled", "next-disabled")
 
 		if disabled {
 			continue

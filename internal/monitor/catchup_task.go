@@ -31,6 +31,7 @@ type CatchUpTask struct {
 	nextAction   string
 	nextFields   map[string]string
 	dayTxns      []storage.BatchTransactionItem
+	cursor       *acb.PaginationCursor
 	currentResp  acb.Response
 	done         chan error
 }
@@ -282,16 +283,35 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	}
 	t.dayTxns = append(t.dayTxns, pageItems...)
 
+	if t.cursor == nil {
+		t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
+	}
+	t.cursor.Step(pageResult, len(pageResult.Transactions))
+
 	// Check if more pages exist for this day within the 20-page budget
-	if pageResult.HasNext && pageResult.NextAction != "" && t.dayPageCount < 20 {
-		t.nextAction = pageResult.NextAction
-		t.nextFields = pageResult.NextFields
+	if t.cursor.HasNext && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) && t.dayPageCount < 20 {
+		t.nextAction = t.cursor.Action
+		t.nextFields = t.cursor.Fields
 		if t.nextFields == nil {
 			t.nextFields = make(map[string]string)
 		}
 		t.nextFields["_raw"] = "true"
 		// Bounded quantum complete! Yield after 1 page so higher-priority tasks can preempt.
 		return scheduler.TaskStepResult{Done: false, Outcome: scheduler.OutcomeSuccess}, nil
+	}
+
+	// Fail closed if day pagination was truncated or budget exceeded with remaining pages
+	if t.cursor.Truncated || (t.cursor.HasNext && t.dayPageCount >= 20) {
+		truncErr := fmt.Errorf("catch-up pagination truncated for day %s: seen %d of %d rows (pages: %d)",
+			dayStr, t.cursor.CumulativeRows, t.cursor.TotalRowsSeen, t.dayPageCount)
+		slog.Warn("catch-up day truncated, failing closed without advancing coverage", "day", dayStr, "error", truncErr)
+		t.finishDone(truncErr)
+		return scheduler.TaskStepResult{
+			Done:      false,
+			RequeueAt: time.Now().Add(30 * time.Second),
+			Outcome:   scheduler.OutcomeTransient,
+			Error:     truncErr,
+		}, nil
 	}
 
 	// Day is complete: advance coverage and checkpoint ONLY after the full day completes!
@@ -308,6 +328,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	t.dayTxns = nil
 	t.nextAction = ""
 	t.nextFields = nil
+	t.cursor = nil
 	t.currentDay = t.currentDay.AddDate(0, 0, 1)
 
 	if t.currentDay.After(toT) {

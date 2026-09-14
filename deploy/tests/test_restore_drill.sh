@@ -107,6 +107,37 @@ rc=0
   --target-dir "$TEST_TMP/wrong_restore" >/dev/null 2>&1 || rc=$?
 assert_eq "1" "$rc" "restore-db.sh aborts when using incorrect private recovery key"
 
+# ==============================================================================
+# TEST 5: restore-db.sh fails closed when verification tools are missing
+# ==============================================================================
+printf '\n=== TEST 5: restore-db.sh fails closed without verification tools ===\n'
+no_tools_dir="$TEST_TMP/no_tools_bin"
+mkdir -p "$no_tools_dir"
+cat <<'EOF' > "$no_tools_dir/age"
+#!/usr/bin/env bash
+out=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+if [[ -n "$out" ]]; then
+  echo "dummy sqlite database" > "$out"
+fi
+exit 0
+EOF
+chmod +x "$no_tools_dir/age"
+
+rc=0
+PATH="$no_tools_dir:/usr/bin:/bin" "$DEPLOY_DIR/restore-db.sh" \
+  --identity "$wrong_identity" \
+  --backup "$backup_artifact" \
+  --target-dir "$TEST_TMP/no_tools_restore" >/dev/null 2>&1 || rc=$?
+assert_eq "1" "$rc" "restore-db.sh fails closed when no integrity tools exist"
+
 printf '\n======================================================\n'
 printf 'Restore Drill Test Results: %d passed, %d failed\n' "$TESTS_PASSED" "$TESTS_FAILED"
 printf '======================================================\n'

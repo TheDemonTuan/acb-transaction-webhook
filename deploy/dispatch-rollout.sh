@@ -653,7 +653,11 @@ if [[ "${PROMOTION_PLATFORM:-false}" == "true" && "${PROMOTION_GATEWAY:-false}" 
   log_info "Executing Transaction 5: Platform / Edge Config Reload..."
   update_rollout_step "platform" "RUNNING"
   active_slot="$(get_active_slot)"
-  bash "$DEPLOY_DIR/switch-slot.sh" "$active_slot" 2>/dev/null || true
+  if ! bash "$DEPLOY_DIR/switch-slot.sh" "$active_slot"; then
+    log_error "Transaction 5: Platform Config Reload failed."
+    update_rollout_step "platform" "STEP_FAILED"
+    exit 1
+  fi
   update_rollout_step "platform" "STEP_COMPLETED"
   promoted_list+=("platform")
   log_info "Transaction 5: Platform Config Reload completed."

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -347,6 +350,8 @@ func main() {
 	healthcheck := flag.Bool("healthcheck", false, "verify worker health via HTTP (readiness first, then liveness)")
 	livenessCheck := flag.Bool("liveness-check", false, "verify worker liveness via HTTP /healthz")
 	readinessCheck := flag.Bool("readiness-check", false, "verify worker readiness via HTTP /readyz")
+	quiesceCheck := flag.Bool("quiesce", false, "quiesce running worker via HTTP POST /rpc/quiesce")
+	drainCheck := flag.Bool("drain", false, "drain running worker via HTTP POST /rpc/drain")
 	flag.Parse()
 
 	rpcAddr := os.Getenv("WORKER_RPC_ADDR")
@@ -356,6 +361,50 @@ func main() {
 			rpcPort = "8190"
 		}
 		rpcAddr = "0.0.0.0:" + rpcPort
+	}
+
+	if *quiesceCheck || *drainCheck {
+		client := &http.Client{Timeout: 30 * time.Second}
+		_, port, err := net.SplitHostPort(rpcAddr)
+		if err != nil {
+			port = "8190"
+		}
+		path := "/rpc/quiesce"
+		if *drainCheck {
+			path = "/rpc/drain"
+		}
+		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s%s", port, path), bytes.NewReader([]byte("{}")))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create rpc request: %v\n", err)
+			os.Exit(1)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		token := os.Getenv("WORKER_INTERNAL_TOKEN")
+		if token == "" {
+			secretsDir := os.Getenv("SECRETS_DIR")
+			if secretsDir == "" {
+				secretsDir = "/run/secrets"
+			}
+			if tokenBytes, err := os.ReadFile(filepath.Join(secretsDir, "worker_internal_token")); err == nil {
+				token = strings.TrimSpace(string(tokenBytes))
+			}
+		}
+		if token != "" {
+			req.Header.Set("X-Worker-Internal-Token", token)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "worker rpc request failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusOK {
+			os.Stdout.Write(body)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "worker rpc returned status %d: %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
 	}
 
 	if *healthcheck || *livenessCheck || *readinessCheck {
@@ -484,8 +533,14 @@ func main() {
 		logger.Info("Bark notification provider registered in worker")
 	}
 
+	var workerWg sync.WaitGroup
+
 	dispatcher := notification.NewDispatcher(store, notificationRegistry)
-	go dispatcher.Start(workerCtx)
+	workerWg.Add(1)
+	go func() {
+		defer workerWg.Done()
+		dispatcher.Start(workerCtx)
+	}()
 
 	// 4. ACB Bank Monitor
 	acbClient, err := acb.NewClient("https://online.acb.com.vn", nil)
@@ -533,12 +588,20 @@ func main() {
 		}
 		verifierSessionLoader = monitor.NewSessionLoader(store, keyring, verifierClient)
 	}
-	go bankMonitor.Run(workerCtx)
+	workerWg.Add(1)
+	go func() {
+		defer workerWg.Done()
+		bankMonitor.Run(workerCtx)
+	}()
 	logger.Info("ACB bank polling monitor started in worker")
 
 	historyRunner := monitor.NewHistoryJobRunner(store, acbClient, bankMonitor.Scheduler(), sessionLoader).
 		WithMonitor(bankMonitor)
-	go historyRunner.Run(workerCtx)
+	workerWg.Add(1)
+	go func() {
+		defer workerWg.Done()
+		historyRunner.Run(workerCtx)
+	}()
 	logger.Info("ACB durable history job runner started in worker")
 
 	// 5. Singleton Maintenance Runner (hourly retention and stale auth reap)
@@ -547,7 +610,11 @@ func main() {
 		maintenance.WithRetentionInterval(1*time.Hour),
 		maintenance.WithStaleAuthInterval(30*time.Second),
 	)
-	go maintRunner.Run(workerCtx)
+	workerWg.Add(1)
+	go func() {
+		defer workerWg.Done()
+		maintRunner.Run(workerCtx)
+	}()
 	logger.Info("singleton maintenance runner started in worker")
 
 	// 6. Setup Private RPC Server
@@ -701,6 +768,19 @@ func main() {
 
 	// Cancel background workers
 	workerCancel()
+
+	// Synchronize background worker goroutines shutdown before releasing singleton lock
+	workerWaitCh := make(chan struct{})
+	go func() {
+		workerWg.Wait()
+		close(workerWaitCh)
+	}()
+	select {
+	case <-workerWaitCh:
+		logger.Info("all background worker goroutines stopped cleanly")
+	case <-time.After(5 * time.Second):
+		logger.Warn("timed out waiting for background worker goroutines to stop")
+	}
 
 	logger.Info("worker stopped successfully")
 }

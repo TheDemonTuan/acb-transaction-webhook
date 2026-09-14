@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 acquire_deploy_lock
+trap release_deploy_lock EXIT HUP INT TERM
 
 CURRENT_SLOT="$(get_active_slot)"
 PREVIOUS_SLOT=""
@@ -23,6 +24,7 @@ log_info "ROLLBACK: Reverting from [${CURRENT_SLOT}] back to [${PREVIOUS_SLOT}]"
 log_info "========================================"
 
 # 1. Start previous slot container if not running
+clear_intentional_stop "$PREVIOUS_SLOT"
 STATUS=$(docker inspect --format '{{.State.Status}}' "acb-gateway-${PREVIOUS_SLOT}" 2>/dev/null || echo "not_found")
 if [[ "$STATUS" != "running" ]]; then
   log_info "Starting stopped previous container acb-gateway-${PREVIOUS_SLOT}..."

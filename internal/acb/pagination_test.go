@@ -75,3 +75,42 @@ func TestParseHistoryPageTruncationDetection(t *testing.T) {
 		t.Fatal("expected HasNext=false when no next page link is present")
 	}
 }
+
+func TestParseHistoryPageNextDisabledAttributeAndName(t *testing.T) {
+	t.Run("input button with name NEXT_DISABLED is recognized as disabled", func(t *testing.T) {
+		html := `<form action="/acbib/Request" method="POST">
+			<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+		</form>
+		<table>
+			<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+			<tr><td>12/09/2026</td><td>TX2001</td><td>0</td><td>10.000</td></tr>
+			<tr><td colspan="4"><input type="button" name="NEXT_DISABLED" value="Trang sau" onclick="submitEvent('nextPage')" /></td></tr>
+		</table>`
+		res, err := ParseHistoryPage(html)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.HasNext {
+			t.Fatal("expected HasNext to be false when next button has name NEXT_DISABLED")
+		}
+	})
+
+	t.Run("hidden input with name NEXT_DISABLED on page disables next", func(t *testing.T) {
+		html := `<form action="/acbib/Request" method="POST">
+			<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+			<input type="hidden" name="NEXT_DISABLED" value="true" />
+		</form>
+		<table>
+			<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+			<tr><td>12/09/2026</td><td>TX2002</td><td>0</td><td>20.000</td></tr>
+			<tr><td colspan="4"><a href="/next" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
+		</table>`
+		res, err := ParseHistoryPage(html)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.HasNext {
+			t.Fatal("expected HasNext to be false when page contains NEXT_DISABLED input")
+		}
+	})
+}

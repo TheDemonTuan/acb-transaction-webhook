@@ -26,6 +26,7 @@ func main() {
 	gateRenewFlag := flag.Bool("gate-renew", false, "renew deployment mutation gate lease")
 	gateCheckFlag := flag.Bool("gate-check", false, "check mutation gate is open and active auth count is 0")
 	schemaCompatFlag := flag.Bool("schema-compat", false, "verify schema compatibility with minimum version")
+	readonlyFlag := flag.Bool("readonly", false, "open SQLite database in read-only mode")
 
 	ownerFlag := flag.String("owner", "", "lease owner identifier")
 	leaseTokenFlag := flag.String("lease-token", "", "lease token for release or renewal")
@@ -47,6 +48,9 @@ func main() {
 			dataDir = "./data"
 		}
 		dbPath = filepath.Join(dataDir, "gateway.db")
+	}
+	if len(dbPath) >= 3 && dbPath[0] == '/' && ((dbPath[1] >= 'a' && dbPath[1] <= 'z') || (dbPath[1] >= 'A' && dbPath[1] <= 'Z')) && dbPath[2] == '/' {
+		dbPath = string(dbPath[1]) + ":" + dbPath[2:]
 	}
 
 	ctx := context.Background()
@@ -80,7 +84,11 @@ func main() {
 	}
 
 	// For check or backup, open runtime without auto-migration
-	store, err := storage.OpenRuntime(ctx, dbPath)
+	isReadOnly := *readonlyFlag || *checkFlag || *schemaVersionFlag || *activeAuthCountFlag || *gateStatusFlag || *gateCheckFlag || *schemaCompatFlag
+	store, err := storage.OpenWithOptions(ctx, dbPath, storage.OpenOptions{
+		RunMigrations: false,
+		ReadOnly:      isReadOnly,
+	})
 	if err != nil {
 		logger.Error("open database failed", "error", err)
 		os.Exit(1)

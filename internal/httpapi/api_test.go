@@ -125,6 +125,13 @@ func TestBrowserScreenCSP(t *testing.T) {
 		if len(imgSrc) != 2 || !contains(imgSrc, "'self'") || !contains(imgSrc, "data:") {
 			t.Fatalf("expected img-src ['self' data:], got %v", imgSrc)
 		}
+		fontSrc, ok := dirs["font-src"]
+		if !ok {
+			t.Fatalf("missing font-src directive: %s", cspHeaders[0])
+		}
+		if len(fontSrc) != 2 || !contains(fontSrc, "'self'") || !contains(fontSrc, "data:") {
+			t.Fatalf("expected font-src ['self' data:], got %v", fontSrc)
+		}
 		if val, ok := dirs["default-src"]; !ok || len(val) != 1 || val[0] != "'self'" {
 			t.Fatalf("default-src mismatch: %v", dirs["default-src"])
 		}

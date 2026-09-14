@@ -462,3 +462,155 @@ func TestRealtimePollPartialWhenHasNextWithEmptyNavigation(t *testing.T) {
 		t.Fatalf("expected 1 row seen, got %d", finishedPoll.RowsSeen)
 	}
 }
+
+type emptyNextActionMockClient struct {
+	calls atomic.Int32
+}
+
+func (m *emptyNextActionMockClient) Bootstrap(ctx context.Context) (acb.Response, error) {
+	body := `<form action="/acbib/Request" method="POST">
+		<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+		<input type="hidden" name="dse_processorState" value="first" />
+		<input type="hidden" name="AccountNbr" value="123456" />
+	</form>`
+	return acb.Response{StatusCode: 200, Body: body, Kind: acb.AccountDetailPage}, nil
+}
+
+func (m *emptyNextActionMockClient) History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
+	call := m.calls.Add(1)
+	if call == 1 {
+		// Page 1: NextAction is empty, but NextFields contains next event
+		body := `<form action="/acbib/Request" method="POST">
+			<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+			<input type="hidden" name="AccountNbr" value="123456" />
+			<input type="hidden" name="dse_processorState" value="page2" />
+		</form>
+		<table>
+			<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+			<tr><td>P1_TX</td><td>12/09/2026</td><td>0</td><td>10.000</td></tr>
+			<tr><td colspan="4"><a href="#" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
+		</table>`
+		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+	}
+	// Page 2: Last page
+	body := `<form action="/acbib/Request" method="POST">
+		<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+		<input type="hidden" name="AccountNbr" value="123456" />
+	</form>
+	<table>
+		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+		<tr><td>P2_TX</td><td>12/09/2026</td><td>0</td><td>20.000</td></tr>
+		<tr><td colspan="4"><span class="disabled">Trang sau</span></td></tr>
+	</table>`
+	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+}
+
+func TestEnsureHistoryEmptyNextActionContinuesWithNextFields(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test_empty_action.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	connID := "conn_empty_action"
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &emptyNextActionMockClient{}
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	runner := NewHistoryJobRunner(store, client, mon.Scheduler(), nil)
+
+	_, _, err = store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2026-09-12", "2026-09-12")
+	if err != nil {
+		t.Fatalf("CreateOrGetHistorySyncJob: %v", err)
+	}
+	processed, err := runner.ProcessNextJob(ctx)
+	if err != nil {
+		t.Fatalf("ProcessNextJob failed: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
+	}
+	if client.calls.Load() != 2 {
+		t.Fatalf("expected 2 calls (page 1 and page 2), got %d", client.calls.Load())
+	}
+	covered, err := store.CheckRangeCoverage(ctx, connID, "2026-09-12", "2026-09-12")
+	if err != nil || !covered {
+		t.Fatalf("expected range to be covered after 2 pages, got: %v", covered)
+	}
+}
+
+type truncatedMockClient struct{}
+
+func (m *truncatedMockClient) Bootstrap(ctx context.Context) (acb.Response, error) {
+	body := `<form action="/history" method="POST">
+		<input type="hidden" name="dse_operationName" value="op1" />
+		<input type="hidden" name="dse_processorState" value="ps1" />
+		<input type="hidden" name="AccountNbr" value="123456" />
+	</form>`
+	return acb.Response{StatusCode: 200, Body: body, Kind: acb.AccountDetailPage}, nil
+}
+
+func (m *truncatedMockClient) History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
+	// Reports 50 total rows but only returns 1 row and next is disabled
+	body := `<table>
+		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+		<tr><td>TX_TRUNC</td><td>12/09/2026</td><td>0</td><td>10.000</td></tr>
+		<tr><td colspan="4"><span class="disabled">Trang sau</span></td></tr>
+	</table>
+	<div>Tổng số dòng: 50</div>`
+	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+}
+
+func TestEnsureHistoryTruncationFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test_trunc_fail_closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	connID := "conn_trunc_fc"
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &truncatedMockClient{}
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	runner := NewHistoryJobRunner(store, client, mon.Scheduler(), nil)
+
+	job, _, err := store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2026-09-12", "2026-09-12")
+	if err != nil {
+		t.Fatalf("CreateOrGetHistorySyncJob: %v", err)
+	}
+	_, err = runner.ProcessNextJob(ctx)
+	if err == nil {
+		t.Fatal("expected runner to return error on truncated history, got nil")
+	}
+
+	// Verify job was marked FAILED with TRUNCATED_HISTORY
+	updatedJob, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedJob.Status != "FAILED" || updatedJob.ErrorCode != "TRUNCATED_HISTORY" {
+		t.Fatalf("expected job status FAILED / TRUNCATED_HISTORY, got: %s / %s", updatedJob.Status, updatedJob.ErrorCode)
+	}
+
+	// Verify coverage was NOT recorded
+	covered, err := store.CheckRangeCoverage(ctx, connID, "2026-09-12", "2026-09-12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if covered {
+		t.Fatal("coverage MUST NOT be recorded when pagination is truncated")
+	}
+}

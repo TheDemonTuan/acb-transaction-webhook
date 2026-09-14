@@ -2,6 +2,7 @@ package workerrpc_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -656,3 +657,26 @@ func TestWorkerRPC_TestNotificationChannel(t *testing.T) {
 	}
 }
 
+func TestWorkerRPC_WorkerRpcVersion_v2(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	srv, err := workerrpc.NewServer(mock, "test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var data map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if data["workerRpcVersion"] != "v2" {
+		t.Fatalf("expected workerRpcVersion v2, got %v", data["workerRpcVersion"])
+	}
+}

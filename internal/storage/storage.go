@@ -31,10 +31,20 @@ func Open(ctx context.Context, path string) (*Store, error) {
 }
 
 func openInternal(ctx context.Context, path string, opts OpenOptions) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
+	if len(path) >= 3 && path[0] == '/' && ((path[1] >= 'a' && path[1] <= 'z') || (path[1] >= 'A' && path[1] <= 'Z')) && path[2] == '/' {
+		path = string(path[1]) + ":" + path[2:]
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)")
+	cleanPath := filepath.ToSlash(filepath.Clean(path))
+	if !opts.ReadOnly {
+		if err := os.MkdirAll(filepath.Dir(cleanPath), 0o750); err != nil {
+			return nil, fmt.Errorf("create data dir: %w", err)
+		}
+	}
+	dsn := "file:" + cleanPath + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"
+	if opts.ReadOnly {
+		dsn = "file:" + cleanPath + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -47,6 +57,10 @@ func openInternal(ctx context.Context, path string, opts OpenOptions) (*Store, e
 	}
 	s := &Store{db: db}
 	if opts.RunMigrations {
+		if opts.ReadOnly {
+			db.Close()
+			return nil, errors.New("cannot run migrations on read-only database")
+		}
 		if err := s.Migrate(ctx); err != nil {
 			db.Close()
 			return nil, err

@@ -276,6 +276,7 @@ type HistoryJobTask struct {
 	maxDayPages  int
 	nextAction   string
 	nextFields   map[string]string
+	cursor       *acb.PaginationCursor
 	dayTxns      []storage.BatchTransactionItem
 	pagesDone    int
 	rowsSeen     int
@@ -567,10 +568,15 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 	t.dayPageCount++
 	t.dayTxns = append(t.dayTxns, pageItems...)
 
+	if t.cursor == nil {
+		t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
+	}
+	t.cursor.Step(pageResult, len(pageResult.Transactions))
+
 	// 10. Check if more pages exist for this day
-	if pageResult.HasNext && t.dayPageCount < t.maxDayPages && (pageResult.NextAction != "" || len(pageResult.NextFields) > 0) {
-		t.nextAction = pageResult.NextAction
-		t.nextFields = pageResult.NextFields
+	if t.cursor.HasNext && t.dayPageCount < t.maxDayPages && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) {
+		t.nextAction = t.cursor.Action
+		t.nextFields = t.cursor.Fields
 		if t.nextFields == nil {
 			t.nextFields = make(map[string]string)
 		}
@@ -581,6 +587,15 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 
 		// Bounded quantum complete! Yield after 1 page so higher-priority tasks can preempt.
 		return scheduler.TaskStepResult{Done: false, Outcome: scheduler.OutcomeSuccess}, nil
+	}
+
+	// Fail closed if day pagination was truncated or budget exceeded with remaining pages
+	if t.cursor.Truncated || (t.cursor.HasNext && t.dayPageCount >= t.maxDayPages) {
+		truncErr := fmt.Errorf("history sync job %s truncated on %s: parsed %d of %d rows (pages: %d)",
+			t.job.ID, dayStr, t.cursor.CumulativeRows, t.cursor.TotalRowsSeen, t.dayPageCount)
+		_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "TRUNCATED_HISTORY", truncErr.Error())
+		t.finish(truncErr)
+		return scheduler.TaskStepResult{Done: true, Error: truncErr, Outcome: scheduler.OutcomeFatal}, truncErr
 	}
 
 	// 11. Day is complete! Mark day coverage and advance to next day
@@ -594,6 +609,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 	t.dayPageCount = 0
 	t.nextAction = ""
 	t.nextFields = nil
+	t.cursor = nil
 	t.dayTxns = nil
 
 	if t.curDay.After(t.toDay) {

@@ -423,7 +423,7 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		"release":          s.cfg.ReleaseCommit,
 		"slot":             s.cfg.Slot,
 		"nonce":            s.instanceNonce,
-		"workerRpcVersion": "v1",
+		"workerRpcVersion": "v2",
 	}
 
 	status := "ready"
@@ -1094,7 +1094,7 @@ func (s *Server) browserScreen(w http.ResponseWriter, r *http.Request) {
 	proxy.ModifyResponse = func(response *http.Response) error {
 		if chi.URLParam(r, "*") == "vnc.html" && response.StatusCode == http.StatusOK {
 			w.Header().Del("Content-Security-Policy")
-			response.Header.Set("Content-Security-Policy", defaultContentSecurityPolicy+"; img-src 'self' data:")
+			response.Header.Set("Content-Security-Policy", defaultContentSecurityPolicy+"; img-src 'self' data:; font-src 'self' data:")
 		}
 		return nil
 	}

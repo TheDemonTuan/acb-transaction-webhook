@@ -30,6 +30,9 @@ GATE_TOKEN=""
 
 cleanup_schema_deploy() {
   local exit_code=$?
+  if command -v docker >/dev/null 2>&1; then
+    docker rm -f acb-schema-check >/dev/null 2>&1 || true
+  fi
   if [[ -n "${GATE_TOKEN:-}" || -n "${SCHEMA_DEPLOY_OWNER:-}" ]]; then
     release_mutation_gate "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" "$SCHEMA_DEPLOY_OWNER" "${GATE_TOKEN:-}" 2>/dev/null || true
   fi
@@ -83,9 +86,10 @@ if ! verify_schema_compat "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" 9; then
 fi
 
 if command -v docker >/dev/null 2>&1 && docker volume inspect "$DATA_VOLUME_NAME" >/dev/null 2>&1; then
-  if ! docker run --rm --network none --read-only --user 1000:1000 \
+  docker rm -f acb-schema-check >/dev/null 2>&1 || true
+  if ! docker run --name acb-schema-check --rm --network none --read-only --user 1000:1000 \
     -v "${DATA_VOLUME_NAME}:/data:ro" \
-    "$DBTOOL_IMAGE" -path /data/gateway.db -check >/dev/null 2>&1; then
+    "$DBTOOL_IMAGE" -path /data/gateway.db -readonly -check >/dev/null 2>&1; then
     log_error "Post-migration database integrity check failed!"
     exit 1
   fi

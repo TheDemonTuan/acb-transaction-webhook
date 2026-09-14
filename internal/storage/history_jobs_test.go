@@ -696,3 +696,51 @@ func TestStore_HistorySyncJobs_RequeueRunningJobsOnShutdown(t *testing.T) {
 		t.Errorf("expected job 2 error code WORKER_SHUTDOWN, got %s", j2.ErrorCode)
 	}
 }
+
+func TestStore_HistorySyncJobs_MaxAttemptsExceeded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, conn := setupTestStore(t)
+
+	job, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, "2026-09-01", "2026-09-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	for i := 1; i <= 4; i++ {
+		claimedJob, claimed, err := store.ClaimNextHistorySyncJob(ctx, now.Add(time.Duration(i)*time.Hour))
+		if err != nil || !claimed {
+			t.Fatalf("attempt %d: claim failed: %v", i, err)
+		}
+		if claimedJob.Attempts != i {
+			t.Fatalf("attempt %d: expected attempts=%d, got %d", i, i, claimedJob.Attempts)
+		}
+		if err := store.RequeueHistorySyncJob(ctx, job.ID, "TRANSIENT_ERR", "temporary glitch", now.Add(time.Duration(i)*time.Hour)); err != nil {
+			t.Fatalf("attempt %d: requeue failed: %v", i, err)
+		}
+	}
+
+	claimedJob5, claimed, err := store.ClaimNextHistorySyncJob(ctx, now.Add(5*time.Hour))
+	if err != nil || !claimed {
+		t.Fatalf("attempt 5: claim failed: %v", err)
+	}
+	if claimedJob5.Attempts != 5 {
+		t.Fatalf("attempt 5: expected attempts=5, got %d", claimedJob5.Attempts)
+	}
+
+	if err := store.RequeueHistorySyncJob(ctx, job.ID, "TRANSIENT_ERR", "glitch 5", now.Add(5*time.Hour)); err != nil {
+		t.Fatalf("attempt 5 requeue error: %v", err)
+	}
+
+	finalJob, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalJob.Status != HistoryJobStatusFailed {
+		t.Fatalf("expected job to be FAILED, got: %s", finalJob.Status)
+	}
+	if finalJob.ErrorCode != "MAX_ATTEMPTS_EXCEEDED" {
+		t.Fatalf("expected error code MAX_ATTEMPTS_EXCEEDED, got: %s", finalJob.ErrorCode)
+	}
+}

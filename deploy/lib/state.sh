@@ -284,7 +284,20 @@ mark_intentional_stop() {
 }
 
 clear_intentional_stop() {
-  return 0
+  local slot="${1:-}"
+  if [[ -z "$slot" ]]; then
+    return 0
+  fi
+  rm -f "$FAILOVER_STATE_DIR/intentional-stop-${slot}" \
+        "$FAILOVER_STATE_DIR/.intentional-stop-${slot}" \
+        "$FAILOVER_STATE_DIR/acb/intentional-stop-${slot}" \
+        "$FAILOVER_STATE_DIR/acb/.intentional-stop-${slot}" \
+        "$SCRIPT_DIR/.intentional-stop-${slot}" \
+        "/tmp/vps-failover/intentional-stop-${slot}" \
+        "/tmp/vps-failover/.intentional-stop-${slot}" \
+        "/tmp/vps-failover/acb/intentional-stop-${slot}" \
+        "/tmp/vps-failover/acb/.intentional-stop-${slot}" 2>/dev/null || true
+  log_info "Cleared intentional stop marker for slot [${slot}]."
 }
 
 stop_standby_container() {
@@ -292,7 +305,6 @@ stop_standby_container() {
   log_info "Stopping container for slot [${slot}]..."
   mark_intentional_stop "$slot"
   compose_prod stop "gateway-${slot}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || docker stop "acb-gateway-${slot}" 2>/dev/null || true
-  clear_intentional_stop "$slot"
   log_info "Slot [${slot}] stopped into warm standby state."
 }
 

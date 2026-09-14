@@ -135,6 +135,7 @@ pull_candidate_image "gateway-${CANDIDATE_SLOT}" "$IMAGE_REF"
 
 # 2. Start candidate container
 log_info "Starting candidate slot [gateway-${CANDIDATE_SLOT}]..."
+clear_intentional_stop "$CANDIDATE_SLOT"
 export "${CANDIDATE_VAR}=${IMAGE_REF}"
 compose_prod up -d "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" up -d "gateway-${CANDIDATE_SLOT}"
 update_tx_state "TX_CANDIDATE_STARTED"

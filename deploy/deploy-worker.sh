@@ -85,19 +85,22 @@ quiesce_old_worker() {
 
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^acb-worker$'; then
     local q_resp
+    if q_resp="$(docker exec -e WORKER_INTERNAL_TOKEN="${WORKER_TOKEN}" acb-worker /worker -quiesce 2>&1)"; then
+      log_info "Old worker quiesced via container exec: ${q_resp}"
+      return 0
+    fi
+    log_info "Container exec quiesce did not succeed (${q_resp}); trying host RPC..."
     if command -v curl >/dev/null 2>&1; then
-      if ! q_resp="$(curl -s -f -m 30 -X POST \
+      if q_resp="$(curl -s -f -m 30 -X POST \
         -H "Content-Type: application/json" \
         -H "X-Worker-Internal-Token: ${WORKER_TOKEN}" \
         "${WORKER_RPC_URL}/rpc/quiesce" 2>&1)"; then
-        log_error "Old worker quiesce RPC failed: ${q_resp}"
-        return 1
+        log_info "Old worker quiesce RPC reported: ${q_resp}"
+        return 0
       fi
-      log_info "Old worker quiesce RPC reported: ${q_resp}"
-    else
-      log_info "curl not available on host; issuing container drain."
-      docker exec acb-worker /worker --drain 2>/dev/null || true
     fi
+    log_error "Failed to quiesce running worker container: ${q_resp}"
+    return 1
   else
     log_info "No currently running acb-worker container found to quiesce."
   fi

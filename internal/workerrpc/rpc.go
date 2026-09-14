@@ -472,14 +472,15 @@ func (s *Server) routes() {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status":        "ready",
-			"role":          role,
-			"release":       rel,
-			"schemaVersion": schema,
-			"state":         stateStr,
-			"singletonLock": true,
-			"stale":         false,
-			"requestId":     reqID,
+			"status":           "ready",
+			"role":             role,
+			"release":          rel,
+			"schemaVersion":    schema,
+			"workerRpcVersion": "v2",
+			"state":            stateStr,
+			"singletonLock":    true,
+			"stale":            false,
+			"requestId":        reqID,
 		})
 	})
 
@@ -505,7 +506,7 @@ func (s *Server) routes() {
 			"release":          rel,
 			"slot":             slot,
 			"schemaVersion":    schema,
-			"workerRpcVersion": "v1",
+			"workerRpcVersion": "v2",
 			"singletonLock":    true,
 			"requestId":        reqID,
 		}

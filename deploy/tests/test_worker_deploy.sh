@@ -114,6 +114,21 @@ elif [[ "$cmd" == "run" ]]; then
     exit 0
   fi
   exit 0
+elif [[ "$cmd" == "exec" ]]; then
+  if [[ "$*" =~ -quiesce ]]; then
+    if [[ "${MOCK_QUIESCE_FAIL:-0}" == "1" ]]; then
+      exit 1
+    fi
+    printf '{"status":"quiesced","quiesced":true}\n'
+    exit 0
+  fi
+  if [[ "$*" =~ --readiness-check ]]; then
+    if [[ "${MOCK_CANDIDATE_READY_FAIL:-0}" == "1" ]]; then
+      exit 1
+    fi
+    exit 0
+  fi
+  exit 0
 fi
 exit 0
 EOF
@@ -205,6 +220,22 @@ assert_eq "$MOCK_CONTAINER_GATEWAY_ID" "gateway-cid-initial-2222" "Gateway conta
 assert_eq "$MOCK_CONTAINER_BROWSER_ID" "browser-cid-initial-3333" "Browser container ID untouched"
 assert_eq "$MOCK_CONTAINER_TTS_ID" "tts-cid-initial-4444" "TTS container ID untouched"
 assert_eq "$MOCK_CONTAINER_BARK_ID" "bark-cid-initial-5555" "Bark container ID untouched"
+
+# ==============================================================================
+# TEST 6: Container Exec Loopback Quiesce (Reachable without host port publish)
+# ==============================================================================
+printf '\n=== TEST 6: Container Exec Quiesce Without Published Host Port ===\n'
+T6="$TEST_TMP/t6"
+setup_worker_mock_env "$T6"
+unset WORKER_QUIESCE_CMD
+export WORKER_START_CMD="true"
+export WORKER_STOP_CMD="true"
+export WORKER_READY_CHECK_CMD="true"
+export WORKER_READINESS_TIMEOUT="2"
+
+"$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T6/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
+assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Container exec loopback quiesced successfully and committed"
 
 printf '\n==================================================\n'
 printf 'WORKER DEPLOY TEST RESULTS: %d PASSED, %d FAILED\n' "$TESTS_PASSED" "$TESTS_FAILED"
