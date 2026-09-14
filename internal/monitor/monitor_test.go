@@ -704,10 +704,8 @@ func TestRequestSyncConcurrentNormalPoll(t *testing.T) {
 		t.Fatal("RequestSync blocked unexpectedly during active normal poll")
 	}
 
-	// Start Run to consume the queued sync once normal poll releases
-	go m.Run(ctx)
-
-	// Release normal poll
+	// Wait until normal poll is finished before starting Run to process the queued sync,
+	// preventing concurrent write lock contention on SQLite.
 	close(releaseNormalPoll)
 
 	select {
@@ -715,9 +713,12 @@ func TestRequestSyncConcurrentNormalPoll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("normal poll failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for normal poll to finish")
 	}
+
+	// Start Run to consume the queued sync once normal poll finishes
+	go m.Run(ctx)
 
 	// Wait for the queued sync poll to also execute
 	deadline := time.Now().Add(2 * time.Second)

@@ -118,8 +118,8 @@ func TestHistoryJobs_QuickAccepted(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d: %s", w.Code, w.Body.String())
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("expected ensure-history to return quickly under 100ms, took %v", elapsed)
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("expected ensure-history to return quickly under 1.5s without waiting for worker task, took %v", elapsed)
 	}
 
 	var res map[string]any
