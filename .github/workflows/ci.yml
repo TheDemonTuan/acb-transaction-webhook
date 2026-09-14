@@ -56,6 +56,18 @@ jobs:
         run: bash deploy/tests/test_ci_workflow.sh
       - name: Test health endpoints, telemetry and operational alerts
         run: bash deploy/tests/test_health_telemetry.sh
+      - name: Run deployment failure drill tests
+        run: |
+          bash deploy/tests/test_secrets.sh
+          bash deploy/tests/test_backup.sh
+          bash deploy/tests/test_restore_drill.sh
+          bash deploy/tests/test_compose_policy.sh
+          bash deploy/tests/test_runtime_policy.sh
+          bash deploy/tests/test_gateway_deploy.sh
+          bash deploy/tests/test_schema_deploy.sh
+          bash deploy/tests/test_worker_deploy.sh
+          bash deploy/tests/test_aux_deploy.sh
+          bash deploy/tests/test_traefik_switch.sh
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob

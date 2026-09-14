@@ -151,7 +151,11 @@ exit_code=$?
 set -e
 
 assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Worker promotion aborted on quiesce failure"
-assert_eq "0" "$(( [ -f "$T2/worker_stopped" ] ? 1 : 0 ))" "Old worker was NOT stopped when quiesce failed"
+stopped=0
+if [[ -f "$T2/worker_stopped" ]]; then
+  stopped=1
+fi
+assert_eq "0" "$stopped" "Old worker was NOT stopped when quiesce failed"
 
 # ==============================================================================
 # TEST 3: Candidate Readiness Failure Triggers Rollback

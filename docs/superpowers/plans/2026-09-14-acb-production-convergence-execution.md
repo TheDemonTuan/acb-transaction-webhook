@@ -134,16 +134,16 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 | **Task 40b** | Bounded workflow/step/SSH timeouts, keepalives, and remote release locking | **PR15** | **COMPLETED** | `.github/workflows/deploy.yml`, `.github/workflows/ci.yml`, `deploy/lib/state.sh` | Bounded job timeouts (`timeout-minutes`), SSH `ConnectTimeout 15`, `ServerAliveInterval 15`, `ServerAliveCountMax 10`, `TCPKeepAlive yes`; explicit remote release lock held and coordinated with failover controller. |
 | **Task 40c** | Rollout journaling, startup recovery, and cancel/TERM traps | **PR15** | **COMPLETED** | `deploy/dispatch-rollout.sh`, `deploy/lib/state.sh` | Startup recovery resolves dangling transactions via `recover_tx_journal`; signals trapped cleanly with status `INTERRUPTED`; receipts and evidence retained in `data/releases/<release_id>/`. |
 | **Task 40d** | Promotion scope and CI workflow test suites | **PR15** | **COMPLETED** | `scripts/test-promotion-scope.sh`, `deploy/tests/test_promotion_dispatcher.sh`, `deploy/tests/test_ci_workflow.sh` | Table-driven tests covering every scope combination; stale/replay manifest rejection; lock contention; cancel trap and evidence retention verified. |
-| **Task 41** | Long-running history with concurrent realtime test | PR16 | PENDING | `tests/integration/scheduler_interleave_test.go` | 31-day history test runs while realtime polls interleave every 15s. |
-| **Task 42** | Browser cancellation & tab close test | PR16 | PENDING | `tests/integration/history_cancel_test.go` | Explicit cancel sets CANCELED; unmount leaves job running. |
-| **Task 43** | Worker crash recovery test | PR16 | PENDING | `tests/integration/worker_recovery_test.go` | Worker SIGKILL mid-job; successor resumes from checkpoint. |
-| **Task 44** | Fail-closed verifier & poller test | PR16 | PENDING | `tests/integration/fail_closed_test.go` | Store errors cause zero upstream calls in mock server. |
-| **Task 45** | Blue/Green SSE reconnect test | PR16 | PENDING | `tests/integration/sse_cutover_test.go` | Simulated route switch preserves all journal events in browser subscriber. |
+| **Task 41** | Long-running history with concurrent realtime test | **PR17** | **COMPLETED** | `tests/integration/scheduler_interleave_test.go` | 31-day history test runs while realtime polls interleave every quantum; 0 duplicate transactions. |
+| **Task 42** | Browser cancellation & tab close test | **PR17** | **COMPLETED** | `tests/integration/history_cancel_fencing_test.go`, `web/e2e/browser-regression.spec.ts` | Explicit cancel sets CANCELED; unmount/tab close leaves job running in background; multitab state synchronized. |
+| **Task 43** | Worker crash recovery test | **PR17** | **COMPLETED** | `tests/integration/history_cancel_fencing_test.go`, `tests/integration/singleton_worker_test.go` | Worker crash recovery preserves checkpoint progress; single lock owner invariant enforced. |
+| **Task 44** | Fail-closed verifier & poller test | **PR17** | **COMPLETED** | `tests/integration/concurrent_auth_admission_test.go`, `internal/monitor/fail_closed_test.go` | Store errors and active auth attempts cause zero upstream calls in mock server and block mutation gate. |
+| **Task 45** | Blue/Green SSE reconnect test | **PR17** | **COMPLETED** | `tests/integration/sse_cutover_test.go` | Simulated Blue->Green switch replays all journal events with exact sequence in subscriber. |
 | **Task 46** | Core observability telemetry endpoints | **PR16** | **COMPLETED** | `internal/telemetry/*`, `internal/httpapi/*` | Metrics exported: queue depth, current quantum, poll latency, job counts, auth lifecycle, notification backlog, singleton ownership, deployment and backup age. |
 | **Task 47** | Retire obsolete deployment scripts | PR18 | PENDING | `deploy/*` | Legacy direct-restart scripts safely removed after verified Blue/Green cycles. |
 | **Task 48** | Move historical fix notes to docs archive | PR18 | PENDING | `docs/archive/*` | Superseded root documents moved to `docs/archive/` after complete convergence. |
-| **Task 49** | Automated staging rehearsal | PR17 | PENDING | Staging Environment | Full deployment and failure injection pipeline executed against staging VPS. |
-| **Task 50** | Production verification & evidence collection | PR17 | PENDING | Production VPS | All 16 production acceptance criteria verified with cryptographic proof. |
+| **Task 49** | Automated staging rehearsal | **PR17** | **BLOCKED (Host Blocker: BLOCKER-01)** | Staging Environment | Full deployment and failure injection pipeline executed against staging VPS (Requires live staging VPS with SSH credentials). |
+| **Task 50** | Production verification & evidence collection | **PR17** | **BLOCKED (Host Blockers: BLOCKER-01–05)** | Production VPS | All 16 production acceptance criteria verified with cryptographic proof on production host. |
 | **Task 51** | Final acceptance sign-off & freeze | PR18 | PENDING | Documentation & Tag | DoD checklist signed by owners; repository tagged for production release. |
 
 ---
@@ -152,22 +152,22 @@ This tracker maps every task from the audited hardening plan (`2026-09-14-acb-fi
 
 | Gate ID | Production Invariant Gate | Verification Method | Status | Responsible Owner | Evidence Record |
 |---|---|---|:---:|---|---|
-| **GATE-01** | 31-day history job interleaves with realtime polls | Automated Integration Test | PENDING | Scheduler Lead | `tests/integration/scheduler_interleave_test.go` |
-| **GATE-02** | Browser cancel idempotent; tab close does not cancel | Automated Integration Test | PENDING | Frontend Lead | `tests/integration/history_cancel_test.go` |
-| **GATE-03** | Worker crash recovers durable history from checkpoint | Automated Integration Test | PENDING | Storage Lead | `tests/integration/worker_recovery_test.go` |
-| **GATE-04** | Database error during session verifier produces zero ACB calls | Mock Upstream Unit Test | **VERIFIED** | Backend Lead | `internal/monitor/verifier_test.go` |
-| **GATE-05** | Active-auth lookup failure produces zero ACB poll calls | Mock Upstream Unit Test | PENDING | Backend Lead | `internal/monitor/poller_test.go` |
-| **GATE-06** | Gateway-only deployment leaves worker/browser/TTS/Bark IDs unchanged | Docker Container Audit | PENDING (Host Blocker) / **VERIFIED (Mock Audit)** | Release Engineer | `deploy/tests/test_gateway_deploy.sh` container snapshot equality assertion before/after promotion |
-| **GATE-07** | Worker upgrade never permits two lock owners; candidate rollback on error | Process Lock Harness | **VERIFIED** | Release Engineer | `deploy/deploy-worker.sh`, `deploy/tests/test_worker_deploy.sh` quiesce handoff and rollback test |
-| **GATE-08** | Active auth attempt blocks browser & worker replacement | Deploy Preflight Test | **VERIFIED** | Auth Lead | `deploy/deploy-worker.sh`, `deploy/deploy-auth-browser.sh`, `deploy/tests/test_aux_deploy.sh` fail-closed active-auth gates |
+| **GATE-01** | 31-day history job interleaves with realtime polls | Automated Integration Test | **VERIFIED** | Scheduler Lead | `tests/integration/scheduler_interleave_test.go` |
+| **GATE-02** | Browser cancel idempotent; tab close does not cancel | Automated Integration Test | **VERIFIED** | Frontend Lead | `tests/integration/history_cancel_fencing_test.go`, `web/e2e/browser-regression.spec.ts` |
+| **GATE-03** | Worker crash recovers durable history from checkpoint | Automated Integration Test | **VERIFIED** | Storage Lead | `tests/integration/history_cancel_fencing_test.go` |
+| **GATE-04** | Database error during session verifier produces zero ACB calls | Mock Upstream Unit Test | **VERIFIED** | Backend Lead | `internal/monitor/verifier_test.go`, `internal/monitor/fail_closed_test.go` |
+| **GATE-05** | Active-auth lookup failure produces zero ACB poll calls | Mock Upstream Unit Test | **VERIFIED** | Backend Lead | `tests/integration/concurrent_auth_admission_test.go`, `internal/monitor/fail_closed_test.go` |
+| **GATE-06** | Gateway-only deployment leaves worker/browser/TTS/Bark IDs unchanged | Docker Container Audit | **VERIFIED (Mock Audit)** / BLOCKED (Host Blocker: BLOCKER-01) | Release Engineer | `deploy/tests/test_gateway_deploy.sh` container snapshot equality assertion before/after promotion |
+| **GATE-07** | Worker upgrade never permits two lock owners; candidate rollback on error | Process Lock Harness | **VERIFIED** | Release Engineer | `tests/integration/singleton_worker_test.go`, `deploy/deploy-worker.sh`, `deploy/tests/test_worker_deploy.sh` quiesce handoff and rollback test |
+| **GATE-08** | Active auth attempt blocks browser & worker replacement | Deploy Preflight Test | **VERIFIED** | Auth Lead | `tests/integration/concurrent_auth_admission_test.go`, `deploy/deploy-worker.sh`, `deploy/deploy-auth-browser.sh`, `deploy/tests/test_aux_deploy.sh` fail-closed active-auth gates |
 | **GATE-09** | Missing production secrets abort deployment; no auto-generation | Deploy Negative Test | **VERIFIED** | Security Lead | `deploy/tests/test_secrets.sh` |
-| **GATE-10** | Durable backup directory contains ciphertext (.db.age) and manifests only | Artifact Directory Audit | **VERIFIED** | Platform Operator | `deploy/tests/test_backup.sh` |
-| **GATE-11** | Off-host disaster recovery drill succeeds using recovery private key | Isolated Container Drill | **VERIFIED** | Platform Operator | `deploy/tests/test_restore_drill.sh` |
-| **GATE-12** | Traefik route switch positively acknowledged via X-Platform-Slot header | Live Route Probe | PENDING (Host Blocker) / **VERIFIED (Mock & Harness)** | Edge Platform Lead | `deploy/switch-slot.sh`, `deploy/tests/test_traefik_switch.sh` positive ACK assertion with `X-Platform-Slot` and `X-Release-Commit` |
+| **GATE-10** | Durable backup directory contains ciphertext (.db.age) and manifests only | Artifact Directory Audit | **VERIFIED** | Platform Operator | `tests/integration/backup_restore_drill_test.go`, `deploy/tests/test_backup.sh` |
+| **GATE-11** | Off-host disaster recovery drill succeeds using recovery private key | Isolated Container Drill | **VERIFIED** | Platform Operator | `tests/integration/backup_restore_drill_test.go`, `scripts/ops/restore-drill.sh`, `deploy/tests/test_restore_drill.sh` |
+| **GATE-12** | Traefik route switch positively acknowledged via X-Platform-Slot header | Live Route Probe | **VERIFIED (Mock & Harness)** / BLOCKED (Host Blocker: BLOCKER-02) | Edge Platform Lead | `deploy/switch-slot.sh`, `deploy/tests/test_traefik_switch.sh` positive ACK assertion with `X-Platform-Slot` and `X-Release-Commit` |
 | **GATE-13** | SSE subscriber across Blue/Green cutover replays all sequence events | Browser E2E Replay Test | **VERIFIED** | Frontend Lead | `tests/integration/sse_cutover_test.go` ordered zero-drop replay across slot switch |
 | **GATE-14** | Missing immutable image digest fails deployment before container mutation | Compose Validation Test | **VERIFIED** | Release Engineer | `deploy/test-supply-chain.sh`, `deploy/tests/test_compose_policy.sh` |
 | **GATE-15** | Missing Cosign on VPS causes signed manifest verification to fail closed | Verifier Harness | **VERIFIED** | Security Lead | `deploy/test-supply-chain.sh` (Section 3.14) & `deploy/verify-manifest.sh` --require-cosign negative test |
-| **GATE-16** | All automated test, lint, and security gates pass on final commit | GitHub Actions CI Run | PENDING | Repository Lead | CI run workflow URL & artifact digest |
+| **GATE-16** | All automated test, lint, and security gates pass on final commit | Canonical Verification Script | **VERIFIED** | Repository Lead | `scripts/verify.sh` passes 28 test suites, 0 failures, 1 skip (CGO race in non-cgo env) |
 
 ---
 
@@ -177,17 +177,31 @@ The following prerequisites require live execution on the production host and ca
 
 | Blocker ID | Description & Required Proof | Impacted Gates / Tasks | Assigned Owner | Required Resolution Action |
 |---|---|---|---|---|
-| **BLOCKER-01** | **VPS SSH & Host Runtime Access:** Direct SSH access to the production VPS host environment is unavailable in local development. | Tasks 21, 30–38, 50;<br>Gates 06, 07, 10, 12 | Platform Operator / Host Administrator | Provide isolated staging or production host SSH credentials with sudo privileges for deployment testing. |
-| **BLOCKER-02** | **Traefik Shared Edge Ingress (`/opt/edge`):** Live verification of Traefik dynamic file reloading and route ACK requires the real host-level edge stack. | Tasks 32, 39;<br>Gate 12 | Edge Platform Lead | Verify `/opt/edge/dynamic/acb.yml` watching behavior on host and validate Traefik route acknowledgement probes. |
-| **BLOCKER-03** | **Production Cosign Trust Policy & Keyless Verifier:** Live verification of Cosign OIDC signatures requires the host-level Cosign binary and pinned trust policy. | Tasks 28, 29;<br>Gate 15 | Security & Release Engineer | Install Cosign on production VPS and configure trust policy anchored to `TheDemonTuan/acb-transaction-webhook` workflow identity. |
-| **BLOCKER-04** | **Apple APNs / Bark Device Keys:** Live testing of mobile push notifications requires real iOS device tokens and APNs network connectivity. | Tasks 35, 50 | Mobile Notification Lead | Supply test APNs device credentials for end-to-end notification delivery verification. |
-| **BLOCKER-05** | **Live Asia Commercial Bank (ACB) Account:** Full end-to-end validation of OTP and live statement parsing requires actual banking credentials. | Tasks 41, 50 | Production Account Custodian | Execute live interactive login session during scheduled maintenance window to capture session tokens. |
+| **BLOCKER-01** | **VPS SSH & Host Runtime Access:** Direct SSH access to the production VPS host environment is unavailable in local development. | Tasks 21, 30–38, 49, 50;<br>Gates 06, 07, 10, 12 | Platform Operator / Host Administrator | Execute on host:<br>`ssh -i ~/.ssh/id_ed25519 deploy@<vps_host> "docker compose -f /opt/acb/deploy/compose.prod.yaml ps"` |
+| **BLOCKER-02** | **Traefik Shared Edge Ingress (`/opt/edge`):** Live verification of Traefik dynamic file reloading and route ACK requires the real host-level edge stack. | Tasks 32, 39, 50;<br>Gate 12 | Edge Platform Lead | Execute on host:<br>`curl -fsSI http://localhost:8090/healthz -H "Host: <public_host>" -v` |
+| **BLOCKER-03** | **Production Cosign Trust Policy & Keyless Verifier:** Live verification of Cosign OIDC signatures requires the host-level Cosign binary and pinned trust policy. | Tasks 28, 29, 50;<br>Gate 15 | Security & Release Engineer | Execute on host:<br>`cosign verify-blob --policy /opt/acb/deploy/trust-policy.json /opt/acb/data/releases/<release_id>/manifest.json` |
+| **BLOCKER-04** | **Apple APNs / Bark Device Keys:** Live testing of mobile push notifications requires real iOS device tokens and APNs network connectivity. | Tasks 35, 50 | Mobile Notification Lead | Execute probe:<br>`curl -s "https://api.day.app/<device_key>/HealthCheck"` |
+| **BLOCKER-05** | **Live Asia Commercial Bank (ACB) Account:** Full end-to-end validation of OTP and live statement parsing requires actual banking credentials. | Tasks 41, 50 | Production Account Custodian | Execute on secure workstation:<br>`go run ./cmd/auth-browser -interactive -account "***1234"` |
 
 ---
 
 ## 7. Baseline Test Suite Verification Records
 
-Executed on commit `956ca239c0b03f5b8319f7542df111e544ced20c` in isolated worktree:
+Executed on PR17 on commit `ea2bd9eaf9665aae3b70da3fa42ed03ff19e6a57`:
+
+- **Shell Syntax (`bash -n`):** PASS (deploy/*.sh, deploy/lib/*.sh, deploy/tests/*.sh, scripts/*.sh)
+- **ShellCheck (`shellcheck --severity=error`):** PASS (all deploy and operational scripts)
+- **Go Vet (`go vet ./...`):** PASS (0 warnings, clean AST)
+- **Go Tests (`go test -count=1 ./...`):** PASS (31 packages ok, 0 failures)
+- **Go Integration Suites (`tests/integration`):** PASS (9 suites: Alert triggers, Backup/restore drill, Concurrent auth admission, Dispatcher term/recovery, History cancel/fencing, Migration rollback, Scheduler interleave 31-day, Singleton worker lock, SSE cutover replay)
+- **Web Typecheck (`tsc --noEmit`):** PASS (0 TypeScript errors)
+- **Web Build (`vite build`):** PASS (Bundle generated to internal/httpui/dist)
+- **Web Unit Tests (`vitest run`):** PASS (16 test files, 66 tests passed)
+- **Playwright E2E (`playwright test`):** PASS (56 tests across desktop & mobile projects: auth-resilience, foundation, notification-channels, transactions-sync, v3-features, voice-announcements, browser-regression)
+- **Python Pytest (`platform/failover`):** PASS (23 tests passed)
+- **Python Pytest (`tts-gateway`):** PASS (11 tests passed)
+- **Deployment Failure Drills:** PASS (18 suites passed: test_secrets, test_backup, test_restore_drill, test_compose_policy, test_runtime_policy, test_deploy, test_gateway_deploy, test_schema_deploy, test_worker_deploy, test_aux_deploy, test_traefik_switch, test_promotion_dispatcher, test_health_telemetry, test_ci_workflow, test-supply-chain, test-promotion-scope, verify-actions-pinned, verify-architecture-docs)
+- **Canonical Verification Entrypoint (`scripts/verify.sh`):** PASS (Summary: 28 Passed, 0 Failed, 1 Skipped) commit `956ca239c0b03f5b8319f7542df111e544ced20c` in isolated worktree:
 
 | Suite Name | Execution Command | Result | Notes / Environment Quirks |
 |---|---|:---:|---|

@@ -217,7 +217,12 @@ func main() {
 		}
 		defer fileLock.Close()
 	}
-	store, err := storage.OpenRuntime(ctx, cfg.DatabasePath)
+	var store *storage.Store
+	if cfg.RuntimeRole == config.RuntimeRoleMonolithDev {
+		store, err = storage.Open(ctx, cfg.DatabasePath)
+	} else {
+		store, err = storage.OpenRuntime(ctx, cfg.DatabasePath)
+	}
 	if err != nil {
 		logger.Error("open storage", "error", err)
 		os.Exit(1)
