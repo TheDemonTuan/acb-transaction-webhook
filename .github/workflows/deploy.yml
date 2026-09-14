@@ -704,6 +704,9 @@ jobs:
           env_file="$DEPLOY_PATH/deploy/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
           chmod 600 "$env_file"
+          [[ -d "$DEPLOY_PATH/deploy/secrets" ]] || { printf 'Missing production secrets directory.\n' >&2; exit 1; }
+          chmod 700 "$DEPLOY_PATH/deploy/secrets"
+          find "$DEPLOY_PATH/deploy/secrets" -maxdepth 1 -type f -exec chmod 600 {} +
           staged_compose="$DEPLOY_PATH/deploy/compose.prod.yaml.next"
           [[ -f "$staged_compose" ]] || { printf 'Missing staged compose file: %s\n' "$staged_compose" >&2; exit 1; }
 
