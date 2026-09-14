@@ -587,6 +587,7 @@ if [[ "${PROMOTION_SCHEMA:-false}" == "true" ]]; then
   update_rollout_step "schema" "RUNNING"
   [[ -n "$IMAGE_DBTOOL" ]] || { log_error "DBTOOL image digest is required for schema promotion."; exit 1; }
   validate_digest "$IMAGE_DBTOOL" "dbtool"
+  export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
   bash "$DEPLOY_DIR/deploy-schema.sh" "$IMAGE_DBTOOL"
   update_rollout_step "schema" "STEP_COMPLETED"
   promoted_list+=("schema")
