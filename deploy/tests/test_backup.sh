@@ -45,6 +45,7 @@ setup_backup_env() {
   printf 'tts-tok-123\n' > "$SECRETS_DIR/tts_internal_token"
   printf 'bark-user\n' > "$SECRETS_DIR/bark_basic_auth_user"
   printf 'bark-pass\n' > "$SECRETS_DIR/bark_basic_auth_password"
+  chmod 600 "$SECRETS_DIR"/* 2>/dev/null || true
 
   # Mock db
   printf 'SQLite format 3\n' > "$dir/data/gateway.db"
