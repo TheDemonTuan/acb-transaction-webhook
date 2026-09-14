@@ -29,6 +29,7 @@ type Scheduler struct {
 
 	running atomic.Bool
 	stopped atomic.Bool
+	paused  atomic.Bool
 
 	delayedMu sync.Mutex
 	delayed   []delayedItem
@@ -103,10 +104,35 @@ func (s *Scheduler) Stop() error {
 	return nil
 }
 
-// Enqueue submits an upstream task. Returns ErrQueueFull on overload or ErrSchedulerStopped if stopped.
+// Pause halts the processing of queued tasks and cancels any currently running quantum so it yields promptly.
+func (s *Scheduler) Pause() {
+	s.paused.Store(true)
+	s.currentMu.RLock()
+	cancel := s.currentCancel
+	s.currentMu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// Resume unpauses the scheduler loop and signals readiness.
+func (s *Scheduler) Resume() {
+	s.paused.Store(false)
+	s.signalReady()
+}
+
+// IsPaused reports whether the scheduler is paused.
+func (s *Scheduler) IsPaused() bool {
+	return s.paused.Load()
+}
+
+// Enqueue submits an upstream task. Returns ErrQueueFull on overload, ErrSchedulerPaused if paused, or ErrSchedulerStopped if stopped.
 func (s *Scheduler) Enqueue(task UpstreamTask) error {
 	if s.stopped.Load() {
 		return ErrSchedulerStopped
+	}
+	if s.paused.Load() {
+		return ErrSchedulerPaused
 	}
 
 	err := s.queue.Push(task, time.Now())
@@ -163,6 +189,19 @@ func (s *Scheduler) run(ctx context.Context) {
 	for {
 		if s.stopped.Load() || ctx.Err() != nil {
 			return
+		}
+
+		if s.paused.Load() {
+			select {
+			case <-s.stopCh:
+				return
+			case <-ctx.Done():
+				return
+			case <-s.notify:
+				continue
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
 		}
 
 		// 1. Promote any delayed tasks whose RequeueAt has expired

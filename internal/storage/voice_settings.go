@@ -57,6 +57,9 @@ func (s *Store) GetVoiceSettings(ctx context.Context) (VoiceSettings, error) {
 }
 
 func (s *Store) SaveVoiceSettings(ctx context.Context, settings VoiceSettings) (VoiceSettings, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return VoiceSettings{}, err
+	}
 	if settings.ProviderMode != "ONLINE_AUTO" && settings.ProviderMode != "EDGE_ONLY" && settings.ProviderMode != "BROWSER_ONLY" {
 		return VoiceSettings{}, errors.New("invalid providerMode: must be ONLINE_AUTO, EDGE_ONLY, or BROWSER_ONLY")
 	}

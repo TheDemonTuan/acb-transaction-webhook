@@ -52,6 +52,9 @@ func (s *Store) Connection(ctx context.Context) (Connection, error) {
 	return c, err
 }
 func (s *Store) ConfigureConnection(ctx context.Context, masked string) (Connection, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return Connection{}, err
+	}
 	masked = strings.TrimSpace(masked)
 	if masked == "" {
 		return Connection{}, errors.New("account masked is required")
@@ -74,6 +77,9 @@ func (s *Store) ConfigureConnection(ctx context.Context, masked string) (Connect
 	return s.Connection(ctx)
 }
 func (s *Store) TransitionConnection(ctx context.Context, action string) (Connection, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return Connection{}, err
+	}
 	var next string
 	switch action {
 	case "pause":
@@ -116,6 +122,9 @@ func (s *Store) Endpoints(ctx context.Context) ([]Endpoint, error) {
 	return endpoints, rows.Err()
 }
 func (s *Store) CreateEndpoint(ctx context.Context, name, url string) (Endpoint, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return Endpoint{}, err
+	}
 	name = strings.TrimSpace(name)
 	url = strings.TrimSpace(url)
 	if name == "" || url == "" {

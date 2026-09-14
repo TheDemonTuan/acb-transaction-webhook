@@ -91,6 +91,111 @@ check_active_auth_gate() {
   return 0
 }
 
+acquire_mutation_gate() {
+  local db_volume="${1:-$DATA_VOLUME_NAME}"
+  local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-}}"
+  local owner="${3:-deploy-$(date -u +%s)}"
+  local reason="${4:-deploy}"
+  local lease_duration="${5:-120s}"
+
+  log_info "Acquiring durable mutation gate for owner '$owner' (reason: $reason)..."
+  local gate_json=""
+  if [[ -n "${GATE_ACQUIRE_CMD:-}" ]]; then
+    if ! gate_json="$($GATE_ACQUIRE_CMD "$owner" "$reason" "$lease_duration" 2>&1)"; then
+      log_error "acquire_mutation_gate: gate command failed: ${gate_json}"
+      return 1
+    fi
+  elif command -v docker >/dev/null 2>&1 && docker volume inspect "$db_volume" >/dev/null 2>&1 && [[ -n "$dbtool_img" ]]; then
+    if ! gate_json="$(
+      docker run --rm --network none --user 1000:1000 \
+        -e DATABASE_PATH=/data/gateway.db \
+        -v "${db_volume}:/data:rw" \
+        "$dbtool_img" \
+        -path /data/gateway.db \
+        -gate-acquire \
+        -owner "$owner" \
+        -reason "$reason" \
+        -lease-duration "$lease_duration" 2>&1
+    )"; then
+      log_error "acquire_mutation_gate: dbtool execution failed: ${gate_json}"
+      return 1
+    fi
+  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v dbtool >/dev/null 2>&1; then
+    if ! gate_json="$(dbtool -path "$SCRIPT_DIR/data/gateway.db" -gate-acquire -owner "$owner" -reason "$reason" -lease-duration "$lease_duration" 2>&1)"; then
+      log_error "acquire_mutation_gate: local dbtool failed: ${gate_json}"
+      return 1
+    fi
+  else
+    log_info "acquire_mutation_gate: falling back to active-auth check in bootstrap transition mode."
+    check_active_auth_gate || return 1
+    return 0
+  fi
+
+  local token=""
+  if command -v jq >/dev/null 2>&1; then
+    token="$(printf '%s' "$gate_json" | jq -r '.leaseToken // empty' 2>/dev/null || true)"
+  fi
+  printf '%s' "$token"
+  log_info "Durable mutation gate acquired successfully."
+  return 0
+}
+
+release_mutation_gate() {
+  local db_volume="${1:-$DATA_VOLUME_NAME}"
+  local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-}}"
+  local owner="$3"
+  local token="${4:-}"
+
+  log_info "Releasing durable mutation gate for owner '$owner'..."
+  if [[ -n "${GATE_RELEASE_CMD:-}" ]]; then
+    $GATE_RELEASE_CMD "$owner" "$token" >/dev/null 2>&1 || true
+    return 0
+  elif command -v docker >/dev/null 2>&1 && docker volume inspect "$db_volume" >/dev/null 2>&1 && [[ -n "$dbtool_img" ]]; then
+    docker run --rm --network none --user 1000:1000 \
+      -e DATABASE_PATH=/data/gateway.db \
+      -v "${db_volume}:/data:rw" \
+      "$dbtool_img" \
+      -path /data/gateway.db \
+      -gate-release \
+      -owner "$owner" \
+      -lease-token "$token" >/dev/null 2>&1 || true
+  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v dbtool >/dev/null 2>&1; then
+    dbtool -path "$SCRIPT_DIR/data/gateway.db" -gate-release -owner "$owner" -lease-token "$token" >/dev/null 2>&1 || true
+  fi
+  log_info "Durable mutation gate released."
+  return 0
+}
+
+verify_schema_compat() {
+  local db_volume="${1:-$DATA_VOLUME_NAME}"
+  local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-}}"
+  local min_version="${3:-9}"
+
+  log_info "Verifying schema compatibility (minimum version: $min_version)..."
+  if [[ -n "${SCHEMA_COMPAT_CMD:-}" ]]; then
+    $SCHEMA_COMPAT_CMD "$min_version" || return 1
+    return 0
+  elif command -v docker >/dev/null 2>&1 && docker volume inspect "$db_volume" >/dev/null 2>&1 && [[ -n "$dbtool_img" ]]; then
+    if ! docker run --rm --network none --read-only --user 1000:1000 \
+      -e DATABASE_PATH=/data/gateway.db \
+      -v "${db_volume}:/data:ro" \
+      "$dbtool_img" \
+      -path /data/gateway.db \
+      -schema-compat \
+      -min-version "$min_version"; then
+      log_error "Schema compatibility verification failed via dbtool"
+      return 1
+    fi
+  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v dbtool >/dev/null 2>&1; then
+    if ! dbtool -path "$SCRIPT_DIR/data/gateway.db" -schema-compat -min-version "$min_version"; then
+      log_error "Schema compatibility verification failed via local dbtool"
+      return 1
+    fi
+  fi
+  log_info "Schema compatibility verified successfully."
+  return 0
+}
+
 verify_wal_probe() {
   local db_volume="${1:-$DATA_VOLUME_NAME}"
   local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-}}"
@@ -231,9 +336,18 @@ EOF
       log_error "Offhost backup hook '$hook' is not executable. Aborting backup verification."
       return 1
     fi
-    log_info "Executing verified offhost backup hook..."
-    "$hook" "$manifest_file" "$backup_file"
-    log_info "Offhost backup hook completed."
+    log_info "Executing verified offhost backup hook for remote backup receipt..."
+    local receipt_target="${enc_backup_file:-$backup_file}"
+    local receipt_out
+    if ! receipt_out="$("$hook" "$manifest_file" "$receipt_target")"; then
+      log_error "Offhost backup hook failed: ${receipt_out}"
+      return 1
+    fi
+    log_info "Remote backup receipt verified: ${receipt_out}"
+    printf '%s' "$receipt_out" > "${manifest_file}.receipt"
+  elif [[ "${REQUIRE_REMOTE_BACKUP_RECEIPT:-0}" == "1" || "${REQUIRE_OFFHOST_BACKUP:-0}" == "1" ]]; then
+    log_error "REQUIRE_REMOTE_BACKUP_RECEIPT is enabled but no executable offhost backup hook is configured. Fail closed."
+    return 1
   fi
 
   printf '%s' "$backup_file"

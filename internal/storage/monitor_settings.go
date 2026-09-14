@@ -54,6 +54,9 @@ func (s *Store) GetMonitorSettings(ctx context.Context) (MonitorSettings, error)
 }
 
 func (s *Store) SaveMonitorSettings(ctx context.Context, settings MonitorSettings) (MonitorSettings, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return MonitorSettings{}, err
+	}
 	if err := settings.Validate(); err != nil {
 		return MonitorSettings{}, err
 	}

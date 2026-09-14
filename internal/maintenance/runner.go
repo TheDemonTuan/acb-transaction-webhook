@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,6 +89,22 @@ type Runner struct {
 	logger            *slog.Logger
 	mu                sync.Mutex
 	running           bool
+	paused            atomic.Bool
+}
+
+// Pause temporarily halts retention and stale auth reap cycles.
+func (r *Runner) Pause() {
+	r.paused.Store(true)
+}
+
+// Resume unpauses retention and stale auth reap cycles.
+func (r *Runner) Resume() {
+	r.paused.Store(false)
+}
+
+// IsPaused reports whether maintenance runner is paused.
+func (r *Runner) IsPaused() bool {
+	return r.paused.Load()
 }
 
 // NewRunner creates a new maintenance Runner.
@@ -150,9 +167,13 @@ func (r *Runner) Run(ctx context.Context) {
 			r.logger.Info("singleton maintenance runner stopping on context done")
 			return
 		case t := <-retentionCh:
-			r.runRetention(ctx, t)
+			if !r.paused.Load() {
+				r.runRetention(ctx, t)
+			}
 		case <-staleAuthCh:
-			r.runStaleAuthReap(ctx)
+			if !r.paused.Load() {
+				r.runStaleAuthReap(ctx)
+			}
 		}
 	}
 }

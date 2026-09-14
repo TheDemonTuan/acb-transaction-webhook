@@ -146,13 +146,13 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/webhooks", s.endpoints)
 		api.Get("/transactions", s.transactions)
 		api.Get("/transactions/{id}", s.transactionDetail)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/transactions/ensure-history", s.ensureHistory)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/transactions/ensure-history", s.ensureHistory)
 		api.Get("/transactions/history-sync-jobs/{id}", s.getHistoryJob)
 		api.Get("/history-sync-jobs/{id}", s.getHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Delete("/transactions/history-sync-jobs/{id}", s.cancelHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Delete("/history-sync-jobs/{id}", s.cancelHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/transactions/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/transactions/history-sync-jobs/{id}", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/history-sync-jobs/{id}", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/transactions/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
 		api.Get("/deliveries", s.deliveries)
 		api.Get("/poll-runs", s.pollRuns)
 		api.Get("/audit", s.auditLogs)
@@ -160,40 +160,40 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/events/stream", s.eventsStream)
 		api.Get("/realtime/status", s.realtimeStatus)
 		api.Get("/monitor/settings", s.getMonitorSettings)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/monitor/settings", s.updateMonitorSettings)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Put("/monitor/settings", s.updateMonitorSettings)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/monitor/settings", s.updateMonitorSettings)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Put("/monitor/settings", s.updateMonitorSettings)
 		api.Get("/payment-qr", s.getPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/payment-qr", s.savePaymentQR)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/payment-qr/upload", s.uploadPaymentQR)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/payment-qr/generate", s.generatePaymentQR)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Delete("/payment-qr", s.deletePaymentQR)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr", s.savePaymentQR)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr/upload", s.uploadPaymentQR)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr/generate", s.generatePaymentQR)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/payment-qr", s.deletePaymentQR)
 
 		api.Get("/voice/settings", s.getVoiceSettings)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Put("/voice/settings", s.updateVoiceSettings)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Put("/voice/settings", s.updateVoiceSettings)
 		api.Get("/voice/status", s.voiceStatus)
 		api.Post("/voice/test", s.testVoiceAudio)
 		api.Post("/voice/transactions/{id}", s.synthesizeTransactionAudio)
 		api.Post("/voice/transactions/{id}/replay", s.replayTransactionAudio)
 		api.Post("/voice/transactions/summary", s.synthesizeSummaryAudio)
 
-		api.With(s.auth.Require(auth.Owner)).Post("/connection/configure", s.configure)
-		api.With(s.auth.Require(auth.Owner, auth.Operator)).Post("/connection/{action:pause|resume|sync}", s.connectionAction)
-		api.With(s.auth.Require(auth.Owner)).Post("/connection/auth/start", s.startAuth)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/configure", s.configure)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/connection/{action:pause|resume|sync}", s.connectionAction)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/auth/start", s.startAuth)
 		api.With(s.auth.Require(auth.Owner)).Get("/connection/auth/current", s.currentAuth)
-		api.With(s.auth.Require(auth.Owner)).Post("/connection/auth/cancel", s.cancelAuth)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/auth/cancel", s.cancelAuth)
 		api.With(s.auth.Require(auth.Owner)).Get("/connection/auth/{attemptID}/status", s.authStatus)
 		api.With(s.auth.Require(auth.Owner)).Handle("/connection/auth/{attemptID}/screen/*", http.HandlerFunc(s.browserScreen))
 
-		api.With(s.auth.Require(auth.Owner)).Post("/webhooks", s.createEndpoint)
-		api.With(s.auth.Require(auth.Owner)).Post("/webhooks/{id}/{action:enable|disable}", s.endpointAction)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/webhooks", s.createEndpoint)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/webhooks/{id}/{action:enable|disable}", s.endpointAction)
 
 		api.Get("/notification-providers", s.notificationProviders)
 		api.Get("/notification-channels", s.notificationChannels)
-		api.With(s.auth.Require(auth.Owner)).Post("/notification-channels", s.createNotificationChannel)
-		api.With(s.auth.Require(auth.Owner)).Put("/notification-channels/{id}", s.updateNotificationChannel)
-		api.With(s.auth.Require(auth.Owner)).Post("/notification-channels/{id}/{action:enable|disable}", s.toggleNotificationChannel)
-		api.With(s.auth.Require(auth.Owner)).Post("/notification-channels/{id}/rotate-secret", s.rotateChannelSecret)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/notification-channels", s.createNotificationChannel)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Put("/notification-channels/{id}", s.updateNotificationChannel)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/notification-channels/{id}/{action:enable|disable}", s.toggleNotificationChannel)
+		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/notification-channels/{id}/rotate-secret", s.rotateChannelSecret)
 		api.With(s.auth.Require(auth.Owner)).Post("/notification-channels/{id}/test", s.testNotificationChannel)
 		api.With(s.auth.Require(auth.Owner)).Post("/deliveries/{id}/replay", s.replayDelivery)
 	})
@@ -372,12 +372,39 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		resp["tts"] = "disabled"
 	}
 
+	// 6. Mutation gate state
+	gate, gateErr := s.store.GetDeploymentGate(ctx)
+	if gateErr == nil && gate != nil {
+		resp["mutationGate"] = gate.GateState
+	} else {
+		resp["mutationGate"] = "OPEN"
+	}
+
 	resp["status"] = status
 	code := http.StatusOK
 	if status == "not_ready" {
 		code = http.StatusServiceUnavailable
 	}
 	writeJSON(w, code, resp)
+}
+
+func (s *Server) requireMutationAllowed(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := s.store.CheckMutationAllowed(r.Context()); err != nil {
+			if errors.Is(err, storage.ErrMutationGateLocked) {
+				w.Header().Set("Retry-After", "5")
+				w.Header().Set("X-Mutation-Gate", "LOCKED")
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"error": "deployment in progress, mutations temporarily locked",
+					"code":  "MUTATION_GATE_LOCKED",
+				})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to check mutation gate: "+err.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	connection, err := s.store.Connection(r.Context())
@@ -576,7 +603,7 @@ func (s *Server) startAuth(w http.ResponseWriter, r *http.Request) {
 
 	attempt, err := s.store.StartAuthAttempt(r.Context(), identity.Email, 15*time.Minute)
 	if err != nil {
-		if errors.Is(err, storage.ErrAuthAttemptActive) {
+		if errors.Is(err, storage.ErrAuthAttemptActive) || strings.Contains(err.Error(), "database is locked") || strings.Contains(err.Error(), "SQLITE_BUSY") {
 			writeError(w, http.StatusConflict, "Một phiên đăng nhập ACB đang được thực hiện bởi quản trị viên khác.")
 			return
 		}

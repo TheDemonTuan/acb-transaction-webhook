@@ -66,6 +66,7 @@ type CoalescingTask interface {
 var (
 	ErrQueueFull        = errors.New("scheduler: queue capacity exceeded")
 	ErrSchedulerStopped = errors.New("scheduler: scheduler stopped")
+	ErrSchedulerPaused  = errors.New("scheduler: scheduler is paused")
 	ErrTaskCanceled     = errors.New("scheduler: task canceled")
 )
 

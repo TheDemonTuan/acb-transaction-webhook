@@ -96,6 +96,21 @@ type TestNotificationResponse struct {
 	SanitizedError    string `json:"error,omitempty"`
 }
 
+type QuiesceResponse struct {
+	Status     string `json:"status"`
+	Quiesced   bool   `json:"quiesced"`
+	Generation int64  `json:"generation"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	CoverageTo string `json:"coverageTo,omitempty"`
+	ScanID     string `json:"scanId,omitempty"`
+	WorkerID   string `json:"workerId,omitempty"`
+}
+
+type ResumeResponse struct {
+	Status  string `json:"status"`
+	Resumed bool   `json:"resumed"`
+}
+
 // Handler interface implemented by worker
 type WorkerHandler interface {
 	RequestSync(ctx context.Context) error
@@ -105,6 +120,8 @@ type WorkerHandler interface {
 	WakeDispatcher(ctx context.Context) error
 	VerifySession(ctx context.Context, account string, generation int64, password []byte) error
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
+	Quiesce(ctx context.Context) (QuiesceResponse, error)
+	Resume(ctx context.Context) error
 }
 
 type ServerOption func(*Server)
@@ -304,6 +321,33 @@ func (s *Server) routes() {
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "draining", "requestId": reqID})
+	}))
+
+	s.mux.HandleFunc("/rpc/quiesce", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		resp, err := s.handler.Quiesce(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
+
+	s.mux.HandleFunc("/rpc/resume", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.handler.Resume(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, ResumeResponse{Status: "ok", Resumed: true})
 	}))
 
 	s.mux.HandleFunc("/rpc/request-sync", s.auth(func(w http.ResponseWriter, r *http.Request) {
@@ -574,6 +618,20 @@ func (c *Client) Drain(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return c.post(callCtx, "/rpc/drain", nil, nil)
+}
+
+func (c *Client) Quiesce(ctx context.Context) (QuiesceResponse, error) {
+	callCtx, cancel := c.withTimeout(ctx, 25*time.Second)
+	defer cancel()
+	var resp QuiesceResponse
+	err := c.post(callCtx, "/rpc/quiesce", nil, &resp)
+	return resp, err
+}
+
+func (c *Client) Resume(ctx context.Context) error {
+	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return c.post(callCtx, "/rpc/resume", nil, nil)
 }
 
 func (c *Client) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {

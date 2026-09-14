@@ -39,6 +39,8 @@ type workerService struct {
 	store                 *storage.Store
 	notificationRegistry  *notification.Registry
 	barkSender            *bark.Sender
+	coordinator           *workerstate.Coordinator
+	maintRunner           *maintenance.Runner
 }
 
 func (w *workerService) RequestSync(ctx context.Context) error {
@@ -239,6 +241,105 @@ func (w *workerService) TestNotificationChannel(ctx context.Context, channelID s
 		ProviderErrorCode: "UNKNOWN_PROVIDER",
 		SanitizedError:    "unsupported notification provider: " + ch.Provider,
 	}, nil
+}
+
+func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse, error) {
+	if w.coordinator == nil {
+		return workerrpc.QuiesceResponse{}, errors.New("coordinator not initialized")
+	}
+
+	// 1. Mark coordinator QUIESCING -> QUIESCED
+	if err := w.coordinator.Quiesce(ctx); err != nil {
+		return workerrpc.QuiesceResponse{}, fmt.Errorf("coordinator quiesce: %w", err)
+	}
+
+	// 2. Pause scheduler
+	if w.bankMonitor != nil && w.bankMonitor.Scheduler() != nil {
+		w.bankMonitor.Scheduler().Pause()
+	}
+
+	// 3. Pause background history runner and requeue RUNNING jobs
+	if w.historyRunner != nil {
+		w.historyRunner.Pause()
+	}
+	if w.store != nil {
+		requeueCtx, rCancel := context.WithTimeout(ctx, 3*time.Second)
+		_, _ = w.store.RequeueRunningHistorySyncJobs(requeueCtx, "Worker quiesced for upgrade")
+		rCancel()
+	}
+
+	// 4. Pause notification dispatcher
+	if w.dispatcher != nil {
+		w.dispatcher.Pause()
+	}
+
+	// 5. Pause maintenance runner
+	if w.maintRunner != nil {
+		w.maintRunner.Pause()
+	}
+
+	// 6. Persist freshest session snapshot
+	if w.bankMonitor != nil {
+		persistCtx, pCancel := context.WithTimeout(ctx, 3*time.Second)
+		if err := w.bankMonitor.PersistSession(persistCtx); err != nil {
+			slog.Warn("persist session snapshot on quiesce", "error", err)
+		}
+		pCancel()
+	}
+
+	// 7. Report generation and latest checkpoint
+	var gen int64
+	var checkpointStr, coverageTo, scanID string
+	if w.store != nil {
+		if conn, err := w.store.Connection(ctx); err == nil {
+			gen = conn.Generation
+			if cp, cpErr := w.store.GetCheckpoint(ctx, conn.ID); cpErr == nil && cp != nil {
+				checkpointStr = cp.UpdatedAt
+				coverageTo = cp.CoverageTo
+				scanID = cp.ScanID
+			}
+		}
+	}
+
+	return workerrpc.QuiesceResponse{
+		Status:     "quiesced",
+		Quiesced:   true,
+		Generation: gen,
+		Checkpoint: checkpointStr,
+		CoverageTo: coverageTo,
+		ScanID:     scanID,
+	}, nil
+}
+
+func (w *workerService) Resume(ctx context.Context) error {
+	// 1. Resume scheduler
+	if w.bankMonitor != nil && w.bankMonitor.Scheduler() != nil {
+		w.bankMonitor.Scheduler().Resume()
+	}
+
+	// 2. Resume history runner
+	if w.historyRunner != nil {
+		w.historyRunner.Resume()
+	}
+
+	// 3. Resume dispatcher
+	if w.dispatcher != nil {
+		w.dispatcher.Resume()
+	}
+
+	// 4. Resume maintenance runner
+	if w.maintRunner != nil {
+		w.maintRunner.Resume()
+	}
+
+	// 5. Unpause coordinator back to StateReady
+	if w.coordinator != nil {
+		if err := w.coordinator.Resume(ctx); err != nil {
+			return fmt.Errorf("coordinator resume: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -454,6 +555,8 @@ func main() {
 		store:                 store,
 		notificationRegistry:  notificationRegistry,
 		barkSender:            barkSender,
+		coordinator:           coordinator,
+		maintRunner:           maintRunner,
 	}
 
 	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken)

@@ -125,6 +125,19 @@ func (m *mockWorkerHandler) TestNotificationChannel(ctx context.Context, channel
 	}, nil
 }
 
+func (m *mockWorkerHandler) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse, error) {
+	return workerrpc.QuiesceResponse{
+		Status:     "quiesced",
+		Quiesced:   true,
+		Generation: 1,
+		Checkpoint: "2026-09-14",
+	}, nil
+}
+
+func (m *mockWorkerHandler) Resume(ctx context.Context) error {
+	return nil
+}
+
 func TestWorkerRPC_ConstructorValidation(t *testing.T) {
 	mock := &mockWorkerHandler{}
 

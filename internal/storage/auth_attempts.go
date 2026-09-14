@@ -125,6 +125,9 @@ func (s *Store) StartAuthAttempt(ctx context.Context, owner string, ttl time.Dur
 	}
 
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		result, err := tx.ExecContext(ctx, `UPDATE connections SET state='AUTH_STARTING',generation=?,updated_at=? WHERE id=? AND generation=?`, attempt.Generation, now(), connection.ID, connection.Generation)
 		if err != nil {
 			return err
@@ -135,7 +138,7 @@ func (s *Store) StartAuthAttempt(ctx context.Context, owner string, ttl time.Dur
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`, attempt.ID, attempt.ConnectionID, attempt.Generation, owner, attempt.Status, attempt.ExpiresAt, attempt.CreatedAt)
 		if err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "one_active_auth_attempt") {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "one_active_auth_attempt") || strings.Contains(err.Error(), "database is locked") {
 				return ErrAuthAttemptActive
 			}
 			return err

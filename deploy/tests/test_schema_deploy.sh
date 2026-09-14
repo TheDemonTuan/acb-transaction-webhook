@@ -167,6 +167,25 @@ elif [[ "$cmd" == "run" ]]; then
     fi
     exit 0
   fi
+  if [[ "$*" =~ -gate-acquire ]]; then
+    if [[ "${MOCK_ACTIVE_AUTH:-0}" == "1" ]]; then
+      exit 1
+    fi
+    printf '{"status":"acquired","gateState":"LOCKED","leaseToken":"mocktoken123","fenceGeneration":2}\n'
+    exit 0
+  fi
+  if [[ "$*" =~ -gate-release ]]; then
+    printf '{"status":"released","gateState":"OPEN"}\n'
+    exit 0
+  fi
+  if [[ "$*" =~ -schema-compat ]]; then
+    printf '{"compatible":true,"schemaVersion":9,"requiredVersion":9}\n'
+    exit 0
+  fi
+  if [[ "$*" =~ -gate-status ]]; then
+    printf '{"gateState":"OPEN","activeAuthCount":0}\n'
+    exit 0
+  fi
   if [[ "$*" =~ -migrate ]]; then
     if [[ "${MOCK_MIGRATION_FAIL:-0}" == "1" ]]; then
       exit 1

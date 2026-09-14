@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -31,6 +32,7 @@ type Dispatcher struct {
 	backoffs   []time.Duration
 	workers    int
 	wakeCh     chan struct{}
+	paused     atomic.Bool
 }
 
 func NewDispatcher(store *storage.Store, registry *Registry) *Dispatcher {
@@ -64,6 +66,19 @@ func (d *Dispatcher) SetWorkers(n int) *Dispatcher {
 		d.workers = n
 	}
 	return d
+}
+
+func (d *Dispatcher) Pause() {
+	d.paused.Store(true)
+}
+
+func (d *Dispatcher) Resume() {
+	d.paused.Store(false)
+	d.Wake()
+}
+
+func (d *Dispatcher) IsPaused() bool {
+	return d.paused.Load()
 }
 
 func (d *Dispatcher) Wake() {
@@ -107,6 +122,9 @@ func (d *Dispatcher) worker(ctx context.Context) {
 }
 
 func (d *Dispatcher) drain(ctx context.Context) {
+	if d.paused.Load() {
+		return
+	}
 	for {
 		processed, err := d.DispatchOne(ctx)
 		if err != nil {

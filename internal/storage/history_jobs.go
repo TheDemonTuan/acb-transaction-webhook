@@ -151,6 +151,9 @@ func (s *Store) checkAndFenceJob(ctx context.Context, tx *sql.Tx, jobID string, 
 // CreateOrGetHistorySyncJob atomically creates a new queued job or returns an active (QUEUED or RUNNING) job
 // for the given connection, generation, and date range.
 func (s *Store) CreateOrGetHistorySyncJob(ctx context.Context, connectionID string, generation int64, fromDay, toDay string) (HistorySyncJob, bool, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return HistorySyncJob{}, false, err
+	}
 	if connectionID == "" {
 		return HistorySyncJob{}, false, errors.New("connection ID is required")
 	}

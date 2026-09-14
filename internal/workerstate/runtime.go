@@ -13,15 +13,18 @@ import (
 type State string
 
 const (
-	StateStarting State = "STARTING"
-	StateReady    State = "READY"
-	StateDraining State = "DRAINING"
-	StateStopping State = "STOPPING"
+	StateStarting  State = "STARTING"
+	StateReady     State = "READY"
+	StateQuiescing State = "QUIESCING"
+	StateQuiesced  State = "QUIESCED"
+	StateDraining  State = "DRAINING"
+	StateStopping  State = "STOPPING"
 )
 
 var (
 	ErrWorkerDraining = errors.New("worker is draining")
 	ErrWorkerStopping = errors.New("worker is stopping")
+	ErrWorkerQuiesced = errors.New("worker is quiesced")
 	ErrInvalidState   = errors.New("invalid state transition")
 )
 
@@ -64,6 +67,8 @@ type Coordinator struct {
 	shutdownTimeout time.Duration
 	drainHooks      []func(ctx context.Context) error
 	stopHooks       []func(ctx context.Context) error
+	quiesceHooks    []func(ctx context.Context) error
+	resumeHooks     []func(ctx context.Context) error
 	logger          *slog.Logger
 	drainDone       chan struct{}
 	drainOnce       sync.Once
@@ -134,6 +139,83 @@ func (c *Coordinator) RegisterStopHook(fn func(ctx context.Context) error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopHooks = append(c.stopHooks, fn)
+}
+
+// RegisterQuiesceHook registers a callback executed when Quiesce() is invoked.
+func (c *Coordinator) RegisterQuiesceHook(fn func(ctx context.Context) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.quiesceHooks = append(c.quiesceHooks, fn)
+}
+
+// RegisterResumeHook registers a callback executed when Resume() is invoked.
+func (c *Coordinator) RegisterResumeHook(fn func(ctx context.Context) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resumeHooks = append(c.resumeHooks, fn)
+}
+
+// IsQuiesced reports whether the worker is in StateQuiescing or StateQuiesced.
+func (c *Coordinator) IsQuiesced() bool {
+	s := c.State()
+	return s == StateQuiescing || s == StateQuiesced
+}
+
+// Quiesce transitions the worker to StateQuiescing -> executes quiesce hooks -> StateQuiesced.
+func (c *Coordinator) Quiesce(ctx context.Context) error {
+	c.mu.Lock()
+	if c.state == StateQuiesced {
+		c.mu.Unlock()
+		return nil
+	}
+	if c.state == StateDraining || c.state == StateStopping {
+		c.mu.Unlock()
+		return ErrWorkerStopping
+	}
+	c.state = StateQuiescing
+	c.logger.Info("worker transitioned to QUIESCING")
+	hooks := append([]func(ctx context.Context) error(nil), c.quiesceHooks...)
+	c.mu.Unlock()
+
+	for _, hook := range hooks {
+		if err := hook(ctx); err != nil {
+			c.logger.Warn("quiesce hook error", "error", err)
+		}
+	}
+
+	c.mu.Lock()
+	c.state = StateQuiesced
+	c.logger.Info("worker transitioned to QUIESCED")
+	c.mu.Unlock()
+	return nil
+}
+
+// Resume transitions the worker from StateQuiesced back to StateReady.
+func (c *Coordinator) Resume(ctx context.Context) error {
+	c.mu.Lock()
+	if c.state == StateReady {
+		c.mu.Unlock()
+		return nil
+	}
+	if c.state != StateQuiesced && c.state != StateQuiescing {
+		cur := c.state
+		c.mu.Unlock()
+		return fmt.Errorf("%w: cannot resume from %s", ErrInvalidState, cur)
+	}
+	hooks := append([]func(ctx context.Context) error(nil), c.resumeHooks...)
+	c.mu.Unlock()
+
+	for _, hook := range hooks {
+		if err := hook(ctx); err != nil {
+			c.logger.Warn("resume hook error", "error", err)
+		}
+	}
+
+	c.mu.Lock()
+	c.state = StateReady
+	c.logger.Info("worker transitioned to READY (resumed)")
+	c.mu.Unlock()
+	return nil
 }
 
 // Drain transitions the worker to StateDraining and executes registered drain hooks.
@@ -208,6 +290,8 @@ func (c *Coordinator) CheckWorkAllowed() error {
 	switch c.state {
 	case StateReady:
 		return nil
+	case StateQuiescing, StateQuiesced:
+		return ErrWorkerQuiesced
 	case StateDraining:
 		return ErrWorkerDraining
 	case StateStopping:

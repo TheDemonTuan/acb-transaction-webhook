@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
@@ -30,6 +31,7 @@ type HistoryJobRunner struct {
 	staleThreshold time.Duration
 	pollInterval   time.Duration
 	logger         *slog.Logger
+	paused         atomic.Bool
 
 	mu         sync.Mutex
 	activeTask *HistoryJobTask
@@ -69,6 +71,22 @@ func (r *HistoryJobRunner) WithPollInterval(d time.Duration) *HistoryJobRunner {
 		r.pollInterval = d
 	}
 	return r
+}
+
+// Pause halts the processing of new or claimed history sync jobs.
+func (r *HistoryJobRunner) Pause() {
+	r.paused.Store(true)
+}
+
+// Resume unpauses history runner processing and signals wake.
+func (r *HistoryJobRunner) Resume() {
+	r.paused.Store(false)
+	r.Wake()
+}
+
+// IsPaused reports whether the history runner is paused.
+func (r *HistoryJobRunner) IsPaused() bool {
+	return r.paused.Load()
 }
 
 // Wake notifies the runner that a new job was enqueued, prompting immediate processing without busy-polling.
@@ -152,6 +170,9 @@ func (r *HistoryJobRunner) Run(ctx context.Context) {
 // ProcessNextJob attempts to claim and execute the next runnable history sync job.
 // Returns true if a job was claimed and executed, false if no job was ready.
 func (r *HistoryJobRunner) ProcessNextJob(ctx context.Context) (bool, error) {
+	if r.paused.Load() {
+		return false, nil
+	}
 	if r.store == nil {
 		return false, errors.New("store not configured")
 	}

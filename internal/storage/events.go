@@ -20,6 +20,9 @@ type EndpointWithSecret struct {
 }
 
 func (s *Store) CreateEndpointWithSecret(ctx context.Context, name, targetURL string) (EndpointWithSecret, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return EndpointWithSecret{}, err
+	}
 	if name == "" || targetURL == "" {
 		return EndpointWithSecret{}, errors.New("name and URL are required")
 	}

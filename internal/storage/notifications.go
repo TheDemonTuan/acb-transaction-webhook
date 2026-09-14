@@ -105,6 +105,9 @@ func ValidateAndNormalizeBarkConfig(cfg *BarkConfig) (BarkConfig, error) {
 }
 
 func (s *Store) CreateBarkChannel(ctx context.Context, name, deviceKey string, cfg *BarkConfig) (NotificationChannel, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return NotificationChannel{}, err
+	}
 	name = strings.TrimSpace(name)
 	deviceKey = strings.TrimSpace(deviceKey)
 	if name == "" {
@@ -242,6 +245,9 @@ func (s *Store) NotificationChannelByID(ctx context.Context, id string) (Notific
 }
 
 func (s *Store) UpdateChannel(ctx context.Context, id string, expectedRevision int, name, targetURL string, barkCfg *BarkConfig) (NotificationChannel, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return NotificationChannel{}, err
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return NotificationChannel{}, errors.New("channel name is required")
@@ -323,6 +329,9 @@ func (s *Store) UpdateChannel(ctx context.Context, id string, expectedRevision i
 }
 
 func (s *Store) RotateSecret(ctx context.Context, chID string, newBarkDeviceKey string) (newSecret string, err error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return "", err
+	}
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
 		var provider string
 		err := tx.QueryRowContext(ctx, `SELECT COALESCE(provider, 'WEBHOOK') FROM webhook_endpoints WHERE id = ?`, chID).Scan(&provider)

@@ -59,6 +59,9 @@ func (s *Store) GetPaymentQR(ctx context.Context, connectionID string) (*Payment
 }
 
 func (s *Store) SavePaymentQR(ctx context.Context, qr PaymentQR) (*PaymentQR, error) {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return nil, err
+	}
 	if qr.ConnectionID == "" {
 		conn, err := s.Connection(ctx)
 		if err != nil {
@@ -120,6 +123,9 @@ func (s *Store) SavePaymentQR(ctx context.Context, qr PaymentQR) (*PaymentQR, er
 }
 
 func (s *Store) DeletePaymentQR(ctx context.Context, connectionID string) error {
+	if err := s.CheckMutationAllowed(ctx); err != nil {
+		return err
+	}
 	if connectionID == "" {
 		conn, err := s.Connection(ctx)
 		if err != nil {

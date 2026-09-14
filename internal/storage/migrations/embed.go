@@ -6,3 +6,8 @@ import _ "embed"
 //
 //go:embed 008_history_job_queue.sql
 var HistoryJobQueueSQL string
+
+// DeploymentControlSQL embeds the SQL migration for schema version 9.
+//
+//go:embed 009_deployment_control.sql
+var DeploymentControlSQL string
