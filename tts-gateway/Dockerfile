@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-alpine3.23
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -7,15 +7,15 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Upgrade the base image security baseline before installing dependencies.
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+RUN apk upgrade --no-cache
 
 # Copy dependencies
 COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
 
 # Create unprivileged user
-RUN groupadd -g 1000 appgroup && \
-    useradd -u 1000 -g appgroup -s /bin/sh appuser
+RUN addgroup -g 1000 -S appgroup && \
+    adduser -u 1000 -S -G appgroup appuser
 
 COPY app ./app
 
