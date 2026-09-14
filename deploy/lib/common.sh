@@ -97,7 +97,14 @@ check_secret_permissions() {
     fi
     if [[ -n "$mode" ]]; then
       local last_two="${mode: -2}"
-      if [[ "$last_two" != "00" ]]; then
+      local base_name
+      base_name="$(basename "$target_path")"
+      if [[ "$base_name" == "bark_basic_auth_user" || "$base_name" == "bark_basic_auth_password" ]]; then
+        if [[ "$mode" != "644" && "$mode" != "600" ]]; then
+          log_error "Bark secret file '$target_path' has unsafe permissions (${mode}); expected 600 or 644 for local Compose bind-mount compatibility."
+          return 1
+        fi
+      elif [[ "$last_two" != "00" ]]; then
         log_error "Secret file '$target_path' has unsafe permissions (${mode}). Secrets must not be group or world readable."
         return 1
       fi
