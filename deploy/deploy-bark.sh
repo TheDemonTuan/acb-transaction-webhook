@@ -82,13 +82,14 @@ wait_for_bark_ready() {
       for c in acb-bark bark; do
         if docker ps --format '{{.Names}}' | grep -q "^${c}\$"; then
           local st
-          st="$(docker inspect --format '{{.State.Health.Status}}' "$c" 2>/dev/null || echo "")"
+          st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c" 2>/dev/null || echo "")"
           if [[ "$st" == "healthy" ]]; then
             return 0
           fi
-          if docker exec "$c" wget -q --spider http://127.0.0.1:8080/ping >/dev/null 2>&1 || \
-             docker exec "$c" /bin/sh -c "nc -z 127.0.0.1 8080" >/dev/null 2>&1; then
-            return 0
+          if [[ "$st" == "unhealthy" ]] || [[ "$(docker inspect --format '{{.State.Status}}' "$c" 2>/dev/null || true)" == "exited" ]]; then
+            docker inspect --format 'Bark state={{json .State}}' "$c" >&2 || true
+            docker logs --tail 100 "$c" >&2 || true
+            return 1
           fi
         fi
       done
