@@ -125,11 +125,19 @@ Bộ điều khiển chuyển vùng sự cố (`/opt/platform/failover/vps-failo
 1. **Lệnh chuyển slot:**
    ```bash
    /bin/bash deploy/switch-slot.sh <blue|green>
+   # hoặc qua wrapper nền tảng:
+   /usr/local/bin/platform-switch acb <blue|green>
    ```
-2. **Không khóa lồng nhau (No Nested Lock):**
-   `switch-slot.sh` kiểm tra biến môi trường `DEPLOY_LOCK_HELD=1` hoặc `SKIP_LOCK=1` để không gây deadlock khi được gọi từ controller hoặc deploy script.
-3. **Đánh dấu Intentional Stop:**
-   Trước khi dừng slot cũ thành standby, script tự động tạo marker `/tmp/vps-failover/acb.intentional-stop` và kích hoạt cooldown. Controller sẽ hiểu đây là hành vi chủ động có chủ đích và KHÔNG kích hoạt failover giả lập.
+2. **Không khóa lồng nhau & khóa tương hỗ (Mutual Host Lock):**
+   `switch-slot.sh` và failover controller dùng chung tệp khóa `/run/lock/vps-failover/acb.lock`. Kiểm tra biến môi trường `DEPLOY_LOCK_HELD=1` hoặc `SKIP_LOCK=1` để không gây deadlock khi được gọi từ controller hoặc deploy script.
+3. **Nhận thức Transaction Journal & Ngăn Promotion trong Transaction:**
+   Failover controller kiểm tra `deploy-journal.json`. Nếu giao dịch triển khai đang chạy (`TX_INITIALIZED`, `CANDIDATE_STARTING`, `VERIFYING_HEALTH`, `SWITCHING_ROUTE`, `VERIFYING_ACK`, `TX_SOAKING`), controller tự động hoãn/chặn failover để không tranh chấp với tiến trình triển khai.
+4. **Đánh dấu Intentional Stop:**
+   Trước khi dừng slot cũ thành standby hoặc dừng container bảo trì, script tự động tạo marker `/var/lib/vps-failover/apps/<app>/intentional-stop-<slot>` (và `/tmp/vps-failover/intentional-stop-<slot>`) đồng thời kích hoạt cooldown. Controller hiểu đây là hành vi chủ động có chủ đích và KHÔNG kích hoạt failover giả lập.
+5. **Worker Singleton & Fencing:**
+   Worker (`acb-worker`) được đăng ký tại `/etc/vps-failover/apps.d/worker.json` với chính sách tự phục hồi có backoff mũ, không bao giờ tạo tiến trình worker song song (fencing).
+6. **Xác thực Định Danh Tuyến (Exact Route Identity ACK):**
+   Khi chuyển slot, controller yêu cầu xác nhận định danh qua header `X-Platform-Slot` và `X-Release-Commit`. Nếu xác nhận thất bại, slot standby bị rollback/dừng lại và hệ thống chuyển về chế độ cảnh báo suy giảm (degraded mode).
 
 ---
 

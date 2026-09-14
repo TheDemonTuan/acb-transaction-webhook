@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # deploy/deploy-bark.sh
-# Auxiliary Bark Service Deployment Transaction.
-# Replaces only Bark container; worker and gateway remain completely untouched.
+# Auxiliary Bark Service Deployment Transaction with Fail-Safe Rollback, Journaling, and Data Volume Preservation.
+# Invariants:
+# 1. Replaces only Bark container; worker, gateway, browser, TTS containers remain completely untouched.
+# 2. Preserves persistent data volume (bark_data) and basic-auth secrets across updates and rollbacks.
+# 3. Rolls back to previous digest if candidate Bark fails healthcheck.
+# 4. Enforces deployment transaction journal and atomic recovery.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,15 +27,29 @@ validate_canonical_env
 validate_digest "$CANDIDATE_BARK_IMAGE" "bark-server"
 validate_secrets
 
+# Verify Bark secrets explicitly
+for sec in bark_basic_auth_user bark_basic_auth_password; do
+  if [[ ! -s "$SECRETS_DIR/$sec" ]]; then
+    log_error "Required Bark secret '$sec' is missing or empty in $SECRETS_DIR"
+    exit 1
+  fi
+done
+
 acquire_deploy_lock
-trap 'release_deploy_lock' EXIT
+recover_tx_journal
 
 PREV_BARK_REF="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
 
-log_info "=========================================================="
-log_info "Starting Bark Auxiliary Deployment Transaction"
-log_info "Candidate Bark Image: ${CANDIDATE_BARK_IMAGE}"
-log_info "=========================================================="
+stop_bark() {
+  if command -v docker >/dev/null 2>&1; then
+    for c in acb-bark bark; do
+      if docker ps -a --format '{{.Names}}' | grep -q "^${c}\$"; then
+        docker stop -t 10 "$c" >/dev/null 2>&1 || true
+        docker rm "$c" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+}
 
 start_bark() {
   local img="$1"
@@ -40,16 +58,10 @@ start_bark() {
     return $?
   fi
   if command -v docker >/dev/null 2>&1; then
-    docker stop -t 10 bark >/dev/null 2>&1 || true
-    docker rm bark >/dev/null 2>&1 || true
+    stop_bark
     BARK_IMAGE_REF="$img" docker compose -f "$SCRIPT_DIR/compose.prod.yaml" up -d --no-deps bark
   fi
 }
-
-if ! start_bark "$CANDIDATE_BARK_IMAGE"; then
-  log_error "Failed to start candidate Bark container."
-  exit 1
-fi
 
 wait_for_bark_ready() {
   local timeout="${1:-20}"
@@ -66,10 +78,20 @@ wait_for_bark_ready() {
   fi
 
   while [[ "$elapsed" -lt "$timeout" ]]; do
-    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^bark$'; then
-      if docker exec bark /bin/sh -c "nc -z 127.0.0.1 8080" >/dev/null 2>&1; then
-        return 0
-      fi
+    if command -v docker >/dev/null 2>&1; then
+      for c in acb-bark bark; do
+        if docker ps --format '{{.Names}}' | grep -q "^${c}\$"; then
+          local st
+          st="$(docker inspect --format '{{.State.Health.Status}}' "$c" 2>/dev/null || echo "")"
+          if [[ "$st" == "healthy" ]]; then
+            return 0
+          fi
+          if docker exec "$c" wget -q --spider http://127.0.0.1:8080/ping >/dev/null 2>&1 || \
+             docker exec "$c" /bin/sh -c "nc -z 127.0.0.1 8080" >/dev/null 2>&1; then
+            return 0
+          fi
+        fi
+      done
     fi
     sleep 1
     elapsed=$(( elapsed + 1 ))
@@ -77,15 +99,84 @@ wait_for_bark_ready() {
   return 1
 }
 
-if ! wait_for_bark_ready 20; then
-  log_error "Candidate Bark failed healthcheck. Rolling back to previous digest..."
+cleanup_bark_deploy() {
+  local exit_code=$?
+  if [[ -f "$TX_JOURNAL_FILE" ]] && ! is_tx_committed; then
+    local st
+    st="$(get_tx_state)"
+    if [[ "$st" != "TX_ROLLED_BACK" && "$st" != "TX_ROLLBACK_FAILED" && "$st" != "TX_COMPLETED" ]]; then
+      log_warn "Interruption caught in state [$st]. Rolling back Bark..."
+      if [[ -n "${PREV_BARK_REF:-}" ]]; then
+        update_tx_state "TX_ROLLING_BACK" "Interruption caught, rolling back"
+        stop_bark
+        start_bark "$PREV_BARK_REF" 2>/dev/null || true
+        if wait_for_bark_ready 10; then
+          update_tx_state "TX_ROLLED_BACK" "Rolled back to previous Bark image on interruption"
+        else
+          update_tx_state "TX_ROLLBACK_FAILED" "Rollback Bark container also failed on interruption"
+        fi
+      fi
+    fi
+  fi
+  release_deploy_lock
+  exit "$exit_code"
+}
+trap cleanup_bark_deploy EXIT HUP INT TERM
+
+log_info "=========================================================="
+log_info "Starting Bark Auxiliary Deployment Transaction"
+log_info "Candidate Bark Image: ${CANDIDATE_BARK_IMAGE}"
+log_info "Previous Bark Image:  ${PREV_BARK_REF:-none}"
+log_info "=========================================================="
+
+# 1. Init transaction journal
+init_tx_journal "bark" "singleton" "singleton" "$CANDIDATE_BARK_IMAGE" "$PREV_BARK_REF" "${EXPECTED_COMMIT:-}"
+update_tx_state "CANDIDATE_STARTING" "Starting candidate Bark container"
+
+# 2. Start candidate container
+log_info "Starting candidate Bark container..."
+if ! start_bark "$CANDIDATE_BARK_IMAGE"; then
+  log_error "Failed to start candidate Bark container."
+  update_tx_state "TX_ROLLING_BACK" "Candidate startup failed"
   if [[ -n "${PREV_BARK_REF:-}" ]]; then
-    start_bark "$PREV_BARK_REF"
-    wait_for_bark_ready 20 || true
+    start_bark "$PREV_BARK_REF" || true
+    wait_for_bark_ready 10 || true
+    update_tx_state "TX_ROLLED_BACK" "Restored previous Bark container after candidate startup failure"
   fi
   exit 1
 fi
 
+# 3. Health check candidate Bark
+READY_CHECK_TIMEOUT="${READY_CHECK_TIMEOUT:-20}"
+update_tx_state "VERIFYING_HEALTH" "Verifying candidate Bark health"
+if ! wait_for_bark_ready "$READY_CHECK_TIMEOUT"; then
+  log_error "Candidate Bark failed healthcheck. Rolling back to previous digest..."
+  update_tx_state "TX_ROLLING_BACK" "Candidate failed healthcheck; rolling back"
+  if [[ -n "${PREV_BARK_REF:-}" ]]; then
+    stop_bark
+    start_bark "$PREV_BARK_REF"
+    if wait_for_bark_ready "$READY_CHECK_TIMEOUT"; then
+      update_tx_state "TX_ROLLED_BACK" "Rolled back successfully to $PREV_BARK_REF"
+      log_info "Rollback to previous Bark digest succeeded."
+    else
+      update_tx_state "TX_ROLLBACK_FAILED" "Rollback container also failed healthcheck"
+      log_error "Rollback failed: previous Bark digest also failed healthcheck."
+    fi
+  else
+    update_tx_state "TX_FAILED" "Candidate failed healthcheck and no previous digest available"
+  fi
+  exit 1
+fi
+
+# 4. Commit new Bark image ref
+update_tx_state "TX_COMMITTED" "Candidate Bark verified healthy"
 set_release_env "BARK_IMAGE_REF" "$CANDIDATE_BARK_IMAGE"
-log_info "Bark auxiliary deployment successfully completed."
+log_info "Committed new BARK_IMAGE_REF to .release.env."
+
+update_tx_state "TX_COMPLETED" "Bark auxiliary deployment transaction completed successfully"
+archive_tx_journal "completed"
+
+log_info "=========================================================="
+log_info "Bark Auxiliary Deployment Transaction Successfully Completed"
+log_info "=========================================================="
 exit 0

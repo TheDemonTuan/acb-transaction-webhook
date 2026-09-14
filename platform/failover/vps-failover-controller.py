@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env bash
+# platform/failover/vps-failover-controller.py
 """
 VPS Unified Stateful Multi-App Failover Engine.
 Event-driven + periodic reconciliation for warm standby Blue/Green and singleton workloads.
@@ -40,22 +41,20 @@ logger = logging.getLogger("vps-failover")
 DEFAULT_REGISTRY_DIR = Path("/etc/vps-failover/apps.d")
 DEFAULT_STATE_DIR = Path("/var/lib/vps-failover/apps")
 DEFAULT_LOCK_DIR = Path("/run/lock/vps-failover")
+DEFAULT_JOURNAL_PATH = Path("/opt/acb/deploy/data/deploy-journal.json")
 DEFAULT_COOLDOWN_SECONDS = 300
 DEFAULT_MAX_RESTARTS = 3
 TRUSTED_PATH_PREFIXES = ("/usr/local/bin/", "/opt/platform/bin/", "/usr/bin/", "/bin/")
 APP_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-
 class CASConflictError(Exception):
     """Raised when state revision does not match expected CAS revision."""
-
 
 @dataclass
 class SlotConfig:
     slot_name: str
     container_name: str
     service: str = ""
-
 
 @dataclass
 class AppConfig:
@@ -67,6 +66,8 @@ class AppConfig:
     max_restarts: int = DEFAULT_MAX_RESTARTS
     switch_cmd: Optional[List[str]] = None
     health_timeout: int = 20
+    min_restart_interval: int = 0
+    backoff_factor: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict, app_name: str) -> AppConfig:
@@ -108,10 +109,7 @@ class AppConfig:
         switch_cmd = data.get("switch_cmd")
         if switch_cmd is not None:
             if not isinstance(switch_cmd, list) or not switch_cmd:
-                raise ValueError(f"Invalid switch_cmd for app '{app_name}': must be non-empty list of strings")
-            for arg in switch_cmd:
-                if not isinstance(arg, str):
-                    raise ValueError(f"switch_cmd args must be strings in app '{app_name}'")
+                raise ValueError(f"Invalid switch_cmd for app '{app_name}'")
             # Validate trusted executable path
             bin_path = switch_cmd[0]
             if not any(bin_path.startswith(prefix) for prefix in TRUSTED_PATH_PREFIXES):
@@ -126,8 +124,9 @@ class AppConfig:
             max_restarts=int(data.get("max_restarts", DEFAULT_MAX_RESTARTS)),
             switch_cmd=switch_cmd,
             health_timeout=int(data.get("health_timeout", 20)),
+            min_restart_interval=int(data.get("min_restart_interval", 0)),
+            backoff_factor=float(data.get("backoff_factor", 0.0)),
         )
-
 
 class AppLock:
     """Per-app runtime mutual exclusion file lock with timeout."""
@@ -161,9 +160,13 @@ class AppLock:
                     msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
                 return self
             except (BlockingIOError, OSError, IOError) as e:
-                if time.time() - start_time >= self.timeout:
+                elapsed = time.time() - start_time
+                if elapsed >= self.timeout:
                     if self._fd is not None:
-                        os.close(self._fd)
+                        try:
+                            os.close(self._fd)
+                        except OSError:
+                            pass
                         self._fd = None
                     raise TimeoutError(f"AppLock timeout ({self.timeout}s) on {self.lock_path}: {e}")
                 time.sleep(0.05)
@@ -188,7 +191,6 @@ class AppLock:
                     pass
                 self._fd = None
 
-
 def make_initial_state(app_name: str) -> dict:
     return {
         "schema_version": 1,
@@ -200,10 +202,25 @@ def make_initial_state(app_name: str) -> dict:
         "slots": {},
         "last_failover_time": None,
         "restarts_count": 0,
+        "last_restart_time": None,
         "degraded": False,
         "degraded_reason": None,
     }
 
+def clean_stale_tmp_files(state_dir: Path | str = DEFAULT_STATE_DIR) -> None:
+    """Cleans up orphan .tmp.* files left behind after ungraceful crashes between phases."""
+    try:
+        st_dir = Path(state_dir)
+        if not st_dir.exists():
+            return
+        for tmp_file in st_dir.glob("*/*.tmp.*"):
+            try:
+                tmp_file.unlink()
+                logger.info("Cleaned up orphan state tmp file: %s", tmp_file)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 def load_state(app_name: str, state_dir: Path | str = DEFAULT_STATE_DIR) -> dict:
     target_file = Path(state_dir) / app_name / "state.json"
@@ -226,7 +243,6 @@ def load_state(app_name: str, state_dir: Path | str = DEFAULT_STATE_DIR) -> dict
         recovered["degraded"] = True
         recovered["degraded_reason"] = f"Corrupt state file recovered: {e}"
         return recovered
-
 
 def save_state_atomic(app_name: str, state: dict, state_dir: Path | str = DEFAULT_STATE_DIR) -> None:
     target_dir = Path(state_dir) / app_name
@@ -252,7 +268,6 @@ def save_state_atomic(app_name: str, state: dict, state_dir: Path | str = DEFAUL
         except OSError:
             pass
 
-
 def check_or_reap_lease(state: dict, now: float) -> Tuple[bool, str]:
     """
     Evaluates lease.
@@ -270,6 +285,64 @@ def check_or_reap_lease(state: dict, now: float) -> Tuple[bool, str]:
         return False, f"Evicted stale lease (owner={owner}, op={op}, expired_at={expires_at})"
     return True, f"Active lease held by {lease.get('owner')} for {lease.get('operation')} until {expires_at}"
 
+def get_deployment_journal_path() -> Path:
+    env_path = os.environ.get("TX_JOURNAL_FILE")
+    if env_path:
+        return Path(env_path)
+    local_path = Path(__file__).resolve().parent.parent.parent / "deploy" / "data" / "deploy-journal.json"
+    if local_path.exists():
+        return local_path
+    return DEFAULT_JOURNAL_PATH
+
+def check_deployment_in_progress(journal_path: Optional[Path] = None) -> Tuple[bool, str]:
+    """
+    Returns (is_in_progress, reason).
+    Inhibits failover/promotion if a deploy transaction is active, uncommitted, or soaking.
+    """
+    path = journal_path or get_deployment_journal_path()
+    if not path or not path.exists():
+        return False, ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False, ""
+        state = data.get("state", "IDLE")
+        tx_id = data.get("tx_id", "unknown")
+        component = data.get("component", "unknown")
+        active_states = {
+            "TX_INITIALIZED",
+            "CANDIDATE_STARTING",
+            "VERIFYING_HEALTH",
+            "SWITCHING_ROUTE",
+            "VERIFYING_ACK",
+            "TX_COMMITTED",
+            "TX_SOAKING",
+            "TX_ROLLING_BACK",
+        }
+        if state in active_states:
+            return True, f"Deploy transaction {tx_id} ({component}) in progress (state={state})"
+        return False, ""
+    except Exception as e:
+        logger.warning("Failed to parse deployment journal %s: %s", path, e)
+        return False, ""
+
+def is_intentional_stop(app_name: str, slot_or_container: str, state_dir: Path | str = DEFAULT_STATE_DIR) -> bool:
+    """
+    Checks whether a slot or container was intentionally stopped.
+    Checks marker files in state_dir, /tmp/vps-failover, or intentional stop cooldowns.
+    """
+    st_dir = Path(state_dir)
+    markers = [
+        st_dir / app_name / f"intentional-stop-{slot_or_container}",
+        st_dir / app_name / f".intentional-stop-{slot_or_container}",
+        Path("/tmp/vps-failover") / f"intentional-stop-{slot_or_container}",
+        Path("/tmp/vps-failover") / f".intentional-stop-{slot_or_container}",
+    ]
+    for m in markers:
+        if m.exists():
+            return True
+    return False
 
 class CommandRunner:
     """Fixed trusted command runner (never shell=True)."""
@@ -280,7 +353,6 @@ class CommandRunner:
             return res.returncode, res.stdout.strip(), res.stderr.strip()
         except Exception as e:
             return -1, "", str(e)
-
 
 class DockerClient:
     """Interface to Docker CLI and Event Stream."""
@@ -337,7 +409,6 @@ class DockerClient:
             except Exception:
                 pass
 
-
 class SystemClock:
     def now(self) -> float:
         return time.time()
@@ -345,11 +416,11 @@ class SystemClock:
     def sleep(self, seconds: float):
         time.sleep(seconds)
 
-
 class FailoverEngine:
     """
     Multi-app stateful failover and reconcile engine.
     Root-owned registry + canonical crash-safe state + runtime locking.
+    Aware of deployment journal, intentional stops, and candidate vs committed states.
     """
 
     def __init__(
@@ -360,6 +431,7 @@ class FailoverEngine:
         runner: Optional[CommandRunner] = None,
         docker_client: Optional[DockerClient] = None,
         clock: Optional[SystemClock] = None,
+        journal_path: Optional[Path | str] = None,
         queue_maxsize: int = 500,
     ):
         self.registry_dir = Path(registry_dir)
@@ -368,12 +440,14 @@ class FailoverEngine:
         self.runner = runner or CommandRunner()
         self.docker_client = docker_client or DockerClient(self.runner)
         self.clock = clock or SystemClock()
+        self.journal_path = Path(journal_path) if journal_path else None
 
         self.event_queue: queue.Queue = queue.Queue(maxsize=queue_maxsize)
         self._dirty_apps: Set[str] = set()
         self._queue_lock = threading.Lock()
         self.running = False
         self._stop_event = threading.Event()
+        clean_stale_tmp_files(self.state_dir)
 
     def load_registry(self) -> Dict[str, AppConfig]:
         configs: Dict[str, AppConfig] = {}
@@ -436,193 +510,259 @@ class FailoverEngine:
     ) -> None:
         """
         Active slot event evaluation under lock.
-        Validates container id/generation, lease, and cooldown.
+        Validates container id/generation, lease, cooldown, and deployment journal.
+        Inhibits failover if a deployment transaction is active or candidate is uncommitted.
         """
         app_cfg = self.get_app_config(app_name)
         if not app_cfg:
             logger.warning("No registry config found for app '%s'. Ignoring event.", app_name)
             return
 
-        with AppLock(app_name, self.lock_dir):
-            state = load_state(app_name, self.state_dir)
-            now = self.clock.now()
+        try:
+            with AppLock(app_name, self.lock_dir):
+                state = load_state(app_name, self.state_dir)
+                now = self.clock.now()
 
-            # Check operation lease
-            is_active, lease_msg = check_or_reap_lease(state, now)
-            if is_active:
-                logger.info("App %s: active operation lease in effect (%s). Skipping failover.", app_name, lease_msg)
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            if state.get("operation_lease") is None and lease_msg:
-                # Stale lease was reaped; persist state
-                save_state_atomic(app_name, state, self.state_dir)
-
-            if app_cfg.workload_class == "singleton":
-                self._handle_singleton_failure(app_cfg, state, event_container_id, now)
-                return
-
-            # Blue/Green workload
-            active_slot = state.get("active_slot")
-            if not active_slot:
-                logger.warning("App %s: active slot is missing/unknown. Safe degraded mode, no default blue.", app_name)
-                state["degraded"] = True
-                state["degraded_reason"] = "Active slot missing or unknown; failover aborted without default"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            # Intentional standby stopped check:
-            # Only events affecting active slot trigger failover!
-            if event_slot != active_slot:
-                logger.info(
-                    "App %s: event on slot '%s' ignored (active slot is '%s'). Standby stopped/transition is normal.",
-                    app_name,
-                    event_slot,
-                    active_slot,
-                )
-                if "slots" not in state:
-                    state["slots"] = {}
-                if event_slot not in state["slots"]:
-                    state["slots"][event_slot] = {}
-                state["slots"][event_slot]["status"] = "stopped"
-                state["slots"][event_slot]["last_transition"] = now
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            # Active slot event -> validate container ID / generation
-            recorded_id = state.get("slots", {}).get(active_slot, {}).get("container_id")
-            if recorded_id and event_container_id and recorded_id != event_container_id:
-                logger.warning(
-                    "App %s: stale event on active slot '%s' (event id %s != recorded active id %s). Ignoring.",
-                    app_name,
-                    active_slot,
-                    event_container_id,
-                    recorded_id,
-                )
-                return
-
-            # Verify active container actual health status
-            active_slot_cfg = app_cfg.slots.get(active_slot)
-            if not active_slot_cfg:
-                state["degraded"] = True
-                state["degraded_reason"] = f"Active slot {active_slot} not defined in registry"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            inspect = self.docker_client.inspect_container(active_slot_cfg.container_name)
-            if inspect:
-                c_state = inspect.get("State", {})
-                status = c_state.get("Status", "")
-                health = c_state.get("Health", {}).get("Status", "")
-                if status == "running" and (health == "healthy" or not health):
-                    logger.info("App %s: container %s is running and healthy. Spurious event ignored.", app_name, active_slot_cfg.container_name)
+                # 1. Deployment Journal check (no promotion during active transaction)
+                in_progress, reason = check_deployment_in_progress(self.journal_path)
+                if in_progress:
+                    logger.info("App %s: deployment transaction in progress (%s). Skipping failover/promotion.", app_name, reason)
                     return
 
-            # Cooldown check
-            last_failover = state.get("last_failover_time")
-            if last_failover and (now - float(last_failover)) < app_cfg.cooldown_seconds:
-                elapsed = now - float(last_failover)
-                logger.warning(
-                    "App %s: active slot failed but failover blocked by cooldown (elapsed %.1fs < %ds).",
+                # 2. Check operation lease
+                is_active, lease_msg = check_or_reap_lease(state, now)
+                if is_active:
+                    logger.info("App %s: active operation lease in effect (%s). Skipping failover.", app_name, lease_msg)
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                if state.get("operation_lease") is None and lease_msg:
+                    # Stale lease was reaped; persist state
+                    save_state_atomic(app_name, state, self.state_dir)
+
+                # 3. Singleton workload
+                if app_cfg.workload_class == "singleton":
+                    self._handle_singleton_failure(app_cfg, state, event_container_id, now)
+                    return
+
+                # 4. Blue/Green workload
+                active_slot = state.get("active_slot")
+                if not active_slot:
+                    logger.warning("App %s: active slot is missing/unknown. Safe degraded mode, no default blue.", app_name)
+                    state["degraded"] = True
+                    state["degraded_reason"] = "Active slot missing or unknown; failover aborted without default"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 5. Intentional stop check on event slot
+                if is_intentional_stop(app_name, event_slot, self.state_dir):
+                    logger.info(
+                        "App %s: event on slot '%s' ignored due to intentional stop marker.",
+                        app_name,
+                        event_slot,
+                    )
+                    if "slots" not in state:
+                        state["slots"] = {}
+                    if event_slot not in state["slots"]:
+                        state["slots"][event_slot] = {}
+                    state["slots"][event_slot]["status"] = "stopped"
+                    state["slots"][event_slot]["last_transition"] = now
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 6. Intentional standby stopped check:
+                # Only events affecting active slot trigger failover!
+                if event_slot != active_slot:
+                    logger.info(
+                        "App %s: event on slot '%s' ignored (active slot is '%s'). Standby stopped/transition is normal.",
+                        app_name,
+                        event_slot,
+                        active_slot,
+                    )
+                    if "slots" not in state:
+                        state["slots"] = {}
+                    if event_slot not in state["slots"]:
+                        state["slots"][event_slot] = {}
+                    state["slots"][event_slot]["status"] = "stopped"
+                    state["slots"][event_slot]["last_transition"] = now
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 7. Active slot event -> validate container ID / generation
+                recorded_id = state.get("slots", {}).get(active_slot, {}).get("container_id")
+                if recorded_id and event_container_id and recorded_id != event_container_id:
+                    logger.warning(
+                        "App %s: stale event on active slot '%s' (event id %s != recorded active id %s). Ignoring.",
+                        app_name,
+                        active_slot,
+                        event_container_id,
+                        recorded_id,
+                    )
+                    return
+
+                # 8. Verify active container actual health status
+                active_slot_cfg = app_cfg.slots.get(active_slot)
+                if not active_slot_cfg:
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Active slot {active_slot} not defined in registry"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                inspect = self.docker_client.inspect_container(active_slot_cfg.container_name)
+                if inspect:
+                    c_state = inspect.get("State", {})
+                    status = c_state.get("Status", "")
+                    health = c_state.get("Health", {}).get("Status", "")
+                    if status == "running" and (health == "healthy" or not health):
+                        logger.info("App %s: container %s is running and healthy. Spurious event ignored.", app_name, active_slot_cfg.container_name)
+                        return
+
+                # 9. Cooldown check
+                last_failover = state.get("last_failover_time")
+                if last_failover and (now - float(last_failover)) < app_cfg.cooldown_seconds:
+                    elapsed = now - float(last_failover)
+                    logger.warning(
+                        "App %s: active slot failed but failover blocked by cooldown (elapsed %.1fs < %ds).",
+                        app_name,
+                        elapsed,
+                        app_cfg.cooldown_seconds,
+                    )
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Active slot failed within cooldown ({elapsed:.0f}s < {app_cfg.cooldown_seconds}s)"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 10. Determine peer standby slot
+                candidate_slots = [s for s in app_cfg.slots.keys() if s != active_slot]
+                if not candidate_slots:
+                    state["degraded"] = True
+                    state["degraded_reason"] = "No standby slot configured in registry"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+                target_slot = candidate_slots[0]
+                target_slot_cfg = app_cfg.slots[target_slot]
+
+                logger.critical(
+                    "App %s: Active container %s failed. Activating warm standby slot %s (%s)...",
                     app_name,
-                    elapsed,
-                    app_cfg.cooldown_seconds,
+                    active_slot_cfg.container_name,
+                    target_slot,
+                    target_slot_cfg.container_name,
                 )
-                state["degraded"] = True
-                state["degraded_reason"] = f"Active slot failed within cooldown ({elapsed:.0f}s < {app_cfg.cooldown_seconds}s)"
+
+                # 11. Start standby container
+                code, out, err = self.docker_client.start_container(target_slot_cfg.container_name)
+                if code != 0:
+                    logger.critical("App %s: Both slots degraded! Failed to start standby %s: %s %s", app_name, target_slot_cfg.container_name, out, err)
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Both slots degraded: active failed, standby {target_slot_cfg.container_name} start failed"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 12. Readiness probe
+                ready = False
+                for _ in range(app_cfg.health_timeout):
+                    p_inspect = self.docker_client.inspect_container(target_slot_cfg.container_name)
+                    if p_inspect:
+                        p_state = p_inspect.get("State", {})
+                        if p_state.get("Status") == "running":
+                            health_stat = p_state.get("Health", {}).get("Status")
+                            if health_stat == "healthy":
+                                ready = True
+                                break
+                            if not health_stat and self.docker_client.exec_healthcheck(target_slot_cfg.container_name):
+                                ready = True
+                                break
+                            if "Health" not in p_state:
+                                ready = True
+                                break
+                    self.clock.sleep(1)
+
+                if not ready:
+                    logger.critical("App %s: Both slots degraded! Standby container %s failed readiness check within %ds", app_name, target_slot_cfg.container_name, app_cfg.health_timeout)
+                    self.runner.run(["docker", "stop", "-t", "5", target_slot_cfg.container_name], timeout=10)
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Both slots degraded: active failed, standby {target_slot_cfg.container_name} readiness timeout"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 13. Perform atomic switch with exact route identity ACK
+                if not self.execute_switch(app_cfg, target_slot):
+                    logger.error("App %s: Route switch to slot %s failed. Entering degraded mode and rolling back standby container.", app_name, target_slot)
+                    self.runner.run(["docker", "stop", "-t", "5", target_slot_cfg.container_name], timeout=10)
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Route switch or identity ACK failed for slot {target_slot}"
+                    if "slots" not in state:
+                        state["slots"] = {}
+                    if target_slot not in state["slots"]:
+                        state["slots"][target_slot] = {}
+                    state["slots"][target_slot]["status"] = "failed"
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # 14. Update canonical state
+                target_inspect = self.docker_client.inspect_container(target_slot_cfg.container_name)
+                state["active_slot"] = target_slot
+                state["last_failover_time"] = now
+                state["degraded"] = False
+                state["degraded_reason"] = None
+                if "slots" not in state:
+                    state["slots"] = {}
+                state["slots"][target_slot] = {
+                    "container_id": target_inspect.get("Id", "") if target_inspect else "",
+                    "image_digest": target_inspect.get("Image", "") if target_inspect else "",
+                    "status": "running",
+                    "health": "healthy",
+                    "last_transition": now,
+                }
+                if active_slot in state["slots"]:
+                    state["slots"][active_slot]["status"] = "failed"
+                    state["slots"][active_slot]["last_transition"] = now
+
                 save_state_atomic(app_name, state, self.state_dir)
-                return
+                logger.info("Failover completed successfully. App %s active slot is now %s.", app_name, target_slot)
 
-            # Determine peer standby slot
-            candidate_slots = [s for s in app_cfg.slots.keys() if s != active_slot]
-            if not candidate_slots:
-                state["degraded"] = True
-                state["degraded_reason"] = "No standby slot configured in registry"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-            target_slot = candidate_slots[0]
-            target_slot_cfg = app_cfg.slots[target_slot]
-
-            logger.critical(
-                "App %s: Active container %s failed. Activating warm standby slot %s (%s)...",
-                app_name,
-                active_slot_cfg.container_name,
-                target_slot,
-                target_slot_cfg.container_name,
-            )
-
-            # Start standby container
-            code, out, err = self.docker_client.start_container(target_slot_cfg.container_name)
-            if code != 0:
-                logger.error("Failed to start standby %s: %s %s", target_slot_cfg.container_name, out, err)
-                state["degraded"] = True
-                state["degraded_reason"] = f"Failed to start standby container {target_slot_cfg.container_name}"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            # Readiness probe
-            ready = False
-            for _ in range(app_cfg.health_timeout):
-                p_inspect = self.docker_client.inspect_container(target_slot_cfg.container_name)
-                if p_inspect:
-                    p_state = p_inspect.get("State", {})
-                    if p_state.get("Status") == "running":
-                        health_stat = p_state.get("Health", {}).get("Status")
-                        if health_stat == "healthy":
-                            ready = True
-                            break
-                        if not health_stat and self.docker_client.exec_healthcheck(target_slot_cfg.container_name):
-                            ready = True
-                            break
-                        if "Health" not in p_state:
-                            ready = True
-                            break
-                self.clock.sleep(1)
-
-            if not ready:
-                logger.error("Standby container %s failed readiness check within %ds", target_slot_cfg.container_name, app_cfg.health_timeout)
-                state["degraded"] = True
-                state["degraded_reason"] = f"Standby container {target_slot_cfg.container_name} readiness timeout"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            # Perform atomic switch
-            if not self.execute_switch(app_cfg, target_slot):
-                state["degraded"] = True
-                state["degraded_reason"] = f"Switch command execution failed for target slot {target_slot}"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
-
-            # Update canonical state
-            target_inspect = self.docker_client.inspect_container(target_slot_cfg.container_name)
-            state["active_slot"] = target_slot
-            state["last_failover_time"] = now
-            state["degraded"] = False
-            state["degraded_reason"] = None
-            if "slots" not in state:
-                state["slots"] = {}
-            state["slots"][target_slot] = {
-                "container_id": target_inspect.get("Id", "") if target_inspect else "",
-                "image_digest": target_inspect.get("Image", "") if target_inspect else "",
-                "status": "running",
-                "health": "healthy",
-                "last_transition": now,
-            }
-            if active_slot in state["slots"]:
-                state["slots"][active_slot]["status"] = "failed"
-                state["slots"][active_slot]["last_transition"] = now
-
-            save_state_atomic(app_name, state, self.state_dir)
-            logger.info("Failover completed successfully. App %s active slot is now %s.", app_name, target_slot)
+        except TimeoutError as e:
+            logger.warning("App %s: mutual host lock contention (%s). Skipping failover safely.", app_name, e)
+            return
 
     def _handle_singleton_failure(self, app_cfg: AppConfig, state: dict, event_container_id: str, now: float) -> None:
-        """Singleton workload: bounded restart same instance, never duplicate."""
+        """Singleton workload: bounded restart same instance with backoff, never duplicate."""
         app_name = app_cfg.app
         c_name = app_cfg.container_name
+
+        # Fencing check: verify no active deployment lease or deployment in progress
+        in_progress, reason = check_deployment_in_progress(self.journal_path)
+        if in_progress:
+            logger.info("App %s: deployment in progress (%s). Skipping singleton restart.", app_name, reason)
+            return
+
+        # Check intentional stop marker
+        if is_intentional_stop(app_name, "singleton", self.state_dir) or is_intentional_stop(app_name, c_name, self.state_dir):
+            logger.info("App %s: singleton container %s was intentionally stopped. Skipping restart.", app_name, c_name)
+            return
+
         restarts = int(state.get("restarts_count", 0))
+        last_restart = state.get("last_restart_time")
+
+        # Exponential backoff / cooldown calculation if configured
+        if (app_cfg.min_restart_interval > 0 or app_cfg.backoff_factor > 0) and last_restart:
+            factor = app_cfg.backoff_factor if app_cfg.backoff_factor > 0 else 2.0
+            base = app_cfg.min_restart_interval if app_cfg.min_restart_interval > 0 else 5.0
+            backoff = min(base * (factor ** max(0, restarts - 1)), float(app_cfg.cooldown_seconds))
+            if (now - float(last_restart)) < backoff:
+                elapsed = now - float(last_restart)
+                logger.warning(
+                    "App %s: singleton restart in backoff (elapsed %.1fs < %.1fs).",
+                    app_name,
+                    elapsed,
+                    backoff,
+                )
+                return
 
         if restarts < app_cfg.max_restarts:
             state["restarts_count"] = restarts + 1
+            state["last_restart_time"] = now
             save_state_atomic(app_name, state, self.state_dir)
             logger.warning(
                 "App %s: singleton container %s failed. Bounded emergency restart (%d/%d)...",
@@ -640,7 +780,7 @@ class FailoverEngine:
                 app_cfg.max_restarts,
             )
             state["degraded"] = True
-            state["degraded_reason"] = f"Singleton exceeded max restarts ({app_cfg.max_restarts})"
+            state["degraded_reason"] = f"Singleton {c_name} exceeded max restarts ({app_cfg.max_restarts})"
             save_state_atomic(app_name, state, self.state_dir)
 
     def reconcile_app(self, app_name: str) -> None:
@@ -649,120 +789,147 @@ class FailoverEngine:
         if not app_cfg:
             return
 
-        with AppLock(app_name, self.lock_dir):
-            state = load_state(app_name, self.state_dir)
-            now = self.clock.now()
+        is_active_healthy = True
+        cid = ""
+        active_slot = None
 
-            is_active, lease_msg = check_or_reap_lease(state, now)
-            if is_active:
-                logger.info("Reconcile: App %s skipped (active lease: %s)", app_name, lease_msg)
-                save_state_atomic(app_name, state, self.state_dir)
-                return
+        try:
+            with AppLock(app_name, self.lock_dir):
+                state = load_state(app_name, self.state_dir)
+                now = self.clock.now()
 
-            if state.get("operation_lease") is None and lease_msg:
-                save_state_atomic(app_name, state, self.state_dir)
+                # Check deployment journal
+                in_progress, reason = check_deployment_in_progress(self.journal_path)
+                if in_progress:
+                    logger.info("Reconcile: App %s skipped (deployment in progress: %s)", app_name, reason)
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
 
-            if app_cfg.workload_class == "singleton":
-                insp = self.docker_client.inspect_container(app_cfg.container_name)
-                status = insp.get("State", {}).get("Status") if insp else "missing"
-                if status != "running":
-                    self._handle_singleton_failure(app_cfg, state, insp.get("Id", "") if insp else "", now)
-                else:
-                    state["slots"] = {
-                        "singleton": {
-                            "container_id": insp.get("Id", "") if insp else "",
+                is_active, lease_msg = check_or_reap_lease(state, now)
+                if is_active:
+                    logger.info("Reconcile: App %s skipped (active lease: %s)", app_name, lease_msg)
+                    save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                if state.get("operation_lease") is None and lease_msg:
+                    save_state_atomic(app_name, state, self.state_dir)
+
+                if app_cfg.workload_class == "singleton":
+                    insp = self.docker_client.inspect_container(app_cfg.container_name)
+                    status = insp.get("State", {}).get("Status") if insp else "missing"
+                    if status != "running":
+                        self._handle_singleton_failure(app_cfg, state, insp.get("Id", "") if insp else "", now)
+                    else:
+                        state["slots"] = {
+                            "singleton": {
+                                "container_id": insp.get("Id", "") if insp else "",
+                                "status": "running",
+                                "health": insp.get("State", {}).get("Health", {}).get("Status", "healthy") if insp else "",
+                                "last_transition": now,
+                            }
+                        }
+                        save_state_atomic(app_name, state, self.state_dir)
+                    return
+
+                # Blue/Green reconcile
+                active_slot = state.get("active_slot")
+                if not active_slot:
+                    # Check running containers
+                    running_healthy = []
+                    for s_name, s_cfg in app_cfg.slots.items():
+                        insp = self.docker_client.inspect_container(s_cfg.container_name)
+                        if insp:
+                            c_st = insp.get("State", {})
+                            if c_st.get("Status") == "running" and c_st.get("Health", {}).get("Status") != "unhealthy":
+                                running_healthy.append((s_name, insp))
+
+                    if len(running_healthy) == 1:
+                        chosen_slot, insp = running_healthy[0]
+                        state["active_slot"] = chosen_slot
+                        state["degraded"] = False
+                        state["degraded_reason"] = None
+                        if "slots" not in state:
+                            state["slots"] = {}
+                        state["slots"][chosen_slot] = {
+                            "container_id": insp.get("Id", ""),
+                            "image_digest": insp.get("Image", ""),
                             "status": "running",
-                            "health": insp.get("State", {}).get("Health", {}).get("Status", "healthy") if insp else "",
+                            "health": "healthy",
                             "last_transition": now,
                         }
-                    }
+                        save_state_atomic(app_name, state, self.state_dir)
+                        logger.info("Reconcile: Identified running active slot %s for app %s", chosen_slot, app_name)
+                    else:
+                        # Missing active: safe degraded mode, NEVER default to blue
+                        state["degraded"] = True
+                        if len(running_healthy) == 0:
+                            state["degraded_reason"] = "Missing active slot: both slots degraded (0 healthy candidates running)"
+                        else:
+                            state["degraded_reason"] = f"Missing active slot: ambiguous ({len(running_healthy)} healthy candidates running)"
+                        save_state_atomic(app_name, state, self.state_dir)
+                        logger.warning("Reconcile: Active slot issue for app %s (%s). Degraded mode entered, no default blue.", app_name, state["degraded_reason"])
+                        return
+                    active_slot = state.get("active_slot")
+
+                active_cfg = app_cfg.slots.get(active_slot)
+                if not active_cfg:
+                    state["degraded"] = True
+                    state["degraded_reason"] = f"Active slot {active_slot} not configured in registry"
                     save_state_atomic(app_name, state, self.state_dir)
-                return
+                    return
 
-            # Blue/Green reconcile
-            active_slot = state.get("active_slot")
-            if not active_slot:
-                # Check running containers
-                running_healthy = []
-                for s_name, s_cfg in app_cfg.slots.items():
-                    insp = self.docker_client.inspect_container(s_cfg.container_name)
-                    if insp:
-                        c_st = insp.get("State", {})
-                        if c_st.get("Status") == "running" and c_st.get("Health", {}).get("Status") != "unhealthy":
-                            running_healthy.append((s_name, insp))
-
-                if len(running_healthy) == 1:
-                    chosen_slot, insp = running_healthy[0]
-                    state["active_slot"] = chosen_slot
-                    state["degraded"] = False
-                    state["degraded_reason"] = None
+                # Check intentional stop marker on active slot
+                if is_intentional_stop(app_name, active_slot, self.state_dir):
+                    logger.info("Reconcile: Active slot %s for app %s was intentionally stopped. Skipping failover.", active_slot, app_name)
                     if "slots" not in state:
                         state["slots"] = {}
-                    state["slots"][chosen_slot] = {
-                        "container_id": insp.get("Id", ""),
-                        "image_digest": insp.get("Image", ""),
-                        "status": "running",
-                        "health": "healthy",
-                        "last_transition": now,
-                    }
+                    if active_slot not in state["slots"]:
+                        state["slots"][active_slot] = {}
+                    state["slots"][active_slot]["status"] = "stopped"
                     save_state_atomic(app_name, state, self.state_dir)
-                    logger.info("Reconcile: Identified running active slot %s for app %s", chosen_slot, app_name)
-                else:
-                    # Missing active: safe degraded mode, NEVER default to blue
-                    state["degraded"] = True
-                    state["degraded_reason"] = f"Missing active slot; found {len(running_healthy)} healthy candidates"
-                    save_state_atomic(app_name, state, self.state_dir)
-                    logger.warning("Reconcile: Missing active slot for app %s. Degraded mode entered, no default blue.", app_name)
                     return
-                active_slot = state.get("active_slot")
 
-            active_cfg = app_cfg.slots.get(active_slot)
-            if not active_cfg:
-                state["degraded"] = True
-                state["degraded_reason"] = f"Active slot {active_slot} not configured in registry"
-                save_state_atomic(app_name, state, self.state_dir)
-                return
+                active_insp = self.docker_client.inspect_container(active_cfg.container_name)
+                is_active_healthy = (
+                    active_insp is not None
+                    and active_insp.get("State", {}).get("Status") == "running"
+                    and active_insp.get("State", {}).get("Health", {}).get("Status") != "unhealthy"
+                )
 
-            active_insp = self.docker_client.inspect_container(active_cfg.container_name)
-            is_active_healthy = (
-                active_insp is not None
-                and active_insp.get("State", {}).get("Status") == "running"
-                and active_insp.get("State", {}).get("Health", {}).get("Status") != "unhealthy"
-            )
-
-            if not is_active_healthy:
-                logger.warning("Reconcile: Active slot container %s is unhealthy/stopped for app %s.", active_cfg.container_name, app_name)
-                # Fall into failover handling
-                cid = active_insp.get("Id", "") if active_insp else ""
-                # Call handle_failover logic within current lock
-                # Release lock to avoid nested re-entry
-            else:
-                # Active is healthy. Verify standby slot:
-                # Controller handles intentional standby stopped: Standby stopped is valid.
-                if "slots" not in state:
-                    state["slots"] = {}
-                state["slots"][active_slot] = {
-                    "container_id": active_insp.get("Id", ""),
-                    "image_digest": active_insp.get("Image", ""),
-                    "status": "running",
-                    "health": active_insp.get("State", {}).get("Health", {}).get("Status", "healthy"),
-                    "last_transition": now,
-                }
-                for s_name, s_cfg in app_cfg.slots.items():
-                    if s_name == active_slot:
-                        continue
-                    standby_insp = self.docker_client.inspect_container(s_cfg.container_name)
-                    standby_status = standby_insp.get("State", {}).get("Status") if standby_insp else "stopped"
-                    state["slots"][s_name] = {
-                        "container_id": standby_insp.get("Id", "") if standby_insp else "",
-                        "image_digest": standby_insp.get("Image", "") if standby_insp else "",
-                        "status": standby_status,
-                        "health": standby_insp.get("State", {}).get("Health", {}).get("Status", "") if standby_insp else "",
+                if is_active_healthy:
+                    # Active is healthy. Verify standby slot:
+                    # Standby stopped is valid in warm standby!
+                    if "slots" not in state:
+                        state["slots"] = {}
+                    state["slots"][active_slot] = {
+                        "container_id": active_insp.get("Id", ""),
+                        "image_digest": active_insp.get("Image", ""),
+                        "status": "running",
+                        "health": active_insp.get("State", {}).get("Health", {}).get("Status", "healthy"),
                         "last_transition": now,
                     }
-                save_state_atomic(app_name, state, self.state_dir)
+                    for s_name, s_cfg in app_cfg.slots.items():
+                        if s_name == active_slot:
+                            continue
+                        standby_insp = self.docker_client.inspect_container(s_cfg.container_name)
+                        standby_status = standby_insp.get("State", {}).get("Status") if standby_insp else "stopped"
+                        state["slots"][s_name] = {
+                            "container_id": standby_insp.get("Id", "") if standby_insp else "",
+                            "image_digest": standby_insp.get("Image", "") if standby_insp else "",
+                            "status": standby_status,
+                            "health": standby_insp.get("State", {}).get("Health", {}).get("Status", "") if standby_insp else "",
+                            "last_transition": now,
+                        }
+                    save_state_atomic(app_name, state, self.state_dir)
+                else:
+                    logger.warning("Reconcile: Active slot container %s is unhealthy/stopped for app %s.", active_cfg.container_name, app_name)
+                    cid = active_insp.get("Id", "") if active_insp else ""
 
-        if not is_active_healthy:
+        except TimeoutError as e:
+            logger.warning("Reconcile: mutual host lock contention on app %s (%s). Skipping safely.", app_name, e)
+            return
+
+        if not is_active_healthy and active_slot:
             # Active container unhealthy: execute failover
             self.handle_failover(app_name, active_slot, cid, "reconcile_failure")
 
@@ -894,9 +1061,8 @@ class FailoverEngine:
         backoff = backoff_init
         while self.running:
             try:
-                logger.info("Connecting to Docker event stream...")
                 stream = self.docker_client.events_stream()
-                # Run reconcile on successful (re)connect
+                logger.info("Connected to Docker event stream. Performing reconnect reconcile...")
                 self.reconcile_all()
                 backoff = backoff_init
 
@@ -940,7 +1106,6 @@ class FailoverEngine:
         self.running = False
         self._stop_event.set()
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="VPS Multi-App Unified Failover Controller")
     parser.add_argument("--reconcile", action="store_true", help="Run one-shot safety net reconcile and exit")
@@ -949,8 +1114,8 @@ def parse_args():
     parser.add_argument("--registry-dir", type=str, default=str(DEFAULT_REGISTRY_DIR))
     parser.add_argument("--state-dir", type=str, default=str(DEFAULT_STATE_DIR))
     parser.add_argument("--lock-dir", type=str, default=str(DEFAULT_LOCK_DIR))
+    parser.add_argument("--journal-path", type=str, default=None, help="Path to deployment transaction journal")
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
@@ -958,6 +1123,7 @@ def main():
         registry_dir=args.registry_dir,
         state_dir=args.state_dir,
         lock_dir=args.lock_dir,
+        journal_path=args.journal_path,
     )
 
     if args.status:
@@ -985,7 +1151,6 @@ def main():
     signal.signal(signal.SIGTERM, sig_handler)
 
     engine.start_daemon()
-
 
 if __name__ == "__main__":
     main()

@@ -106,6 +106,32 @@ Docker Daemon (/var/run/docker.sock)
 }
 ```
 
+## Deployment Journal Coordination & Mutual Host Locking
+
+The controller coordinates with transactional deployments (`deploy-gateway.sh`, `deploy-worker.sh`, `deploy-schema.sh`, `deploy-auth-browser.sh`, `deploy-tts.sh`, `deploy-bark.sh`):
+1. **Mutual Host Lock (`/run/lock/vps-failover/<app>.lock`)**: Deployment scripts and the failover controller share the exact same per-app lock path. If deploy holds the lock, the failover engine catches lock contention, backs off safely, and never races or corrupts the route pointer.
+2. **Deployment Journal Awareness (`deploy-journal.json`)**: When a deploy transaction is active (`TX_INITIALIZED`, `CANDIDATE_STARTING`, `VERIFYING_HEALTH`, `SWITCHING_ROUTE`, `VERIFYING_ACK`, `TX_SOAKING`, `TX_COMMITTED`), failover promotion is strictly inhibited. The controller treats candidate containers running during tests or soak as candidate state rather than committed state.
+3. **Intentional Stop Markers (`intentional-stop-<slot>`)**: Prior to stopping old slots after deployment or during maintenance, deploy scripts place intentional stop markers in `/var/lib/vps-failover/apps/<app>/` and `/tmp/vps-failover/`. Docker container termination (`die`, `oom`) events matching an intentional stop marker are treated as expected transitions and do not trigger failovers.
+
+## Exact Route Identity ACK & Bounded Recovery
+
+- **Positive Edge Route ACK**: When failover activates warm standby, the controller executes the trusted switch command and verifies route ACK. If the route switch or edge ACK fails, the standby container is rolled back/stopped, and the app enters degraded mode without promoting a faulty target.
+- **Bounded Cooldown & Exponential Backoff**: Failovers are bounded by `cooldown_seconds` and `max_restarts`. Repeated flapping triggers a degraded alert rather than endless restart storms.
+
+## Split-Brain Prevention & Singleton Fencing
+
+- **Singleton Workloads (`worker`, `auth-browser`)**: Registered singleton apps undergo bounded restarts on failure using exponential backoff (`min_restart_interval` and `backoff_factor`).
+- **Strict Fencing**: The controller restarts only the existing singleton container name (`acb-worker`, `acb-auth-browser`) and never spawns parallel or duplicate containers. If an active deployment is in progress for the component, failover restarts are deferred.
+
+## Edge Case Failure Handlers
+
+| Failure Scenario | Controller Action |
+|---|---|
+| **Crash Between Phases** | State files use atomic tmp writes (`state.json.tmp.*`) with directory fsync. Orphan `.tmp` files left behind by crashes are cleaned up automatically on engine startup. |
+| **Stale / Corrupt State** | Corrupt JSON in `state.json` is automatically backed up to `state.json.corrupt.<ts>`. The controller resets to initial safe degraded state and inspects actual live Docker containers rather than arbitrarily switching traffic. |
+| **Rollback Failure** | If standby startup or switch ACK fails, the failed container is stopped, state is updated with `degraded=True` and explicit reason, and no active promotion occurs. |
+| **Both Slots Degraded** | If the active slot dies and the standby slot fails start or readiness check, the controller halts failover, stops failed containers, and declares degraded state (`Both slots degraded`). |
+
 ## Operation Leases & Stale Lease Eviction
 
 Deploy processes or maintenance tools may acquire an operation lease in `state.json`:

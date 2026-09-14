@@ -130,6 +130,7 @@ def env():
     reg_dir.mkdir(parents=True)
     st_dir.mkdir(parents=True)
     lk_dir.mkdir(parents=True)
+    journal_path = Path(temp_dir) / "deploy-journal.json"
 
     clock = FakeClock(1000.0)
     runner = FakeRunner()
@@ -142,6 +143,7 @@ def env():
         runner=runner,
         docker_client=docker,
         clock=clock,
+        journal_path=journal_path,
     )
 
     yield {
@@ -149,6 +151,7 @@ def env():
         "reg_dir": reg_dir,
         "st_dir": st_dir,
         "lk_dir": lk_dir,
+        "journal_path": journal_path,
         "clock": clock,
         "runner": runner,
         "docker": docker,
@@ -172,6 +175,9 @@ def create_app_registry(reg_dir: Path, app: str, slots: dict = None, switch_cmd:
         "max_restarts": kwargs.get("max_restarts", 3),
         "switch_cmd": switch_cmd or ["/usr/local/bin/platform-switch", "{app}", "{slot}"],
     }
+    for k, v in kwargs.items():
+        if k not in data:
+            data[k] = v
     if kwargs.get("workload_class") == "singleton":
         data["container_name"] = kwargs.get("container_name", app)
         data.pop("slots", None)
@@ -574,3 +580,358 @@ def test_apps_registry_matches_compose():
                 assert cname in compose_containers, (
                     f"{json_file.name}: slot '{slot_name}' container '{cname}' not found in compose.prod.yaml ({compose_containers})"
                 )
+
+
+# 13. Deployment Journal Blocks Failover & No Promotion During Transaction
+def test_deployment_journal_blocks_failover(env):
+    """When a deployment transaction is active, failover is strictly inhibited."""
+    create_app_registry(env["reg_dir"], "acb")
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="running", health="healthy")
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="stopped", health="")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    st["slots"] = {
+        "blue": {"container_id": "cid-blue-1", "status": "running"},
+        "green": {"container_id": "cid-green-1", "status": "stopped"},
+    }
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    # Active deployment journal written
+    env["journal_path"].write_text(json.dumps({
+        "tx_id": "tx-deploy-999",
+        "component": "gateway",
+        "state": "CANDIDATE_STARTING",
+        "active_slot": "blue",
+        "candidate_slot": "green",
+    }), encoding="utf-8")
+
+    # Active slot dies mid-deploy
+    event = {
+        "Action": "die",
+        "Actor": {"ID": "cid-blue-1", "Attributes": {"name": "acb-web-blue"}},
+    }
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    # Verify: failover was inhibited by active transaction
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] == "blue"
+    assert "acb-web-green" not in env["docker"].started
+    assert len(env["runner"].history) == 0
+
+
+# 14. Candidate vs Committed State (No Premature Promotion)
+def test_candidate_vs_committed_state_no_promotion(env):
+    """Candidate container running during deployment is not promoted before commit."""
+    create_app_registry(env["reg_dir"], "acb")
+    # Candidate green is running for testing/soak, but active slot is blue
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="running", health="healthy")
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="running", health="healthy")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    env["journal_path"].write_text(json.dumps({
+        "tx_id": "tx-deploy-soak",
+        "component": "gateway",
+        "state": "TX_SOAKING",
+        "active_slot": "blue",
+        "candidate_slot": "green",
+    }), encoding="utf-8")
+
+    # Reconcile runs during soak
+    env["engine"].reconcile_app("acb")
+
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] == "blue"
+    assert len(env["runner"].history) == 0
+
+
+# 15. Mutual Host Lock Contention Safe Exit
+def test_mutual_host_lock_contention_safe_exit(env):
+    """When deploy holds the app lock, controller catches contention and exits safely without mutating route."""
+    create_app_registry(env["reg_dir"], "acb")
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="running", health="healthy")
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="stopped", health="")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    # Simulate deploy holding mutual lock with immediate timeout
+    lock = ctrl.AppLock("acb", env["lk_dir"], timeout=0.05)
+    lock.acquire()
+    try:
+        # Lower controller lock timeout for rapid test
+        orig_app_lock = ctrl.AppLock
+        class FastAppLock(orig_app_lock):
+            def __init__(self, app_name, lock_dir, timeout=0.05):
+                super().__init__(app_name, lock_dir, timeout=0.05)
+        ctrl.AppLock = FastAppLock
+
+        event = {
+            "Action": "die",
+            "Actor": {"ID": "cid-blue-1", "Attributes": {"name": "acb-web-blue"}},
+        }
+        env["engine"].ingest_docker_event(event)
+        # Process event should not raise exception on lock contention
+        env["engine"].process_event_batch()
+
+        # Route switch was NOT attempted
+        assert len(env["runner"].history) == 0
+    finally:
+        ctrl.AppLock = orig_app_lock
+        lock.release()
+
+
+# 16. Crash Between Phases: Orphan Tmp Cleanup
+def test_crash_between_phases_tmp_cleanup(env):
+    """Ungraceful crash between write phases leaves .tmp files; engine cleans them up."""
+    acb_dir = env["st_dir"] / "acb"
+    acb_dir.mkdir(parents=True, exist_ok=True)
+    orphan_tmp = acb_dir / "state.json.tmp.9999_fakeuuid"
+    orphan_tmp.write_text('{"incomplete": true}', encoding="utf-8")
+    assert orphan_tmp.exists()
+
+    ctrl.clean_stale_tmp_files(env["st_dir"])
+    assert orphan_tmp.exists() is False
+
+
+# 17. Corrupt State Safe Recovery: No Blind Switch
+def test_corrupt_state_safe_recovery_no_blind_switch(env):
+    """Corrupt state.json is safely backed up to .corrupt.<ts> and does not blindly promote default slot."""
+    create_app_registry(env["reg_dir"], "acb")
+    acb_dir = env["st_dir"] / "acb"
+    acb_dir.mkdir(parents=True, exist_ok=True)
+    state_file = acb_dir / "state.json"
+    state_file.write_text("{ unclosed invalid json string ...", encoding="utf-8")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    assert st["degraded"] is True
+    assert "corrupt state file recovered" in st["degraded_reason"].lower()
+
+    corrupt_backups = list(acb_dir.glob("state.json.corrupt.*"))
+    assert len(corrupt_backups) == 1
+
+    # Reconcile with no healthy containers running
+    env["engine"].reconcile_app("acb")
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] is None
+    assert post_st["degraded"] is True
+    assert len(env["runner"].history) == 0
+
+
+# 18. Intentional Stop Marker Prevents Failover
+def test_intentional_stop_marker_prevents_failover(env):
+    """When a slot has an intentional stop marker, die event is treated as expected transition."""
+    create_app_registry(env["reg_dir"], "acb")
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="running", health="healthy")
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="stopped", health="")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    st["slots"] = {"blue": {"container_id": "cid-blue-1", "status": "running"}}
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    # Create intentional stop marker for blue
+    acb_dir = env["st_dir"] / "acb"
+    (acb_dir / "intentional-stop-blue").write_text('{"desired":"stopped"}', encoding="utf-8")
+
+    event = {
+        "Action": "die",
+        "Actor": {"ID": "cid-blue-1", "Attributes": {"name": "acb-web-blue"}},
+    }
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] == "blue"
+    assert post_st["slots"]["blue"]["status"] == "stopped"
+    assert "acb-web-green" not in env["docker"].started
+    assert len(env["runner"].history) == 0
+
+
+# 19. Switch Command Failure: Rollback & Degraded
+def test_switch_command_failure_rollback_and_degraded(env):
+    """When switch command fails, standby container is stopped, state is marked degraded, no promotion."""
+    create_app_registry(env["reg_dir"], "acb")
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="exited", health="")
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="stopped", health="")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    st["slots"] = {"blue": {"container_id": "cid-blue-1", "status": "running"}}
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    # Simulate switch command failing route ACK
+    env["runner"].responses[("/usr/local/bin/platform-switch", "acb", "green")] = (
+        1, "", "Route identity ACK failed: 502 Bad Gateway"
+    )
+
+    event = {
+        "Action": "die",
+        "Actor": {"ID": "cid-blue-1", "Attributes": {"name": "acb-web-blue"}},
+    }
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] == "blue"  # Green was NOT committed
+    assert post_st["degraded"] is True
+    assert "route switch or identity ack failed" in post_st["degraded_reason"].lower()
+    # Confirm candidate was stopped/rolled back
+    assert ["docker", "stop", "-t", "5", "acb-web-green"] in env["runner"].history
+
+
+# 20. Both Slots Degraded: Primary Dies and Standby Fails to Start
+def test_both_slots_degraded_standby_start_fails(env):
+    """When primary dies and standby start fails, both slots degraded is declared, no switch."""
+    create_app_registry(env["reg_dir"], "acb")
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="exited", health="")
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="stopped", health="")
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    st["slots"] = {"blue": {"container_id": "cid-blue-1", "status": "running"}}
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    # Standby start fails (e.g. Docker daemon error / OOM)
+    env["docker"].start_container = lambda name: (1, "", "Cannot start container: out of memory")
+
+    event = {
+        "Action": "die",
+        "Actor": {"ID": "cid-blue-1", "Attributes": {"name": "acb-web-blue"}},
+    }
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] == "blue"
+    assert post_st["degraded"] is True
+    assert "both slots degraded" in post_st["degraded_reason"].lower()
+    assert len(env["runner"].history) == 0
+
+
+# 21. Both Slots Degraded: Standby Fails Readiness Probe
+def test_both_slots_degraded_standby_readiness_timeout(env):
+    """When primary dies and standby fails readiness probe within timeout, both degraded is declared."""
+    create_app_registry(env["reg_dir"], "acb", health_timeout=2)
+    env["docker"].add_container("acb-web-blue", "cid-blue-1", status="exited", health="")
+    # Green container stays unhealthy
+    env["docker"].add_container("acb-web-green", "cid-green-1", status="running", health="unhealthy")
+
+    # Override start to leave it unhealthy
+    env["docker"].start_container = lambda name: (0, "started", "")
+    env["docker"].exec_healthcheck = lambda name, probe_cmd=None: False
+
+    st = ctrl.load_state("acb", env["st_dir"])
+    st["active_slot"] = "blue"
+    st["slots"] = {"blue": {"container_id": "cid-blue-1", "status": "running"}}
+    ctrl.save_state_atomic("acb", st, env["st_dir"])
+
+    event = {
+        "Action": "die",
+        "Actor": {"ID": "cid-blue-1", "Attributes": {"name": "acb-web-blue"}},
+    }
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    post_st = ctrl.load_state("acb", env["st_dir"])
+    assert post_st["active_slot"] == "blue"
+    assert post_st["degraded"] is True
+    assert "both slots degraded" in post_st["degraded_reason"].lower()
+    assert ["docker", "stop", "-t", "5", "acb-web-green"] in env["runner"].history
+
+
+# 22. Worker Singleton Recovery with Exponential Backoff and Fencing
+def test_worker_singleton_recovery_with_backoff_and_fencing(env):
+    """Worker singleton fails: restarts with backoff, never spawns duplicate, marks degraded on exhaustion."""
+    create_app_registry(
+        env["reg_dir"],
+        "worker",
+        workload_class="singleton",
+        container_name="acb-worker",
+        max_restarts=3,
+        min_restart_interval=10,
+        backoff_factor=2.0,
+    )
+    env["docker"].add_container("acb-worker", "cid-worker-1", status="exited", health="")
+
+    st = ctrl.load_state("worker", env["st_dir"])
+    ctrl.save_state_atomic("worker", st, env["st_dir"])
+
+    event = {"Action": "die", "Actor": {"ID": "cid-worker-1", "Attributes": {"name": "acb-worker"}}}
+
+    # Restart 1 at t=1000: succeeds
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+    st = ctrl.load_state("worker", env["st_dir"])
+    assert st["restarts_count"] == 1
+    assert "acb-worker" in env["docker"].restarted
+
+    # Rapid failure at t=1002 (within 10s backoff): restart is blocked by backoff
+    env["clock"].advance(2.0)
+    env["docker"].containers["acb-worker"]["State"]["Status"] = "exited"
+    restarts_before = len(env["docker"].restarted)
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+    assert len(env["docker"].restarted) == restarts_before  # no new restart
+
+    # Advance clock to t=1015 (past 10s backoff): restart 2 succeeds
+    env["clock"].advance(13.0)
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+    st = ctrl.load_state("worker", env["st_dir"])
+    assert st["restarts_count"] == 2
+    assert len(env["docker"].restarted) == restarts_before + 1
+
+    # Advance clock past second backoff (20s) to t=1040: restart 3 succeeds
+    env["clock"].advance(25.0)
+    env["docker"].containers["acb-worker"]["State"]["Status"] = "exited"
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+    st = ctrl.load_state("worker", env["st_dir"])
+    assert st["restarts_count"] == 3
+
+    # Failure 4 at t=1090: exceeds max_restarts (3) -> marked degraded, no new restart
+    env["clock"].advance(50.0)
+    env["docker"].containers["acb-worker"]["State"]["Status"] = "exited"
+    restarts_before_exhaust = len(env["docker"].restarted)
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+    st = ctrl.load_state("worker", env["st_dir"])
+    assert st["degraded"] is True
+    assert "exceeded max restarts" in st["degraded_reason"].lower()
+    assert len(env["docker"].restarted) == restarts_before_exhaust
+
+
+# 23. Worker Singleton: Deploy in Progress Inhibits Controller Restarts
+def test_worker_deployment_in_progress_inhibits_restart(env):
+    """When deployment transaction is active for worker, failover controller does not touch worker."""
+    create_app_registry(
+        env["reg_dir"],
+        "worker",
+        workload_class="singleton",
+        container_name="acb-worker",
+        max_restarts=3,
+    )
+    env["docker"].add_container("acb-worker", "cid-worker-1", status="exited", health="")
+
+    st = ctrl.load_state("worker", env["st_dir"])
+    ctrl.save_state_atomic("worker", st, env["st_dir"])
+
+    env["journal_path"].write_text(json.dumps({
+        "tx_id": "tx-worker-upgrade",
+        "component": "worker",
+        "state": "CANDIDATE_STARTING",
+    }), encoding="utf-8")
+
+    event = {"Action": "die", "Actor": {"ID": "cid-worker-1", "Attributes": {"name": "acb-worker"}}}
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    assert len(env["docker"].restarted) == 0
+    st = ctrl.load_state("worker", env["st_dir"])
+    assert st["restarts_count"] == 0

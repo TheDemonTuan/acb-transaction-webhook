@@ -195,25 +195,71 @@ recover_tx_journal() {
 
   log_warn "RECOVERY: Found uncommitted or interrupted transaction journal in state [${cur_state}]!"
 
+  local component
+  component="$(grep -o '"component":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "gateway")"
   local cand_slot
   cand_slot="$(grep -o '"candidate_slot":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
   local act_slot
   act_slot="$(grep -o '"active_slot":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
+  local prev_digest
+  prev_digest="$(grep -o '"previous_digest":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
 
-  # If state was uncommitted, candidate must be stopped and route verified
-  if [[ -n "$cand_slot" && "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_SOAKING" ]]; then
-    log_info "RECOVERY: Stopping uncommitted candidate container [acb-gateway-${cand_slot}]..."
-    docker compose -f "$COMPOSE_FILE" stop "gateway-${cand_slot}" 2>/dev/null || docker stop "acb-gateway-${cand_slot}" 2>/dev/null || true
-    if [[ -n "$act_slot" && -f "$ACB_CONFIG" ]]; then
-      if ! grep -q "acb-web-${act_slot}" "$ACB_CONFIG" 2>/dev/null; then
-        log_warn "RECOVERY: Restoring Traefik route pointer back to known active slot [${act_slot}]..."
-        if [[ -f "${ACB_CONFIG}.prev" ]]; then
-          cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null || true
+  case "$component" in
+    gateway)
+      if [[ -n "$cand_slot" && "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_SOAKING" ]]; then
+        log_info "RECOVERY: Stopping uncommitted candidate container [acb-gateway-${cand_slot}]..."
+        docker compose -f "$COMPOSE_FILE" stop "gateway-${cand_slot}" 2>/dev/null || docker stop "acb-gateway-${cand_slot}" 2>/dev/null || true
+        if [[ -n "$act_slot" && -f "$ACB_CONFIG" ]]; then
+          if ! grep -q "acb-web-${act_slot}" "$ACB_CONFIG" 2>/dev/null; then
+            log_warn "RECOVERY: Restoring Traefik route pointer back to known active slot [${act_slot}]..."
+            if [[ -f "${ACB_CONFIG}.prev" ]]; then
+              cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null || true
+            fi
+            printf '%s' "$act_slot" > "$ACTIVE_SLOT_FILE" 2>/dev/null || true
+          fi
         fi
-        printf '%s' "$act_slot" > "$ACTIVE_SLOT_FILE" 2>/dev/null || true
       fi
-    fi
-  fi
+      ;;
+    worker)
+      if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
+        log_warn "RECOVERY: Interrupted worker transaction. Restoring singleton container..."
+        docker stop -t 10 acb-worker 2>/dev/null || true
+        if [[ -n "$prev_digest" ]]; then
+          WORKER_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps worker 2>/dev/null || true
+        fi
+      fi
+      ;;
+    auth-browser)
+      if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
+        log_warn "RECOVERY: Interrupted auth-browser transaction. Restoring previous container..."
+        docker stop -t 5 acb-auth-browser 2>/dev/null || docker stop -t 5 acb-browser 2>/dev/null || true
+        if [[ -n "$prev_digest" ]]; then
+          BROWSER_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps auth-browser 2>/dev/null || true
+        fi
+      fi
+      ;;
+    tts|tts-gateway)
+      if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
+        log_warn "RECOVERY: Interrupted TTS transaction. Restoring previous container..."
+        docker stop -t 5 acb-tts-gateway 2>/dev/null || docker stop -t 5 tts-gateway 2>/dev/null || true
+        if [[ -n "$prev_digest" ]]; then
+          TTS_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps tts-gateway 2>/dev/null || true
+        fi
+      fi
+      ;;
+    bark)
+      if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
+        log_warn "RECOVERY: Interrupted Bark transaction. Restoring previous container..."
+        docker stop -t 5 acb-bark 2>/dev/null || docker stop -t 5 bark 2>/dev/null || true
+        if [[ -n "$prev_digest" ]]; then
+          BARK_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps bark 2>/dev/null || true
+        fi
+      fi
+      ;;
+    *)
+      log_warn "RECOVERY: Unrecognized component [$component] in transaction journal."
+      ;;
+  esac
 
   archive_tx_journal "recovered"
   clear_deploy_state
