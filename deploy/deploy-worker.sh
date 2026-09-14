@@ -35,11 +35,93 @@ acquire_deploy_lock
 
 WORKER_DEPLOY_OWNER="deploy-worker-$(date -u +%Y%m%d%H%M%S)"
 GATE_TOKEN=""
-PREV_WORKER_REF="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
+OLD_WORKER_QUIESCED=0
 OLD_WORKER_STOPPED=0
+
+# Resolve previous running worker image digest
+resolve_previous_worker_image() {
+  local prev=""
+  prev="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
+  if [[ -n "$prev" ]] && validate_digest "$prev" "worker" 2>/dev/null; then
+    printf '%s\n' "$prev"
+    return 0
+  fi
+
+  # Fallback to inspecting running worker container if release.env missing or unpinned
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
+    local cfg_img
+    cfg_img="$(docker inspect --format '{{.Config.Image}}' acb-worker 2>/dev/null || true)"
+    if [[ -n "$cfg_img" ]] && validate_digest "$cfg_img" "worker" 2>/dev/null; then
+      printf '%s\n' "$cfg_img"
+      return 0
+    fi
+
+    local img_id
+    img_id="$(docker inspect --format '{{.Image}}' acb-worker 2>/dev/null || true)"
+    if [[ -n "$img_id" ]]; then
+      local repo_digests
+      repo_digests="$(docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$img_id" 2>/dev/null || true)"
+      while IFS= read -r line; do
+        if [[ -n "$line" ]] && validate_digest "$line" "worker" 2>/dev/null; then
+          printf '%s\n' "$line"
+          return 0
+        fi
+      done <<< "$repo_digests"
+    fi
+  fi
+
+  return 1
+}
+
+PREV_WORKER_REF="$(resolve_previous_worker_image 2>/dev/null || true)"
+
+OLD_WORKER_RUNNING=0
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
+  OLD_WORKER_RUNNING=1
+fi
+
+resume_old_worker() {
+  log_info "Resuming old worker via RPC..."
+  if [[ -n "${WORKER_RESUME_CMD:-}" ]]; then
+    local out
+    if out="$(eval "$WORKER_RESUME_CMD" 2>&1)"; then
+      log_info "Old worker resumed via command: ${out}"
+      return 0
+    fi
+    log_error "Worker resume command failed: ${out}"
+    return 1
+  fi
+
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
+    local r_resp=""
+    if r_resp="$(docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -resume 2>&1)"; then
+      log_info "Old worker resumed via container exec: ${r_resp}"
+      return 0
+    fi
+
+    local rpc_port="8190"
+    if [[ -n "${WORKER_PORT:-}" ]]; then
+      rpc_port="$WORKER_PORT"
+    elif [[ "${WORKER_RPC_URL:-}" =~ :([0-9]+) ]]; then
+      rpc_port="${BASH_REMATCH[1]}"
+    fi
+
+    if r_resp="$(docker run --rm --network container:acb-worker --entrypoint /worker -v "$SECRETS_DIR/worker_internal_token:/run/secrets/worker_internal_token:ro" -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token -e WORKER_PORT="$rpc_port" "$CANDIDATE_WORKER_IMAGE" -resume 2>&1)"; then
+      log_info "Old worker resumed via candidate container RPC: ${r_resp}"
+      return 0
+    fi
+    log_error "Failed to resume running worker container: ${r_resp}"
+    return 1
+  fi
+  return 0
+}
 
 cleanup_worker_deploy() {
   local exit_code=$?
+  if [[ "${OLD_WORKER_QUIESCED:-0}" -eq 1 && "${OLD_WORKER_STOPPED:-0}" -eq 0 ]]; then
+    log_warn "Upgrade aborted after worker was quiesced but before container was stopped. Resuming old worker..."
+    resume_old_worker 2>/dev/null || log_error "Failed to resume quiesced old worker"
+  fi
   if [[ -n "${GATE_TOKEN:-}" || -n "${WORKER_DEPLOY_OWNER:-}" ]]; then
     release_mutation_gate "$DATA_VOLUME_NAME" "${DBTOOL_IMAGE_REF:-}" "$WORKER_DEPLOY_OWNER" "${GATE_TOKEN:-}" 2>/dev/null || true
   fi
@@ -55,6 +137,14 @@ log_info "Previous Worker Image:  ${PREV_WORKER_REF:-none}"
 log_info "Owner:                  ${WORKER_DEPLOY_OWNER}"
 log_info "=========================================================="
 
+# Safety check: fail closed before mutation gate or stop if running worker lacks rollback digest
+if [[ "$OLD_WORKER_RUNNING" -eq 1 ]]; then
+  if [[ -z "${PREV_WORKER_REF:-}" ]] || ! validate_digest "$PREV_WORKER_REF" "previous worker" 2>/dev/null; then
+    log_error "CRITICAL: Running worker container detected, but failed to resolve valid immutable rollback digest. Aborting before quiesce/stop."
+    exit 1
+  fi
+fi
+
 # 1. Preflight active-auth check (active in-flight sessions block worker upgrade)
 if ! check_active_auth_gate; then
   log_error "Worker upgrade aborted: active customer authentication attempt in progress or check failed."
@@ -66,39 +156,100 @@ GATE_TOKEN="$(acquire_mutation_gate "$DATA_VOLUME_NAME" "${DBTOOL_IMAGE_REF:-}" 
 
 # 3. Quiesce old worker via RPC if container is running
 WORKER_RPC_URL="${WORKER_RPC_URL:-http://127.0.0.1:8190}"
-WORKER_TOKEN=""
-if [[ -f "$SECRETS_DIR/worker_internal_token" ]]; then
-  WORKER_TOKEN="$(tr -d ' \r\n' < "$SECRETS_DIR/worker_internal_token")"
-fi
+
+verify_quiesce_response() {
+  local resp="$1"
+  if [[ -z "$resp" ]]; then
+    return 1
+  fi
+  local is_quiesced="false"
+  if command -v jq >/dev/null 2>&1; then
+    is_quiesced="$(printf '%s' "$resp" | jq -e -r '.quiesced' 2>/dev/null || echo "false")"
+  fi
+  if [[ "$is_quiesced" != "true" ]] && command -v python3 >/dev/null 2>&1; then
+    is_quiesced="$(python3 -c "import sys, json, re
+text = sys.stdin.read()
+m = re.search(r'\{.*\}', text, re.DOTALL)
+if m:
+    try:
+        data = json.loads(m.group(0))
+        if data.get('quiesced') is True:
+            print('true')
+            sys.exit(0)
+    except Exception:
+        pass
+print('false')
+" <<< "$resp" 2>/dev/null || echo "false")"
+  fi
+  if [[ "$is_quiesced" != "true" ]]; then
+    if [[ "$resp" =~ \"quiesced\"[[:space:]]*:[[:space:]]*true ]]; then
+      is_quiesced="true"
+    fi
+  fi
+
+  if [[ "$is_quiesced" == "true" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+verify_quiesced_json() {
+  verify_quiesce_response "$@"
+}
 
 quiesce_old_worker() {
-  log_info "Quiescing old worker via RPC (${WORKER_RPC_URL}/rpc/quiesce)..."
+  log_info "Quiescing old worker via RPC..."
   if [[ -n "${WORKER_QUIESCE_CMD:-}" ]]; then
     local out
-    if ! out="$($WORKER_QUIESCE_CMD 2>&1)"; then
+    if ! out="$(eval "$WORKER_QUIESCE_CMD" 2>&1)"; then
       log_error "Worker quiesce command failed: ${out}"
       return 1
     fi
+    if ! verify_quiesced_json "$out"; then
+      log_error "Worker quiesce command returned unverified response: ${out}"
+      return 1
+    fi
+    OLD_WORKER_QUIESCED=1
     log_info "Old worker quiesced successfully: ${out}"
     return 0
   fi
 
-  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^acb-worker$'; then
-    local q_resp
-    if q_resp="$(docker exec -e WORKER_INTERNAL_TOKEN="${WORKER_TOKEN}" acb-worker /worker -quiesce 2>&1)"; then
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
+    local q_resp=""
+    local exec_ok=0
+    if q_resp="$(docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -quiesce 2>&1)"; then
+      if verify_quiesced_json "$q_resp"; then
+        exec_ok=1
+      fi
+    fi
+
+    if [[ "$exec_ok" -eq 1 ]]; then
+      OLD_WORKER_QUIESCED=1
       log_info "Old worker quiesced via container exec: ${q_resp}"
       return 0
     fi
-    log_info "Container exec quiesce did not succeed (${q_resp}); trying host RPC..."
-    if command -v curl >/dev/null 2>&1; then
-      if q_resp="$(curl -s -f -m 30 -X POST \
-        -H "Content-Type: application/json" \
-        -H "X-Worker-Internal-Token: ${WORKER_TOKEN}" \
-        "${WORKER_RPC_URL}/rpc/quiesce" 2>&1)"; then
-        log_info "Old worker quiesce RPC reported: ${q_resp}"
-        return 0
-      fi
+
+    log_info "Container exec quiesce did not succeed (${q_resp}); trying candidate image RPC client..."
+
+    local rpc_port="8190"
+    if [[ -n "${WORKER_PORT:-}" ]]; then
+      rpc_port="$WORKER_PORT"
+    elif [[ "${WORKER_RPC_URL:-}" =~ :([0-9]+) ]]; then
+      rpc_port="${BASH_REMATCH[1]}"
     fi
+
+    if q_resp="$(docker run --rm --network container:acb-worker --entrypoint /worker -v "$SECRETS_DIR/worker_internal_token:/run/secrets/worker_internal_token:ro" -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token -e WORKER_PORT="$rpc_port" "$CANDIDATE_WORKER_IMAGE" -quiesce 2>&1)"; then
+      if verify_quiesce_response "$q_resp"; then
+        OLD_WORKER_QUIESCED=1
+        log_info "Old worker quiesced via candidate container RPC: ${q_resp}"
+        return 0
+      else
+        log_error "Candidate container quiesce returned unverified response: ${q_resp}"
+      fi
+    else
+      log_error "Candidate container quiesce RPC failed: ${q_resp}"
+    fi
+
     log_error "Failed to quiesce running worker container: ${q_resp}"
     return 1
   else
@@ -112,12 +263,26 @@ if ! quiesce_old_worker; then
   exit 1
 fi
 
+# Pre-stop guard: verify rollback digest exists if old worker was running
+if [[ "$OLD_WORKER_RUNNING" -eq 1 ]]; then
+  if [[ -z "${PREV_WORKER_REF:-}" ]] || ! validate_digest "$PREV_WORKER_REF" "previous worker" 2>/dev/null; then
+    log_error "CRITICAL: Cannot stop running worker: rollback digest is missing or invalid. Aborting."
+    exit 1
+  fi
+fi
+
 # 4. Stop old worker container ONLY AFTER quiesce succeeds
 log_info "Stopping old worker singleton container (acb-worker)..."
 if [[ -n "${WORKER_STOP_CMD:-}" ]]; then
-  $WORKER_STOP_CMD || true
-elif command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | grep -q '^acb-worker$'; then
-  docker stop -t 10 acb-worker >/dev/null 2>&1 || true
+  if ! eval "$WORKER_STOP_CMD"; then
+    log_error "Failed to stop old worker container via command."
+    exit 1
+  fi
+elif command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
+  if ! docker stop -t 10 acb-worker >/dev/null 2>&1; then
+    log_error "Failed to stop acb-worker container."
+    exit 1
+  fi
   docker rm acb-worker >/dev/null 2>&1 || true
 fi
 OLD_WORKER_STOPPED=1
@@ -166,15 +331,15 @@ wait_for_worker_ready() {
   fi
 
   while [[ "$elapsed" -lt "$timeout" ]]; do
-    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^acb-worker$'; then
+    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
       if docker exec acb-worker /worker --readiness-check >/dev/null 2>&1; then
         log_info "Candidate worker passed readiness probe via container probe."
         return 0
       fi
     fi
-    if command -v curl >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1 && [[ -n "${WORKER_RPC_URL:-}" ]]; then
       local code
-      code="$(curl -s -o /dev/null -w "%{http_code}" -m 2 -H "X-Worker-Internal-Token: ${WORKER_TOKEN}" "${WORKER_RPC_URL}/readyz" 2>/dev/null || echo "000")"
+      code="$(curl -s -o /dev/null -w "%{http_code}" -m 2 "${WORKER_RPC_URL}/readyz" 2>/dev/null || echo "000")"
       if [[ "$code" == "200" ]]; then
         log_info "Candidate worker passed readiness probe via HTTP /readyz."
         return 0
@@ -199,7 +364,7 @@ rollback_worker() {
 
   if [[ -n "${WORKER_STOP_CMD:-}" ]]; then
     $WORKER_STOP_CMD || true
-  elif command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | grep -q '^acb-worker$'; then
+  elif command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
     docker stop -t 10 acb-worker >/dev/null 2>&1 || true
     docker rm acb-worker >/dev/null 2>&1 || true
   fi

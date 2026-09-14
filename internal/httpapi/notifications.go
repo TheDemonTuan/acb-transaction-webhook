@@ -241,6 +241,10 @@ func (s *Server) testNotificationChannel(w http.ResponseWriter, r *http.Request)
 			})
 			return
 		}
+		if res.ProviderErrorCode == storage.ErrCodeBarkKeyDecryptionFailed {
+			writeStandardError(w, r, http.StatusBadRequest, res.ProviderErrorCode, res.SanitizedError)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"status": "FAILED",
 			"code":   res.ProviderErrorCode,
@@ -254,6 +258,10 @@ func (s *Server) testNotificationChannel(w http.ResponseWriter, r *http.Request)
 		EndpointRevision: ch.Revision,
 	})
 	if err != nil {
+		if ch.Provider == "BARK" && (errors.Is(err, storage.ErrBarkDecryptionFailed) || errors.Is(err, security.ErrAuthenticationFailed)) {
+			writeStandardError(w, r, http.StatusBadRequest, storage.ErrCodeBarkKeyDecryptionFailed, storage.ErrMsgBarkKeyDecryptionFailed)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "cannot decrypt channel target: "+err.Error())
 		return
 	}

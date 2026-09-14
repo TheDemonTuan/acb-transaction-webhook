@@ -1,13 +1,18 @@
 package httpapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -187,6 +192,233 @@ func TestBrowserScreenCSP(t *testing.T) {
 		}
 		if strings.Contains(cspHeaders[0], "data:") {
 			t.Fatalf("404 response must not contain data:, got %s", cspHeaders[0])
+		}
+	})
+}
+
+func TestBrowserScreenProxyEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "proxy_e2e.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
+		t.Fatal(err)
+	}
+	ownerAttempt, err := store.StartAuthAttempt(ctx, "", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherStore, err := storage.Open(ctx, filepath.Join(t.TempDir(), "other.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherStore.Close()
+	if _, err := otherStore.ConfigureConnection(ctx, "***5678"); err != nil {
+		t.Fatal(err)
+	}
+	otherAttempt, err := otherStore.StartAuthAttempt(ctx, "different-owner@example.com", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type reqRecord struct {
+		Path     string
+		RawQuery string
+		Upgrade  string
+	}
+	var (
+		mu       sync.Mutex
+		lastReq  reqRecord
+		reqCount int
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqCount++
+		lastReq = reqRecord{
+			Path:     r.URL.Path,
+			RawQuery: r.URL.RawQuery,
+			Upgrade:  r.Header.Get("Upgrade"),
+		}
+		mu.Unlock()
+
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+				return
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer conn.Close()
+
+			res := "HTTP/1.1 101 Switching Protocols\r\n" +
+				"Upgrade: websocket\r\n" +
+				"Connection: Upgrade\r\n" +
+				"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+			if _, err := bufrw.WriteString(res); err != nil {
+				return
+			}
+			if err := bufrw.Flush(); err != nil {
+				return
+			}
+
+			// Bidirectional echo test
+			line, err := bufrw.ReadString('\n')
+			if err == nil {
+				_, _ = bufrw.WriteString("echo:" + line)
+				_ = bufrw.Flush()
+			}
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "upstream path=%s query=%s", r.URL.Path, r.URL.RawQuery)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Timezone:           time.UTC,
+		DevelopmentSubject: "owner",
+		AuthBrowserVNCURL:  upstream.URL,
+	}
+	gatewayServer := httptest.NewServer(New(cfg, store).Handler())
+	defer gatewayServer.Close()
+
+	t.Run("WebSocket Upgrade 101 and bidirectional forwarding", func(t *testing.T) {
+		conn, err := net.Dial("tcp", gatewayServer.Listener.Addr().String())
+		if err != nil {
+			t.Fatalf("failed to dial gateway: %v", err)
+		}
+		defer conn.Close()
+
+		reqPath := fmt.Sprintf("/api/v1/connection/auth/%s/screen/websockify?token=vnc-sec-token&autoconnect=true", ownerAttempt.ID)
+		rawReq := fmt.Sprintf(
+			"GET %s HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Upgrade: websocket\r\n"+
+				"Connection: Upgrade\r\n"+
+				"Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==\r\n"+
+				"Sec-WebSocket-Version: 13\r\n\r\n",
+			reqPath, gatewayServer.Listener.Addr().String(),
+		)
+
+		if _, err := conn.Write([]byte(rawReq)); err != nil {
+			t.Fatalf("failed to write WS handshake request: %v", err)
+		}
+
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("failed to read WS handshake response: %v", err)
+		}
+		if resp.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("expected status 101 Switching Protocols, got %d", resp.StatusCode)
+		}
+		if !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+			t.Fatalf("expected Upgrade: websocket, got %q", resp.Header.Get("Upgrade"))
+		}
+		if !strings.Contains(strings.ToLower(resp.Header.Get("Connection")), "upgrade") {
+			t.Fatalf("expected Connection: Upgrade, got %q", resp.Header.Get("Connection"))
+		}
+
+		// Verify upstream observed the correct forwarded path and query
+		mu.Lock()
+		observed := lastReq
+		mu.Unlock()
+		if observed.Path != "/websockify" {
+			t.Fatalf("expected upstream path /websockify, got %q", observed.Path)
+		}
+		if observed.RawQuery != "token=vnc-sec-token&autoconnect=true" {
+			t.Fatalf("expected upstream raw query 'token=vnc-sec-token&autoconnect=true', got %q", observed.RawQuery)
+		}
+
+		// Verify bidirectional payload exchange over hijacked stream
+		testMsg := "ping-rfb\n"
+		if _, err := conn.Write([]byte(testMsg)); err != nil {
+			t.Fatalf("failed to write over upgraded WS connection: %v", err)
+		}
+		echoLine, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed to read echo from upgraded WS connection: %v", err)
+		}
+		if echoLine != "echo:"+testMsg {
+			t.Fatalf("expected echo:%s, got %q", testMsg, echoLine)
+		}
+	})
+
+	t.Run("Query and path forwarding for subpaths", func(t *testing.T) {
+		reqURL := fmt.Sprintf("%s/api/v1/connection/auth/%s/screen/app/images/icons/novnc.svg?resize=scale&logging=warn",
+			gatewayServer.URL, ownerAttempt.ID)
+		resp, err := gatewayServer.Client().Get(reqURL)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		expectedBody := "upstream path=/app/images/icons/novnc.svg query=resize=scale&logging=warn"
+		if string(body) != expectedBody {
+			t.Fatalf("expected body %q, got %q", expectedBody, string(body))
+		}
+
+		mu.Lock()
+		observed := lastReq
+		mu.Unlock()
+		if observed.Path != "/app/images/icons/novnc.svg" {
+			t.Fatalf("expected path /app/images/icons/novnc.svg, got %q", observed.Path)
+		}
+		if observed.RawQuery != "resize=scale&logging=warn" {
+			t.Fatalf("expected query 'resize=scale&logging=warn', got %q", observed.RawQuery)
+		}
+	})
+
+	t.Run("Ownership enforcement", func(t *testing.T) {
+		mu.Lock()
+		countBefore := reqCount
+		mu.Unlock()
+
+		// 1. Another owner's attempt must be rejected (404) and never forwarded upstream
+		diffOwnerURL := fmt.Sprintf("%s/api/v1/connection/auth/%s/screen/websockify",
+			gatewayServer.URL, otherAttempt.ID)
+		respDiff, err := gatewayServer.Client().Get(diffOwnerURL)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		respDiff.Body.Close()
+		if respDiff.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404 for mismatched owner, got %d", respDiff.StatusCode)
+		}
+
+		// 2. Nonexistent attempt must be rejected (404)
+		nonexistentURL := fmt.Sprintf("%s/api/v1/connection/auth/auth_nonexistent999/screen/vnc.html",
+			gatewayServer.URL)
+		respNonexistent, err := gatewayServer.Client().Get(nonexistentURL)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		respNonexistent.Body.Close()
+		if respNonexistent.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404 for nonexistent attempt, got %d", respNonexistent.StatusCode)
+		}
+
+		// 3. Verify upstream was never touched for unauthorized requests
+		mu.Lock()
+		countAfter := reqCount
+		mu.Unlock()
+		if countAfter != countBefore {
+			t.Fatalf("upstream was called %d times for unauthorized requests", countAfter-countBefore)
 		}
 	})
 }

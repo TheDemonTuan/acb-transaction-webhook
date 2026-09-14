@@ -109,11 +109,8 @@ ws_handshake=$(curl -s -i -N \
 if echo "$ws_handshake" | grep -qi "101 Switching Protocols\|101 Web Socket"; then
   echo "noVNC WebSocket upgrade handshake succeeded (HTTP 101 Switching Protocols)."
 else
-  echo "Notice: WebSocket upgrade response did not return 101 directly; verifying port connectivity..."
-  if ! curl --silent --fail --max-time 2 "http://${host}:${AUTH_BROWSER_VNC_PORT}/" >/dev/null 2>&1; then
-    echo "Error: WebSocket/noVNC port ${AUTH_BROWSER_VNC_PORT} is not accessible" >&2
-    exit 1
-  fi
+  echo "Error: noVNC WebSocket upgrade handshake failed on /websockify (expected HTTP 101 Switching Protocols, got: $ws_handshake)" >&2
+  exit 1
 fi
 
 # Step 2: Test POST session creation

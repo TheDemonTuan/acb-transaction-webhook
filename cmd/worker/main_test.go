@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -110,6 +111,80 @@ func TestWorkerQuiesceDrainFlags(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), `"quiesced":true`) {
 			t.Errorf("expected quiesce response in stdout, got %s", stdout.String())
+		}
+	})
+
+	t.Run("worker -quiesce sends POST /rpc/quiesce with WORKER_INTERNAL_TOKEN_FILE", func(t *testing.T) {
+		tokenFile := filepath.Join(t.TempDir(), "worker_token")
+		if err := os.WriteFile(tokenFile, []byte("file-token-secret-456\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command("go", "run", ".", "-quiesce")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=",
+			"WORKER_INTERNAL_TOKEN_FILE="+tokenFile,
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("worker -quiesce failed: %v, stderr: %s", err, stderr.String())
+		}
+		if receivedPath != "/rpc/quiesce" {
+			t.Errorf("expected path /rpc/quiesce, got %s", receivedPath)
+		}
+		if receivedToken != "file-token-secret-456" {
+			t.Errorf("expected token file-token-secret-456, got %s", receivedToken)
+		}
+	})
+
+	t.Run("worker -resume sends POST /rpc/resume with WORKER_INTERNAL_TOKEN_FILE", func(t *testing.T) {
+		tokenFile := filepath.Join(t.TempDir(), "worker_token")
+		if err := os.WriteFile(tokenFile, []byte("resume-token-secret-789\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command("go", "run", ".", "-resume")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=",
+			"WORKER_INTERNAL_TOKEN_FILE="+tokenFile,
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("worker -resume failed: %v, stderr: %s", err, stderr.String())
+		}
+		if receivedPath != "/rpc/resume" {
+			t.Errorf("expected path /rpc/resume, got %s", receivedPath)
+		}
+		if receivedToken != "resume-token-secret-789" {
+			t.Errorf("expected token resume-token-secret-789, got %s", receivedToken)
+		}
+	})
+
+	t.Run("worker -quiesce fails when WORKER_INTERNAL_TOKEN_FILE is missing", func(t *testing.T) {
+		cmd := exec.Command("go", "run", ".", "-quiesce")
+		cmd.Dir = "."
+		cmd.Env = append(os.Environ(),
+			"WORKER_PORT="+port,
+			"WORKER_INTERNAL_TOKEN=",
+			"WORKER_INTERNAL_TOKEN_FILE=/nonexistent/token/file",
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			t.Fatal("expected error with nonexistent token file, got nil")
+		}
+		if !strings.Contains(stderr.String(), "failed to read worker internal token") {
+			t.Fatalf("expected stderr to mention failed to read worker internal token, got %q", stderr.String())
 		}
 	})
 }

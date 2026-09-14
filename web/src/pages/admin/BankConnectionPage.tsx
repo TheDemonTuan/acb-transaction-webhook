@@ -22,6 +22,7 @@ export const BankConnectionPage: React.FC = () => {
   const {
     activeAttempt,
     hasActiveAuth,
+    browserUnavailable,
     startAuth,
     cancelAuth,
     sync,
@@ -209,9 +210,22 @@ export const BankConnectionPage: React.FC = () => {
         ) : (
           <div className="space-y-4 border border-stone-200 rounded-2xl p-4 bg-stone-50/50">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-medium text-emerald-700">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span>Trình duyệt ACB đã sẵn sàng. Bạn có thể thao tác qua VNC bên dưới.</span>
+              <div className="flex items-center gap-2 text-xs font-medium">
+                {browserUnavailable ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="text-amber-700">
+                      Dịch vụ trình duyệt ACB tạm thời gián đoạn. Đang kết nối lại...
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-emerald-700">
+                      Trình duyệt ACB đã sẵn sàng. Bạn có thể thao tác qua VNC bên dưới.
+                    </span>
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <button

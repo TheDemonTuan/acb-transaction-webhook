@@ -10,9 +10,16 @@ import {
 import { queryKeys } from '../../shared/api/query-keys';
 import { isTerminalAuthError } from '../../api';
 
+export interface ActiveAttempt {
+  id: string;
+  screenUrl: string;
+  browserUnavailable?: boolean;
+}
+
 export interface BankConnectionContextValue {
-  activeAttempt: { id: string; screenUrl: string } | null;
+  activeAttempt: ActiveAttempt | null;
   hasActiveAuth: boolean;
+  browserUnavailable: boolean;
   globalNotice: { kind: 'ok' | 'error'; text: string } | null;
   setGlobalNotice: (notice: { kind: 'ok' | 'error'; text: string } | null) => void;
   startAuth: () => Promise<void>;
@@ -29,7 +36,8 @@ const BankConnectionContext = createContext<BankConnectionContextValue | null>(n
 
 export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const queryClient = useQueryClient();
-  const [activeAttempt, setActiveAttempt] = useState<{ id: string; screenUrl: string } | null>(null);
+  const [activeAttempt, setActiveAttempt] = useState<ActiveAttempt | null>(null);
+  const [browserUnavailable, setBrowserUnavailable] = useState(false);
   const [screenKey, setScreenKey] = useState(0);
   const [globalNotice, setGlobalNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [isStartingAuth, setIsStartingAuth] = useState(false);
@@ -46,10 +54,13 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
     fetchCurrentAuthSession()
       .then((res) => {
         if (!cancelled && res?.attempt) {
+          const isUnavailable = Boolean(res.attempt.browserUnavailable);
           setActiveAttempt({
             id: res.attempt.attemptId,
             screenUrl: res.attempt.screenUrl,
+            browserUnavailable: isUnavailable,
           });
+          setBrowserUnavailable(isUnavailable);
         }
       })
       .catch(() => {
@@ -63,9 +74,10 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
   const startAuth = async () => {
     setIsStartingAuth(true);
     setGlobalNotice(null);
+    setBrowserUnavailable(false);
     try {
       const res = await startAuthSession();
-      setActiveAttempt({ id: res.attemptId, screenUrl: res.screenUrl });
+      setActiveAttempt({ id: res.attemptId, screenUrl: res.screenUrl, browserUnavailable: false });
     } catch (err: any) {
       setGlobalNotice({
         kind: 'error',
@@ -82,6 +94,7 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
     try {
       await cancelAuthSession(activeAttempt.id);
       setActiveAttempt(null);
+      setBrowserUnavailable(false);
       setGlobalNotice({ kind: 'ok', text: 'Đã hủy phiên đăng nhập ACB.' });
       queryClient.invalidateQueries({ queryKey: queryKeys.connection });
       queryClient.invalidateQueries({ queryKey: queryKeys.status });
@@ -128,9 +141,12 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
       try {
         const result = await checkAuthStatus(activeAttempt.id);
         if (cancelled) return;
+        setBrowserUnavailable(false);
+        setActiveAttempt((prev) => (prev ? { ...prev, browserUnavailable: false } : null));
         if (result.status === 'MONITORING' || result.status === 'VERIFIED') {
           cancelled = true;
           setActiveAttempt(null);
+          setBrowserUnavailable(false);
           setGlobalNotice({
             kind: 'ok',
             text: 'ACB đã xác thực. Hệ thống đang bắt đầu theo dõi giao dịch.',
@@ -146,6 +162,7 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
         ) {
           cancelled = true;
           setActiveAttempt(null);
+          setBrowserUnavailable(false);
           if (result.status === 'CANCELLED') {
             setGlobalNotice({ kind: 'ok', text: 'Đã hủy phiên đăng nhập ACB.' });
           } else {
@@ -163,6 +180,7 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
         if (isTerminalAuthError(error)) {
           cancelled = true;
           setActiveAttempt(null);
+          setBrowserUnavailable(false);
           setGlobalNotice({
             kind: 'error',
             text:
@@ -176,6 +194,8 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
           queryClient.invalidateQueries({ queryKey: queryKeys.status });
           return;
         }
+        setBrowserUnavailable(true);
+        setActiveAttempt((prev) => (prev ? { ...prev, browserUnavailable: true } : null));
         setGlobalNotice({
           kind: 'error',
           text: error instanceof Error ? error.message : 'Không thể kiểm tra trạng thái đăng nhập ACB.',
@@ -191,12 +211,13 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [activeAttempt, queryClient]);
+  }, [activeAttempt?.id, queryClient]);
 
   const value = useMemo(
     () => ({
       activeAttempt,
       hasActiveAuth: activeAttempt !== null || isStartingAuth,
+      browserUnavailable,
       globalNotice,
       setGlobalNotice,
       startAuth,
@@ -208,7 +229,7 @@ export const BankConnectionProvider: React.FC<{ children: React.ReactNode }> = (
       isCancelling,
       isSyncing,
     }),
-    [activeAttempt, globalNotice, isStartingAuth, isCancelling, isSyncing, screenKey]
+    [activeAttempt, browserUnavailable, globalNotice, isStartingAuth, isCancelling, isSyncing, screenKey]
   );
 
   return (

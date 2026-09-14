@@ -176,6 +176,14 @@ func (w *workerService) TestNotificationChannel(ctx context.Context, channelID s
 		EndpointRevision: ch.Revision,
 	})
 	if err != nil {
+		if ch.Provider == "BARK" && errors.Is(err, storage.ErrBarkDecryptionFailed) {
+			return workerrpc.TestNotificationResponse{
+				Success:           false,
+				Status:            "FAILED",
+				ProviderErrorCode: storage.ErrCodeBarkKeyDecryptionFailed,
+				SanitizedError:    storage.ErrMsgBarkKeyDecryptionFailed,
+			}, nil
+		}
 		return workerrpc.TestNotificationResponse{
 			Success:        false,
 			Status:         "FAILED",
@@ -352,6 +360,7 @@ func main() {
 	readinessCheck := flag.Bool("readiness-check", false, "verify worker readiness via HTTP /readyz")
 	quiesceCheck := flag.Bool("quiesce", false, "quiesce running worker via HTTP POST /rpc/quiesce")
 	drainCheck := flag.Bool("drain", false, "drain running worker via HTTP POST /rpc/drain")
+	resumeCheck := flag.Bool("resume", false, "resume quiesced worker via HTTP POST /rpc/resume")
 	flag.Parse()
 
 	rpcAddr := os.Getenv("WORKER_RPC_ADDR")
@@ -363,7 +372,7 @@ func main() {
 		rpcAddr = "0.0.0.0:" + rpcPort
 	}
 
-	if *quiesceCheck || *drainCheck {
+	if *quiesceCheck || *drainCheck || *resumeCheck {
 		client := &http.Client{Timeout: 30 * time.Second}
 		_, port, err := net.SplitHostPort(rpcAddr)
 		if err != nil {
@@ -372,6 +381,8 @@ func main() {
 		path := "/rpc/quiesce"
 		if *drainCheck {
 			path = "/rpc/drain"
+		} else if *resumeCheck {
+			path = "/rpc/resume"
 		}
 		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s%s", port, path), bytes.NewReader([]byte("{}")))
 		if err != nil {
@@ -379,7 +390,11 @@ func main() {
 			os.Exit(1)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		token := os.Getenv("WORKER_INTERNAL_TOKEN")
+		token, err := config.ReadSecret("WORKER_INTERNAL_TOKEN", "WORKER_INTERNAL_TOKEN_FILE")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to read worker internal token: %v\n", err)
+			os.Exit(1)
+		}
 		if token == "" {
 			secretsDir := os.Getenv("SECRETS_DIR")
 			if secretsDir == "" {

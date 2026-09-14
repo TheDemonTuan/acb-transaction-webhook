@@ -375,3 +375,225 @@ func TestChannelTestDelegatesToWorkerRPC(t *testing.T) {
 	}
 }
 
+func TestBarkDecryptionFailureFromWorkerReturnsActionableMessage(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	ch, err := store.CreateBarkChannel(context.Background(), "Worker Bark", "device_key_worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tester := &mockChannelTester{resp: workerrpc.TestNotificationResponse{
+		Status:            "FAILED",
+		ProviderErrorCode: storage.ErrCodeBarkKeyDecryptionFailed,
+		SanitizedError:    storage.ErrMsgBarkKeyDecryptionFailed,
+	}}
+	srv.WithNotificationTester(tester)
+	csrf, cookie := getCSRF(srv)
+	req := prepareAuthedPost("http://example.test/api/v1/notification-channels/"+ch.ID+"/test", nil, csrf, cookie)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 from worker decryption failure, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"`+storage.ErrCodeBarkKeyDecryptionFailed+`"`) || !strings.Contains(rec.Body.String(), `"requestId"`) {
+		t.Fatalf("expected standard actionable response, got %s", rec.Body.String())
+	}
+}
+
+func TestBarkTestEndpointDecryptionFailureReturnsActionableMessage(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_decryption_err.db")
+
+	rawKeyA := make([]byte, 32)
+	for i := range rawKeyA {
+		rawKeyA[i] = byte(i + 1)
+	}
+	keyPathA := filepath.Join(tempDir, "masterA.key")
+	if err := os.WriteFile(keyPathA, []byte(hex.EncodeToString(rawKeyA)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	krA, err := security.LoadKeyring(keyPathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Create channel using Key A
+	store1, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store1.WithKeyring(krA)
+	secretBarkKey := "bark_super_secret_device_key_777"
+	ch, err := store1.CreateBarkChannel(ctx, "Encrypted iPhone", secretBarkKey, nil)
+	if err != nil {
+		store1.Close()
+		t.Fatal(err)
+	}
+	_ = store1.Close()
+
+	// 2. Open server with Key B (wrong master key)
+	rawKeyB := make([]byte, 32)
+	for i := range rawKeyB {
+		rawKeyB[i] = byte(255 - i)
+	}
+	keyPathB := filepath.Join(tempDir, "masterB.key")
+	if err := os.WriteFile(keyPathB, []byte(hex.EncodeToString(rawKeyB)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	krB, err := security.LoadKeyring(keyPathB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storeWrongKey, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeWrongKey.Close()
+	storeWrongKey.WithKeyring(krB)
+
+	cfg := config.Config{
+		Timezone:           time.UTC,
+		DevelopmentSubject: "owner",
+		DatabasePath:       dbPath,
+		MasterKeyFile:      keyPathB,
+	}
+	srv := New(cfg, storeWrongKey)
+
+	csrf, cookie := getCSRF(srv)
+	req := prepareAuthedPost("http://example.test/api/v1/notification-channels/"+ch.ID+"/test", nil, csrf, cookie)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request on decryption failure, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal JSON error response: %v", err)
+	}
+
+	if errResp.Code != storage.ErrCodeBarkKeyDecryptionFailed {
+		t.Fatalf("expected code %q, got %q", storage.ErrCodeBarkKeyDecryptionFailed, errResp.Code)
+	}
+	if errResp.Error != storage.ErrMsgBarkKeyDecryptionFailed {
+		t.Fatalf("expected actionable error message %q, got %q", storage.ErrMsgBarkKeyDecryptionFailed, errResp.Error)
+	}
+
+	// Invariant: response body must never leak secrets
+	bodyStr := rec.Body.String()
+	if strings.Contains(bodyStr, secretBarkKey) {
+		t.Fatalf("response body leaked plaintext Bark device key!")
+	}
+	if strings.Contains(bodyStr, hex.EncodeToString(rawKeyA)) || strings.Contains(bodyStr, hex.EncodeToString(rawKeyB)) {
+		t.Fatalf("response body leaked master key material!")
+	}
+}
+
+func TestBarkTestEndpointPreservesGenericErrorForOtherFailures(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	// Create a webhook endpoint
+	ep, err := store.CreateEndpointWithSecret(context.Background(), "Broken Webhook", "https://example.com/hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Tamper the webhook secret envelope so decryption fails
+	_, err = store.DB().ExecContext(context.Background(), `
+		UPDATE endpoint_secrets
+		SET envelope = X'7B7D'
+		WHERE endpoint_id = ? AND status = 'ACTIVE'
+	`, ep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csrf, cookie := getCSRF(srv)
+	req := prepareAuthedPost("http://example.test/api/v1/notification-channels/"+ep.ID+"/test", nil, csrf, cookie)
+	rec := httptest.NewRecorder()
+	srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatal(err)
+	}
+
+	// Must preserve generic behavior for non-Bark / generic failures
+	if errResp.Code == storage.ErrCodeBarkKeyDecryptionFailed {
+		t.Fatalf("unexpected BARK_KEY_DECRYPTION_FAILED for webhook failure")
+	}
+	if !strings.HasPrefix(errResp.Error, "cannot decrypt channel target:") {
+		t.Fatalf("expected generic 'cannot decrypt channel target:' prefix, got: %s", errResp.Error)
+	}
+}
+
+func TestBarkAPIEndpointsNeverLeakPlaintext(t *testing.T) {
+	srv, store := setupTestServerWithKeyring(t)
+	defer store.Close()
+
+	csrf, cookie := getCSRF(srv)
+
+	secretDeviceKey := "device_key_top_secret_never_leak_007"
+	barkBody, _ := json.Marshal(map[string]any{
+		"provider":  "BARK",
+		"name":      "Private Phone",
+		"deviceKey": secretDeviceKey,
+	})
+
+	// 1. POST /api/v1/notification-channels
+	reqCreate := prepareAuthedPost("http://example.test/api/v1/notification-channels", barkBody, csrf, cookie)
+	recCreate := httptest.NewRecorder()
+	srv.handler.ServeHTTP(recCreate, reqCreate)
+	if recCreate.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", recCreate.Code, recCreate.Body.String())
+	}
+	if strings.Contains(recCreate.Body.String(), secretDeviceKey) {
+		t.Fatalf("device key leaked in create channel response!")
+	}
+
+	var createdCh struct {
+		ID           string `json:"id"`
+		HasDeviceKey bool   `json:"hasDeviceKey"`
+		Secret       string `json:"secret"`
+	}
+	_ = json.Unmarshal(recCreate.Body.Bytes(), &createdCh)
+	if !createdCh.HasDeviceKey || createdCh.Secret != "" {
+		t.Fatalf("unexpected created channel fields: %+v", createdCh)
+	}
+
+	// 2. GET /api/v1/notification-channels
+	reqList := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/notification-channels", nil)
+	recList := httptest.NewRecorder()
+	srv.handler.ServeHTTP(recList, reqList)
+	if strings.Contains(recList.Body.String(), secretDeviceKey) {
+		t.Fatalf("device key leaked in list channels response!")
+	}
+
+	// 3. POST /api/v1/notification-channels/{id}/rotate-secret
+	newRotatedKey := "device_key_rotated_never_leak_888"
+	rotateBody, _ := json.Marshal(map[string]string{
+		"deviceKey": newRotatedKey,
+	})
+	reqRotate := prepareAuthedPost("http://example.test/api/v1/notification-channels/"+createdCh.ID+"/rotate-secret", rotateBody, csrf, cookie)
+	recRotate := httptest.NewRecorder()
+	srv.handler.ServeHTTP(recRotate, reqRotate)
+	if recRotate.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", recRotate.Code, recRotate.Body.String())
+	}
+	if strings.Contains(recRotate.Body.String(), newRotatedKey) {
+		t.Fatalf("device key leaked in rotate response!")
+	}
+}

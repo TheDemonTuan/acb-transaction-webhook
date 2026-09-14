@@ -21,20 +21,17 @@ const (
 // ClassifyPage uses independent page signals. It must not turn unknown markup
 // into an empty transaction history.
 func ClassifyPage(finalURL, body string) PageKind {
-	page := strings.ToLower(html.UnescapeString(body))
 	location, _ := url.Parse(finalURL)
 	host := strings.ToLower(location.Hostname())
 	if host != "" && host != "online.acb.com.vn" {
 		return UnknownPage
 	}
-	if containsAny(page, "bảo trì", "bao tri", "maintenance") {
-		return MaintenancePage
-	}
 
-	lowerURL := strings.ToLower(finalURL)
-	if containsAny(lowerURL, "login.jsp", "displaypagenotloginop", "obkloginop", "/acbib/webmbtt") ||
-		containsAny(page, "phiên làm việc đã hết hạn", "phien lam viec da het han", "vui lòng đăng nhập lại", "vui long dang nhap lai") {
-		return LoginPage
+	page := strings.ToLower(html.UnescapeString(body))
+	cleanPage := stripScripts(page)
+
+	if containsAny(cleanPage, "bảo trì", "bao tri", "maintenance") {
+		return MaintenancePage
 	}
 
 	if strings.Contains(page, "ibkacctdetailproc") && containsAny(page, "accountnbr", "dse_processorstate") {
@@ -49,7 +46,7 @@ func ClassifyPage(finalURL, body string) PageKind {
 
 	loginSignals := 0
 	for _, signal := range []string{"username", "tên truy cập", "ten truy cap", "password", "mật khẩu", "mat khau", "obkloginop"} {
-		if strings.Contains(page, signal) {
+		if strings.Contains(cleanPage, signal) {
 			loginSignals++
 		}
 	}
@@ -58,13 +55,36 @@ func ClassifyPage(finalURL, body string) PageKind {
 		return LoginPage
 	}
 
-	if containsAny(page, "nhập mã otp", "nhap ma otp", "nhập mã safekey", "nhap ma safekey", "mã xác thực otp", "ma xac thuc otp", "xác thực otp", "xac thuc otp", "xác nhận otp", "xac nhan otp", "mã otp", "ma otp", `name="otp"`, `id="otp"`, `name="safekey"`, `id="safekey"`, `name="authcode"`, `id="authcode"`) {
+	if containsAny(cleanPage, "nhập mã otp", "nhap ma otp", "nhập mã safekey", "nhap ma safekey", "mã xác thực otp", "ma xac thuc otp", "xác thực otp", "xac thuc otp", "xác nhận otp", "xac nhan otp", "mã otp", "ma otp", `name="otp"`, `id="otp"`, `name="safekey"`, `id="safekey"`, `name="authcode"`, `id="authcode"`) {
 		return OTPChallenge
 	}
-	if containsAny(page, "mã xác nhận", "ma xac nhan", "mã kiểm tra", "ma kiem tra", `name="captcha"`, `id="captcha"`) {
+	if containsAny(cleanPage, "mã xác nhận", "ma xac nhan", "mã kiểm tra", "ma kiem tra", `name="captcha"`, `id="captcha"`) {
 		return CaptchaPage
 	}
+
+	lowerURL := strings.ToLower(finalURL)
+	lowerPath := strings.ToLower(location.Path)
+	if lowerPath == "/login" || containsAny(lowerURL, "login.jsp", "displaypagenotloginop", "obkloginop", "/acbib/webmbtt") ||
+		containsAny(cleanPage, "phiên làm việc đã hết hạn", "phien lam viec da het han", "vui lòng đăng nhập lại", "vui long dang nhap lai") {
+		return LoginPage
+	}
+
 	return UnknownPage
+}
+
+func stripScripts(s string) string {
+	for {
+		start := strings.Index(s, "<script")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(s[start:], "</script>")
+		if end == -1 {
+			return s[:start]
+		}
+		s = s[:start] + s[start+end+len("</script>"):]
+	}
+	return s
 }
 
 func containsAny(value string, candidates ...string) bool {
