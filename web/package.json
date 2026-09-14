@@ -8,7 +8,7 @@
     "build": "bunx --bun tsc --noEmit && bunx --bun vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "bunx --bun playwright test"
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.8",

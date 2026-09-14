@@ -66,10 +66,14 @@ export const BankConnectionPage: React.FC = () => {
     setGlobalNotice(null);
 
     try {
-      await configureConnection(accountInput.trim());
+      const res = await configureConnection(accountInput.trim());
+      const connData = (res as any)?.connection ? res : { configured: true, connection: res };
+      queryClient.setQueryData(queryKeys.connection, connData);
       setGlobalNotice({ kind: 'ok', text: 'Đã lưu kết nối.' });
-      queryClient.invalidateQueries({ queryKey: queryKeys.connection });
-      queryClient.invalidateQueries({ queryKey: queryKeys.status });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.connection }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
     } catch (err: any) {
       setGlobalNotice({
         kind: 'error',
