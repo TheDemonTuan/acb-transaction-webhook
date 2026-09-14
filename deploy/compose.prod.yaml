@@ -174,12 +174,10 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "/bark-entrypoint.sh"]
-    command: ["bark-server"]
+    command: ["--addr", "0.0.0.0:8080", "--data", "/data"]
     environment:
       TZ: Asia/Ho_Chi_Minh
       BARK_KEY: ""
-      BARK_SERVER_ADDRESS: 0.0.0.0:8080
-      BARK_SERVER_DATA_DIR: /data
       BARK_SERVER_REDUCE_MEMORY_USAGE: "true"
     expose:
       - "8080"
