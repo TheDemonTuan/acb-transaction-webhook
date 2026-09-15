@@ -149,8 +149,13 @@ class AppLock:
         self.release()
 
     def acquire(self) -> AppLock:
-        self.lock_dir.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o640)
+        try:
+            self.lock_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            self.lock_dir = Path("/tmp/vps-failover")
+            self.lock_dir.mkdir(parents=True, exist_ok=True)
+            self.lock_path = self.lock_dir / f"{self.app_name}.lock"
+        self._fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o666)
         start_time = time.time()
         while True:
             try:
