@@ -234,6 +234,12 @@ recover_tx_journal() {
   prev_digest="$(grep -o '"previous_digest":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
 
   case "$component" in
+    frontend)
+      if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" && -n "$prev_digest" ]]; then
+        log_warn "RECOVERY: Interrupted frontend transaction. Restoring previous container image..."
+        FRONTEND_IMAGE_REF="$prev_digest" compose_prod up -d --no-deps frontend 2>/dev/null || true
+      fi
+      ;;
     gateway)
       if [[ -n "$cand_slot" && "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_SOAKING" ]]; then
         log_info "RECOVERY: Stopping uncommitted candidate container [acb-gateway-${cand_slot}]..."

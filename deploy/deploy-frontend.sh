@@ -22,6 +22,7 @@ if [[ -z "$PREV_FRONTEND_REF" ]] && command -v docker >/dev/null 2>&1; then
   PREV_FRONTEND_REF="$(docker inspect --format '{{.Config.Image}}' acb-frontend 2>/dev/null || true)"
 fi
 FRONTEND_COMMITTED=0
+init_tx_journal "frontend" "frontend" "frontend" "$CANDIDATE_FRONTEND_IMAGE" "$PREV_FRONTEND_REF" "${RELEASE_COMMIT:-unknown}"
 
 cleanup_frontend_deploy() {
   local code=$?
@@ -50,6 +51,7 @@ wait_for_frontend_ready() {
 log_info "Deploying frontend only: $CANDIDATE_FRONTEND_IMAGE"
 FRONTEND_IMAGE_REF="$CANDIDATE_FRONTEND_IMAGE" compose_prod pull frontend
 FRONTEND_IMAGE_REF="$CANDIDATE_FRONTEND_IMAGE" compose_prod up -d --no-deps frontend
+update_tx_state "TX_CANDIDATE_STARTED"
 
 if ! wait_for_frontend_ready; then
   log_error "Frontend candidate failed readiness."
@@ -57,5 +59,6 @@ if ! wait_for_frontend_ready; then
 fi
 
 set_release_env FRONTEND_IMAGE_REF "$CANDIDATE_FRONTEND_IMAGE"
+update_tx_state "TX_COMPLETED"
 FRONTEND_COMMITTED=1
 log_info "Frontend deployment committed. Gateway, worker, TTS and Bark were untouched."

@@ -203,10 +203,8 @@ LAST_RELEASE_FILE="$DATA_DIR/last-release.json"
 ROLLOUT_JOURNAL_FILE="$DATA_DIR/rollout-journal.json"
 RELEASES_DIR="$DATA_DIR/releases"
 
-# Detect CI environment to detach soak automatically
-if [[ "${CI:-false}" == "true" || "${GITHUB_ACTIONS:-false}" == "true" ]]; then
-  DETACH_SOAK=1
-fi
+# CI must wait for soak completion before recording a successful release.
+# Detached soak remains an explicit operator-only mode.
 
 # Rollout Journal Helpers
 init_rollout_journal() {
@@ -510,6 +508,7 @@ if [[ -n "$REQUESTED_SCOPE" ]]; then
   done
 
   # Narrow promotion to only requested components
+  PROMOTION_FRONTEND="false"
   PROMOTION_GATEWAY="false"
   PROMOTION_WORKER="false"
   PROMOTION_SCHEMA="false"
@@ -692,7 +691,10 @@ if [[ "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
   gw_args=("$IMAGE_GATEWAY")
   [[ -n "$GIT_SHA" ]] && gw_args+=(--expected-commit "$GIT_SHA")
   [[ "$SOAK_SECONDS" -gt 0 ]] && gw_args+=(--soak-seconds "$SOAK_SECONDS")
-  [[ "$DETACH_SOAK" -eq 1 ]] && gw_args+=(--detach-soak)
+  if [[ "$DETACH_SOAK" -eq 1 ]]; then
+    log_error "Detached gateway soak is not permitted in a release transaction; success must wait for soak completion."
+    exit 1
+  fi
   [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]] && gw_args+=(--skip-manifest-check)
   bash "$DEPLOY_DIR/deploy-gateway.sh" "${gw_args[@]}"
   update_rollout_step "gateway" "STEP_COMPLETED"
@@ -750,12 +752,20 @@ EOF
 if [[ -f "$DEPLOY_DIR/release-env.sh" ]]; then
   # shellcheck source=deploy/release-env.sh
   source "$DEPLOY_DIR/release-env.sh"
-  [[ -n "${IMAGE_FRONTEND:-}" && "${PROMOTION_FRONTEND:-false}" == "true" ]] && set_release_env "FRONTEND_IMAGE_REF" "$IMAGE_FRONTEND" 2>/dev/null || true
-  [[ -n "${IMAGE_WORKER:-}" && "${PROMOTION_WORKER:-false}" == "true" ]] && set_release_env "WORKER_IMAGE_REF" "$IMAGE_WORKER" 2>/dev/null || true
-  [[ -n "${IMAGE_DBTOOL:-}" && "${PROMOTION_SCHEMA:-false}" == "true" ]] && set_release_env "DBTOOL_IMAGE_REF" "$IMAGE_DBTOOL" 2>/dev/null || true
-  [[ -n "${IMAGE_AUTH_BROWSER:-}" && "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]] && set_release_env "BROWSER_IMAGE_REF" "$IMAGE_AUTH_BROWSER" 2>/dev/null || true
-  [[ -n "${IMAGE_TTS_GATEWAY:-}" && "${PROMOTION_TTS:-false}" == "true" ]] && set_release_env "TTS_IMAGE_REF" "$IMAGE_TTS_GATEWAY" 2>/dev/null || true
-  [[ -n "${IMAGE_BARK:-}" && "${PROMOTION_BARK:-false}" == "true" ]] && set_release_env "BARK_IMAGE_REF" "$IMAGE_BARK" 2>/dev/null || true
+  [[ -n "${IMAGE_FRONTEND:-}" && "${PROMOTION_FRONTEND:-false}" == "true" ]] && set_release_env "FRONTEND_IMAGE_REF" "$IMAGE_FRONTEND"
+  if [[ -n "${IMAGE_GATEWAY:-}" && "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
+    active_gateway_slot="$(get_active_slot 2>/dev/null || true)"
+    case "$active_gateway_slot" in
+      blue) set_release_env "IMAGE_REF_BLUE" "$IMAGE_GATEWAY" ;;
+      green) set_release_env "IMAGE_REF_GREEN" "$IMAGE_GATEWAY" ;;
+      *) log_error "Cannot persist gateway image: active slot is unknown after promotion."; exit 1 ;;
+    esac
+  fi
+  [[ -n "${IMAGE_WORKER:-}" && "${PROMOTION_WORKER:-false}" == "true" ]] && set_release_env "WORKER_IMAGE_REF" "$IMAGE_WORKER"
+  [[ -n "${IMAGE_DBTOOL:-}" && "${PROMOTION_SCHEMA:-false}" == "true" ]] && set_release_env "DBTOOL_IMAGE_REF" "$IMAGE_DBTOOL"
+  [[ -n "${IMAGE_AUTH_BROWSER:-}" && "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]] && set_release_env "BROWSER_IMAGE_REF" "$IMAGE_AUTH_BROWSER"
+  [[ -n "${IMAGE_TTS_GATEWAY:-}" && "${PROMOTION_TTS:-false}" == "true" ]] && set_release_env "TTS_IMAGE_REF" "$IMAGE_TTS_GATEWAY"
+  [[ -n "${IMAGE_BARK:-}" && "${PROMOTION_BARK:-false}" == "true" ]] && set_release_env "BARK_IMAGE_REF" "$IMAGE_BARK"
 fi
 
 finish_rollout_journal "COMPLETED" "$evidence_dir"

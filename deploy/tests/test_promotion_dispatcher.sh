@@ -201,6 +201,23 @@ else
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
 fi
 
+# 0b. Explicit scope must narrow every manifest component, including frontend.
+printf "\n0b. Testing explicit worker scope clears frontend manifest scope...\n"
+T0B="$TEST_TMP/t0b"
+setup_dispatcher_env "$T0B"
+manifest_t0b="$T0B/deploy/release-manifest.json"
+write_mock_manifest "$manifest_t0b" "$sha_t0" '{"frontend":true,"gateway":false,"worker":true,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false}'
+TRACE_FILE="$T0B/trace.log" DATA_DIR="$T0B/data" SECRETS_DIR="$T0B/secrets" DEPLOY_PATH="$T0B" RELEASE_ENV_FILE="$T0B/deploy/.release.env" SKIP_MANIFEST_CHECK=1 \
+  bash "$T0B/deploy/dispatch-rollout.sh" --manifest "$manifest_t0b" --deploy-dir "$T0B/deploy" --data-dir "$T0B/data" --skip-manifest-check --allow-redeploy --scope worker
+assert_file_contains "$T0B/trace.log" '^WORKER:' "Explicit worker scope invokes worker deploy"
+if grep -q '^FRONTEND:' "$T0B/trace.log"; then
+  printf 'FAIL: explicit worker scope retained frontend manifest scope\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: explicit worker scope clears frontend manifest scope\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
 # 1. Documentation-Only Release (Zero runtime promotion)
 # ----------------------------------------------------
 printf "TEST 1: Documentation-Only Promotion (Zero Runtime Mutation)...\n"

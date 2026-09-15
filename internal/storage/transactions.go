@@ -156,11 +156,19 @@ func (s *Store) IngestTransactionsBatchWithSource(ctx context.Context, connectio
 		}
 		for rows.Next() {
 			var ep endpointRef
-			if err := rows.Scan(&ep.id, &ep.revision, &ep.provider, &ep.keyID); err == nil {
-				activeEndpoints = append(activeEndpoints, ep)
+			if err := rows.Scan(&ep.id, &ep.revision, &ep.provider, &ep.keyID); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan active endpoint: %w", err)
 			}
+			activeEndpoints = append(activeEndpoints, ep)
 		}
-		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate active endpoints: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close active endpoints: %w", err)
+		}
 
 		// 3. Process items atomically
 		for _, item := range items {

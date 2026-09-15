@@ -23,6 +23,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -508,6 +509,7 @@ class FailoverEngine:
         event_slot: str,
         event_container_id: str,
         event_action: str,
+        event_time: float = 0.0,
     ) -> None:
         """
         Active slot event evaluation under lock.
@@ -543,7 +545,7 @@ class FailoverEngine:
 
                 # 3. Singleton workload
                 if app_cfg.workload_class == "singleton":
-                    self._handle_singleton_failure(app_cfg, state, event_container_id, now)
+                    self._handle_singleton_failure(app_cfg, state, event_container_id, now, event_time)
                     return
 
                 # 4. Blue/Green workload
@@ -727,55 +729,75 @@ class FailoverEngine:
             logger.warning("App %s: mutual host lock contention (%s). Skipping failover safely.", app_name, e)
             return
 
-    def _handle_singleton_failure(self, app_cfg: AppConfig, state: dict, event_container_id: str, now: float) -> None:
-        """Singleton workload: bounded restart same instance with backoff, never duplicate."""
+    def _handle_singleton_failure(
+        self,
+        app_cfg: AppConfig,
+        state: dict,
+        event_container_id: str,
+        now: float,
+        event_time: float = 0.0,
+    ) -> None:
+        """Restart the configured singleton only after fencing stale events and current health."""
         app_name = app_cfg.app
         c_name = app_cfg.container_name
 
-        # Fencing check: verify no active deployment lease or deployment in progress
         in_progress, reason = check_deployment_in_progress(self.journal_path)
         if in_progress:
             logger.info("App %s: deployment in progress (%s). Skipping singleton restart.", app_name, reason)
             return
 
-        # Check intentional stop marker
         if is_intentional_stop(app_name, "singleton", self.state_dir) or is_intentional_stop(app_name, c_name, self.state_dir):
             logger.info("App %s: singleton container %s was intentionally stopped. Skipping restart.", app_name, c_name)
             return
 
-        restarts = int(state.get("restarts_count", 0))
-        last_restart = state.get("last_restart_time")
+        inspect = self.docker_client.inspect_container(c_name)
+        if inspect:
+            current_id = str(inspect.get("Id", ""))
+            container_state = inspect.get("State", {})
+            status = str(container_state.get("Status", ""))
+            health = str(container_state.get("Health", {}).get("Status", ""))
 
-        # Exponential backoff / cooldown calculation if configured
-        if (app_cfg.min_restart_interval > 0 or app_cfg.backoff_factor > 0) and last_restart:
-            factor = app_cfg.backoff_factor if app_cfg.backoff_factor > 0 else 2.0
-            base = app_cfg.min_restart_interval if app_cfg.min_restart_interval > 0 else 5.0
-            backoff = min(base * (factor ** max(0, restarts - 1)), float(app_cfg.cooldown_seconds))
-            if (now - float(last_restart)) < backoff:
-                elapsed = now - float(last_restart)
-                logger.warning(
-                    "App %s: singleton restart in backoff (elapsed %.1fs < %.1fs).",
+            if event_container_id and current_id and event_container_id != current_id:
+                logger.info(
+                    "App %s: ignoring stale singleton event for container %s; current container is %s.",
                     app_name,
-                    elapsed,
-                    backoff,
+                    event_container_id,
+                    current_id,
                 )
                 return
+            if status == "running" and health == "healthy":
+                logger.info("App %s: singleton recovered and is healthy; ignoring stale failure event.", app_name)
+                return
+            started_at = str(container_state.get("StartedAt", ""))
+            if event_time and started_at:
+                try:
+                    started_epoch = datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+                    if started_epoch > event_time:
+                        logger.info("App %s: singleton started after the failure event; ignoring stale event.", app_name)
+                        return
+                except ValueError:
+                    logger.warning("App %s: Docker returned an invalid StartedAt timestamp: %s", app_name, started_at)
+            if status == "restarting" or (status == "running" and health == "starting"):
+                logger.info("App %s: singleton is %s/%s; Docker recovery is still in progress.", app_name, status, health or "unknown")
+                return
 
-        if restarts < app_cfg.max_restarts:
-            state["restarts_count"] = restarts + 1
-            state["last_restart_time"] = now
-            save_state_atomic(app_name, state, self.state_dir)
+        restarts = int(state.get("restarts_count", 0))
+        last_attempt = state.get("last_restart_attempt_time", state.get("last_restart_time"))
+        factor = app_cfg.backoff_factor if app_cfg.backoff_factor > 0 else 2.0
+        base = app_cfg.min_restart_interval if app_cfg.min_restart_interval > 0 else 5.0
+        backoff = min(base * (factor ** max(0, restarts - 1)), float(app_cfg.cooldown_seconds))
+        if restarts < app_cfg.max_restarts and last_attempt and (now - float(last_attempt)) < backoff:
             logger.warning(
-                "App %s: singleton container %s failed. Bounded emergency restart (%d/%d)...",
+                "App %s: singleton restart attempt in backoff (elapsed %.1fs < %.1fs).",
                 app_name,
-                c_name,
-                restarts + 1,
-                app_cfg.max_restarts,
+                now - float(last_attempt),
+                backoff,
             )
-            self.docker_client.restart_container(c_name)
-        else:
+            return
+
+        if restarts >= app_cfg.max_restarts:
             logger.critical(
-                "App %s: singleton container %s exceeded max restarts (%d). Marked degraded without duplication.",
+                "App %s: singleton container %s exceeded max acknowledged restarts (%d). Marked degraded without duplication.",
                 app_name,
                 c_name,
                 app_cfg.max_restarts,
@@ -783,6 +805,31 @@ class FailoverEngine:
             state["degraded"] = True
             state["degraded_reason"] = f"Singleton {c_name} exceeded max restarts ({app_cfg.max_restarts})"
             save_state_atomic(app_name, state, self.state_dir)
+            return
+
+        state["restart_attempts"] = int(state.get("restart_attempts", 0)) + 1
+        state["last_restart_attempt_time"] = now
+        save_state_atomic(app_name, state, self.state_dir)
+        logger.warning(
+            "App %s: singleton container %s failed. Requesting bounded emergency restart (%d/%d)...",
+            app_name,
+            c_name,
+            restarts + 1,
+            app_cfg.max_restarts,
+        )
+        code, _out, err = self.docker_client.restart_container(c_name)
+        if code != 0:
+            state["degraded"] = True
+            state["degraded_reason"] = f"Singleton {c_name} restart request failed: {err or 'docker error'}"
+            save_state_atomic(app_name, state, self.state_dir)
+            logger.error("App %s: singleton restart request failed: %s", app_name, err or "docker error")
+            return
+
+        state["restarts_count"] = restarts + 1
+        state["last_restart_time"] = now
+        state["degraded"] = False
+        state["degraded_reason"] = None
+        save_state_atomic(app_name, state, self.state_dir)
 
     def reconcile_app(self, app_name: str) -> None:
         """Reconciles canonical state with reality for a single app."""
@@ -819,7 +866,7 @@ class FailoverEngine:
                     insp = self.docker_client.inspect_container(app_cfg.container_name)
                     status = insp.get("State", {}).get("Status") if insp else "missing"
                     health = insp.get("State", {}).get("Health", {}).get("Status", "") if insp else ""
-                    if status != "running" or health == "unhealthy":
+                    if status != "running" or health != "healthy":
                         self._handle_singleton_failure(app_cfg, state, insp.get("Id", "") if insp else "", now)
                     else:
                         healthy_since = state.get("healthy_since")
@@ -996,12 +1043,18 @@ class FailoverEngine:
         if not matched_app:
             return True
 
+        try:
+            event_time = float(event.get("timeNano", 0)) / 1_000_000_000 if event.get("timeNano") else float(event.get("time", 0) or 0)
+        except (TypeError, ValueError):
+            event_time = 0.0
+
         payload = {
             "app": matched_app,
             "slot": matched_slot,
             "container_name": container_name,
             "container_id": container_id,
             "action": action,
+            "event_time": event_time,
         }
 
         try:
@@ -1068,6 +1121,7 @@ class FailoverEngine:
             event_slot=latest["slot"],
             event_container_id=latest["container_id"],
             event_action=latest["action"],
+            event_time=latest.get("event_time", 0.0),
         )
         return True
 

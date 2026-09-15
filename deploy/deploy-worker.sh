@@ -75,6 +75,14 @@ resolve_previous_worker_image() {
 
 PREV_WORKER_REF="$(resolve_previous_worker_image 2>/dev/null || true)"
 
+# Registry and disk failures must be detected before the active singleton is quiesced.
+log_info "Pre-pulling candidate worker image before quiesce..."
+WORKER_IMAGE_REF="$CANDIDATE_WORKER_IMAGE" compose_prod pull worker
+if [[ -n "$PREV_WORKER_REF" && "$PREV_WORKER_REF" != "$CANDIDATE_WORKER_IMAGE" ]]; then
+  log_info "Pre-pulling rollback worker image before quiesce..."
+  WORKER_IMAGE_REF="$PREV_WORKER_REF" compose_prod pull worker
+fi
+
 OLD_WORKER_RUNNING=0
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
   OLD_WORKER_RUNNING=1

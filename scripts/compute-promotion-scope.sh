@@ -18,7 +18,7 @@ usage() {
 Usage: compute-promotion-scope.sh [options]
 
 Options:
-  --base <ref>            Base git ref/commit (default: LAST_RELEASE_COMMIT or HEAD~1)
+  --base <ref>            Verified production base ref (required unless LAST_RELEASE_COMMIT is set)
   --head <ref>            Head git ref/commit (default: GITHUB_SHA or HEAD)
   --files-from <path>     Read changed paths from file (supports name-status format)
   --format <json|env|list> Output format (default: json)
@@ -97,12 +97,16 @@ else
   fi
 
   if [[ -z "$base_ref" ]]; then
-    if git rev-parse --verify "${head_ref}~1" >/dev/null 2>&1; then
-      base_ref="${head_ref}~1"
-    else
-      # Empty tree hash for initial commit
-      base_ref="$(git hash-object -t tree /dev/null 2>/dev/null || echo '4b825dc642cb6eb9a060e54bf8d69288fbee4904')"
-    fi
+    printf 'Error: --base or LAST_RELEASE_COMMIT is required when reading changes from git\n' >&2
+    exit 1
+  fi
+  if ! git cat-file -e "${base_ref}^{commit}" 2>/dev/null && ! git cat-file -e "${base_ref}^{tree}" 2>/dev/null; then
+    printf 'Error: production base ref is not available locally: %s\n' "$base_ref" >&2
+    exit 1
+  fi
+  if ! git cat-file -e "${head_ref}^{commit}" 2>/dev/null; then
+    printf 'Error: candidate head ref is not available locally: %s\n' "$head_ref" >&2
+    exit 1
   fi
 
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -179,19 +183,21 @@ classify_path() {
     [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> gateway\n' "$p" >&2
   fi
 
-  # 3. Worker paths
-  if [[ "$p" =~ ^cmd/worker/ ]] || [[ "$p" =~ ^internal/monitor/ ]] || \
-     [[ "$p" =~ ^internal/acb/ ]] || [[ "$p" =~ ^internal/upstream/ ]] || \
-     [[ "$p" =~ ^internal/scheduler/ ]]; then
+  # 3. Worker-only paths
+  if [[ "$p" =~ ^cmd/worker/ ]] || [[ "$p" =~ ^internal/workerstate/ ]] || \
+     [[ "$p" =~ ^internal/maintenance/ ]] || [[ "$p" =~ ^internal/upstream/ ]]; then
     scope_worker=true
     matched=1
     [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> worker\n' "$p" >&2
   fi
 
-  # 4. Shared Go packages (conservatively promote both gateway and worker)
+  # 4. Shared runtime packages imported by both production binaries.
   if [[ "$p" =~ ^internal/workerrpc/ ]] || [[ "$p" =~ ^internal/storage/ ]] || \
      [[ "$p" =~ ^internal/config/ ]] || [[ "$p" =~ ^internal/security/ ]] || \
-     [[ "$p" =~ ^internal/domain/ ]]; then
+     [[ "$p" =~ ^internal/domain/ ]] || [[ "$p" =~ ^internal/monitor/ ]] || \
+     [[ "$p" =~ ^internal/acb/ ]] || [[ "$p" =~ ^internal/scheduler/ ]] || \
+     [[ "$p" =~ ^internal/notification/ ]] || [[ "$p" =~ ^internal/webhook/ ]] || \
+     [[ "$p" =~ ^internal/bark/ ]]; then
     scope_gateway=true
     scope_worker=true
     matched=1
@@ -212,8 +218,12 @@ classify_path() {
      [[ "$p" =~ ^internal/authbrowser/ ]] || [[ "$p" == "deploy/seccomp-auth-browser.json" ]] || \
      [[ "$p" == "deploy/smoke-test-auth-browser.sh" ]]; then
     scope_auth_browser=true
+    if [[ "$p" =~ ^internal/authbrowser/ ]]; then
+      scope_gateway=true
+      scope_worker=true
+    fi
     matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> auth-browser\n' "$p" >&2
+    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> auth-browser%s\n' "$p" "$([[ "$p" =~ ^internal/authbrowser/ ]] && printf ', gateway, worker')" >&2
   fi
 
   # 7. TTS

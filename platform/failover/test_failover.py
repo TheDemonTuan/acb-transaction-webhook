@@ -111,6 +111,7 @@ class FakeDockerClient:
         self.restarted.append(name_or_id)
         if name_or_id in self.containers:
             self.containers[name_or_id]["State"]["Status"] = "running"
+            self.containers[name_or_id]["State"]["Health"] = {"Status": "healthy"}
         return 0, "restarted", ""
 
     def exec_healthcheck(self, name_or_id: str, probe_cmd: Optional[List[str]] = None) -> bool:
@@ -467,7 +468,9 @@ def test_singleton_bounded_restart(env):
     assert "auth-browser" in env["docker"].restarted
 
     # Restart 2
+    env["clock"].advance(5)
     env["docker"].containers["auth-browser"]["State"]["Status"] = "exited"
+    env["docker"].containers["auth-browser"]["State"]["Health"] = {}
     env["engine"].ingest_docker_event(event)
     env["engine"].process_event_batch()
     st = ctrl.load_state("auth-browser", env["st_dir"])
@@ -481,6 +484,49 @@ def test_singleton_bounded_restart(env):
     st = ctrl.load_state("auth-browser", env["st_dir"])
     assert st["degraded"] is True
     assert len(env["docker"].restarted) == restart_count_before  # no new restart
+
+
+def test_singleton_stale_event_does_not_restart_recovered_container(env):
+    """A delayed die event must not restart a singleton Docker already recovered."""
+    create_app_registry(env["reg_dir"], "worker", workload_class="singleton", container_name="acb-worker", max_restarts=3)
+    env["docker"].add_container("acb-worker", "cid-worker-1", status="running", health="healthy")
+
+    event = {"Action": "die", "Actor": {"ID": "cid-worker-1", "Attributes": {"name": "acb-worker"}}}
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    state = ctrl.load_state("worker", env["st_dir"])
+    assert env["docker"].restarted == []
+    assert state["restarts_count"] == 0
+
+
+def test_singleton_event_for_replaced_container_is_ignored(env):
+    """An event for an obsolete container ID cannot mutate the replacement."""
+    create_app_registry(env["reg_dir"], "worker", workload_class="singleton", container_name="acb-worker", max_restarts=3)
+    env["docker"].add_container("acb-worker", "cid-worker-new", status="exited", health="unhealthy")
+
+    event = {"Action": "die", "Actor": {"ID": "cid-worker-old", "Attributes": {"name": "acb-worker"}}}
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    assert env["docker"].restarted == []
+
+
+def test_singleton_failed_restart_does_not_consume_acknowledged_budget(env):
+    """A failed Docker command counts as an attempt, not a successful restart."""
+    create_app_registry(env["reg_dir"], "worker", workload_class="singleton", container_name="acb-worker", max_restarts=3)
+    env["docker"].add_container("acb-worker", "cid-worker-1", status="exited", health="unhealthy")
+    env["docker"].restart_container = lambda _name: (1, "", "daemon unavailable")
+
+    event = {"Action": "die", "Actor": {"ID": "cid-worker-1", "Attributes": {"name": "acb-worker"}}}
+    env["engine"].ingest_docker_event(event)
+    env["engine"].process_event_batch()
+
+    state = ctrl.load_state("worker", env["st_dir"])
+    assert state["restarts_count"] == 0
+    assert state["restart_attempts"] == 1
+    assert state["degraded"] is True
+    assert "daemon unavailable" in state["degraded_reason"]
 
 
 def test_singleton_reconcile_restarts_running_unhealthy_only(env):

@@ -80,14 +80,24 @@ assert_eq "gateway: PROMOTION_SCOPE is gateway" "$(printf '%s' "$gw_out" | grep 
 printf "\n3. Testing worker-only changes...\n"
 cat <<'EOF' > "$test_tmp/worker_only.txt"
 M	cmd/worker/main.go
-M	internal/monitor/poller.go
-M	internal/acb/client.go
+M	internal/maintenance/cleanup.go
+M	internal/workerstate/coordinator.go
 EOF
 w_out="$(run_case "$test_tmp/worker_only.txt" --format env)"
 assert_eq "worker: PROMOTION_GATEWAY is false" "$(printf '%s' "$w_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
 assert_eq "worker: PROMOTION_WORKER is true" "$(printf '%s' "$w_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
 assert_eq "worker: PROMOTION_SCHEMA is false" "$(printf '%s' "$w_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
 assert_eq "worker: PROMOTION_SCOPE is worker" "$(printf '%s' "$w_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" "worker"
+
+# Shared polling/runtime packages are imported by both gateway and worker.
+cat <<'EOF' > "$test_tmp/polling_shared.txt"
+M	internal/monitor/realtime_task.go
+M	internal/acb/client.go
+M	internal/scheduler/scheduler.go
+EOF
+poll_out="$(run_case "$test_tmp/polling_shared.txt" --format env)"
+assert_eq "shared polling: PROMOTION_GATEWAY is true" "$(printf '%s' "$poll_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "shared polling: PROMOTION_WORKER is true" "$(printf '%s' "$poll_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
 
 # 4. Shared RPC change (gateway + worker)
 printf "\n4. Testing shared workerrpc changes...\n"

@@ -141,7 +141,7 @@ export "${CANDIDATE_VAR}=${IMAGE_REF}"
 if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
   export RELEASE_COMMIT="$EXPECTED_COMMIT"
 fi
-compose_prod up -d "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" up -d "gateway-${CANDIDATE_SLOT}"
+compose_prod up -d --no-deps "gateway-${CANDIDATE_SLOT}"
 update_tx_state "TX_CANDIDATE_STARTED"
 
 # 3. Candidate readiness probe (twice consecutively)
@@ -189,9 +189,9 @@ update_tx_state "TX_ACK_VERIFIED"
 update_tx_state "TX_COMMITTED"
 printf '%s' "$CANDIDATE_SLOT" > "$ACTIVE_SLOT_FILE"
 printf '%s' "$ACTIVE_SLOT" > "$PREVIOUS_SLOT_FILE"
-set_release_env "$CANDIDATE_VAR" "$IMAGE_REF" 2>/dev/null || true
+set_release_env "$CANDIDATE_VAR" "$IMAGE_REF"
 if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
-  set_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT" 2>/dev/null || true
+  set_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT"
 fi
 log_info "Transaction COMMITTED: Live traffic routed to [${CANDIDATE_SLOT}]."
 

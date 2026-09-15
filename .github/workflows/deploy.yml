@@ -21,8 +21,97 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  production-state:
+    name: Read authoritative production state
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.state.outputs.sha }}
+      frontend_image: ${{ steps.state.outputs.frontend_image }}
+      gateway_image: ${{ steps.state.outputs.gateway_image }}
+      worker_image: ${{ steps.state.outputs.worker_image }}
+      dbtool_image: ${{ steps.state.outputs.dbtool_image }}
+      auth_browser_image: ${{ steps.state.outputs.auth_browser_image }}
+      tts_image: ${{ steps.state.outputs.tts_image }}
+      bark_image: ${{ steps.state.outputs.bark_image }}
+    steps:
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Read deployed commit and immutable image refs
+        id: state
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid DEPLOY_PATH" >&2; exit 1; }
+          state="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          receipt="$DEPLOY_PATH/data/last-release.json"
+          release_env="$DEPLOY_PATH/deploy/.release.env"
+          [[ -s "$receipt" && -s "$release_env" ]] || { echo 'Production state is missing' >&2; exit 1; }
+          python3 - "$receipt" "$release_env" <<'PY'
+          import json, re, sys
+          receipt_path, env_path = sys.argv[1:]
+          receipt = json.load(open(receipt_path, encoding="utf-8"))
+          sha = receipt.get("git_sha", "")
+          if receipt.get("status") != "SUCCESS" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit("Production receipt is not a valid successful release")
+          values = {}
+          for raw in open(env_path, encoding="utf-8"):
+              raw = raw.strip()
+              if raw and not raw.startswith("#") and "=" in raw:
+                  key, value = raw.split("=", 1)
+                  values[key.strip()] = value.strip()
+          keys = {
+              "frontend_image": "FRONTEND_IMAGE_REF",
+              "worker_image": "WORKER_IMAGE_REF",
+              "dbtool_image": "DBTOOL_IMAGE_REF",
+              "auth_browser_image": "BROWSER_IMAGE_REF",
+              "tts_image": "TTS_IMAGE_REF",
+              "bark_image": "BARK_IMAGE_REF",
+          }
+          active_slot_path = f"{receipt_path.rsplit('/data/', 1)[0]}/deploy/.active-slot"
+          try:
+              active_slot = open(active_slot_path, encoding="utf-8").read().strip()
+          except FileNotFoundError:
+              raise SystemExit("Production active gateway slot is missing")
+          if active_slot not in ("blue", "green"):
+              raise SystemExit("Production active gateway slot is invalid")
+          keys["gateway_image"] = f"IMAGE_REF_{active_slot.upper()}"
+          digest = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
+          print(f"sha={sha}")
+          for output, key in keys.items():
+              value = values.get(key, "")
+              if not digest.fullmatch(value):
+                  raise SystemExit(f"Missing or invalid production image ref: {key}")
+              print(f"{output}={value}")
+          PY
+          REMOTE
+          )"
+          printf '%s\n' "$state"
+          while IFS='=' read -r key value; do
+            case "$key" in
+              sha|frontend_image|gateway_image|worker_image|dbtool_image|auth_browser_image|tts_image|bark_image)
+                echo "$key=$value" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done <<< "$state"
+
   verify:
     name: Verify test and build
+    needs: production-state
     timeout-minutes: 15
     runs-on: ubuntu-latest
     outputs:
@@ -42,21 +131,22 @@ jobs:
       - name: Resolve verified production baseline
         id: baseline
         env:
-          PRODUCTION_BASE_SHA: ${{ vars.PRODUCTION_BASE_SHA }}
-          EVENT_BEFORE: ${{ github.event.before }}
+          PRODUCTION_BASE_SHA: ${{ needs.production-state.outputs.sha }}
         run: |
           set -euo pipefail
-          base_commit=""
-          if [[ -n "${PRODUCTION_BASE_SHA:-}" ]] && [[ "$PRODUCTION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "${PRODUCTION_BASE_SHA}^{commit}" 2>/dev/null; then
-            base_commit="$PRODUCTION_BASE_SHA"
-          elif [[ -n "${EVENT_BEFORE:-}" ]] && [[ "$EVENT_BEFORE" =~ ^[0-9a-f]{40}$ ]] && [[ "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "${EVENT_BEFORE}^{commit}" 2>/dev/null; then
-            base_commit="$EVENT_BEFORE"
-          elif git rev-parse --verify "HEAD~1^{commit}" >/dev/null 2>&1; then
-            base_commit="$(git rev-parse HEAD~1)"
-          else
-            base_commit="$(git rev-parse HEAD)"
+          if [[ -z "${PRODUCTION_BASE_SHA:-}" ]]; then
+            echo "PRODUCTION_BASE_SHA must identify the last successfully promoted production commit." >&2
+            exit 1
           fi
-          echo "sha=$base_commit" >> "$GITHUB_OUTPUT"
+          if [[ ! "$PRODUCTION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${PRODUCTION_BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "PRODUCTION_BASE_SHA is invalid or unavailable in repository history: $PRODUCTION_BASE_SHA" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$PRODUCTION_BASE_SHA" "$GITHUB_SHA"; then
+            echo "Production baseline is not an ancestor of the candidate; reconcile or roll back production state first." >&2
+            exit 1
+          fi
+          echo "sha=$PRODUCTION_BASE_SHA" >> "$GITHUB_OUTPUT"
       - name: Compute component scope before builds
         id: scope
         env:
@@ -145,8 +235,8 @@ jobs:
   build-frontend-image:
     name: Build frontend GHCR image
     timeout-minutes: 15
-    needs: verify
-    if: needs.verify.outputs.frontend == 'true' || !vars.FRONTEND_IMAGE_REF
+    needs: [production-state, verify]
+    if: needs.verify.outputs.frontend == 'true' || !needs.production-state.outputs.frontend_image
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -189,8 +279,8 @@ jobs:
   build-gateway-image:
     name: Build gateway GHCR image
     timeout-minutes: 15
-    needs: verify
-    if: needs.verify.outputs.gateway == 'true' || !vars.GATEWAY_IMAGE_REF
+    needs: [production-state, verify]
+    if: needs.verify.outputs.gateway == 'true' || !needs.production-state.outputs.gateway_image
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -233,8 +323,8 @@ jobs:
   build-worker-image:
     name: Build worker GHCR image
     timeout-minutes: 15
-    needs: verify
-    if: needs.verify.outputs.worker == 'true' || !vars.WORKER_IMAGE_REF
+    needs: [production-state, verify]
+    if: needs.verify.outputs.worker == 'true' || !needs.production-state.outputs.worker_image
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -277,8 +367,8 @@ jobs:
   build-dbtool-image:
     name: Build dbtool GHCR image
     timeout-minutes: 15
-    needs: verify
-    if: needs.verify.outputs.schema == 'true' || !vars.DBTOOL_IMAGE_REF
+    needs: [production-state, verify]
+    if: needs.verify.outputs.schema == 'true' || !needs.production-state.outputs.dbtool_image
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -321,8 +411,8 @@ jobs:
   build-auth-browser-image:
     name: Build auth-browser GHCR image
     timeout-minutes: 15
-    needs: verify
-    if: needs.verify.outputs.auth_browser == 'true' || !vars.BROWSER_IMAGE_REF
+    needs: [production-state, verify]
+    if: needs.verify.outputs.auth_browser == 'true' || !needs.production-state.outputs.auth_browser_image
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -369,8 +459,8 @@ jobs:
   build-tts-gateway-image:
     name: Build tts-gateway GHCR image
     timeout-minutes: 15
-    needs: verify
-    if: needs.verify.outputs.tts == 'true' || !vars.TTS_IMAGE_REF
+    needs: [production-state, verify]
+    if: needs.verify.outputs.tts == 'true' || !needs.production-state.outputs.tts_image
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -418,6 +508,7 @@ jobs:
     timeout-minutes: 20
     if: always() && needs.verify.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     needs:
+      - production-state
       - verify
       - build-frontend-image
       - build-gateway-image
@@ -495,10 +586,10 @@ jobs:
             --allowlist deploy/third-party-allowlist.json
       - name: Scan core first-party images with Trivy (frontend, gateway, worker, dbtool)
         env:
-          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || needs.production-state.outputs.frontend_image }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || needs.production-state.outputs.gateway_image }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || needs.production-state.outputs.worker_image }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || needs.production-state.outputs.dbtool_image }}
         run: |
           set -euo pipefail
           mkdir -p sbom-artifacts security-reports
@@ -542,8 +633,8 @@ jobs:
 
       - name: Scan sidecar first-party images with Trivy (auth-browser, tts-gateway)
         env:
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || needs.production-state.outputs.auth_browser_image }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || needs.production-state.outputs.tts_image }}
         run: |
           set -euo pipefail
           mkdir -p sbom-artifacts security-reports
@@ -628,12 +719,12 @@ jobs:
 
       - name: Sign first-party images with Cosign keyless OIDC
         env:
-          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || needs.production-state.outputs.frontend_image }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || needs.production-state.outputs.gateway_image }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || needs.production-state.outputs.worker_image }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || needs.production-state.outputs.dbtool_image }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || needs.production-state.outputs.auth_browser_image }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || needs.production-state.outputs.tts_image }}
         run: |
           set -euo pipefail
           first_party=(
@@ -652,12 +743,12 @@ jobs:
 
       - name: Verify first-party image signatures
         env:
-          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || needs.production-state.outputs.frontend_image }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || needs.production-state.outputs.gateway_image }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || needs.production-state.outputs.worker_image }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || needs.production-state.outputs.dbtool_image }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || needs.production-state.outputs.auth_browser_image }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || needs.production-state.outputs.tts_image }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -695,12 +786,12 @@ jobs:
 
       - name: Generate release manifest JSON
         env:
-          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || vars.FRONTEND_IMAGE_REF }}
-          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || vars.GATEWAY_IMAGE_REF }}
-          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || vars.WORKER_IMAGE_REF }}
-          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || vars.DBTOOL_IMAGE_REF }}
-          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || vars.BROWSER_IMAGE_REF }}
-          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || vars.TTS_IMAGE_REF }}
+          FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || needs.production-state.outputs.frontend_image }}
+          GATEWAY_IMAGE: ${{ needs.build-gateway-image.outputs.digest && format('{0}@{1}', needs.build-gateway-image.outputs.image, needs.build-gateway-image.outputs.digest) || needs.production-state.outputs.gateway_image }}
+          WORKER_IMAGE: ${{ needs.build-worker-image.outputs.digest && format('{0}@{1}', needs.build-worker-image.outputs.image, needs.build-worker-image.outputs.digest) || needs.production-state.outputs.worker_image }}
+          DBTOOL_IMAGE: ${{ needs.build-dbtool-image.outputs.digest && format('{0}@{1}', needs.build-dbtool-image.outputs.image, needs.build-dbtool-image.outputs.digest) || needs.production-state.outputs.dbtool_image }}
+          BROWSER_IMAGE: ${{ needs.build-auth-browser-image.outputs.digest && format('{0}@{1}', needs.build-auth-browser-image.outputs.image, needs.build-auth-browser-image.outputs.digest) || needs.production-state.outputs.auth_browser_image }}
+          TTS_IMAGE: ${{ needs.build-tts-gateway-image.outputs.digest && format('{0}@{1}', needs.build-tts-gateway-image.outputs.image, needs.build-tts-gateway-image.outputs.digest) || needs.production-state.outputs.tts_image }}
           BARK_IMAGE_REF: ${{ vars.BARK_IMAGE_REF || 'ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4' }}
         run: |
           bash deploy/generate-release-manifest.sh \
@@ -746,7 +837,7 @@ jobs:
   deploy:
     name: Deploy to VPS
     timeout-minutes: 25
-    needs: [verify, build-frontend-image, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
+    needs: [production-state, verify, build-frontend-image, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
     if: always() && needs.scan-and-attest.result == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true))
     runs-on: ubuntu-latest
     environment: production

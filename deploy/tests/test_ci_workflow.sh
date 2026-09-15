@@ -58,6 +58,24 @@ assert_contains "$deploy_content" "group: acb-transaction-webhook-production" "D
 assert_contains "$deploy_content" "cancel-in-progress: false" "Deploy concurrency cancel-in-progress is false (never cancels in flight)"
 
 # 3. Environment Protection
+printf "\n2b. Testing authoritative production state inputs...\n"
+assert_contains "$deploy_content" "  production-state:" "Workflow defines production-state job"
+assert_contains "$deploy_content" 'PRODUCTION_BASE_SHA: ${{ needs.production-state.outputs.sha }}' "Baseline comes from VPS production state"
+if grep -q 'EVENT_BEFORE:' "$deploy_yml" || grep -q 'HEAD~1' "$deploy_yml"; then
+  printf 'FAIL: deploy workflow retains an inferred baseline fallback\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: deploy workflow has no event.before or HEAD~1 baseline fallback\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+if grep -Eq 'vars\.(FRONTEND|GATEWAY|WORKER|DBTOOL|BROWSER|TTS)_IMAGE_REF' "$deploy_yml"; then
+  printf 'FAIL: first-party image fallback still uses repository variables\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: first-party image fallbacks come from production state\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
 printf "\n3. Testing Environment Protection...\n"
 assert_contains "$deploy_content" "environment: production" "Deploy job enforces production environment protection"
 
