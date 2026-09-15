@@ -201,6 +201,7 @@ assert_contains "$deploy_content" "stable-deployer.sh" "Deploy step invokes stab
 stable_deployer_content="$(cat "$REPO_ROOT/deploy/stable-deployer.sh")"
 assert_contains "$stable_deployer_content" "dispatch-rollout.sh" "Stable deployer invokes dispatch-rollout.sh"
 assert_contains "$stable_deployer_content" "--require-cosign" "Stable deployer enforces --require-cosign"
+assert_contains "$stable_deployer_content" 'EDGE_PROBE_SCRIPT="$RELEASE_DIR/edge-probe.sh"' "Stable deployer uses the verified release edge probe"
 assert_contains "$deploy_content" "--expected-identity" "Deploy step passes exact --expected-identity"
 assert_contains "$deploy_content" "--expected-issuer" "Deploy step passes --expected-issuer"
 

@@ -67,6 +67,9 @@ export DEPLOY_STATE_FILE="$runtime_dir/.deploy-state"
 export SOAK_STATE_FILE="$runtime_dir/.soak-state"
 export DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
 export PATH="$runtime_dir:$PATH"
+if [[ -x "$RELEASE_DIR/edge-probe.sh" ]]; then
+  export EDGE_PROBE_SCRIPT="$RELEASE_DIR/edge-probe.sh"
+fi
 
 bash "$RELEASE_DIR/dispatch-rollout.sh" \
   --manifest "$RELEASE_DIR/release-manifest.json" \
