@@ -114,6 +114,9 @@ check_job_timeout "$ci_yml" "docker-smoke-gateway"
 check_job_timeout "$ci_yml" "docker-smoke-auth-browser"
 check_job_timeout "$ci_yml" "docker-smoke-tts-gateway"
 
+scan_checkout_context="$(grep -A 25 '^  scan-and-attest:' "$deploy_yml" || true)"
+assert_contains "$scan_checkout_context" "fetch-depth: 0" "Scan and attest job fetches full history for promotion scope"
+
 # 5. Step-Level Timeouts on Deploy Job
 printf "\n5. Testing Step-Level Timeouts on Critical Steps...\n"
 assert_contains "$deploy_content" "name: Sync deployment files" "Sync step exists"
