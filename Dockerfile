@@ -8,6 +8,8 @@ COPY web/ ./
 RUN bunx --bun tsc --noEmit && bunx --bun vite build
 
 FROM nginxinc/nginx-unprivileged:1.29.4-alpine AS frontend
+USER root
+RUN apk update && apk upgrade --no-cache
 COPY deploy/frontend-nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=web-builder /src/web/dist /usr/share/nginx/html
 USER 101:101
