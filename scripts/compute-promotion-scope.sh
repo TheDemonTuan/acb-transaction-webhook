@@ -140,145 +140,58 @@ total_files=0
 normalize_path() {
   printf '%s' "$1" | tr '\\' '/'
 }
-
-is_doc_path() {
-  local p="$1"
-  if [[ "$p" =~ \.md$ ]] || [[ "$p" =~ ^docs/ ]] || [[ "$p" =~ ^LICENSE ]] || \
-     [[ "$p" == ".gitignore" ]] || [[ "$p" == ".gitattributes" ]] || \
-     [[ "$p" == ".github/dependabot.yml" ]]; then
-    return 0
-  fi
-  return 1
-}
+component_map="${COMPONENT_MAP_FILE:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/deploy/component-map.json}"
+[[ -f "$component_map" ]] || { printf 'Component map not found: %s\n' "$component_map" >&2; exit 1; }
 
 classify_path() {
   local p="$1"
-  local matched=0
-
-  if ! is_doc_path "$p"; then
-    all_doc_only=false
-  fi
-
-  # 1. Schema & dbtool
-  if [[ "$p" =~ ^internal/storage/migrations/ ]] || [[ "$p" =~ ^cmd/dbtool/ ]]; then
-    scope_schema=true
-    scope_gateway=true
-    scope_worker=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> schema, gateway, worker (migration/dbtool)\n' "$p" >&2
-  fi
-
-  # 2. Frontend paths
-  if [[ "$p" =~ ^web/ ]] || [[ "$p" == "deploy/frontend-nginx.conf" ]]; then
-    scope_frontend=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> frontend\n' "$p" >&2
-  fi
-
-  # 3. Gateway paths
-  if [[ "$p" =~ ^cmd/gateway/ ]] || [[ "$p" =~ ^internal/httpapi/ ]] || \
-     [[ "$p" =~ ^internal/csrf/ ]]; then
-    scope_gateway=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> gateway\n' "$p" >&2
-  fi
-
-  # 3. Worker-only paths
-  if [[ "$p" =~ ^cmd/worker/ ]] || [[ "$p" =~ ^internal/workerstate/ ]] || \
-     [[ "$p" =~ ^internal/maintenance/ ]] || [[ "$p" =~ ^internal/upstream/ ]]; then
-    scope_worker=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> worker\n' "$p" >&2
-  fi
-
-  # 4. Shared runtime packages imported by both production binaries.
-  if [[ "$p" =~ ^internal/workerrpc/ ]] || [[ "$p" =~ ^internal/storage/ ]] || \
-     [[ "$p" =~ ^internal/config/ ]] || [[ "$p" =~ ^internal/security/ ]] || \
-     [[ "$p" =~ ^internal/domain/ ]] || [[ "$p" =~ ^internal/monitor/ ]] || \
-     [[ "$p" =~ ^internal/acb/ ]] || [[ "$p" =~ ^internal/scheduler/ ]] || \
-     [[ "$p" =~ ^internal/notification/ ]] || [[ "$p" =~ ^internal/webhook/ ]] || \
-     [[ "$p" =~ ^internal/bark/ ]]; then
-    scope_gateway=true
-    scope_worker=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> gateway, worker (shared package)\n' "$p" >&2
-  fi
-
-  # 5. Root Go modules and lock files
-  if [[ "$p" == "go.mod" ]] || [[ "$p" == "go.sum" ]]; then
-    scope_gateway=true
-    scope_worker=true
-    scope_schema=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> gateway, worker, schema (go.mod/sum)\n' "$p" >&2
-  fi
-
-  # 6. Auth-browser
-  if [[ "$p" == "Dockerfile.auth-browser" ]] || [[ "$p" =~ ^cmd/auth-browser/ ]] || \
-     [[ "$p" =~ ^internal/authbrowser/ ]] || [[ "$p" == "deploy/seccomp-auth-browser.json" ]] || \
-     [[ "$p" == "deploy/smoke-test-auth-browser.sh" ]]; then
-    scope_auth_browser=true
-    if [[ "$p" =~ ^internal/authbrowser/ ]]; then
-      scope_gateway=true
-      scope_worker=true
+  local result kind components
+  result="$(python3 - "$component_map" "$p" <<'PY_MAP'
+import json, re, sys
+with open(sys.argv[1], encoding='utf-8') as handle:
+    mapping = json.load(handle)
+path = sys.argv[2]
+if any(re.search(pattern, path) for pattern in mapping.get('documentation', [])):
+    print('doc:')
+    raise SystemExit
+matched = []
+for rule in mapping.get('rules', []):
+    if re.search(rule['pattern'], path):
+        for component in rule['components']:
+            if component not in matched:
+                matched.append(component)
+if not matched:
+    matched = mapping.get('unknown', [])
+print('runtime:' + ','.join(matched))
+PY_MAP
+)"
+  kind="${result%%:*}"
+  components="${result#*:}"
+  if [[ "$kind" == "doc" ]]; then
+    if [[ $verbose -eq 1 ]]; then
+      printf '  [CLASSIFY] %s -> doc-only\n' "$p" >&2
     fi
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> auth-browser%s\n' "$p" "$([[ "$p" =~ ^internal/authbrowser/ ]] && printf ', gateway, worker')" >&2
+    return 0
   fi
-
-  # 7. TTS
-  if [[ "$p" =~ ^tts-gateway/ ]] || [[ "$p" == "deploy/smoke-test-tts-gateway.sh" ]]; then
-    scope_tts=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> tts\n' "$p" >&2
-  fi
-
-  # 8. Bark
-  if [[ "$p" == "deploy/third-party-allowlist.json" ]] || \
-     [[ "$p" == "deploy/verify-third-party-policy.sh" ]] || \
-     [[ "$p" == "deploy/smoke-test-bark.sh" ]] || \
-     [[ "$p" == "deploy/bark-entrypoint.sh" ]]; then
-    scope_bark=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> bark\n' "$p" >&2
-  fi
-
-  # 9. Root Dockerfile edits require an explicit full first-party rebuild review.
-  if [[ "$p" == "Dockerfile" ]]; then
-    scope_frontend=true
-    scope_gateway=true
-    scope_worker=true
-    scope_schema=true
-    scope_auth_browser=true
-    scope_platform=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> frontend, gateway, worker, schema, auth-browser, platform (root Dockerfile)\n' "$p" >&2
-  fi
-
-  # 10. Platform / deploy / CI
-  if [[ "$p" =~ ^deploy/ ]] || [[ "$p" =~ ^platform/ ]] || \
-     [[ "$p" =~ ^\.github/workflows/ ]] || [[ "$p" =~ ^scripts/ ]] || \
-     [[ "$p" == "compose.yaml" ]]; then
-    scope_platform=true
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> platform\n' "$p" >&2
-  fi
-
-  # 11. Doc-only
-  if is_doc_path "$p"; then
-    matched=1
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> doc-only\n' "$p" >&2
-  fi
-
-  # 12. Fallback for unclassified files: fail-safe broader scope
-  if [[ $matched -eq 0 ]]; then
-    [[ $verbose -eq 1 ]] && printf '  [CLASSIFY] %s -> UNCLASSIFIED (assigning broader scope: gateway, worker, platform)\n' "$p" >&2
-    scope_gateway=true
-    scope_worker=true
-    scope_platform=true
+  all_doc_only=false
+  IFS=',' read -r -a matched_components <<< "$components"
+  for component in "${matched_components[@]}"; do
+    case "$component" in
+      frontend) scope_frontend=true ;;
+      gateway) scope_gateway=true ;;
+      worker) scope_worker=true ;;
+      schema) scope_schema=true ;;
+      auth_browser) scope_auth_browser=true ;;
+      tts) scope_tts=true ;;
+      bark) scope_bark=true ;;
+      platform) scope_platform=true ;;
+      *) printf 'Unknown component %q in %s\n' "$component" "$component_map" >&2; exit 1 ;;
+    esac
+  done
+  if [[ $verbose -eq 1 ]]; then
+    printf '  [CLASSIFY] %s -> %s\n' "$p" "$components" >&2
   fi
 }
-
 for path_entry in "${raw_paths[@]}"; do
   cleaned="$(normalize_path "$path_entry")"
   [[ -z "$cleaned" ]] && continue

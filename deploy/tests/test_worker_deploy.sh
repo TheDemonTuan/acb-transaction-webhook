@@ -132,6 +132,10 @@ elif [[ "$cmd" == "compose" ]]; then
   fi
   exit 0
 elif [[ "$cmd" == "run" ]]; then
+  if [[ "$*" =~ -deploy-capabilities ]]; then
+    printf '{"protocol":2,"quiesce":true,"drain":true,"resume":true,"notificationDrain":true,"sessionCheckpoint":true,"journalCheckpoint":true}\n'
+    exit 0
+  fi
   if [[ "$*" =~ -active-auth-count ]]; then
     if [[ "${MOCK_ACTIVE_AUTH:-0}" == "1" ]]; then
       printf '{"activeCount":1}\n'
@@ -173,7 +177,7 @@ elif [[ "$cmd" == "run" ]]; then
     if [[ "${MOCK_CANDIDATE_QUIESCE_FAIL:-0}" == "1" ]]; then
       exit 1
     fi
-    printf '{"status":"quiesced","quiesced":true,"generation":5}\n'
+    printf '{"status":"quiesced","quiesced":true,"generation":5,"dispatcher":"IDLE","activeDeliveries":0,"activePoll":false,"journalSeq":12,"sessionCheckpointed":true}\n'
     exit 0
   fi
   if [[ "$*" =~ container:acb-worker && "$*" =~ -resume ]]; then
@@ -188,6 +192,10 @@ elif [[ "$cmd" == "run" ]]; then
   fi
   exit 0
 elif [[ "$cmd" == "exec" ]]; then
+  if [[ "$*" =~ -deploy-capabilities ]]; then
+    printf '{"protocol":2,"quiesce":true,"drain":true,"resume":true,"notificationDrain":true,"sessionCheckpoint":true,"journalCheckpoint":true}\n'
+    exit 0
+  fi
   if [[ "$*" =~ -quiesce ]]; then
     if [[ "${MOCK_EXEC_LEGACY_WORKER:-0}" == "1" ]]; then
       printf 'flag provided but not defined: -quiesce\n' >&2
@@ -196,7 +204,7 @@ elif [[ "$cmd" == "exec" ]]; then
     if [[ "${MOCK_QUIESCE_FAIL:-0}" == "1" ]]; then
       exit 1
     fi
-    printf '{"status":"quiesced","quiesced":true}\n'
+    printf '{"status":"quiesced","quiesced":true,"generation":5,"dispatcher":"IDLE","activeDeliveries":0,"activePoll":false,"journalSeq":12,"sessionCheckpointed":true}\n'
     exit 0
   fi
   if [[ "$*" =~ -resume ]]; then
@@ -260,7 +268,7 @@ assert_eq "0" "$stopped" "Old worker was NOT stopped when quiesce failed"
 printf '\n=== TEST 3: Candidate Readiness Failure Triggers Automatic Rollback ===\n'
 T3="$TEST_TMP/t3"
 setup_worker_mock_env "$T3"
-export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true,\"generation\":5,\"checkpoint\":\"2026-09-14\"}'"
+export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true,\"generation\":5,\"checkpoint\":\"2026-09-14\",\"dispatcher\":\"IDLE\",\"activeDeliveries\":0,\"activePoll\":false,\"journalSeq\":12,\"sessionCheckpointed\":true}'"
 export WORKER_START_CMD="true"
 export WORKER_STOP_CMD="true"
 export WORKER_READY_CHECK_CMD="false"
@@ -282,7 +290,7 @@ assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf '\n=== TEST 4: Successful Worker Upgrade ===\n'
 T4="$TEST_TMP/t4"
 setup_worker_mock_env "$T4"
-export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true,\"generation\":5,\"checkpoint\":\"2026-09-14\"}'"
+export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true,\"generation\":5,\"checkpoint\":\"2026-09-14\",\"dispatcher\":\"IDLE\",\"activeDeliveries\":0,\"activePoll\":false,\"journalSeq\":12,\"sessionCheckpointed\":true}'"
 export WORKER_START_CMD="true"
 export WORKER_STOP_CMD="true"
 export WORKER_READY_CHECK_CMD="true"
@@ -370,7 +378,7 @@ assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 # ==============================================================================
 printf '\n=== TEST 9: Bad Quiesce Responses Fail Closed Without Stopping Old Container ===\n'
 
-# 9a: Candidate container returns 404 (endpoint not supported on legacy pre-quiesce worker -> graceful fallback)
+# 9a: Candidate RPC client observes a legacy worker without the quiesce endpoint.
 T9A="$TEST_TMP/t9a"
 setup_worker_mock_env "$T9A"
 unset WORKER_QUIESCE_CMD
@@ -382,14 +390,12 @@ set +e
 exit_code=$?
 set -e
 
-assert_eq "0" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy succeeds on legacy worker 404 response via graceful stop fallback"
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy fails closed when the running worker lacks safe quiesce"
 stopped=0
 if [[ -f "$T9A/stop_was_called" ]]; then
   stopped=1
 fi
-assert_eq "1" "$stopped" "Old worker container was stopped via graceful stop"
-committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T9A/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Legacy worker upgraded and committed"
+assert_eq "0" "$stopped" "Old worker container was not stopped after a legacy 404 response"
 
 # 9b: Candidate container returns quiesced: false
 T9B="$TEST_TMP/t9b"
@@ -461,7 +467,7 @@ setup_worker_mock_env "$T11"
 # Remove WORKER_IMAGE_REF from release.env
 sed -i '/WORKER_IMAGE_REF/d' "$T11/.release.env"
 # Docker inspect will return valid running digest: ghcr.io/test/worker@sha256:aaaaaaaa...
-export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true}'"
+export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true,\"generation\":5,\"dispatcher\":\"IDLE\",\"activeDeliveries\":0,\"activePoll\":false,\"journalSeq\":12,\"sessionCheckpointed\":true}'"
 export WORKER_START_CMD="true"
 export WORKER_STOP_CMD="true"
 export WORKER_READY_CHECK_CMD="false" # Candidate fails readiness to trigger rollback
@@ -487,7 +493,7 @@ fi
 printf '\n=== TEST 12: Cleanup Resumes Worker If Quiesced But Not Stopped On Abort ===\n'
 T12="$TEST_TMP/t12"
 setup_worker_mock_env "$T12"
-export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true}'"
+export WORKER_QUIESCE_CMD="echo '{\"status\":\"quiesced\",\"quiesced\":true,\"generation\":5,\"dispatcher\":\"IDLE\",\"activeDeliveries\":0,\"activePoll\":false,\"journalSeq\":12,\"sessionCheckpointed\":true}'"
 export WORKER_STOP_CMD="false" # Stop fails, so container remains unstopped
 
 set +e
@@ -517,7 +523,7 @@ export WORKER_READINESS_TIMEOUT="2"
 
 # Create a restricted PATH environment containing required utilities, but strictly NO jq
 mkdir -p "$T13/no-jq-bin"
-for bin in bash sh env date tr grep egrep sed cut rm mv cp wc mkdir chmod cat touch sleep mktemp tail head awk python3 uname sort uniq dirname pwd basename false true; do
+for bin in bash sh env date tr grep egrep sed cut rm mv cp wc mkdir chmod cat touch sleep mktemp tail head awk python3 uname sort uniq dirname pwd basename flock false true; do
   bin_path="$(command -v "$bin" 2>/dev/null || true)"
   if [[ -n "$bin_path" && -x "$bin_path" ]]; then
     ln -sf "$bin_path" "$T13/no-jq-bin/$bin"
@@ -540,7 +546,7 @@ assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   eval "$(sed -n '/^verify_quiesce_response() {/,/^}/p' "$DEPLOY_DIR/deploy-worker.sh")"
 
   rc_ok=0
-  verify_quiesce_response '{"status":"quiesced","quiesced":true}' || rc_ok=$?
+  verify_quiesce_response '{"status":"quiesced","quiesced":true,"generation":5,"dispatcher":"IDLE","activeDeliveries":0,"activePoll":false,"journalSeq":12,"sessionCheckpointed":true}' || rc_ok=$?
   assert_eq "0" "$rc_ok" "verify_quiesce_response accepts quiesced true without jq"
 
   rc_false=0

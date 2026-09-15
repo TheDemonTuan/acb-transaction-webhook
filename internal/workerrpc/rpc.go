@@ -97,13 +97,18 @@ type TestNotificationResponse struct {
 }
 
 type QuiesceResponse struct {
-	Status     string `json:"status"`
-	Quiesced   bool   `json:"quiesced"`
-	Generation int64  `json:"generation"`
-	Checkpoint string `json:"checkpoint,omitempty"`
-	CoverageTo string `json:"coverageTo,omitempty"`
-	ScanID     string `json:"scanId,omitempty"`
-	WorkerID   string `json:"workerId,omitempty"`
+	Status              string `json:"status"`
+	Quiesced            bool   `json:"quiesced"`
+	Generation          int64  `json:"generation"`
+	Checkpoint          string `json:"checkpoint,omitempty"`
+	CoverageTo          string `json:"coverageTo,omitempty"`
+	ScanID              string `json:"scanId,omitempty"`
+	WorkerID            string `json:"workerId,omitempty"`
+	Dispatcher          string `json:"dispatcher"`
+	ActiveDeliveries    int64  `json:"activeDeliveries"`
+	ActivePoll          bool   `json:"activePoll"`
+	JournalSeq          int64  `json:"journalSeq"`
+	SessionCheckpointed bool   `json:"sessionCheckpointed"`
 }
 
 type ResumeResponse struct {

@@ -22,8 +22,15 @@ var defaultBackoffs = []time.Duration{
 	1 * time.Minute,
 	2 * time.Minute,
 	5 * time.Minute,
+	10 * time.Minute,
 	15 * time.Minute,
+	30 * time.Minute,
 }
+
+const (
+	defaultMaxRetries     = 154 // More than 72 hours with the capped backoff above.
+	deliveryReconcileTick = time.Minute
+)
 
 type Dispatcher struct {
 	store      *storage.Store
@@ -33,13 +40,15 @@ type Dispatcher struct {
 	workers    int
 	wakeCh     chan struct{}
 	paused     atomic.Bool
+	active     atomic.Int64
+	lifecycle  sync.RWMutex
 }
 
 func NewDispatcher(store *storage.Store, registry *Registry) *Dispatcher {
 	return &Dispatcher{
 		store:      store,
 		registry:   registry,
-		maxRetries: len(defaultBackoffs),
+		maxRetries: defaultMaxRetries,
 		backoffs:   defaultBackoffs,
 		workers:    4,
 		wakeCh:     make(chan struct{}, 4),
@@ -69,16 +78,40 @@ func (d *Dispatcher) SetWorkers(n int) *Dispatcher {
 }
 
 func (d *Dispatcher) Pause() {
+	d.lifecycle.Lock()
 	d.paused.Store(true)
+	d.lifecycle.Unlock()
+}
+
+func (d *Dispatcher) Drain(ctx context.Context) error {
+	d.Pause()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if d.active.Load() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d *Dispatcher) Resume() {
+	d.lifecycle.Lock()
 	d.paused.Store(false)
+	d.lifecycle.Unlock()
 	d.Wake()
 }
 
 func (d *Dispatcher) IsPaused() bool {
 	return d.paused.Load()
+}
+
+func (d *Dispatcher) ActiveDeliveries() int64 {
+	return d.active.Load()
 }
 
 func (d *Dispatcher) Wake() {
@@ -107,25 +140,54 @@ func (d *Dispatcher) Start(ctx context.Context) {
 }
 
 func (d *Dispatcher) worker(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-d.wakeCh:
-			d.drain(ctx)
-		case <-ticker.C:
-			d.drain(ctx)
+		case <-timer.C:
 		}
+		d.drain(ctx)
+		resetTimer(timer, d.nextWait(ctx))
 	}
 }
 
-func (d *Dispatcher) drain(ctx context.Context) {
+func (d *Dispatcher) nextWait(ctx context.Context) time.Duration {
 	if d.paused.Load() {
-		return
+		return deliveryReconcileTick
 	}
-	for {
+	due, err := d.store.NextDeliveryDue(ctx, time.Now().UTC())
+	if errors.Is(err, sql.ErrNoRows) {
+		return deliveryReconcileTick
+	}
+	if err != nil {
+		slog.Warn("notification delivery deadline query failed", "error", err)
+		return 2 * time.Second
+	}
+	wait := time.Until(due)
+	if wait <= 0 {
+		return 0
+	}
+	if wait > deliveryReconcileTick {
+		return deliveryReconcileTick
+	}
+	return wait
+}
+
+func resetTimer(timer *time.Timer, wait time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(wait)
+}
+
+func (d *Dispatcher) drain(ctx context.Context) {
+	for !d.paused.Load() {
 		processed, err := d.DispatchOne(ctx)
 		if err != nil {
 			slog.Warn("notification dispatch error", "error", err)
@@ -140,6 +202,15 @@ func (d *Dispatcher) drain(ctx context.Context) {
 // DispatchOne claims and attempts to dispatch a single pending delivery.
 // Returns (true, nil) if a delivery was processed, (false, nil) if none available.
 func (d *Dispatcher) DispatchOne(ctx context.Context) (bool, error) {
+	d.lifecycle.RLock()
+	if d.paused.Load() {
+		d.lifecycle.RUnlock()
+		return false, nil
+	}
+	d.active.Add(1)
+	d.lifecycle.RUnlock()
+	defer d.active.Add(-1)
+
 	now := time.Now().UTC()
 	delivery, err := d.store.ClaimDelivery(ctx, now, 30*time.Second)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -75,6 +75,13 @@ get_release_env() {
   fi
 }
 
+commit_component_release_env() {
+  if [[ "${DEFER_RELEASE_STATE:-0}" == "1" ]]; then
+    return 0
+  fi
+  set_release_env "$@"
+}
+
 set_release_env() {
   local key="$1"
   local value="$2"
@@ -141,8 +148,21 @@ set_release_env() {
     fi
   fi
 
-  chmod 600 "$tmp_file" 2>/dev/null || true
+  chmod 600 "$tmp_file"
+  python3 - "$tmp_file" <<'PY'
+import os, sys
+with open(sys.argv[1], 'rb') as handle:
+    os.fsync(handle.fileno())
+PY
   mv -f "$tmp_file" "$file"
+  python3 - "$target_dir" <<'PY'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
   return 0
 }
 

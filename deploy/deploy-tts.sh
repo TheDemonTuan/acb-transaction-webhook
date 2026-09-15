@@ -161,7 +161,7 @@ fi
 
 # 4. Commit new TTS image ref
 update_tx_state "TX_COMMITTED" "Candidate TTS verified healthy"
-set_release_env "TTS_IMAGE_REF" "$CANDIDATE_TTS_IMAGE"
+commit_component_release_env "TTS_IMAGE_REF" "$CANDIDATE_TTS_IMAGE"
 log_info "Committed new TTS_IMAGE_REF to .release.env."
 
 update_tx_state "TX_COMPLETED" "TTS auxiliary deployment transaction completed successfully"

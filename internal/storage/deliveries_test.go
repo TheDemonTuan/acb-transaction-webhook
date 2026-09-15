@@ -85,3 +85,35 @@ func TestRecordAttemptStoresAndRetrieves(t *testing.T) {
 			deliveryID, attemptNum, statusCode, latencyMs, outcome, sanitizedError, provider, providerErrorCode)
 	}
 }
+
+func TestNextDeliveryDueUsesActivePendingAndExpiredClaims(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "next-due.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	nowAt := time.Now().UTC().Truncate(time.Second)
+	for _, statement := range []string{
+		`INSERT INTO webhook_endpoints(id,name,status,current_revision,created_at,updated_at) VALUES('active','active','ACTIVE',1,'now','now'),('disabled','disabled','DISABLED',1,'now','now')`,
+		`INSERT INTO events(id,event_type,payload,payload_hash,created_at) VALUES('event-a','test',X'7B7D','a','now'),('event-b','test',X'7B7D','b','now')`,
+	} {
+		if _, err := store.DB().ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	future := nowAt.Add(time.Hour).Format(time.RFC3339Nano)
+	expired := nowAt.Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO deliveries(id,event_id,endpoint_id,endpoint_revision,key_id,status,next_attempt_at,lease_until,created_at,updated_at) VALUES
+		('disabled-pending','event-a','disabled',1,'k1','PENDING',? ,NULL,'now','now'),
+		('expired-claim','event-b','active',1,'k1','IN_FLIGHT',?,?,'now','now')`, future, future, expired); err != nil {
+		t.Fatal(err)
+	}
+	due, err := store.NextDeliveryDue(ctx, nowAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !due.Equal(nowAt.Add(-time.Minute)) {
+		t.Fatalf("expected expired claim deadline, got %s", due)
+	}
+}

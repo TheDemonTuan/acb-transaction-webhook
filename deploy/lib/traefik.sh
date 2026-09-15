@@ -135,6 +135,14 @@ validate_traefik_yaml() {
 render_traefik_config() {
   local target_slot="$1"
   local output_path="$2"
+  local frontend_slot="${3:-}"
+  if [[ -z "$frontend_slot" && -f "${FRONTEND_ACTIVE_SLOT_FILE:-}" ]]; then
+    frontend_slot="$(tr -d '[:space:]' < "$FRONTEND_ACTIVE_SLOT_FILE")"
+  fi
+  local frontend_backend="acb-frontend"
+  case "$frontend_slot" in
+    blue|green) frontend_backend="acb-frontend-${frontend_slot}" ;;
+  esac
   local route_host
   route_host="$(get_route_host)"
 
@@ -176,7 +184,7 @@ http:
       loadBalancer:
         passHostHeader: true
         servers:
-          - url: "http://acb-frontend:8080"
+          - url: "http://${frontend_backend}:8080"
         healthCheck:
           path: "/readyz"
           interval: "5s"
@@ -194,6 +202,42 @@ http:
           interval: "5s"
           timeout: "2s"
 EOF
+}
+
+atomic_switch_frontend_route() {
+  local target_slot="$1"
+  [[ "$target_slot" == "blue" || "$target_slot" == "green" ]] || {
+    log_error "atomic_switch_frontend_route: invalid target slot '${target_slot}'."
+    return 1
+  }
+  local gateway_slot
+  gateway_slot="$(get_active_slot)"
+  verify_traefik_prerequisites
+  local tmp_config="${ACB_CONFIG}.tmp.$$"
+  render_traefik_config "$gateway_slot" "$tmp_config" "$target_slot"
+  if ! validate_traefik_yaml "$tmp_config"; then
+    rm -f "$tmp_config"
+    return 1
+  fi
+  [[ ! -f "$ACB_CONFIG" ]] || cp -p "$ACB_CONFIG" "${ACB_CONFIG}.prev"
+  atomic_write_file "$ACB_CONFIG" 644 < "$tmp_config"
+  rm -f "$tmp_config"
+  printf '%s' "$target_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+}
+
+ack_frontend_route() {
+  local timeout="${1:-15}"
+  local probe_script="${EDGE_PROBE_SCRIPT:-${SCRIPT_DIR:-deploy}/edge-probe.sh}"
+  [[ -x "$probe_script" ]] || { log_error "Frontend edge probe is unavailable."; return 1; }
+  local elapsed=0
+  while [[ "$elapsed" -lt "$timeout" ]]; do
+    if "$probe_script" --target production --service acb --path / --expected-status 200 --timeout 5 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
 }
 
 atomic_switch_route() {
@@ -220,8 +264,9 @@ atomic_switch_route() {
     cp -p "$ACB_CONFIG" "${ACB_CONFIG}.prev" 2>/dev/null || true
   fi
 
-  mv -f "$tmp_config" "$ACB_CONFIG"
-  printf '%s' "$target_slot" > "$ACTIVE_SLOT_FILE"
+  atomic_write_file "$ACB_CONFIG" 644 < "$tmp_config"
+  rm -f "$tmp_config"
+  printf '%s' "$target_slot" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
   log_info "Dynamic route pointer successfully set to acb-web-${target_slot} (atomic rename committed)."
   return 0
 }

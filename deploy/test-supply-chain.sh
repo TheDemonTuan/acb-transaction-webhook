@@ -220,13 +220,8 @@ manifest_test_dir="$test_tmp/bundle"
 mkdir -p "$manifest_test_dir"
 
 # Copy real deploy files to test bundle
-cp "$script_dir"/compose.prod.yaml "$script_dir"/deploy-warm.sh "$script_dir"/rollback-warm.sh \
-   "$script_dir"/switch-slot.sh "$script_dir"/smoke-slot.sh "$script_dir"/check-host.sh \
-   "$script_dir"/seccomp-auth-browser.json "$script_dir"/deploy.sh "$script_dir"/rollback.sh \
-   "$script_dir"/verify-deployment.sh "$script_dir"/backup.sh "$script_dir"/bark-entrypoint.sh \
-   "$script_dir"/smoke-test-bark.sh "$script_dir"/smoke-test-tts-gateway.sh \
-   "$script_dir"/smoke-test-auth-browser.sh "$script_dir"/verify-manifest.sh "$script_dir"/lib.sh \
-   "$script_dir"/README.md "$manifest_test_dir/"
+cp -r "$script_dir"/* "$manifest_test_dir/"
+rm -f "$manifest_test_dir/release-manifest.json"* "$manifest_test_dir"/*.tmp*
 
 manifest_out="$manifest_test_dir/release-manifest.json"
 valid_sha="a4e71ffe29e97e88df6bf25e449c5a0d032a18cb"

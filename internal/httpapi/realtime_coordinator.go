@@ -134,6 +134,16 @@ func (c *RealtimeCoordinator) reconcile(ctx context.Context, target int64, gap b
 			return
 		}
 	}
+	minSeq, err := c.server.store.GetMinJournalSeq(ctx, realtimeEpoch)
+	if err != nil {
+		slog.Warn("realtime recovery minimum watermark failed", "error", err)
+		return
+	}
+	if minSeq > 0 && c.LastSeq() < minSeq-1 {
+		c.setLastSeq(minSeq - 1)
+		gap = true
+	}
+
 	recoveredCredits := 0
 	defer func() { telemetry.Default.RecordFallbackRecovery(recoveredCredits, gap) }()
 	for c.LastSeq() < target {

@@ -88,6 +88,42 @@ if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/n
   OLD_WORKER_RUNNING=1
 fi
 
+verify_deploy_capabilities() {
+  local label="$1"
+  local output="$2"
+  if ! CAPABILITIES_JSON="$output" python3 - "$label" <<'PY'
+import json, os, re, sys
+label = sys.argv[1]
+match = re.search(r'\{.*\}', os.environ.get('CAPABILITIES_JSON', ''), re.S)
+if not match:
+    raise SystemExit(f'{label}: missing capabilities JSON')
+data = json.loads(match.group(0))
+required = ('quiesce', 'drain', 'resume', 'notificationDrain', 'sessionCheckpoint', 'journalCheckpoint')
+if not isinstance(data.get('protocol'), int) or data['protocol'] < 2:
+    raise SystemExit(f'{label}: deployment protocol 2 or newer is required')
+missing = [key for key in required if data.get(key) is not True]
+if missing:
+    raise SystemExit(f"{label}: missing capabilities: {', '.join(missing)}")
+PY
+  then
+    log_error "Worker deployment capability check failed for ${label}."
+    return 1
+  fi
+}
+
+candidate_capabilities="$(docker run --rm --entrypoint /worker "$CANDIDATE_WORKER_IMAGE" -deploy-capabilities 2>&1)" || {
+  log_error "Candidate worker does not expose the deployment capability protocol: ${candidate_capabilities}"
+  exit 1
+}
+verify_deploy_capabilities "candidate worker" "$candidate_capabilities"
+if [[ "$OLD_WORKER_RUNNING" -eq 1 ]]; then
+  running_capabilities="$(docker exec acb-worker /worker -deploy-capabilities 2>&1)" || {
+    log_error "Running worker cannot prove a safe handoff protocol: ${running_capabilities}"
+    exit 1
+  }
+  verify_deploy_capabilities "running worker" "$running_capabilities"
+fi
+
 resume_old_worker() {
   log_info "Resuming old worker via RPC..."
   if [[ -n "${WORKER_RESUME_CMD:-}" ]]; then
@@ -167,40 +203,26 @@ WORKER_RPC_URL="${WORKER_RPC_URL:-http://127.0.0.1:8190}"
 
 verify_quiesce_response() {
   local resp="$1"
-  if [[ -z "$resp" ]]; then
-    return 1
-  fi
-  local is_quiesced="false"
-  if command -v jq >/dev/null 2>&1; then
-    is_quiesced="$(printf '%s' "$resp" | jq -e -r '.quiesced' 2>/dev/null || echo "false")"
-  fi
-  if [[ "$is_quiesced" != "true" ]] && command -v python3 >/dev/null 2>&1; then
-    is_quiesced="$(python3 -c "import sys, json, re
-text = sys.stdin.read()
-m = re.search(r'\{.*\}', text, re.DOTALL)
-if m:
-    try:
-        data = json.loads(m.group(0))
-        if data.get('quiesced') is True:
-            print('true')
-            sys.exit(0)
-    except Exception:
-        pass
-print('false')
-" <<< "$resp" 2>/dev/null || echo "false")"
-  fi
-  if [[ "$is_quiesced" != "true" ]]; then
-    if [[ "$resp" =~ \"quiesced\"[[:space:]]*:[[:space:]]*true ]]; then
-      is_quiesced="true"
-    fi
-  fi
-
-  if [[ "$is_quiesced" == "true" ]]; then
-    return 0
-  fi
-  return 1
+  [[ -n "$resp" ]] || return 1
+  QUIESCE_JSON="$resp" python3 - <<'PY_INNER'
+import json, os, re
+match = re.search(r'\{.*\}', os.environ.get('QUIESCE_JSON', ''), re.S)
+if not match:
+    raise SystemExit('missing quiesce JSON')
+data = json.loads(match.group(0))
+if data.get('status') != 'quiesced' or data.get('quiesced') is not True:
+    raise SystemExit('worker did not report quiesced state')
+if data.get('dispatcher') != 'IDLE' or data.get('activeDeliveries') != 0:
+    raise SystemExit('notification dispatcher is not drained')
+if data.get('activePoll') is not False:
+    raise SystemExit('bank poll is still active')
+if data.get('sessionCheckpointed') is not True:
+    raise SystemExit('session checkpoint was not persisted')
+for key in ('generation', 'journalSeq'):
+    if not isinstance(data.get(key), int) or data[key] < 0:
+        raise SystemExit(f'invalid {key}')
+PY_INNER
 }
-
 verify_quiesced_json() {
   verify_quiesce_response "$@"
 }
@@ -256,11 +278,10 @@ quiesce_old_worker() {
       fi
     else
       if [[ "$q_resp" =~ "404 page not found" || "$q_resp" =~ "status 404" ]]; then
-        log_warn "Running worker container returned HTTP 404 for /rpc/quiesce. Detected legacy pre-quiesce worker."
-        log_warn "Proceeding with graceful container stop (SIGTERM with 30s grace period)..."
-        return 0
+        log_error "Running worker does not support the required safe quiesce protocol."
+      else
+        log_error "Candidate container quiesce RPC failed: ${q_resp}"
       fi
-      log_error "Candidate container quiesce RPC failed: ${q_resp}"
     fi
 
     log_error "Failed to quiesce running worker container: ${q_resp}"
@@ -404,7 +425,7 @@ if ! wait_for_worker_ready "${WORKER_READINESS_TIMEOUT:-30}"; then
 fi
 
 # 7. Commit new worker image reference to release state
-set_release_env "WORKER_IMAGE_REF" "$CANDIDATE_WORKER_IMAGE"
+commit_component_release_env "WORKER_IMAGE_REF" "$CANDIDATE_WORKER_IMAGE"
 log_info "Committed new WORKER_IMAGE_REF to .release.env."
 
 # 8. Release durable mutation gate

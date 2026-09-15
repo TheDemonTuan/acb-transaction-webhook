@@ -22,13 +22,35 @@ type Delivery struct {
 	NextAttempt            string `json:"nextAttemptAt"`
 }
 
-func (s *Store) NextDeliveryDue(ctx context.Context) (time.Time, error) {
-	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT min(next_attempt_at) FROM deliveries WHERE status='PENDING'`).Scan(&raw)
+func (s *Store) NextDeliveryDue(ctx context.Context, nowAt time.Time) (time.Time, error) {
+	nowString := nowAt.UTC().Format(time.RFC3339Nano)
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT min(CASE WHEN d.status='IN_FLIGHT' THEN d.lease_until ELSE d.next_attempt_at END)
+		FROM deliveries d
+		JOIN webhook_endpoints e ON e.id=d.endpoint_id
+		WHERE e.status='ACTIVE'
+		  AND d.status IN ('PENDING','IN_FLIGHT')
+		  AND (d.status!='IN_FLIGHT' OR d.lease_until IS NOT NULL)
+		  AND NOT EXISTS (
+			SELECT 1 FROM deliveries active
+			WHERE active.endpoint_id=d.endpoint_id
+			  AND active.status='IN_FLIGHT'
+			  AND active.lease_until>=?
+			  AND active.id<>d.id
+		  )
+	`, nowString).Scan(&raw)
 	if err != nil {
 		return time.Time{}, err
 	}
-	return time.Parse(time.RFC3339Nano, raw)
+	if !raw.Valid || raw.String == "" {
+		return time.Time{}, sql.ErrNoRows
+	}
+	due, err := time.Parse(time.RFC3339Nano, raw.String)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return due, nil
 }
 
 func (s *Store) ClaimDelivery(ctx context.Context, nowAt time.Time, lease time.Duration) (Delivery, error) {

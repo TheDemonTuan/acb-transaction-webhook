@@ -52,16 +52,18 @@ if [[ "$DRILL_DIR" == "/data" || "$DRILL_DIR" == "/data/"* ]]; then
   exit 1
 fi
 
-abs_drill="$(cd -- "$(mkdir -p "$DRILL_DIR" && cd -- "$DRILL_DIR" && pwd)" && pwd)"
+abs_drill="$(realpath -m -- "$DRILL_DIR")"
 live_data_dir="${DATA_DIR:-$REPO_ROOT/deploy/data}"
-abs_live="$(cd -- "$(mkdir -p "$live_data_dir" && cd -- "$live_data_dir" && pwd)" && pwd)"
+abs_live="$(realpath -m -- "$live_data_dir")"
 
-if [[ "$abs_drill" == "$abs_live"* || "$abs_drill" == "/data" || "$abs_drill" == "/data/"* || "$abs_drill" == *gateway_data* ]]; then
+if [[ "$abs_drill" == "$abs_live" || "$abs_drill" == "$abs_live/"* || "$abs_drill" == "/data" || "$abs_drill" == "/data/"* || "$abs_drill" == *gateway_data* ]]; then
   printf 'RESTORE DRILL REFUSED: Target drill directory (%s) overlaps with live production data directory (%s).\n' "$abs_drill" "$abs_live" >&2
   exit 1
 fi
 
-chmod 700 "$abs_drill" 2>/dev/null || true
+mkdir -p "$abs_drill"
+[[ ! -L "$abs_drill" ]] || { printf 'RESTORE DRILL REFUSED: Target is a symlink.\n' >&2; exit 1; }
+chmod 700 "$abs_drill"
 ts="$(date -u +'%Y%m%d%H%M%S')"
 drill_id="drill-${ts}"
 

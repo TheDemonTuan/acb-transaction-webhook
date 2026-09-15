@@ -211,80 +211,71 @@ init_rollout_journal() {
   local r_id="$1"
   local git_sha="$2"
   local scope="$3"
-  mkdir -p "$(dirname "$ROLLOUT_JOURNAL_FILE")"
   local now
   now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-  cat <<EOF > "$ROLLOUT_JOURNAL_FILE"
-{
-  "rollout_id": "${r_id}",
-  "git_sha": "${git_sha}",
-  "status": "RUNNING",
-  "scope": "${scope}",
-  "started_at": "${now}",
-  "updated_at": "${now}",
-  "current_step": "INITIALIZED",
-  "completed_steps": []
-}
-EOF
+  R_ID="$r_id" R_GIT_SHA="$git_sha" R_SCOPE="$scope" R_NOW="$now" python3 - <<'PY_JSON' | atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600
+import json, os
+print(json.dumps({
+    "rollout_id": os.environ["R_ID"],
+    "git_sha": os.environ["R_GIT_SHA"],
+    "status": "RUNNING",
+    "scope": os.environ["R_SCOPE"],
+    "started_at": os.environ["R_NOW"],
+    "updated_at": os.environ["R_NOW"],
+    "current_step": "INITIALIZED",
+    "completed_steps": [],
+}, indent=2))
+PY_JSON
 }
 
 update_rollout_step() {
   local step="$1"
   local status="$2"
-  if [[ -f "$ROLLOUT_JOURNAL_FILE" ]]; then
-    local now
-    now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    sed -i -e "s/\"current_step\":[[:space:]]*\"[^\"]*\"/\"current_step\": \"$step\"/" \
-           -e "s/\"status\":[[:space:]]*\"[^\"]*\"/\"status\": \"$status\"/" \
-           -e "s/\"updated_at\":[[:space:]]*\"[^\"]*\"/\"updated_at\": \"$now\"/" "$ROLLOUT_JOURNAL_FILE" 2>/dev/null || true
-    if command -v node >/dev/null 2>&1; then
-      node - "$ROLLOUT_JOURNAL_FILE" "$step" "$status" "$now" <<'JSEOF' 2>/dev/null || true
-const fs = require('fs');
-const [,, file, step, status, now] = process.argv;
-try {
-  const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-  j.current_step = step;
-  j.status = status;
-  j.updated_at = now;
-  if (status === 'STEP_COMPLETED' && !j.completed_steps.includes(step)) {
-    j.completed_steps.push(step);
-  }
-  fs.writeFileSync(file, JSON.stringify(j, null, 2));
-} catch (e) {}
-JSEOF
-    fi
-  fi
+  [[ -f "$ROLLOUT_JOURNAL_FILE" ]] || return 0
+  local now tmp
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  tmp="$(mktemp "$(dirname "$ROLLOUT_JOURNAL_FILE")/.rollout-update.XXXXXX")"
+  R_FILE="$ROLLOUT_JOURNAL_FILE" R_STEP="$step" R_STATUS="$status" R_NOW="$now" python3 - <<'PY_JSON' > "$tmp"
+import json, os
+with open(os.environ["R_FILE"], encoding="utf-8") as handle:
+    data = json.load(handle)
+data["current_step"] = os.environ["R_STEP"]
+data["status"] = os.environ["R_STATUS"]
+data["updated_at"] = os.environ["R_NOW"]
+completed = data.setdefault("completed_steps", [])
+if data["status"] == "STEP_COMPLETED" and data["current_step"] not in completed:
+    completed.append(data["current_step"])
+print(json.dumps(data, indent=2))
+PY_JSON
+  atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600 < "$tmp"
+  rm -f "$tmp"
 }
 
 finish_rollout_journal() {
   local final_status="$1"
   local evidence_dir="${2:-}"
-  if [[ -f "$ROLLOUT_JOURNAL_FILE" ]]; then
-    local now
-    now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    sed -i -e "s/\"status\":[[:space:]]*\"[^\"]*\"/\"status\": \"$final_status\"/" \
-           -e "s/\"updated_at\":[[:space:]]*\"[^\"]*\"/\"updated_at\": \"$now\"/" "$ROLLOUT_JOURNAL_FILE" 2>/dev/null || true
-    if command -v node >/dev/null 2>&1; then
-      node - "$ROLLOUT_JOURNAL_FILE" "$final_status" "$now" <<'JSEOF' 2>/dev/null || true
-const fs = require('fs');
-const [,, file, status, now] = process.argv;
-try {
-  const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-  j.status = status;
-  j.updated_at = now;
-  fs.writeFileSync(file, JSON.stringify(j, null, 2));
-} catch (e) {}
-JSEOF
-    fi
-    if [[ -n "$evidence_dir" && -d "$evidence_dir" ]]; then
-      cp -f "$ROLLOUT_JOURNAL_FILE" "$evidence_dir/rollout-journal.json" 2>/dev/null || true
-    fi
-    if [[ "$final_status" == "COMPLETED" || "$final_status" == "DOC_ONLY" ]]; then
-      mv -f "$ROLLOUT_JOURNAL_FILE" "${ROLLOUT_JOURNAL_FILE}.previous" 2>/dev/null || true
-    fi
+  [[ -f "$ROLLOUT_JOURNAL_FILE" ]] || return 0
+  local now tmp
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  tmp="$(mktemp "$(dirname "$ROLLOUT_JOURNAL_FILE")/.rollout-finish.XXXXXX")"
+  R_FILE="$ROLLOUT_JOURNAL_FILE" R_STATUS="$final_status" R_NOW="$now" python3 - <<'PY_JSON' > "$tmp"
+import json, os
+with open(os.environ["R_FILE"], encoding="utf-8") as handle:
+    data = json.load(handle)
+data["status"] = os.environ["R_STATUS"]
+data["updated_at"] = os.environ["R_NOW"]
+print(json.dumps(data, indent=2))
+PY_JSON
+  atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600 < "$tmp"
+  rm -f "$tmp"
+  if [[ -n "$evidence_dir" && -d "$evidence_dir" ]]; then
+    atomic_write_file "$evidence_dir/rollout-journal.json" 600 < "$ROLLOUT_JOURNAL_FILE"
+  fi
+  if [[ "$final_status" == "COMPLETED" || "$final_status" == "DOC_ONLY" ]]; then
+    atomic_write_file "${ROLLOUT_JOURNAL_FILE}.previous" 600 < "$ROLLOUT_JOURNAL_FILE"
+    rm -f "$ROLLOUT_JOURNAL_FILE"
   fi
 }
-
 ROLLOUT_EXIT_CODE=0
 cleanup_rollout() {
   local code=$?
@@ -323,15 +314,17 @@ if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
 fi
 
 if [[ -f "$ROLLOUT_JOURNAL_FILE" ]]; then
-  prev_st="$(grep -o '"status":[[:space:]]*"[^"]*"' "$ROLLOUT_JOURNAL_FILE" | head -n1 | cut -d'"' -f4 || echo "")"
-  if [[ "$prev_st" == "RUNNING" || "$prev_st" == "INTERRUPTED" ]]; then
-    log_warn "Startup recovery: archiving previous interrupted rollout journal (status: ${prev_st})..."
-    mv -f "$ROLLOUT_JOURNAL_FILE" "${ROLLOUT_JOURNAL_FILE}.interrupted.$(date +%s)" 2>/dev/null || true
+  prev_st="$(python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as handle:
+    print(json.load(handle).get('status', ''))
+PY
+)"
+  if [[ "$prev_st" == "RUNNING" || "$prev_st" == "INTERRUPTED" || -z "$prev_st" ]]; then
+    log_error "A previous rollout is incomplete or unreadable (status: ${prev_st:-unknown}). Reconcile runtime state before another release."
+    exit 1
   fi
 fi
-
-# Initialize early rollout journal for trap capture
-init_rollout_journal "pending" "pending" "unresolved"
 
 # 3. Verify Manifest & Promotion Scope
 PROMOTION_FRONTEND="false"
@@ -554,7 +547,7 @@ if [[ "$is_docs_only" -eq 1 ]]; then
   log_info "Zero runtime containers, migrations, or routes authorized."
   log_info "=========================================================="
 
-  cat <<EOF > "$evidence_dir/receipt.json"
+  atomic_write_file "$evidence_dir/receipt.json" 600 <<EOF
 {
   "release_id": "${RELEASE_ID:-rel-doc-$GIT_SHA}",
   "git_sha": "${GIT_SHA}",
@@ -565,7 +558,7 @@ if [[ "$is_docs_only" -eq 1 ]]; then
 }
 EOF
 
-  cat <<EOF > "$LAST_RELEASE_FILE"
+  atomic_write_file "$LAST_RELEASE_FILE" 600 <<EOF
 {
   "release_id": "${RELEASE_ID:-rel-doc-$GIT_SHA}",
   "git_sha": "${GIT_SHA}",
@@ -618,7 +611,7 @@ if [[ "${PROMOTION_SCHEMA:-false}" == "true" ]]; then
   [[ -n "$IMAGE_DBTOOL" ]] || { log_error "DBTOOL image digest is required for schema promotion."; exit 1; }
   validate_digest "$IMAGE_DBTOOL" "dbtool"
   export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
-  bash "$DEPLOY_DIR/deploy-schema.sh" "$IMAGE_DBTOOL"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-schema.sh" "$IMAGE_DBTOOL"
   update_rollout_step "schema" "STEP_COMPLETED"
   promoted_list+=("schema")
   log_info "Transaction 1: Schema Migration completed."
@@ -630,7 +623,7 @@ if [[ "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]]; then
   update_rollout_step "auth_browser" "RUNNING"
   [[ -n "$IMAGE_AUTH_BROWSER" ]] || { log_error "AUTH_BROWSER image digest is required for browser promotion."; exit 1; }
   validate_digest "$IMAGE_AUTH_BROWSER" "auth-browser"
-  bash "$DEPLOY_DIR/deploy-auth-browser.sh" "$IMAGE_AUTH_BROWSER"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-auth-browser.sh" "$IMAGE_AUTH_BROWSER"
   update_rollout_step "auth_browser" "STEP_COMPLETED"
   promoted_list+=("auth_browser")
   log_info "Transaction 2a: Auth Browser completed."
@@ -641,7 +634,7 @@ if [[ "${PROMOTION_TTS:-false}" == "true" ]]; then
   update_rollout_step "tts" "RUNNING"
   [[ -n "$IMAGE_TTS_GATEWAY" ]] || { log_error "TTS image digest is required for TTS promotion."; exit 1; }
   validate_digest "$IMAGE_TTS_GATEWAY" "tts-gateway"
-  bash "$DEPLOY_DIR/deploy-tts.sh" "$IMAGE_TTS_GATEWAY"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-tts.sh" "$IMAGE_TTS_GATEWAY"
   update_rollout_step "tts" "STEP_COMPLETED"
   promoted_list+=("tts")
   log_info "Transaction 2b: TTS Gateway completed."
@@ -652,7 +645,7 @@ if [[ "${PROMOTION_BARK:-false}" == "true" ]]; then
   update_rollout_step "bark" "RUNNING"
   [[ -n "$IMAGE_BARK" ]] || { log_error "BARK image digest is required for Bark promotion."; exit 1; }
   validate_digest "$IMAGE_BARK" "bark"
-  bash "$DEPLOY_DIR/deploy-bark.sh" "$IMAGE_BARK"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-bark.sh" "$IMAGE_BARK"
   update_rollout_step "bark" "STEP_COMPLETED"
   promoted_list+=("bark")
   log_info "Transaction 2c: Bark Service completed."
@@ -664,7 +657,7 @@ if [[ "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
   update_rollout_step "frontend" "RUNNING"
   [[ -n "$IMAGE_FRONTEND" ]] || { log_error "FRONTEND image digest is required for frontend promotion."; exit 1; }
   validate_digest "$IMAGE_FRONTEND" "frontend"
-  bash "$DEPLOY_DIR/deploy-frontend.sh" "$IMAGE_FRONTEND"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-frontend.sh" "$IMAGE_FRONTEND"
   update_rollout_step "frontend" "STEP_COMPLETED"
   promoted_list+=("frontend")
   log_info "Transaction 2d: frontend completed without touching gateway or worker."
@@ -676,7 +669,7 @@ if [[ "${PROMOTION_WORKER:-false}" == "true" ]]; then
   update_rollout_step "worker" "RUNNING"
   [[ -n "$IMAGE_WORKER" ]] || { log_error "WORKER image digest is required for worker promotion."; exit 1; }
   validate_digest "$IMAGE_WORKER" "worker"
-  bash "$DEPLOY_DIR/deploy-worker.sh" "$IMAGE_WORKER"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-worker.sh" "$IMAGE_WORKER"
   update_rollout_step "worker" "STEP_COMPLETED"
   promoted_list+=("worker")
   log_info "Transaction 3: Worker Singleton Upgrade completed."
@@ -696,7 +689,7 @@ if [[ "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
     exit 1
   fi
   [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]] && gw_args+=(--skip-manifest-check)
-  bash "$DEPLOY_DIR/deploy-gateway.sh" "${gw_args[@]}"
+  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-gateway.sh" "${gw_args[@]}"
   update_rollout_step "gateway" "STEP_COMPLETED"
   promoted_list+=("gateway")
   log_info "Transaction 4: Gateway Blue/Green Promotion completed."
@@ -723,35 +716,16 @@ if [[ ${#promoted_list[@]} -gt 0 ]]; then
   promoted_json="$(printf '    "%s"\n' "${promoted_list[@]}" | paste -sd, -)"
 fi
 
-cat <<EOF > "$evidence_dir/receipt.json"
-{
-  "release_id": "${RELEASE_ID}",
-  "git_sha": "${GIT_SHA}",
-  "status": "SUCCESS",
-  "deployed_at": "${now}",
-  "promoted_components": [
-${promoted_json}
-  ]
-}
-EOF
-
-cat <<EOF > "$LAST_RELEASE_FILE"
-{
-  "release_id": "${RELEASE_ID}",
-  "git_sha": "${GIT_SHA}",
-  "status": "SUCCESS",
-  "doc_only": false,
-  "deployed_at": "${now}",
-  "promoted_components": [
-${promoted_json}
-  ]
-}
-EOF
-
-# Update release environment
+# Commit the complete release environment once after every component and soak succeeded.
 if [[ -f "$DEPLOY_DIR/release-env.sh" ]]; then
   # shellcheck source=deploy/release-env.sh
   source "$DEPLOY_DIR/release-env.sh"
+  canonical_release_env="$RELEASE_ENV_FILE"
+  staged_release_env="$(mktemp "$(dirname "$canonical_release_env")/.release-env.commit.XXXXXX")"
+  if [[ -f "$canonical_release_env" ]]; then
+    cp "$canonical_release_env" "$staged_release_env"
+  fi
+  export RELEASE_ENV_FILE="$staged_release_env"
   [[ -n "${IMAGE_FRONTEND:-}" && "${PROMOTION_FRONTEND:-false}" == "true" ]] && set_release_env "FRONTEND_IMAGE_REF" "$IMAGE_FRONTEND"
   if [[ -n "${IMAGE_GATEWAY:-}" && "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
     active_gateway_slot="$(get_active_slot 2>/dev/null || true)"
@@ -766,7 +740,37 @@ if [[ -f "$DEPLOY_DIR/release-env.sh" ]]; then
   [[ -n "${IMAGE_AUTH_BROWSER:-}" && "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]] && set_release_env "BROWSER_IMAGE_REF" "$IMAGE_AUTH_BROWSER"
   [[ -n "${IMAGE_TTS_GATEWAY:-}" && "${PROMOTION_TTS:-false}" == "true" ]] && set_release_env "TTS_IMAGE_REF" "$IMAGE_TTS_GATEWAY"
   [[ -n "${IMAGE_BARK:-}" && "${PROMOTION_BARK:-false}" == "true" ]] && set_release_env "BARK_IMAGE_REF" "$IMAGE_BARK"
+  set_release_env "RELEASE_COMMIT" "$GIT_SHA"
+  atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"
+  rm -f "$staged_release_env"
+  export RELEASE_ENV_FILE="$canonical_release_env"
 fi
+
+atomic_write_file "$evidence_dir/receipt.json" 600 <<EOF
+{
+  "release_id": "${RELEASE_ID}",
+  "git_sha": "${GIT_SHA}",
+  "status": "SUCCESS",
+  "deployed_at": "${now}",
+  "promoted_components": [
+${promoted_json}
+  ]
+}
+EOF
+
+# This is the sole successful-release commit point.
+atomic_write_file "$LAST_RELEASE_FILE" 600 <<EOF
+{
+  "release_id": "${RELEASE_ID}",
+  "git_sha": "${GIT_SHA}",
+  "status": "SUCCESS",
+  "doc_only": false,
+  "deployed_at": "${now}",
+  "promoted_components": [
+${promoted_json}
+  ]
+}
+EOF
 
 finish_rollout_journal "COMPLETED" "$evidence_dir"
 

@@ -174,7 +174,7 @@ fi
 
 # 4. Commit new Bark image ref
 update_tx_state "TX_COMMITTED" "Candidate Bark verified healthy"
-set_release_env "BARK_IMAGE_REF" "$CANDIDATE_BARK_IMAGE"
+commit_component_release_env "BARK_IMAGE_REF" "$CANDIDATE_BARK_IMAGE"
 log_info "Committed new BARK_IMAGE_REF to .release.env."
 
 update_tx_state "TX_COMPLETED" "Bark auxiliary deployment transaction completed successfully"

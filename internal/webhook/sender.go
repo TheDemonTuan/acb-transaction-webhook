@@ -61,6 +61,7 @@ func (s *Sender) Send(ctx context.Context, req notification.SendRequest) notific
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Bank-Event-Id", req.EventID)
 	httpReq.Header.Set("X-Bank-Delivery-Id", req.DeliveryID)
+	httpReq.Header.Set("X-Idempotency-Key", req.DeliveryID)
 	httpReq.Header.Set("X-Bank-Timestamp", signed.Timestamp)
 	httpReq.Header.Set("X-Bank-Nonce", signed.Nonce)
 	httpReq.Header.Set("X-Bank-Signature", signed.Signature)

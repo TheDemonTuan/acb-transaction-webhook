@@ -562,31 +562,46 @@ fi
 
 # 4. Verify artifact checksums against files on disk
 artifact_count=0
+declare -A verified_artifacts=()
+canonical_deploy_dir="$(cd -- "$deploy_dir" && pwd -P)"
 while IFS= read -r line; do
   if [[ "$line" =~ ^ARTIFACT:(.*)=(.*)$ ]]; then
     art_file="${BASH_REMATCH[1]}"
     expected_hash="${BASH_REMATCH[2]}"
-
-    target_path=""
-    if [[ -f "$deploy_dir/$art_file" ]]; then
-      target_path="$deploy_dir/$art_file"
-    elif [[ -f "$art_file" ]]; then
-      target_path="$art_file"
-    elif [[ -f "$deploy_dir/$(basename "$art_file")" ]]; then
-      target_path="$deploy_dir/$(basename "$art_file")"
-    else
-      printf 'Error: artifact file listed in manifest not found on disk: %s (checked in %s)\n' "$art_file" "$deploy_dir" >&2
+    if [[ -z "$art_file" || "$art_file" == /* || "$art_file" == *\\* || "$art_file" == *".."* || ! "$expected_hash" =~ ^[a-f0-9]{64}$ ]]; then
+      printf 'Error: unsafe artifact entry in manifest: %s\n' "$art_file" >&2
       exit 1
     fi
-
-    actual_hash="$(compute_hash "$target_path")"
+    target_path="$canonical_deploy_dir/$art_file"
+    if [[ ! -f "$target_path" || -L "$target_path" ]]; then
+      printf 'Error: regular artifact file listed in manifest not found: %s\n' "$art_file" >&2
+      exit 1
+    fi
+    canonical_target="$(realpath "$target_path")"
+    case "$canonical_target" in
+      "$canonical_deploy_dir"/*) ;;
+      *) printf 'Error: artifact escapes release directory: %s\n' "$art_file" >&2; exit 1 ;;
+    esac
+    actual_hash="$(compute_hash "$canonical_target")"
     if [[ "$actual_hash" != "$expected_hash" ]]; then
       printf 'Error: artifact checksum mismatch for %s: expected=%s actual=%s\n' "$art_file" "$expected_hash" "$actual_hash" >&2
       exit 1
     fi
+    verified_artifacts["$art_file"]=1
     artifact_count=$((artifact_count + 1))
   fi
 done <<< "$parsed_output"
+
+required_artifacts=(
+  dispatch-rollout.sh verify-manifest.sh stable-deployer.sh edge-probe.sh compose.prod.yaml component-map.json release-env.sh lib.sh
+  lib/common.sh lib/database.sh lib/images.sh lib/state.sh lib/traefik.sh
+)
+for required_artifact in "${required_artifacts[@]}"; do
+  if [[ "${verified_artifacts[$required_artifact]:-0}" != "1" ]]; then
+    printf 'Error: required executable/config artifact is absent from signed manifest: %s\n' "$required_artifact" >&2
+    exit 1
+  fi
+done
 
 if [[ -n "$output_env_file" ]]; then
   mkdir -p "$(dirname "$output_env_file")"

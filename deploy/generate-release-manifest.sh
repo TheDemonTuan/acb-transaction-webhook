@@ -217,6 +217,7 @@ compute_hash() {
 # Collect deploy bundle files
 bundle_files=(
   "compose.prod.yaml"
+  "component-map.json"
   "lib.sh"
   "deploy-warm.sh"
   "deploy-frontend.sh"
@@ -236,6 +237,13 @@ bundle_files=(
   "provision-secrets.sh"
   "init-fresh-data.sh"
   "release-env.sh"
+  "stable-deployer.sh"
+  "edge-probe.sh"
+  "lib/common.sh"
+  "lib/database.sh"
+  "lib/images.sh"
+  "lib/state.sh"
+  "lib/traefik.sh"
   "verify-compose-runtime.sh"
   "cve-allowlist.json"
   "validate-cve-allowlist.sh"
@@ -261,10 +269,12 @@ tmp_artifacts="$(mktemp)"
 
 for filename in "${bundle_files[@]}"; do
   filepath="$deploy_dir/$filename"
-  if [[ -f "$filepath" ]]; then
-    hash="$(compute_hash "$filepath")"
-    printf '%s=%s\n' "$filename" "$hash" >> "$tmp_artifacts"
+  if [[ ! -f "$filepath" || -L "$filepath" ]]; then
+    printf 'Error: required regular release artifact is missing or a symlink: %s\n' "$filename" >&2
+    exit 1
   fi
+  hash="$(compute_hash "$filepath")"
+  printf '%s=%s\n' "$filename" "$hash" >> "$tmp_artifacts"
 done
 
 if command -v node >/dev/null 2>&1; then
@@ -314,8 +324,8 @@ const manifest = {
   git_sha: gitSha,
   created_at: createdAt,
   compatibility: {
-    schema_version: 1,
-    min_supported_schema_version: 1,
+    schema_version: 9,
+    min_supported_schema_version: 9,
     worker_rpc_version: 2,
     worker_rpc_endpoints: [
       "/rpc/request-sync",
@@ -392,8 +402,8 @@ manifest = {
     "git_sha": git_sha,
     "created_at": created_at,
     "compatibility": {
-        "schema_version": 1,
-        "min_supported_schema_version": 1,
+        "schema_version": 9,
+        "min_supported_schema_version": 9,
         "worker_rpc_version": 2,
         "worker_rpc_endpoints": [
             "/rpc/request-sync",

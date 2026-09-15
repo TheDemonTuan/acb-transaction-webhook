@@ -106,16 +106,19 @@ chmod 600 "$staging_raw" 2>/dev/null || true
 
 # 2. SQLite Integrity and Schema Verification
 log_info "Verifying SQLite integrity of staging snapshot..."
-integrity="ok"
+integrity=""
 migrations="0"
-if command -v sqlite3 >/dev/null 2>&1; then
-  integrity="$(sqlite3 "$staging_raw" "PRAGMA integrity_check;" 2>/dev/null || echo "failed")"
-  if [[ "$integrity" != "ok" ]]; then
-    log_error "SQLite integrity check failed on staging snapshot: ${integrity}"
-    exit 1
-  fi
-  migrations="$(sqlite3 "$staging_raw" "SELECT count(*) FROM schema_migrations;" 2>/dev/null || echo "0")"
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  log_error "sqlite3 is required to verify a backup before publication."
+  exit 1
 fi
+integrity="$(sqlite3 "$staging_raw" "PRAGMA integrity_check;" 2>/dev/null || echo "failed")"
+if [[ "$integrity" != "ok" ]]; then
+  log_error "SQLite integrity check failed on staging snapshot: ${integrity}"
+  exit 1
+fi
+migrations="$(sqlite3 "$staging_raw" "SELECT COALESCE(max(version),0) FROM schema_migrations;" 2>/dev/null || echo "0")"
+[[ "$migrations" =~ ^[0-9]+$ ]] || { log_error "Invalid schema version in backup snapshot."; exit 1; }
 log_info "Staging snapshot integrity verified (${integrity}, schema migrations: ${migrations})"
 
 raw_sha256="$(sha256sum "$staging_raw" 2>/dev/null | cut -d' ' -f1 || echo "unknown")"
@@ -163,8 +166,9 @@ chmod 600 "$staging_manifest" 2>/dev/null || true
 # 5. Atomic publish to durable backup directory
 durable_enc="$BACKUP_DIR/gateway-${ts}.db.age"
 durable_manifest="$BACKUP_DIR/manifest-${ts}.json"
-mv "$staging_enc" "$durable_enc"
-mv "$staging_manifest" "$durable_manifest"
+atomic_write_file "$durable_enc" 600 < "$staging_enc"
+atomic_write_file "$durable_manifest" 600 < "$staging_manifest"
+rm -f "$staging_enc" "$staging_manifest"
 
 log_info "Published encrypted backup artifact: ${durable_enc}"
 log_info "Published backup manifest: ${durable_manifest}"

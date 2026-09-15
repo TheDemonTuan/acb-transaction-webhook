@@ -6,10 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
+
+type blockingSender struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSender) Send(context.Context, SendRequest) SendResult {
+	close(s.started)
+	<-s.release
+	return SendResult{Outcome: OutcomeSuccess, StatusCode: 200}
+}
 
 type mockSender struct {
 	outcome           Outcome
@@ -181,5 +193,60 @@ func TestDispatcherRetryExhaustionAndReplay(t *testing.T) {
 	summary, _ = store.DeliverySummary(ctx)
 	if summary.Pending != 0 || summary.DeadLetter != 0 {
 		t.Fatalf("expected completed delivery, got: %+v", summary)
+	}
+}
+
+func TestDispatcherDrainWaitsForInFlightSend(t *testing.T) {
+	ctx := context.Background()
+	store := setupTestStoreWithKeyring(t)
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING' WHERE id=?`, conn.ID); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := store.CreateEndpointWithSecret(ctx, "Drain Hook", "https://example.com/webhook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEndpointStatus(ctx, endpoint.ID, "ACTIVE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, "***1234", []storage.BatchTransactionItem{{
+		Number: "DRAIN_001", TransactionAt: "2026-09-15T00:00:00Z", EffectiveAt: "2026-09-15T00:00:00Z", Credit: 100,
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &blockingSender{started: make(chan struct{}), release: make(chan struct{})}
+	registry := NewRegistry()
+	registry.Register(ProviderWebhook, sender)
+	dispatcher := NewDispatcher(store, registry).SetWorkers(1)
+	result := make(chan error, 1)
+	go func() {
+		_, err := dispatcher.DispatchOne(ctx)
+		result <- err
+	}()
+	<-sender.started
+
+	drainCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := dispatcher.Drain(drainCtx); err != context.DeadlineExceeded {
+		t.Fatalf("expected drain deadline while send is active, got %v", err)
+	}
+	if dispatcher.ActiveDeliveries() != 1 {
+		t.Fatalf("expected one active delivery, got %d", dispatcher.ActiveDeliveries())
+	}
+	close(sender.release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatcher.IsPaused() || dispatcher.ActiveDeliveries() != 0 {
+		t.Fatalf("dispatcher was not safely drained: paused=%v active=%d", dispatcher.IsPaused(), dispatcher.ActiveDeliveries())
 	}
 }

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "documentation": [
+    "(^|/)README[^/]*\\.md$",
+    "\\.md$",
+    "^docs/",
+    "^LICENSE",
+    "^\\.gitignore$",
+    "^\\.gitattributes$",
+    "^\\.github/dependabot\\.yml$"
+  ],
+  "rules": [
+    {"pattern": "^deploy/component-map\\.json$", "components": ["frontend", "gateway", "worker", "schema", "auth_browser", "tts", "bark", "platform"]},
+    {"pattern": "^internal/storage/migrations/|^cmd/dbtool/|^deploy/deploy-schema\\.sh$", "components": ["schema", "gateway", "worker"]},
+    {"pattern": "^web/|^deploy/frontend-nginx\\.conf$|^deploy/deploy-frontend\\.sh$", "components": ["frontend"]},
+    {"pattern": "^cmd/gateway/|^internal/httpapi/|^internal/csrf/|^deploy/deploy-gateway\\.sh$", "components": ["gateway"]},
+    {"pattern": "^cmd/worker/|^internal/workerstate/|^internal/maintenance/|^internal/upstream/|^deploy/deploy-worker\\.sh$", "components": ["worker"]},
+    {"pattern": "^internal/(workerrpc|storage|config|security|domain|monitor|acb|scheduler|notification|webhook|bark)/", "components": ["gateway", "worker"]},
+    {"pattern": "^(go\\.mod|go\\.sum)$", "components": ["gateway", "worker", "schema"]},
+    {"pattern": "^Dockerfile\\.auth-browser$|^cmd/auth-browser/|^deploy/(seccomp-auth-browser\\.json|smoke-test-auth-browser\\.sh|deploy-auth-browser\\.sh)$", "components": ["auth_browser"]},
+    {"pattern": "^internal/authbrowser/", "components": ["auth_browser", "gateway", "worker"]},
+    {"pattern": "^tts-gateway/|^deploy/(smoke-test-tts-gateway\\.sh|deploy-tts\\.sh)$", "components": ["tts"]},
+    {"pattern": "^deploy/(third-party-allowlist\\.json|verify-third-party-policy\\.sh|smoke-test-bark\\.sh|bark-entrypoint\\.sh|deploy-bark\\.sh)$", "components": ["bark"]},
+    {"pattern": "^Dockerfile$|^deploy/compose\\.prod\\.yaml$", "components": ["frontend", "gateway", "worker", "schema", "auth_browser", "tts", "bark", "platform"]},
+    {"pattern": "^deploy/|^platform/|^\\.github/workflows/|^scripts/|^compose\\.yaml$", "components": ["platform"]}
+  ],
+  "unknown": ["gateway", "worker", "platform"]
+}

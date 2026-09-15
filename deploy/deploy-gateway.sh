@@ -187,11 +187,11 @@ update_tx_state "TX_ACK_VERIFIED"
 
 # 6. Commit Transaction State
 update_tx_state "TX_COMMITTED"
-printf '%s' "$CANDIDATE_SLOT" > "$ACTIVE_SLOT_FILE"
-printf '%s' "$ACTIVE_SLOT" > "$PREVIOUS_SLOT_FILE"
-set_release_env "$CANDIDATE_VAR" "$IMAGE_REF"
+printf '%s' "$CANDIDATE_SLOT" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
+printf '%s' "$ACTIVE_SLOT" | atomic_write_file "$PREVIOUS_SLOT_FILE" 600
+commit_component_release_env "$CANDIDATE_VAR" "$IMAGE_REF"
 if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
-  set_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT"
+  commit_component_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT"
 fi
 log_info "Transaction COMMITTED: Live traffic routed to [${CANDIDATE_SLOT}]."
 

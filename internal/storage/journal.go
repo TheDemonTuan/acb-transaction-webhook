@@ -94,6 +94,9 @@ func (s *Store) ReadJournalEvents(ctx context.Context, epoch string, afterSeq in
 		e.Payload = []byte(payloadStr)
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate journal events: %w", err)
+	}
 	return entries, nil
 }
 

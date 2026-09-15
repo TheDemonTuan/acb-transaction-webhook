@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,6 +36,31 @@ func TestServeWorkerHTTPReportsUnexpectedFailure(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected serve failure to be reported")
+	}
+}
+
+func TestWorkerDeployCapabilities(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "-deploy-capabilities")
+	cmd.Dir = "."
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("worker -deploy-capabilities failed: %v", err)
+	}
+	var capabilities struct {
+		Protocol          int  `json:"protocol"`
+		Quiesce           bool `json:"quiesce"`
+		Drain             bool `json:"drain"`
+		Resume            bool `json:"resume"`
+		NotificationDrain bool `json:"notificationDrain"`
+		SessionCheckpoint bool `json:"sessionCheckpoint"`
+		JournalCheckpoint bool `json:"journalCheckpoint"`
+	}
+	if err := json.Unmarshal(out, &capabilities); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	if capabilities.Protocol < 2 || !capabilities.Quiesce || !capabilities.Drain || !capabilities.Resume ||
+		!capabilities.NotificationDrain || !capabilities.SessionCheckpoint || !capabilities.JournalCheckpoint {
+		t.Fatalf("incomplete deploy capabilities: %+v", capabilities)
 	}
 }
 

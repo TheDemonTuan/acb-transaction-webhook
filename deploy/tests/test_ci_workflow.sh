@@ -69,14 +69,18 @@ else
   printf 'PASS: deploy workflow has no event.before or HEAD~1 baseline fallback\n'
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
 fi
-for key in FRONTEND GATEWAY WORKER DBTOOL BROWSER TTS; do
-  if ! grep -q "vars\.${key}_IMAGE_REF" "$deploy_yml"; then
-    printf 'FAIL: workflow is missing selective image fallback for %s\n' "$key" >&2
-    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
-  fi
+if grep -Eq 'vars\.(FRONTEND|GATEWAY|WORKER|DBTOOL|BROWSER|TTS|BARK)_IMAGE_REF' "$deploy_yml"; then
+  printf 'FAIL: GitHub Variables remain a production image source of truth\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: production image refs never fall back to GitHub Variables\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+for key in FRONTEND GATEWAY WORKER DBTOOL AUTH_BROWSER TTS BARK; do
+  assert_contains "$deploy_content" "PRODUCTION_${key}_IMAGE" "VPS state provides the ${key} image fallback"
 done
-printf 'PASS: first-party selective image fallbacks are explicitly configured\n'
-TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+assert_contains "$deploy_content" "stable-deployer.sh" "VPS rollout executes through the stable deployer"
+assert_contains "$deploy_content" 'releases/$release_id' "Candidate is staged in an immutable release directory"
 
 printf "\n3. Testing Environment Protection...\n"
 assert_contains "$deploy_content" "environment: production" "Deploy job enforces production environment protection"
@@ -139,7 +143,7 @@ assert_contains "$scan_checkout_context" "fetch-depth: 0" "Scan and attest job f
 
 # 5. Step-Level Timeouts on Deploy Job
 printf "\n5. Testing Step-Level Timeouts on Critical Steps...\n"
-assert_contains "$deploy_content" "name: Sync deployment files" "Sync step exists"
+assert_contains "$deploy_content" "name: Stage signed release without touching the trusted deployer" "Stage release step exists"
 assert_contains "$deploy_content" "name: Deploy immutable image" "Deploy step exists"
 
 has_sync_timeout="false"
@@ -151,7 +155,7 @@ const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n');
 let inSync = false;
 let timeout = false;
 for (const l of lines) {
-  if (l.includes('name: Sync deployment files')) inSync = true;
+  if (l.includes('name: Stage signed release without touching the trusted deployer')) inSync = true;
   else if (inSync && l.includes('name: ')) break;
   else if (inSync && l.includes('timeout-minutes:')) { timeout = true; break; }
 }
@@ -172,7 +176,7 @@ console.log(timeout ? 'true' : 'false');
 JSEOF
 )"
 fi
-assert_eq "true" "$has_sync_timeout" "Sync deployment files step has timeout-minutes"
+assert_eq "true" "$has_sync_timeout" "Stage release step has timeout-minutes"
 assert_eq "true" "$has_deploy_step_timeout" "Deploy immutable image step has timeout-minutes"
 
 # 6. SSH Hardening & Keepalives
@@ -185,8 +189,10 @@ assert_contains "$deploy_content" "-o ConnectTimeout=15" "SSH execution passes e
 
 # 7. Promotion Dispatcher Invocation (No Compose Up/Down Shortcuts)
 printf "\n7. Testing Promotion Dispatcher Contract...\n"
-assert_contains "$deploy_content" "dispatch-rollout.sh" "Deploy step invokes dispatch-rollout.sh"
-assert_contains "$deploy_content" "--require-cosign" "Deploy step enforces --require-cosign"
+assert_contains "$deploy_content" "stable-deployer.sh" "Deploy step invokes stable-deployer.sh"
+stable_deployer_content="$(cat "$REPO_ROOT/deploy/stable-deployer.sh")"
+assert_contains "$stable_deployer_content" "dispatch-rollout.sh" "Stable deployer invokes dispatch-rollout.sh"
+assert_contains "$stable_deployer_content" "--require-cosign" "Stable deployer enforces --require-cosign"
 assert_contains "$deploy_content" "--expected-identity" "Deploy step passes exact --expected-identity"
 assert_contains "$deploy_content" "--expected-issuer" "Deploy step passes --expected-issuer"
 

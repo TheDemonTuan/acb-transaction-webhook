@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -314,9 +315,12 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 		}
 	}
 
-	// 4. Pause notification dispatcher
+	// 4. Stop new deliveries and wait for all in-flight sends to finish.
 	if w.dispatcher != nil {
-		w.dispatcher.Pause()
+		if err := w.dispatcher.Drain(ctx); err != nil {
+			_ = w.Resume(context.Background())
+			return workerrpc.QuiesceResponse{}, fmt.Errorf("drain notification dispatcher: %w", err)
+		}
 	}
 
 	// 5. Pause maintenance runner
@@ -325,6 +329,7 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 	}
 
 	// 6. Persist freshest session snapshot before the singleton is stopped.
+	sessionCheckpointed := w.bankMonitor == nil
 	if w.bankMonitor != nil {
 		persistCtx, pCancel := context.WithTimeout(ctx, 3*time.Second)
 		persistErr := w.bankMonitor.PersistSession(persistCtx)
@@ -333,10 +338,11 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 			_ = w.Resume(context.Background())
 			return workerrpc.QuiesceResponse{}, fmt.Errorf("persist session snapshot on quiesce: %w", persistErr)
 		}
+		sessionCheckpointed = true
 	}
 
-	// 7. Report generation and latest checkpoint
-	var gen int64
+	// 7. Report generation and latest durable checkpoints.
+	var gen, journalSeq int64
 	var checkpointStr, coverageTo, scanID string
 	if w.store != nil {
 		if conn, err := w.store.Connection(ctx); err == nil {
@@ -347,15 +353,26 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 				scanID = cp.ScanID
 			}
 		}
+		var err error
+		journalSeq, err = w.store.GetMaxJournalSeq(ctx, "ep1")
+		if err != nil {
+			_ = w.Resume(context.Background())
+			return workerrpc.QuiesceResponse{}, fmt.Errorf("read journal checkpoint on quiesce: %w", err)
+		}
 	}
 
 	return workerrpc.QuiesceResponse{
-		Status:     "quiesced",
-		Quiesced:   true,
-		Generation: gen,
-		Checkpoint: checkpointStr,
-		CoverageTo: coverageTo,
-		ScanID:     scanID,
+		Status:              "quiesced",
+		Quiesced:            true,
+		Generation:          gen,
+		Checkpoint:          checkpointStr,
+		CoverageTo:          coverageTo,
+		ScanID:              scanID,
+		Dispatcher:          "IDLE",
+		ActiveDeliveries:    0,
+		ActivePoll:          false,
+		JournalSeq:          journalSeq,
+		SessionCheckpointed: sessionCheckpointed,
 	}, nil
 }
 
@@ -430,6 +447,7 @@ func newWorkerPollNotifier(store *storage.Store, waker interface{ Wake() }, hub 
 }
 
 func main() {
+	deployCapabilities := flag.Bool("deploy-capabilities", false, "print the versioned worker deployment protocol as JSON")
 	healthcheck := flag.Bool("healthcheck", false, "verify worker health via HTTP (readiness first, then liveness)")
 	livenessCheck := flag.Bool("liveness-check", false, "verify worker liveness via HTTP /healthz")
 	readinessCheck := flag.Bool("readiness-check", false, "verify worker readiness via HTTP /readyz")
@@ -437,6 +455,23 @@ func main() {
 	drainCheck := flag.Bool("drain", false, "drain running worker via HTTP POST /rpc/drain")
 	resumeCheck := flag.Bool("resume", false, "resume quiesced worker via HTTP POST /rpc/resume")
 	flag.Parse()
+
+	if *deployCapabilities {
+		capabilities := struct {
+			Protocol          int  `json:"protocol"`
+			Quiesce           bool `json:"quiesce"`
+			Drain             bool `json:"drain"`
+			Resume            bool `json:"resume"`
+			NotificationDrain bool `json:"notificationDrain"`
+			SessionCheckpoint bool `json:"sessionCheckpoint"`
+			JournalCheckpoint bool `json:"journalCheckpoint"`
+		}{2, true, true, true, true, true, true}
+		if err := json.NewEncoder(os.Stdout).Encode(capabilities); err != nil {
+			fmt.Fprintf(os.Stderr, "encode deploy capabilities: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	rpcAddr := os.Getenv("WORKER_RPC_ADDR")
 	if rpcAddr == "" {

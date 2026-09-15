@@ -36,10 +36,22 @@ record_skip() {
 
 # 1. Shell scripts syntax check (bash -n)
 log_header "Gate 1: Shell Scripts Syntax Check (bash -n)"
-if bash -n deploy/*.sh deploy/lib/*.sh deploy/tests/*.sh scripts/ops/*.sh scripts/*.sh; then
-  record_pass "Shell syntax check passed across all scripts"
+shopt -s nullglob
+shell_scripts=(deploy/*.sh deploy/lib/*.sh deploy/tests/*.sh scripts/ops/*.sh scripts/*.sh platform/edge/*.sh)
+if [[ ${#shell_scripts[@]} -eq 0 ]]; then
+  record_fail "No shell scripts found"
 else
-  record_fail "Shell syntax check failed"
+  shell_syntax_ok=1
+  for script in "${shell_scripts[@]}"; do
+    if ! bash -n "$script"; then
+      shell_syntax_ok=0
+    fi
+  done
+  if [[ "$shell_syntax_ok" -eq 1 ]]; then
+    record_pass "Shell syntax check passed across all scripts"
+  else
+    record_fail "Shell syntax check failed"
+  fi
 fi
 
 # Shellcheck (if installed)
@@ -102,10 +114,10 @@ fi
 
 # 5. Playwright E2E browser regression suite
 log_header "Gate 5: Browser Playwright E2E Regression Suite"
-if (cd web && npx playwright test); then
-  record_pass "playwright E2E suite passed (56/56 desktop & mobile tests)"
+if (cd web && bun run e2e); then
+  record_pass "Playwright E2E suite passed on configured desktop and mobile projects"
 else
-  record_fail "playwright E2E suite failed"
+  record_fail "Playwright E2E suite failed"
 fi
 
 # 6. Python test suites (Failover controller & TTS Gateway)

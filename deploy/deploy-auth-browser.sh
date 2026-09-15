@@ -167,7 +167,7 @@ fi
 
 # 5. Commit new browser image ref
 update_tx_state "TX_COMMITTED" "Candidate auth-browser verified healthy"
-set_release_env "BROWSER_IMAGE_REF" "$CANDIDATE_BROWSER_IMAGE"
+commit_component_release_env "BROWSER_IMAGE_REF" "$CANDIDATE_BROWSER_IMAGE"
 log_info "Committed new BROWSER_IMAGE_REF to .release.env."
 
 update_tx_state "TX_COMPLETED" "Auth-browser deployment transaction completed successfully"

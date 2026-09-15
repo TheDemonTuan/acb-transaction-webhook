@@ -4,6 +4,36 @@
 set -euo pipefail
 
 TX_JOURNAL_FILE="${TX_JOURNAL_FILE:-$SCRIPT_DIR/data/deploy-journal.json}"
+atomic_write_file() {
+  local target="$1"
+  local mode="${2:-600}"
+  local parent tmp
+  parent="$(dirname "$target")"
+  mkdir -p "$parent"
+  tmp="$(mktemp "${parent}/.$(basename "$target").tmp.XXXXXX")"
+  cat > "$tmp"
+  chmod "$mode" "$tmp"
+  python3 - "$tmp" "$parent" <<'PY'
+import os, sys
+file_path, parent = sys.argv[1:]
+with open(file_path, 'rb') as handle:
+    os.fsync(handle.fileno())
+dir_fd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+  mv -f "$tmp" "$target"
+  python3 - "$parent" <<'PY'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
 
 terminate_background_soak() {
   if [[ -f "${SOAK_STATE_FILE:-}" ]]; then
@@ -33,27 +63,26 @@ acquire_deploy_lock() {
   if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" || "${SKIP_LOCK:-0}" == "1" ]]; then
     return 0
   fi
-  # Clean up any previous background soak process before acquiring lock
-  terminate_background_soak
+  if ! command -v flock >/dev/null 2>&1; then
+    log_error "flock is required for coordinated deployment and failover locking."
+    return 1
+  fi
 
   local lock_dir
   lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
-  if ! mkdir -p "$lock_dir" 2>/dev/null; then
-    DEPLOY_LOCK_FILE="/tmp/vps-failover/acb.lock"
-    lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
-    mkdir -p "$lock_dir" 2>/dev/null || true
+  if ! mkdir -p "$lock_dir"; then
+    log_error "Cannot create the canonical deployment lock directory: ${lock_dir}"
+    return 1
   fi
   exec 9>"$DEPLOY_LOCK_FILE"
-  if command -v flock >/dev/null 2>&1; then
-    if ! flock -w "$timeout" 9; then
-      log_error "Another deployment or cutover is active (lock timeout ${timeout}s on ${DEPLOY_LOCK_FILE})."
-      return 1
-    fi
+  if ! flock -w "$timeout" 9; then
+    log_error "Another deployment or cutover is active (lock timeout ${timeout}s on ${DEPLOY_LOCK_FILE})."
+    return 1
   fi
   export DEPLOY_LOCK_HELD=1
+  terminate_background_soak
   return 0
 }
-
 release_deploy_lock() {
   if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" ]]; then
     unset DEPLOY_LOCK_HELD
@@ -134,8 +163,7 @@ init_tx_journal() {
   local now
   now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
-  local tmp="${TX_JOURNAL_FILE}.tmp.$$"
-  cat <<EOF > "$tmp"
+  atomic_write_file "$TX_JOURNAL_FILE" 600 <<EOF
 {
   "tx_id": "${tx_id}",
   "component": "${component}",
@@ -150,7 +178,6 @@ init_tx_journal() {
   "details": "Transaction initialized"
 }
 EOF
-  mv -f "$tmp" "$TX_JOURNAL_FILE"
   log_info "Deployment transaction journal initialized: [${tx_id}]"
 }
 
@@ -175,10 +202,9 @@ update_tx_state() {
   fi
 
   if [[ -s "$tmp" ]]; then
-    mv -f "$tmp" "$TX_JOURNAL_FILE"
-  else
-    rm -f "$tmp" 2>/dev/null || true
+    atomic_write_file "$TX_JOURNAL_FILE" 600 < "$tmp"
   fi
+  rm -f "$tmp" 2>/dev/null || true
   log_info "Transaction state -> [${state}]"
 }
 
@@ -235,9 +261,21 @@ recover_tx_journal() {
 
   case "$component" in
     frontend)
-      if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" && -n "$prev_digest" ]]; then
-        log_warn "RECOVERY: Interrupted frontend transaction. Restoring previous container image..."
-        FRONTEND_IMAGE_REF="$prev_digest" compose_prod up -d --no-deps frontend 2>/dev/null || true
+      if [[ "$cur_state" != "TX_COMPLETED" ]]; then
+        log_warn "RECOVERY: Reverting interrupted frontend candidate and route."
+        if [[ "$act_slot" == "blue" || "$act_slot" == "green" || "$act_slot" == "legacy" ]]; then
+          gateway_slot="$(get_active_slot 2>/dev/null || true)"
+          if [[ "$gateway_slot" == "blue" || "$gateway_slot" == "green" ]]; then
+            recovery_route="${ACB_CONFIG}.recovery.$$"
+            render_traefik_config "$gateway_slot" "$recovery_route" "$act_slot" && mv -f "$recovery_route" "$ACB_CONFIG" || true
+          fi
+          if [[ "$act_slot" == "legacy" ]]; then
+            rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+          else
+            printf '%s' "$act_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+          fi
+        fi
+        [[ -z "$cand_slot" ]] || docker stop "acb-frontend-${cand_slot}" 2>/dev/null || true
       fi
       ;;
     gateway)
