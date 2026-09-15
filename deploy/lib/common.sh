@@ -98,6 +98,69 @@ ensure_secret_permissions() {
   fi
 }
 
+BARK_SECRET_GROUP="${BARK_SECRET_GROUP:-1000}"
+
+prepare_bark_secret_permissions() {
+  [[ "$BARK_SECRET_GROUP" =~ ^[0-9]+$ ]] || {
+    log_error "BARK_SECRET_GROUP must be a numeric group ID."
+    return 1
+  }
+
+  local secret_path
+  for secret_path in \
+    "$SECRETS_DIR/bark_basic_auth_user" \
+    "$SECRETS_DIR/bark_basic_auth_password"; do
+    if [[ ! -f "$secret_path" || -L "$secret_path" || ! -s "$secret_path" ]]; then
+      log_error "Bark secret must be a non-empty regular file and must not be a symlink: $secret_path"
+      return 1
+    fi
+    if ! chgrp "$BARK_SECRET_GROUP" "$secret_path" 2>/dev/null; then
+      if ! command -v sudo >/dev/null 2>&1 || ! sudo -n chgrp "$BARK_SECRET_GROUP" "$secret_path"; then
+        log_error "Cannot assign Bark secret '$secret_path' to group $BARK_SECRET_GROUP. Run the deployment as the file owner or correct the group as an operator."
+        return 1
+      fi
+    fi
+    if ! chmod 0640 "$secret_path" 2>/dev/null; then
+      if ! command -v sudo >/dev/null 2>&1 || ! sudo -n chmod 0640 "$secret_path"; then
+        log_error "Cannot set least-privilege mode 0640 on Bark secret '$secret_path'."
+        return 1
+      fi
+    fi
+  done
+}
+
+preflight_bark_secret_access() {
+  local image_ref="$1"
+  validate_digest "$image_ref" "bark"
+
+  if [[ -n "${BARK_SECRET_PREFLIGHT_CMD:-}" ]]; then
+    if ! $BARK_SECRET_PREFLIGHT_CMD "$image_ref"; then
+      log_error "Bark secret access preflight failed."
+      return 1
+    fi
+    return 0
+  fi
+
+  command -v docker >/dev/null 2>&1 || {
+    log_error "Docker is required to verify Bark secret access."
+    return 1
+  }
+  docker info >/dev/null 2>&1 || {
+    log_error "Docker is unavailable; Bark secret access was not verified."
+    return 1
+  }
+
+  local read_check='set -eu; for file in /run/secrets/bark_basic_auth_user /run/secrets/bark_basic_auth_password; do test -s "$file"; cat "$file" >/dev/null; done'
+  if ! BARK_IMAGE_REF="$image_ref" compose_prod run --rm --no-deps --entrypoint /bin/sh bark -c "$read_check" >/dev/null 2>&1; then
+    log_error "Bark cannot read its basic-auth secrets with the configured runtime identity."
+    return 1
+  fi
+  if ! BARK_IMAGE_REF="$image_ref" compose_prod run --rm --no-deps --user 1000:1000 --entrypoint /bin/sh bark -c "$read_check" >/dev/null 2>&1; then
+    log_error "Worker identity 1000:1000 cannot read the shared Bark basic-auth secrets."
+    return 1
+  fi
+}
+
 check_secret_permissions() {
   local target_path="$1"
   if [[ ! -e "$target_path" ]]; then
@@ -119,9 +182,17 @@ check_secret_permissions() {
       local base_name
       base_name="$(basename "$target_path")"
       if [[ "$base_name" == "bark_basic_auth_user" || "$base_name" == "bark_basic_auth_password" ]]; then
-        if [[ "$mode" != "644" && "$mode" != "600" ]]; then
-          log_error "Bark secret file '$target_path' has unsafe permissions (${mode}); expected 600 or 644 for local Compose bind-mount compatibility."
+        if [[ "$mode" != "600" && "$mode" != "640" ]]; then
+          log_error "Bark secret file '$target_path' has unsafe permissions (${mode}); expected 600 before preparation or 640 for runtime access."
           return 1
+        fi
+        if [[ "$mode" == "640" ]]; then
+          local group_id=""
+          group_id="$(stat -c '%g' "$target_path" 2>/dev/null || true)"
+          if [[ -n "$group_id" && "$group_id" != "$BARK_SECRET_GROUP" ]]; then
+            log_error "Bark secret file '$target_path' belongs to group ${group_id}; expected ${BARK_SECRET_GROUP}."
+            return 1
+          fi
         fi
       elif [[ "$last_two" != "00" ]]; then
         log_error "Secret file '$target_path' has unsafe permissions (${mode}). Secrets must not be group or world readable."

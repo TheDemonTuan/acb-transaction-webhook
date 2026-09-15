@@ -198,6 +198,32 @@ else
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
 fi
 
+if [[ ! "$(uname -s 2>/dev/null)" =~ MINGW|MSYS|CYGWIN ]]; then
+  printf '\n=== TEST 8: Bark Runtime Secret Permissions ===\n'
+  T8="$TEST_TMP/t8"
+  mkdir -p "$T8/secrets"
+  export SECRETS_DIR="$T8/secrets"
+  printf 'bark-user\n' > "$SECRETS_DIR/bark_basic_auth_user"
+  printf 'bark-pass\n' > "$SECRETS_DIR/bark_basic_auth_password"
+  chmod 600 "$SECRETS_DIR"/*
+  original_user="$(cat "$SECRETS_DIR/bark_basic_auth_user")"
+  original_pass="$(cat "$SECRETS_DIR/bark_basic_auth_password")"
+  prepare_bark_secret_permissions
+  prepare_bark_secret_permissions
+  assert_eq "640" "$(stat -c '%a' "$SECRETS_DIR/bark_basic_auth_user")" "Bark username secret is group-readable only"
+  assert_eq "640" "$(stat -c '%a' "$SECRETS_DIR/bark_basic_auth_password")" "Bark password secret is group-readable only"
+  assert_eq "1000" "$(stat -c '%g' "$SECRETS_DIR/bark_basic_auth_user")" "Bark username secret uses runtime group 1000"
+  assert_eq "$original_user" "$(cat "$SECRETS_DIR/bark_basic_auth_user")" "Preparing Bark username does not change its value"
+  assert_eq "$original_pass" "$(cat "$SECRETS_DIR/bark_basic_auth_password")" "Preparing Bark password does not change its value"
+  chmod 644 "$SECRETS_DIR/bark_basic_auth_user"
+  rc=0
+  check_secret_permissions "$SECRETS_DIR/bark_basic_auth_user" >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "World-readable Bark secrets are rejected"
+else
+  printf 'PASS: Skipping Bark ownership test on non-POSIX Windows/MSYS platform\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
 printf '\n======================================================\n'
 printf 'Secrets Test Results: %d passed, %d failed\n' "$TESTS_PASSED" "$TESTS_FAILED"
 printf '======================================================\n'

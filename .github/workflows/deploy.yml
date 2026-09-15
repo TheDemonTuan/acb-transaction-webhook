@@ -206,6 +206,11 @@ jobs:
         run: bash scripts/test-promotion-scope.sh
       - name: Test promotion dispatcher and rollout orchestration
         run: bash deploy/tests/test_promotion_dispatcher.sh
+      - name: Test deployment permissions and runtime policy
+        run: |
+          bash deploy/tests/test_secrets.sh
+          bash deploy/tests/test_aux_deploy.sh
+          bash deploy/tests/test_runtime_policy.sh
       - name: Verify CI workflow timeouts, keepalives, and action pinning
         run: bash deploy/tests/test_ci_workflow.sh
       - name: Verify deployment and platform script syntax
@@ -942,7 +947,13 @@ jobs:
           chmod 600 "$env_file"
           [[ -d "$DEPLOY_PATH/deploy/secrets" ]] || { printf 'Missing production secrets directory.\n' >&2; exit 1; }
           chmod 700 "$DEPLOY_PATH/deploy/secrets"
-          find "$DEPLOY_PATH/deploy/secrets" -maxdepth 1 -type f -exec chmod 600 {} +
+          for secret_file in "$DEPLOY_PATH/deploy/secrets"/*; do
+            [[ -f "$secret_file" && ! -L "$secret_file" ]] || continue
+            case "$(basename "$secret_file")" in
+              bark_basic_auth_user|bark_basic_auth_password) ;;
+              *) chmod 600 "$secret_file" ;;
+            esac
+          done
           [[ -f "$DEPLOY_PATH/deploy/.release.env" ]] || { printf 'Missing canonical release environment.\n' >&2; exit 1; }
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
           export DEPLOY_PATH

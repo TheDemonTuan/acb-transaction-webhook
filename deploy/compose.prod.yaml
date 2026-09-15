@@ -175,6 +175,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    group_add:
+      - "1000"
     entrypoint: ["/bin/sh", "/bark-entrypoint.sh"]
     command: ["--addr", "0.0.0.0:8080", "--data", "/data"]
     environment:

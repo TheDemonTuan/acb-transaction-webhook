@@ -56,6 +56,14 @@ printf "\n2. Testing Concurrency Protection & Non-Cancellation...\n"
 deploy_content="$(cat "$deploy_yml")"
 assert_contains "$deploy_content" "group: acb-transaction-webhook-production" "Deploy concurrency group is acb-transaction-webhook-production"
 assert_contains "$deploy_content" "cancel-in-progress: false" "Deploy concurrency cancel-in-progress is false (never cancels in flight)"
+assert_contains "$deploy_content" "bark_basic_auth_user|bark_basic_auth_password) ;;" "Workflow preserves runtime group access for Bark secrets"
+if grep -q 'find .*secrets.*chmod 600' "$deploy_yml"; then
+  printf 'FAIL: deploy workflow still forces every secret to mode 0600\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: deploy workflow does not force Bark secrets back to mode 0600\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
 
 # 3. Environment Protection
 printf "\n2b. Testing authoritative production state inputs...\n"

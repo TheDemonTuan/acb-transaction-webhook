@@ -63,6 +63,12 @@ setup_dispatcher_env() {
   cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/deploy-frontend.sh" "$tdir/deploy/"
+  printf 'mock-master\n' > "$tdir/secrets/app_master_key"
+  printf 'mock-worker\n' > "$tdir/secrets/worker_internal_token"
+  printf 'mock-tts\n' > "$tdir/secrets/tts_internal_token"
+  printf 'mock-bark-user\n' > "$tdir/secrets/bark_basic_auth_user"
+  printf 'mock-bark-pass\n' > "$tdir/secrets/bark_basic_auth_password"
+  chmod 600 "$tdir/secrets/"* 2>/dev/null || true
   chmod 755 "$tdir/deploy/"*.sh
 
   # Create canonical mock env files
@@ -323,8 +329,16 @@ manifest_t5="$T5/deploy/release-manifest.json"
 sha_t5="5555666677778888999900001111222233334444"
 write_mock_manifest "$manifest_t5" "$sha_t5" '{"gateway":false,"worker":false,"schema":false,"auth_browser":true,"tts":true,"bark":true,"platform":false}'
 
+cat <<'EOF' > "$T5/deploy/bark-secret-preflight"
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'PREFLIGHT\n' >> "$TRACE_FILE"
+EOF
+chmod 755 "$T5/deploy/bark-secret-preflight"
+
 TRACE_FILE="$T5/data/trace.log" \
 DEPLOY_LOCK_FILE="$T5/data/deploy.lock" \
+BARK_SECRET_PREFLIGHT_CMD="$T5/deploy/bark-secret-preflight" \
 bash "$T5/deploy/dispatch-rollout.sh" \
   --manifest "$manifest_t5" \
   --deploy-dir "$T5/deploy" \
@@ -332,6 +346,7 @@ bash "$T5/deploy/dispatch-rollout.sh" \
   --skip-manifest-check
 
 assert_eq "0" "$?" "Auxiliary rollout exits with code 0"
+assert_file_contains "$T5/data/trace.log" "PREFLIGHT" "Bark secret preflight ran before auxiliary promotion"
 assert_file_contains "$T5/data/trace.log" "AUTH_BROWSER:" "Auth browser script was called"
 assert_file_contains "$T5/data/trace.log" "TTS:" "TTS script was called"
 assert_file_contains "$T5/data/trace.log" "BARK:" "Bark script was called"

@@ -307,12 +307,7 @@ trap cleanup_rollout EXIT
 # 1. Acquire explicit remote release lock
 acquire_deploy_lock
 
-# 2. Startup Recovery: recover any uncommitted prior transaction
-if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
-  log_info "Startup recovery: inspecting prior component transaction journal..."
-  recover_tx_journal
-fi
-
+# 2. Refuse an incomplete rollout before validating a new release.
 if [[ -f "$ROLLOUT_JOURNAL_FILE" ]]; then
   prev_st="$(python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null || true
 import json, sys
@@ -592,6 +587,20 @@ log_info "=========================================================="
 log_info "Starting Rollout Orchestration for [${RELEASE_ID}] (${GIT_SHA})"
 log_info "Authorized Promotion Scope: [${scope_str}]"
 log_info "=========================================================="
+
+if [[ "$PROMOTION_BARK" == "true" || "$PROMOTION_WORKER" == "true" ]]; then
+  [[ -n "$IMAGE_BARK" ]] || { log_error "BARK image digest is required to verify shared Bark secrets."; exit 1; }
+  validate_secrets
+  prepare_bark_secret_permissions
+  validate_secrets
+  preflight_bark_secret_access "$IMAGE_BARK"
+fi
+
+# Recover only after all non-destructive release and secret preflights pass.
+if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
+  log_info "Startup recovery: inspecting prior component transaction journal..."
+  recover_tx_journal
+fi
 
 init_rollout_journal "$RELEASE_ID" "$GIT_SHA" "$scope_str"
 

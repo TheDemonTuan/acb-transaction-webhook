@@ -27,17 +27,6 @@ validate_canonical_env
 validate_digest "$CANDIDATE_BARK_IMAGE" "bark-server"
 validate_secrets
 
-# Verify Bark secrets explicitly
-for sec in bark_basic_auth_user bark_basic_auth_password; do
-  if [[ ! -s "$SECRETS_DIR/$sec" ]]; then
-    log_error "Required Bark secret '$sec' is missing or empty in $SECRETS_DIR"
-    exit 1
-  fi
-done
-
-acquire_deploy_lock
-recover_tx_journal
-
 PREV_BARK_REF="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
 
 stop_bark() {
@@ -125,7 +114,13 @@ cleanup_bark_deploy() {
   release_deploy_lock
   exit "$exit_code"
 }
+acquire_deploy_lock
+prepare_bark_secret_permissions
+validate_secrets
+preflight_bark_secret_access "$CANDIDATE_BARK_IMAGE"
+
 trap cleanup_bark_deploy EXIT HUP INT TERM
+recover_tx_journal
 
 log_info "=========================================================="
 log_info "Starting Bark Auxiliary Deployment Transaction"

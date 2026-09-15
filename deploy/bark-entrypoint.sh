@@ -5,7 +5,10 @@ load_secret() {
     file="$1"
     variable="$2"
     [ -r "$file" ] || { printf 'Required Bark secret is missing or unreadable: %s\n' "$file" >&2; exit 1; }
-    value="$(tr -d '\r\n' < "$file")"
+    if ! value="$(tr -d '\r\n' < "$file")"; then
+        printf 'Required Bark secret cannot be opened: %s\n' "$file" >&2
+        exit 1
+    fi
     [ -n "$value" ] || { printf 'Required Bark secret is empty: %s\n' "$file" >&2; exit 1; }
     export "$variable=$value"
 }

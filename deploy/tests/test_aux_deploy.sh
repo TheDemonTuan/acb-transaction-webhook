@@ -58,6 +58,8 @@ EOF
   export TX_JOURNAL_FILE="$test_dir/data/deploy-journal.json"
   export DEPLOY_STATE_FILE="$test_dir/data/deploy-state.json"
   export READY_CHECK_TIMEOUT=1
+  export SKIP_LOCK=1
+  export BARK_SECRET_PREFLIGHT_CMD=true
 
   printf 'mock-master-key\n' > "$test_dir/secrets/app_master_key"
   printf 'mock-tts-token\n' > "$test_dir/secrets/tts_internal_token"
@@ -211,6 +213,26 @@ assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy failed on unhealthy candid
 bark_ref="$(grep '^BARK_IMAGE_REF=' "$T7/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
 assert_eq "ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4" "$bark_ref" "Release env preserved previous Bark image ref on rollback"
 assert_eq "precious-bark-data" "$(cat "$T7/bark_data/device_tokens.db")" "Bark data volume preserved across rollback"
+
+# ==============================================================================
+# TEST 7B: Secret preflight failure stops before candidate startup
+# ==============================================================================
+printf '\n=== TEST 7B: Bark Secret Preflight Fails Before Startup ===\n'
+T7B="$TEST_TMP/t7b"
+setup_aux_mock_env "$T7B"
+export BARK_SECRET_PREFLIGHT_CMD=false
+export BARK_START_CMD="printf started > '$T7B/started'"
+previous_ref="$(grep '^BARK_IMAGE_REF=' "$T7B/.release.env")"
+
+set +e
+"$DEPLOY_DIR/deploy-bark.sh" "ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4"
+exit_code=$?
+set -e
+
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy fails when Bark secret preflight fails"
+assert_eq "false" "$([[ -e "$T7B/started" ]] && echo true || echo false)" "Candidate is not started after preflight failure"
+assert_eq "$previous_ref" "$(grep '^BARK_IMAGE_REF=' "$T7B/.release.env")" "Release ref is unchanged after preflight failure"
+export BARK_SECRET_PREFLIGHT_CMD=true
 
 # ==============================================================================
 # TEST 8: Rollback Failure Handling Recorded in Journal
