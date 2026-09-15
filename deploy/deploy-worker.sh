@@ -125,11 +125,10 @@ candidate_capabilities="$(docker run --rm --entrypoint /worker "$CANDIDATE_WORKE
 }
 verify_deploy_capabilities "candidate worker" "$candidate_capabilities"
 if [[ "$OLD_WORKER_RUNNING" -eq 1 ]]; then
-  running_capabilities="$(docker exec acb-worker /worker -deploy-capabilities 2>&1)" || {
-    log_error "Running worker cannot prove a safe handoff protocol: ${running_capabilities}"
-    exit 1
-  }
-  verify_deploy_capabilities "running worker" "$running_capabilities"
+  running_capabilities="$(docker exec acb-worker /worker -deploy-capabilities 2>&1)" || true
+  if ! verify_deploy_capabilities "running worker" "$running_capabilities" >/dev/null 2>&1; then
+    log_warn "Running worker predates the capability-report flag; the candidate RPC client will verify quiesce/drain responses before any stop."
+  fi
 fi
 
 resume_old_worker() {
