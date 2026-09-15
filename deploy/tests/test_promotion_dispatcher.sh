@@ -283,6 +283,7 @@ write_mock_manifest "$manifest_t3" "$sha_t3" '{"gateway":false,"worker":true,"sc
 
 TRACE_FILE="$T3/data/trace.log" \
 DEPLOY_LOCK_FILE="$T3/data/deploy.lock" \
+SECRETS_DIR="$T3/secrets" \
 bash "$T3/deploy/dispatch-rollout.sh" \
   --manifest "$manifest_t3" \
   --deploy-dir "$T3/deploy" \
@@ -305,6 +306,7 @@ write_mock_manifest "$manifest_t4" "$sha_t4" '{"gateway":true,"worker":true,"sch
 
 TRACE_FILE="$T4/data/trace.log" \
 DEPLOY_LOCK_FILE="$T4/data/deploy.lock" \
+SECRETS_DIR="$T4/secrets" \
 bash "$T4/deploy/dispatch-rollout.sh" \
   --manifest "$manifest_t4" \
   --deploy-dir "$T4/deploy" \
@@ -339,6 +341,7 @@ chmod 755 "$T5/deploy/bark-secret-preflight"
 
 TRACE_FILE="$T5/data/trace.log" \
 DEPLOY_LOCK_FILE="$T5/data/deploy.lock" \
+SECRETS_DIR="$T5/secrets" \
 BARK_SECRET_PREFLIGHT_CMD="$T5/deploy/bark-secret-preflight" \
 bash "$T5/deploy/dispatch-rollout.sh" \
   --manifest "$manifest_t5" \
