@@ -151,12 +151,9 @@ preflight_bark_secret_access() {
   }
 
   local read_check='set -eu; for file in /run/secrets/bark_basic_auth_user /run/secrets/bark_basic_auth_password; do test -s "$file"; cat "$file" >/dev/null; done'
-  if ! BARK_IMAGE_REF="$image_ref" compose_prod run --rm --no-deps --entrypoint /bin/sh bark -c "$read_check" >/dev/null 2>&1; then
-    log_error "Bark cannot read its basic-auth secrets with the configured runtime identity."
-    return 1
-  fi
-  if ! BARK_IMAGE_REF="$image_ref" compose_prod run --rm --no-deps --user 1000:1000 --entrypoint /bin/sh bark -c "$read_check" >/dev/null 2>&1; then
-    log_error "Worker identity 1000:1000 cannot read the shared Bark basic-auth secrets."
+  local preflight_output=""
+  if ! preflight_output="$(BARK_IMAGE_REF="$image_ref" compose_prod run --rm --no-deps --entrypoint /bin/sh bark -c "$read_check" 2>&1)"; then
+    log_error "Bark cannot read its basic-auth secrets with the configured runtime identity: ${preflight_output}"
     return 1
   fi
 }

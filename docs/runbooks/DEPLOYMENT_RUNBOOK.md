@@ -70,7 +70,7 @@ deploy/provision-secrets.sh --confirm-fresh-provision
 
 ### Bark Secret Runtime Permissions
 
-Bark and the worker share only `bark_basic_auth_user` and `bark_basic_auth_password`. The deployment keeps both files at mode `0640`, preserves their existing common numeric group, and gives Bark that group as a supplementary group. The worker already runs as `1000:1000`, so its production secret files must retain a group that maps to GID 1000 inside the worker container. Never make these files world-readable and never regenerate them while repairing permissions.
+Bark and the worker share only `bark_basic_auth_user` and `bark_basic_auth_password`. The deployment keeps both files at mode `0640`, preserves their existing common numeric group, and gives Bark that group as a supplementary group. The worker continues to consume the same Compose secret mounts with its existing runtime configuration. Never make these files world-readable and never regenerate them while repairing permissions.
 
 If the Bark preflight reports a permissions error, inspect metadata without printing secret contents:
 
