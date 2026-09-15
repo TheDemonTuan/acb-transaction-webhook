@@ -228,11 +228,11 @@ atomic_switch_frontend_route() {
 ack_frontend_route() {
   local timeout="${1:-15}"
   local probe_script="${EDGE_PROBE_SCRIPT:-${SCRIPT_DIR:-deploy}/edge-probe.sh}"
-  [[ -x "$probe_script" ]] || { log_error "Frontend edge probe is unavailable."; return 1; }
+  [[ -f "$probe_script" ]] || { log_error "Frontend edge probe is unavailable: $probe_script"; return 1; }
   local elapsed=0
   local probe_output=""
   while [[ "$elapsed" -lt "$timeout" ]]; do
-    if probe_output="$("$probe_script" --target production --service acb --path / --expected-status 200 --timeout 5 2>&1)"; then
+    if probe_output="$(bash "$probe_script" --target production --service acb --path / --expected-status 200 --timeout 5 2>&1)"; then
       return 0
     fi
     sleep 1
