@@ -99,7 +99,7 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Production state did not return a valid SHA" >&2; exit 1; }
           printf '%s\n' "$state" > production-state.env
       - name: Upload production state
-        uses: actions/upload-artifact@6027e3aa5d65c5d20619b1cb8b64a4637c93a02b # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: production-state
           path: production-state.env
