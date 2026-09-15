@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,27 @@ func acbLoginURL() string {
 	return defaultACBLoginURL
 }
 
+func isValidAttemptID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func newProfileDirName() (string, error) {
+	token := make([]byte, 18)
+	if _, err := rand.Read(token); err != nil {
+		return "", err
+	}
+	return "profile-" + base64.RawURLEncoding.EncodeToString(token), nil
+}
+
 type browserFormState struct {
 	Action string            `json:"action"`
 	Fields map[string]string `json:"fields"`
@@ -53,6 +75,7 @@ type browserSession struct {
 	ScreenURL string    `json:"screenUrl"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	Error     string    `json:"error,omitempty"`
+	profile   string
 	cancel    context.CancelFunc
 	debugURL  string
 	handoff   string
@@ -258,8 +281,18 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		AttemptID string `json:"attemptId"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil || strings.TrimSpace(input.AttemptID) == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attemptId is required"})
+		return
+	}
+	attemptID := strings.TrimSpace(input.AttemptID)
+	if !isValidAttemptID(attemptID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attemptId contains invalid characters"})
+		return
+	}
+	profileDir, err := newProfileDirName()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot prepare browser profile"})
 		return
 	}
 
@@ -271,7 +304,7 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			s.reapSession(oldSession, 5*time.Second)
 			s.mu.Lock()
-		} else if s.session.AttemptID == input.AttemptID {
+		} else if s.session.AttemptID == attemptID {
 			resp := sessionResponse(s.session)
 			s.mu.Unlock()
 			writeJSON(w, http.StatusOK, resp)
@@ -302,10 +335,11 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	expiresAt := time.Now().UTC().Add(sessionTTL)
 	ctx, cancel := context.WithDeadline(context.Background(), expiresAt)
 	item := &browserSession{
-		AttemptID: input.AttemptID,
+		AttemptID: attemptID,
 		Status:    "STARTING",
 		ScreenURL: "/",
 		ExpiresAt: expiresAt,
+		profile:   profileDir,
 		cancel:    cancel,
 		debugURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
 		done:      make(chan struct{}),
@@ -339,7 +373,7 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) launch(ctx context.Context, item *browserSession, port int, ready chan<- error) {
-	profile := filepath.Join(s.profiles, item.AttemptID)
+	profile := filepath.Join(s.profiles, item.profile)
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		s.failStartup(item, ready, "cannot prepare Chromium profile", err)
 		item.exitOnce.Do(func() { close(item.done) })

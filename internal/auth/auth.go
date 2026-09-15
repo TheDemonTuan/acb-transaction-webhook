@@ -182,12 +182,11 @@ func CSRF(w http.ResponseWriter, r *http.Request) {
 		token := make([]byte, 32)
 		_, _ = rand.Read(token)
 		encoded = base64.RawURLEncoding.EncodeToString(token)
-		secure := isSecureRequest(r)
 		http.SetCookie(w, &http.Cookie{
 			Name:     "tbg_csrf",
 			Value:    encoded,
 			Path:     "/api/v1",
-			Secure:   secure,
+			Secure:   true,
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   3600,
 			HttpOnly: true,
