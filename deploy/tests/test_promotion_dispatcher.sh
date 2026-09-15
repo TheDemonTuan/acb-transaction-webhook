@@ -555,6 +555,7 @@ write_mock_manifest "$manifest_t11" "$sha_t11" '{"gateway":true,"worker":true,"s
 
 TRACE_FILE="$T11/data/trace.log" \
 DEPLOY_LOCK_FILE="$T11/data/deploy.lock" \
+SECRETS_DIR="$T11/secrets" \
 bash "$T11/deploy/dispatch-rollout.sh" \
   --manifest "$manifest_t11" \
   --deploy-dir "$T11/deploy" \
