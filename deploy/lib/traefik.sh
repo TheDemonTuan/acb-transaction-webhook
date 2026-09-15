@@ -230,13 +230,15 @@ ack_frontend_route() {
   local probe_script="${EDGE_PROBE_SCRIPT:-${SCRIPT_DIR:-deploy}/edge-probe.sh}"
   [[ -x "$probe_script" ]] || { log_error "Frontend edge probe is unavailable."; return 1; }
   local elapsed=0
+  local probe_output=""
   while [[ "$elapsed" -lt "$timeout" ]]; do
-    if "$probe_script" --target production --service acb --path / --expected-status 200 --timeout 5 >/dev/null 2>&1; then
+    if probe_output="$("$probe_script" --target production --service acb --path / --expected-status 200 --timeout 5 2>&1)"; then
       return 0
     fi
     sleep 1
     elapsed=$((elapsed + 1))
   done
+  log_error "Frontend edge probe failed after ${timeout}s: ${probe_output}"
   return 1
 }
 
