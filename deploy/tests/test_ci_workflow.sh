@@ -60,7 +60,8 @@ assert_contains "$deploy_content" "cancel-in-progress: false" "Deploy concurrenc
 # 3. Environment Protection
 printf "\n2b. Testing authoritative production state inputs...\n"
 assert_contains "$deploy_content" "  production-state:" "Workflow defines production-state job"
-assert_contains "$deploy_content" 'PRODUCTION_BASE_SHA_B64: ${{ needs.production-state.outputs.sha_b64 }}' "Baseline comes from VPS production state"
+assert_contains "$deploy_content" "name: production-state" "Baseline is transferred through a production-state artifact"
+assert_contains "$deploy_content" "PRODUCTION_BASE_SHA=\"\$(sed -n 's/^sha=//p' .production-state/production-state.env)\"" "Baseline comes from downloaded VPS production state"
 if grep -q 'EVENT_BEFORE:' "$deploy_yml" || grep -q 'HEAD~1' "$deploy_yml"; then
   printf 'FAIL: deploy workflow retains an inferred baseline fallback\n' >&2
   TESTS_FAILED=$(( TESTS_FAILED + 1 ))

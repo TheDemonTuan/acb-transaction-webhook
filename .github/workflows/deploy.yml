@@ -27,7 +27,7 @@ jobs:
     environment: production
     timeout-minutes: 5
     outputs:
-      sha_b64: ${{ steps.state.outputs.sha_b64 }}
+      state_artifact: production-state
     steps:
       - name: Configure SSH
         env:
@@ -97,7 +97,14 @@ jobs:
           printf '%s\n' "$state"
           sha="$(printf '%s\n' "$state" | sed -n 's/^sha=//p')"
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Production state did not return a valid SHA" >&2; exit 1; }
-          echo "sha_b64=$(printf '%s' "$sha" | base64 -w0)" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$state" > production-state.env
+      - name: Upload production state
+        uses: actions/upload-artifact@6027e3aa5d65c5d20619b1cb8b64a4637c93a02b # v4.6.2
+        with:
+          name: production-state
+          path: production-state.env
+          if-no-files-found: error
+          retention-days: 1
 
   verify:
     name: Verify test and build
@@ -118,13 +125,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Download production state
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: production-state
+          path: .production-state
       - name: Resolve verified production baseline
         id: baseline
-        env:
-          PRODUCTION_BASE_SHA_B64: ${{ needs.production-state.outputs.sha_b64 }}
         run: |
           set -euo pipefail
-          PRODUCTION_BASE_SHA="$(printf '%s' "${PRODUCTION_BASE_SHA_B64:-}" | base64 -d 2>/dev/null || true)"
+          PRODUCTION_BASE_SHA="$(sed -n 's/^sha=//p' .production-state/production-state.env)"
           if [[ -z "${PRODUCTION_BASE_SHA:-}" ]]; then
             echo "PRODUCTION_BASE_SHA must identify the last successfully promoted production commit." >&2
             exit 1
