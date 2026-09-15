@@ -8,6 +8,10 @@ import (
 
 var ErrSessionNotRefreshable = errors.New("session is not refreshable")
 
+func IsSessionNotRefreshable(err error) bool {
+	return errors.Is(err, ErrSessionNotRefreshable) || errors.Is(err, sql.ErrNoRows)
+}
+
 type StoredSession struct {
 	ConnectionID string
 	Generation   int64

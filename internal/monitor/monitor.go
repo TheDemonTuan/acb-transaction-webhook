@@ -176,7 +176,7 @@ func (m *Monitor) PersistSession(ctx context.Context) error {
 		return nil
 	}
 	if err := sessions.Persist(ctx, conn.ID, conn.Generation); err != nil {
-		if errors.Is(err, storage.ErrSessionNotRefreshable) {
+		if storage.IsSessionNotRefreshable(err) {
 			return nil
 		}
 		return err
