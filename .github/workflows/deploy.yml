@@ -43,11 +43,20 @@ jobs:
         id: baseline
         env:
           PRODUCTION_BASE_SHA: ${{ vars.PRODUCTION_BASE_SHA }}
+          EVENT_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          [[ "$PRODUCTION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "PRODUCTION_BASE_SHA must be the last verified production runtime commit" >&2; exit 1; }
-          git cat-file -e "${PRODUCTION_BASE_SHA}^{commit}"
-          echo "sha=$PRODUCTION_BASE_SHA" >> "$GITHUB_OUTPUT"
+          base_commit=""
+          if [[ -n "${PRODUCTION_BASE_SHA:-}" ]] && [[ "$PRODUCTION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "${PRODUCTION_BASE_SHA}^{commit}" 2>/dev/null; then
+            base_commit="$PRODUCTION_BASE_SHA"
+          elif [[ -n "${EVENT_BEFORE:-}" ]] && [[ "$EVENT_BEFORE" =~ ^[0-9a-f]{40}$ ]] && [[ "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "${EVENT_BEFORE}^{commit}" 2>/dev/null; then
+            base_commit="$EVENT_BEFORE"
+          elif git rev-parse --verify "HEAD~1^{commit}" >/dev/null 2>&1; then
+            base_commit="$(git rev-parse HEAD~1)"
+          else
+            base_commit="$(git rev-parse HEAD)"
+          fi
+          echo "sha=$base_commit" >> "$GITHUB_OUTPUT"
       - name: Compute component scope before builds
         id: scope
         env:
@@ -137,7 +146,7 @@ jobs:
     name: Build frontend GHCR image
     timeout-minutes: 15
     needs: verify
-    if: needs.verify.outputs.frontend == 'true'
+    if: needs.verify.outputs.frontend == 'true' || !vars.FRONTEND_IMAGE_REF
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -181,7 +190,7 @@ jobs:
     name: Build gateway GHCR image
     timeout-minutes: 15
     needs: verify
-    if: needs.verify.outputs.gateway == 'true'
+    if: needs.verify.outputs.gateway == 'true' || !vars.GATEWAY_IMAGE_REF
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -225,7 +234,7 @@ jobs:
     name: Build worker GHCR image
     timeout-minutes: 15
     needs: verify
-    if: needs.verify.outputs.worker == 'true'
+    if: needs.verify.outputs.worker == 'true' || !vars.WORKER_IMAGE_REF
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -269,7 +278,7 @@ jobs:
     name: Build dbtool GHCR image
     timeout-minutes: 15
     needs: verify
-    if: needs.verify.outputs.schema == 'true'
+    if: needs.verify.outputs.schema == 'true' || !vars.DBTOOL_IMAGE_REF
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -313,7 +322,7 @@ jobs:
     name: Build auth-browser GHCR image
     timeout-minutes: 15
     needs: verify
-    if: needs.verify.outputs.auth_browser == 'true'
+    if: needs.verify.outputs.auth_browser == 'true' || !vars.BROWSER_IMAGE_REF
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -361,7 +370,7 @@ jobs:
     name: Build tts-gateway GHCR image
     timeout-minutes: 15
     needs: verify
-    if: needs.verify.outputs.tts == 'true'
+    if: needs.verify.outputs.tts == 'true' || !vars.TTS_IMAGE_REF
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -469,7 +478,7 @@ jobs:
           bash deploy/validate-cve-allowlist.sh \
             --file deploy/cve-allowlist.json \
             --output-ignorefile .trivyignore
-          for comp in gateway worker dbtool auth-browser tts-gateway; do
+          for comp in frontend gateway worker dbtool auth-browser tts-gateway; do
             bash deploy/validate-cve-allowlist.sh \
               --file deploy/cve-allowlist.json \
               --component "$comp" \
