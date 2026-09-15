@@ -37,8 +37,6 @@ func NewRealtimeCoordinator(server *Server, interval time.Duration) *RealtimeCoo
 	}
 }
 
-func (c *RealtimeCoordinator) Input() chan<- eventhub.Event { return c.input }
-
 func (c *RealtimeCoordinator) RequestReconcile() {
 	select {
 	case c.reconcileNow <- struct{}{}:
@@ -46,14 +44,24 @@ func (c *RealtimeCoordinator) RequestReconcile() {
 	}
 }
 
-// Submit queues a live hint. Backpressure is bounded by the Worker stream's
-// write deadline; an interrupted connection resumes from the last handled ID.
+// Submit queues a durable live hint without blocking the stream reader. A full
+// queue is recovered from the journal through the coordinator's single cursor.
 func (c *RealtimeCoordinator) Submit(event eventhub.Event) error {
 	select {
-	case c.input <- event:
-		return nil
 	case <-c.done:
 		return context.Canceled
+	default:
+	}
+
+	select {
+	case <-c.done:
+		return context.Canceled
+	case c.input <- event:
+		return nil
+	default:
+		telemetry.Default.RecordRealtimeCoordinatorQueueFull()
+		c.RequestReconcile()
+		return nil
 	}
 }
 
@@ -64,10 +72,13 @@ func (c *RealtimeCoordinator) LastSeq() int64 {
 }
 
 func (c *RealtimeCoordinator) Run(ctx context.Context) {
-	if c == nil || c.server == nil || c.server.store == nil {
+	if c == nil {
 		return
 	}
 	defer close(c.done)
+	if c.server == nil || c.server.store == nil {
+		return
+	}
 	for {
 		lastSeq, err := c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
 		if err == nil {

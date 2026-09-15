@@ -9,14 +9,8 @@ import (
 )
 
 func (s *Server) Publish(event eventhub.Event) {
-	if s.realtimeInput != nil {
-		select {
-		case s.realtimeInput <- event:
-		default:
-			if s.realtimeRecover != nil {
-				s.realtimeRecover()
-			}
-		}
+	if s.realtimeSubmit != nil {
+		_ = s.realtimeSubmit(event)
 		return
 	}
 	if s.eventHub != nil {

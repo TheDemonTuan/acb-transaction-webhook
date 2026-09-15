@@ -39,6 +39,7 @@ type RealtimeTelemetry struct {
 	StreamConnected                  int64   `json:"streamConnected"`
 	StreamReconnectTotal             int64   `json:"streamReconnectTotal"`
 	StreamDisconnectTotal            int64   `json:"streamDisconnectTotal"`
+	CoordinatorQueueFullTotal        int64   `json:"coordinatorQueueFullTotal"`
 	FallbackRecoveryTotal            int64   `json:"fallbackRecoveryTotal"`
 	GapRepairTotal                   int64   `json:"gapRepairTotal"`
 	P95CommitToGatewayMs             float64 `json:"p95CommitToGatewayMs"`

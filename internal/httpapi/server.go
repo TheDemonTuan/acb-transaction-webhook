@@ -93,8 +93,7 @@ type Server struct {
 	browserVNCURL     string
 	keyring           *security.Keyring
 	eventHub          *eventhub.Hub
-	realtimeInput     chan<- eventhub.Event
-	realtimeRecover   func()
+	realtimeSubmit    func(eventhub.Event) error
 	ttsClient         *ttsclient.Client
 	barkSender        *bark.Sender
 	notifRegistry     *notification.Registry
@@ -216,11 +215,10 @@ func (s *Server) WithEventHub(hub *eventhub.Hub) *Server {
 	return s
 }
 
-// WithRealtimeInput routes journal-backed events through the gateway ordering
+// WithRealtimeSubmit routes journal-backed events through the gateway ordering
 // coordinator before they are published to browser subscribers.
-func (s *Server) WithRealtimeInput(input chan<- eventhub.Event, recover func()) *Server {
-	s.realtimeInput = input
-	s.realtimeRecover = recover
+func (s *Server) WithRealtimeSubmit(submit func(eventhub.Event) error) *Server {
+	s.realtimeSubmit = submit
 	return s
 }
 
@@ -1958,7 +1956,6 @@ func requestIDFromContext(ctx context.Context) string {
 }
 
 const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self'"
-
 
 const vncContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
 

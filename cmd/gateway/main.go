@@ -343,7 +343,7 @@ func main() {
 			WithWorkerProber(workerClient)
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
-			server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
+			server.WithRealtimeSubmit(coordinator.Submit)
 			go coordinator.Run(ctx)
 			telemetry.Default.SetRealtimeStreamState(true, "connecting", "startup")
 			streamClient, streamErr := realtimestream.NewClient(realtimestream.ClientConfig{

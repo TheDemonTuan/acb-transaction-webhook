@@ -47,6 +47,7 @@ type Registry struct {
 	streamStateSince     time.Time
 	streamReconnects     int64
 	streamDisconnects    int64
+	coordinatorQueueFull int64
 	fallbackRecoveries   int64
 	gapRepairs           int64
 	fallbackTimes        []time.Time
@@ -243,6 +244,12 @@ func (r *Registry) RecordRealtimeDisconnect() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.streamDisconnects++
+}
+
+func (r *Registry) RecordRealtimeCoordinatorQueueFull() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.coordinatorQueueFull++
 }
 
 func (r *Registry) RecordFallbackRecovery(count int, gap bool) {
@@ -577,6 +584,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		StreamConnected:                  connected,
 		StreamReconnectTotal:             r.streamReconnects,
 		StreamDisconnectTotal:            r.streamDisconnects,
+		CoordinatorQueueFullTotal:        r.coordinatorQueueFull,
 		FallbackRecoveryTotal:            r.fallbackRecoveries,
 		GapRepairTotal:                   r.gapRepairs,
 		P95CommitToGatewayMs:             calcP95(r.commitGatewaySamples),

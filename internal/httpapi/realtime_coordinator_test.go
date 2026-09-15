@@ -9,7 +9,64 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
+
+func TestRealtimeCoordinatorSubmitDoesNotBlockWhenQueueIsFull(t *testing.T) {
+	registry := telemetry.NewRegistry()
+	previousRegistry := telemetry.Default
+	telemetry.Default = registry
+	t.Cleanup(func() { telemetry.Default = previousRegistry })
+
+	store, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	coordinator := NewRealtimeCoordinator(New(config.Config{}, store).WithEventHub(eventhub.New()), time.Hour)
+	defer close(coordinator.done)
+	for i := 0; i < cap(coordinator.input); i++ {
+		if err := coordinator.Submit(eventhub.Event{Seq: int64(i + 1), Epoch: realtimeEpoch}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- coordinator.Submit(eventhub.Event{Seq: int64(cap(coordinator.input) + 1), Epoch: realtimeEpoch})
+	}()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("queue-full submit returned an error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("queue-full submit blocked")
+	}
+
+	if got := len(coordinator.reconcileNow); got != 1 {
+		t.Fatalf("expected one pending reconcile request, got %d", got)
+	}
+	if got := telemetry.Default.FullSnapshot().Realtime.CoordinatorQueueFullTotal; got != 1 {
+		t.Fatalf("expected queue-full counter 1, got %d", got)
+	}
+
+	if err := coordinator.Submit(eventhub.Event{Seq: 999, Epoch: realtimeEpoch}); err != nil {
+		t.Fatalf("second queue-full submit returned an error: %v", err)
+	}
+	if got := len(coordinator.reconcileNow); got != 1 {
+		t.Fatalf("expected reconcile requests to coalesce, got %d", got)
+	}
+}
+
+func TestRealtimeCoordinatorStopsWhenRunCannotStart(t *testing.T) {
+	coordinator := NewRealtimeCoordinator(nil, time.Hour)
+	coordinator.Run(context.Background())
+	if err := coordinator.Submit(eventhub.Event{}); err != context.Canceled {
+		t.Fatalf("expected cancellation after invalid run, got %v", err)
+	}
+}
 
 func TestRealtimeCoordinatorSubmitStopsAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -47,7 +104,7 @@ func TestRealtimeCoordinatorPublishesContiguousEventDirectly(t *testing.T) {
 	hub := eventhub.New()
 	server := New(config.Config{}, store).WithEventHub(hub)
 	coordinator := NewRealtimeCoordinator(server, time.Hour)
-	server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
+	server.WithRealtimeSubmit(coordinator.Submit)
 	go coordinator.Run(ctx)
 	waitForCoordinatorSeq(t, coordinator, 0)
 
@@ -77,7 +134,7 @@ func TestRealtimeCoordinatorRepairsGapFromJournal(t *testing.T) {
 	hub := eventhub.New()
 	server := New(config.Config{}, store).WithEventHub(hub)
 	coordinator := NewRealtimeCoordinator(server, time.Hour)
-	server.WithRealtimeInput(coordinator.Input(), coordinator.RequestReconcile)
+	server.WithRealtimeSubmit(coordinator.Submit)
 	go coordinator.Run(ctx)
 	waitForCoordinatorSeq(t, coordinator, 0)
 
@@ -100,6 +157,29 @@ func TestRealtimeCoordinatorRepairsGapFromJournal(t *testing.T) {
 			t.Fatalf("timed out waiting for seq %d", want)
 		}
 	}
+}
+
+func TestRealtimeCoordinatorReconcilesMoreThanOneJournalBatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	hub := eventhub.New()
+	coordinator := NewRealtimeCoordinator(New(config.Config{}, store).WithEventHub(hub), time.Hour)
+	go coordinator.Run(ctx)
+	waitForCoordinatorSeq(t, coordinator, 0)
+	const total = replayBatch*2 + 100
+	for i := 1; i <= total; i++ {
+		if _, err := store.AppendJournalEvent(ctx, realtimeEpoch, "test.event", "", []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	coordinator.RequestReconcile()
+	waitForCoordinatorSeq(t, coordinator, total)
 }
 
 func TestRealtimeCoordinatorAdvancesPastPermanentSequenceHole(t *testing.T) {
