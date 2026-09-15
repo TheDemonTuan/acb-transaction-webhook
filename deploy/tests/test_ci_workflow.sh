@@ -88,6 +88,7 @@ for key in FRONTEND GATEWAY WORKER DBTOOL AUTH_BROWSER TTS BARK; do
   assert_contains "$deploy_content" "PRODUCTION_${key}_IMAGE" "VPS state provides the ${key} image fallback"
 done
 assert_contains "$deploy_content" "stable-deployer.sh" "VPS rollout executes through the stable deployer"
+assert_contains "$deploy_content" "ALLOW_LEGACY_WORKER_RESTART=1" "Production deploy explicitly authorizes one legacy worker restart"
 assert_contains "$deploy_content" 'releases/$release_id' "Candidate is staged in an immutable release directory"
 
 printf "\n3. Testing Environment Protection...\n"

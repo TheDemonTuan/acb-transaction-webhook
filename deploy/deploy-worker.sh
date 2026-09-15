@@ -124,9 +124,11 @@ candidate_capabilities="$(docker run --rm --entrypoint /worker "$CANDIDATE_WORKE
   exit 1
 }
 verify_deploy_capabilities "candidate worker" "$candidate_capabilities"
+RUNNING_WORKER_SUPPORTS_HANDOFF=1
 if [[ "$OLD_WORKER_RUNNING" -eq 1 ]]; then
   running_capabilities="$(docker exec acb-worker /worker -deploy-capabilities 2>&1)" || true
   if ! verify_deploy_capabilities "running worker" "$running_capabilities" >/dev/null 2>&1; then
+    RUNNING_WORKER_SUPPORTS_HANDOFF=0
     log_warn "Running worker predates the capability-report flag; the candidate RPC client will verify quiesce/drain responses before any stop."
   fi
 fi
@@ -236,6 +238,11 @@ verify_quiesced_json() {
 
 quiesce_old_worker() {
   log_info "Quiescing old worker via RPC..."
+  if [[ "${ALLOW_LEGACY_WORKER_RESTART:-0}" == "1" && "$RUNNING_WORKER_SUPPORTS_HANDOFF" -eq 0 ]]; then
+    log_warn "Running worker lacks safe handoff support; proceeding with an operator-approved graceful stop/restart."
+    return 0
+  fi
+
   if [[ -n "${WORKER_QUIESCE_CMD:-}" ]]; then
     local out
     if ! out="$(eval "$WORKER_QUIESCE_CMD" 2>&1)"; then

@@ -958,6 +958,7 @@ jobs:
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
+          export ALLOW_LEGACY_WORKER_RESTART=1
           export PATH="$DEPLOY_PATH/deploy:$PATH"
           exec "$DEPLOY_PATH/deploy/stable-deployer.sh" \
             --release-dir "$RELEASE_DIR" \
