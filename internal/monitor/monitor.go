@@ -175,7 +175,13 @@ func (m *Monitor) PersistSession(ctx context.Context) error {
 	if conn.ID == "" || conn.Generation <= 0 {
 		return nil
 	}
-	return sessions.Persist(ctx, conn.ID, conn.Generation)
+	if err := sessions.Persist(ctx, conn.ID, conn.Generation); err != nil {
+		if errors.Is(err, storage.ErrSessionNotRefreshable) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (m *Monitor) SetBackoff(duration time.Duration) {

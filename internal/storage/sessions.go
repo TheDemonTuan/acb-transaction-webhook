@@ -3,7 +3,10 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
+
+var ErrSessionNotRefreshable = errors.New("session is not refreshable")
 
 type StoredSession struct {
 	ConnectionID string
@@ -34,7 +37,7 @@ func (s *Store) RefreshSession(ctx context.Context, connectionID string, generat
 		return err
 	}
 	if changed != 1 {
-		return sql.ErrNoRows
+		return ErrSessionNotRefreshable
 	}
 	return nil
 }
