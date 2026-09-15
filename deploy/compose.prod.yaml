@@ -176,7 +176,7 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     group_add:
-      - "${BARK_SECRET_GROUP:?BARK_SECRET_GROUP is required}"
+      - "${BARK_SECRET_GROUP:-0}"
     entrypoint: ["/bin/sh", "/bark-entrypoint.sh"]
     command: ["--addr", "0.0.0.0:8080", "--data", "/data"]
     environment:
