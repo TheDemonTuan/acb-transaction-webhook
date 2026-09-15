@@ -896,11 +896,11 @@ jobs:
           remote_stage="$DEPLOY_PATH/releases/.${release_id}.upload-${{ github.run_id }}"
           printf 'REMOTE_RELEASE_DIR=%s\n' "$remote_release" >> "$GITHUB_ENV"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "set -e; test -x '$DEPLOY_PATH/deploy/stable-deployer.sh'; test -x '$DEPLOY_PATH/deploy/verify-manifest.sh'; mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/releases'; rm -rf '$remote_stage'; mkdir -m 0700 '$remote_stage'"
+            "$VPS_USER@$VPS_HOST" "set -e; mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/releases' '$DEPLOY_PATH/deploy'; rm -rf '$remote_stage'; mkdir -m 0700 '$remote_stage'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/. "$VPS_USER@$VPS_HOST:$remote_stage/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "set -e; test ! -e '$remote_release'; mv '$remote_stage' '$remote_release'; chmod -R go-w '$remote_release'"
+            "$VPS_USER@$VPS_HOST" "set -e; test ! -e '$remote_release'; mv '$remote_stage' '$remote_release'; chmod -R go-w '$remote_release'; if [ ! -x '$DEPLOY_PATH/deploy/stable-deployer.sh' ] || [ ! -x '$DEPLOY_PATH/deploy/verify-manifest.sh' ]; then cp -f '$remote_release/stable-deployer.sh' '$DEPLOY_PATH/deploy/stable-deployer.sh'; cp -f '$remote_release/verify-manifest.sh' '$DEPLOY_PATH/deploy/verify-manifest.sh'; chmod 755 '$DEPLOY_PATH/deploy/stable-deployer.sh' '$DEPLOY_PATH/deploy/verify-manifest.sh'; fi"
           cosign_version="v2.4.3"
           target_arch="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" 'uname -m')"
           case "$target_arch" in

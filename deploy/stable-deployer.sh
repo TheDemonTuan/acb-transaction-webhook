@@ -52,9 +52,10 @@ runtime_dir="$SCRIPT_DIR"
 for required in .env.production .release.env secrets; do
   [[ -e "$runtime_dir/$required" ]] || { printf 'Missing canonical runtime state: %s\n' "$runtime_dir/$required" >&2; exit 1; }
 done
-for required in .env.production secrets; do
-  [[ ! -e "$RELEASE_DIR/$required" && ! -L "$RELEASE_DIR/$required" ]] || { printf 'Release shadows canonical runtime state: %s\n' "$required" >&2; exit 1; }
-  ln -s "$runtime_dir/$required" "$RELEASE_DIR/$required"
+for required in .env.production .release.env secrets; do
+  if [[ ! -e "$RELEASE_DIR/$required" && ! -L "$RELEASE_DIR/$required" ]]; then
+    ln -s "$runtime_dir/$required" "$RELEASE_DIR/$required"
+  fi
 done
 
 export ENV_FILE="$runtime_dir/.env.production"
