@@ -92,6 +92,7 @@ EOF
   local trace_file="$tdir/data/trace.log"
   rm -f "$trace_file"
   touch "$trace_file"
+  export BARK_SECRET_PREFLIGHT_CMD=true
 
   cat <<'EOF' > "$tdir/deploy/deploy-schema.sh"
 #!/usr/bin/env bash
