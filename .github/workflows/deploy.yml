@@ -939,8 +939,7 @@ jobs:
             --expected-identity "$EXPECTED_IDENTITY" \
             --expected-issuer "$EXPECTED_ISSUER" \
             --require-cosign \
-            --soak-seconds 900 \
-            --detach-soak
+            --soak-seconds 900
 
           cp -f "$staged_compose" "$DEPLOY_PATH/deploy/compose.prod.yaml"
           rm -f "$staged_compose"
