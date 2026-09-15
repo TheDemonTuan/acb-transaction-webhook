@@ -894,26 +894,31 @@ jobs:
           [[ "$release_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { echo "Invalid release ID" >&2; exit 1; }
           remote_release="$DEPLOY_PATH/releases/$release_id"
           remote_stage="$DEPLOY_PATH/releases/.${release_id}.upload-${{ github.run_id }}"
-          printf 'REMOTE_RELEASE_DIR=%s
-' "$remote_release" >> "$GITHUB_ENV"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15             "$VPS_USER@$VPS_HOST" "set -e; test -x '$DEPLOY_PATH/deploy/stable-deployer.sh'; test -x '$DEPLOY_PATH/deploy/verify-manifest.sh'; mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/releases'; rm -rf '$remote_stage'; mkdir -m 0700 '$remote_stage'"
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r             deploy/. "$VPS_USER@$VPS_HOST:$remote_stage/"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15             "$VPS_USER@$VPS_HOST" "set -e; test ! -e '$remote_release'; mv '$remote_stage' '$remote_release'; chmod -R go-w '$remote_release'"
+          printf 'REMOTE_RELEASE_DIR=%s\n' "$remote_release" >> "$GITHUB_ENV"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "set -e; test -x '$DEPLOY_PATH/deploy/stable-deployer.sh'; test -x '$DEPLOY_PATH/deploy/verify-manifest.sh'; mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/releases'; rm -rf '$remote_stage'; mkdir -m 0700 '$remote_stage'"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
+            deploy/. "$VPS_USER@$VPS_HOST:$remote_stage/"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "set -e; test ! -e '$remote_release'; mv '$remote_stage' '$remote_release'; chmod -R go-w '$remote_release'"
           cosign_version="v2.4.3"
           target_arch="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" 'uname -m')"
           case "$target_arch" in
             x86_64|amd64) cosign_asset="cosign-linux-amd64" ;;
             aarch64|arm64) cosign_asset="cosign-linux-arm64" ;;
-            *) printf 'Unsupported VPS architecture for Cosign: %s
-' "$target_arch" >&2; exit 1 ;;
+            *) printf 'Unsupported VPS architecture for Cosign: %s\n' "$target_arch" >&2; exit 1 ;;
           esac
           cosign_bin="$RUNNER_TEMP/$cosign_asset"
           cosign_checksums="$RUNNER_TEMP/cosign_checksums.txt"
-          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused             --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/${cosign_asset}"
-          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused             --output "$cosign_checksums" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign_checksums.txt"
+          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
+            --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/${cosign_asset}"
+          curl --fail --location --retry 5 --retry-delay 2 --retry-connrefused \
+            --output "$cosign_checksums" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign_checksums.txt"
           grep "  ${cosign_asset}$" "$cosign_checksums" | (cd "$RUNNER_TEMP" && sha256sum --check -)
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15             "$cosign_bin" "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/cosign.next"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15             "$VPS_USER@$VPS_HOST" "set -e; install -m 0755 '$DEPLOY_PATH/deploy/cosign.next' '$DEPLOY_PATH/deploy/cosign'; rm -f '$DEPLOY_PATH/deploy/cosign.next'"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$cosign_bin" "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/cosign.next"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "set -e; install -m 0755 '$DEPLOY_PATH/deploy/cosign.next' '$DEPLOY_PATH/deploy/cosign'; rm -f '$DEPLOY_PATH/deploy/cosign.next'"
       - name: Deploy immutable image
         timeout-minutes: 20
         env:
@@ -928,21 +933,17 @@ jobs:
           owner="$(printf '%s' "$DASHBOARD_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
           expected_identity="https://github.com/${{ github.repository }}/.github/workflows/deploy.yml@refs/heads/main"
           expected_issuer="https://token.actions.githubusercontent.com"
-          [[ -n "${REMOTE_RELEASE_DIR:-}" ]] || { printf 'REMOTE_RELEASE_DIR is missing.
-' >&2; exit 1; }
+          [[ -n "${REMOTE_RELEASE_DIR:-}" ]] || { printf 'REMOTE_RELEASE_DIR is missing.\n' >&2; exit 1; }
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_DIR='$REMOTE_RELEASE_DIR' OWNER='$owner' EXPECTED_IDENTITY='$expected_identity' EXPECTED_ISSUER='$expected_issuer' bash -s" <<'REMOTE'
           set -Eeuo pipefail
           env_file="$DEPLOY_PATH/deploy/.env.production"
-          [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s
-' "$env_file" >&2; exit 1; }
+          [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
           chmod 600 "$env_file"
-          [[ -d "$DEPLOY_PATH/deploy/secrets" ]] || { printf 'Missing production secrets directory.
-' >&2; exit 1; }
+          [[ -d "$DEPLOY_PATH/deploy/secrets" ]] || { printf 'Missing production secrets directory.\n' >&2; exit 1; }
           chmod 700 "$DEPLOY_PATH/deploy/secrets"
           find "$DEPLOY_PATH/deploy/secrets" -maxdepth 1 -type f -exec chmod 600 {} +
-          [[ -f "$DEPLOY_PATH/deploy/.release.env" ]] || { printf 'Missing canonical release environment.
-' >&2; exit 1; }
+          [[ -f "$DEPLOY_PATH/deploy/.release.env" ]] || { printf 'Missing canonical release environment.\n' >&2; exit 1; }
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
