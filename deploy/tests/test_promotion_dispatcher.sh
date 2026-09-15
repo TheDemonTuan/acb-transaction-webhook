@@ -501,6 +501,23 @@ wait "$DISPATCHER_PID" 2>/dev/null || true
 assert_file_exists "$T9/data/rollout-journal.json" "Rollout journal preserved on SIGTERM"
 assert_file_contains "$T9/data/rollout-journal.json" '"status": "INTERRUPTED"' "Rollout journal marked INTERRUPTED on cancellation"
 
+# A verified release may reconcile and archive an interrupted orchestration.
+cat <<'EOF' > "$T9/deploy/deploy-gateway.sh"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 755 "$T9/deploy/deploy-gateway.sh"
+TRACE_FILE="$T9/data/trace.log" DEPLOY_LOCK_FILE="$T9/data/deploy.lock" \
+  bash "$T9/deploy/dispatch-rollout.sh" --manifest "$manifest_t9" --deploy-dir "$T9/deploy" --data-dir "$T9/data" --skip-manifest-check --allow-redeploy
+assert_eq "0" "$?" "Next verified rollout reconciles interrupted orchestration"
+if compgen -G "$T9/data/rollout-journal.json.interrupted.*" >/dev/null; then
+  printf 'PASS: interrupted rollout journal is retained as archived evidence\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: interrupted rollout journal was not archived\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
 # ----------------------------------------------------
 # 10. Remote Release Lock Contention
 # ----------------------------------------------------

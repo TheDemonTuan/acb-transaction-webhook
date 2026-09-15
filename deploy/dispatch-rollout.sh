@@ -307,16 +307,17 @@ trap cleanup_rollout EXIT
 # 1. Acquire explicit remote release lock
 acquire_deploy_lock
 
-# 2. Refuse an incomplete rollout before validating a new release.
+# 2. Inspect previous rollout state. Recovery runs only after new release preflights.
+PREVIOUS_ROLLOUT_STATUS=""
 if [[ -f "$ROLLOUT_JOURNAL_FILE" ]]; then
-  prev_st="$(python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null || true
+  PREVIOUS_ROLLOUT_STATUS="$(python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null || true
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as handle:
     print(json.load(handle).get('status', ''))
 PY
 )"
-  if [[ "$prev_st" == "RUNNING" || "$prev_st" == "INTERRUPTED" || -z "$prev_st" ]]; then
-    log_error "A previous rollout is incomplete or unreadable (status: ${prev_st:-unknown}). Reconcile runtime state before another release."
+  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "RUNNING" || -z "$PREVIOUS_ROLLOUT_STATUS" ]]; then
+    log_error "A previous rollout is active or unreadable (status: ${PREVIOUS_ROLLOUT_STATUS:-unknown}). Reconcile runtime state before another release."
     exit 1
   fi
 fi
@@ -600,6 +601,11 @@ fi
 if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
   log_info "Startup recovery: inspecting prior component transaction journal..."
   recover_tx_journal
+fi
+if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]]; then
+  previous_rollout_archive="${ROLLOUT_JOURNAL_FILE}.interrupted.$(date +%s)"
+  mv -f "$ROLLOUT_JOURNAL_FILE" "$previous_rollout_archive"
+  log_info "Archived reconciled interrupted rollout journal: $previous_rollout_archive"
 fi
 
 init_rollout_journal "$RELEASE_ID" "$GIT_SHA" "$scope_str"
