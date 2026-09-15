@@ -45,11 +45,11 @@ printf "========================================================\n\n"
 printf "1. Auditing Canonical Production Compose...\n"
 assert_success "Canonical deploy/compose.prod.yaml passes full runtime policy audit" \
   bash "$VERIFY_SCRIPT" --compose-file "$PROD_COMPOSE"
-if grep -A 15 'container_name: acb-bark' "$PROD_COMPOSE" | grep -A 2 'group_add:' | grep -q '"1000"'; then
-  printf '  [PASS] Bark receives only shared runtime group 1000 for secret reads\n'
+if grep -A 15 'container_name: acb-bark' "$PROD_COMPOSE" | grep -A 2 'group_add:' | grep -q 'BARK_SECRET_GROUP'; then
+  printf '  [PASS] Bark receives the existing shared secret group for reads\n'
   TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-  printf '  [FAIL] Bark does not receive runtime group 1000\n' >&2
+  printf '  [FAIL] Bark does not receive the shared secret group\n' >&2
   TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 

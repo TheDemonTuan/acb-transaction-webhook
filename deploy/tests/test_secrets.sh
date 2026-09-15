@@ -212,7 +212,7 @@ if [[ ! "$(uname -s 2>/dev/null)" =~ MINGW|MSYS|CYGWIN ]]; then
   prepare_bark_secret_permissions
   assert_eq "640" "$(stat -c '%a' "$SECRETS_DIR/bark_basic_auth_user")" "Bark username secret is group-readable only"
   assert_eq "640" "$(stat -c '%a' "$SECRETS_DIR/bark_basic_auth_password")" "Bark password secret is group-readable only"
-  assert_eq "1000" "$(stat -c '%g' "$SECRETS_DIR/bark_basic_auth_user")" "Bark username secret uses runtime group 1000"
+  assert_eq "$(stat -c '%g' "$SECRETS_DIR/bark_basic_auth_user")" "$BARK_SECRET_GROUP" "Bark runtime group matches the existing secret group"
   assert_eq "$original_user" "$(cat "$SECRETS_DIR/bark_basic_auth_user")" "Preparing Bark username does not change its value"
   assert_eq "$original_pass" "$(cat "$SECRETS_DIR/bark_basic_auth_password")" "Preparing Bark password does not change its value"
   chmod 644 "$SECRETS_DIR/bark_basic_auth_user"

@@ -98,15 +98,11 @@ ensure_secret_permissions() {
   fi
 }
 
-BARK_SECRET_GROUP="${BARK_SECRET_GROUP:-1000}"
+BARK_SECRET_GROUP="${BARK_SECRET_GROUP:-}"
 
 prepare_bark_secret_permissions() {
-  [[ "$BARK_SECRET_GROUP" =~ ^[0-9]+$ ]] || {
-    log_error "BARK_SECRET_GROUP must be a numeric group ID."
-    return 1
-  }
-
-  local secret_path
+  local detected_group=""
+  local secret_path group_id
   for secret_path in \
     "$SECRETS_DIR/bark_basic_auth_user" \
     "$SECRETS_DIR/bark_basic_auth_password"; do
@@ -114,19 +110,23 @@ prepare_bark_secret_permissions() {
       log_error "Bark secret must be a non-empty regular file and must not be a symlink: $secret_path"
       return 1
     fi
-    if ! chgrp "$BARK_SECRET_GROUP" "$secret_path" 2>/dev/null; then
-      if ! command -v sudo >/dev/null 2>&1 || ! sudo -n chgrp "$BARK_SECRET_GROUP" "$secret_path"; then
-        log_error "Cannot assign Bark secret '$secret_path' to group $BARK_SECRET_GROUP. Run the deployment as the file owner or correct the group as an operator."
-        return 1
-      fi
+    group_id="$(stat -c '%g' "$secret_path" 2>/dev/null || true)"
+    [[ "$group_id" =~ ^[0-9]+$ ]] || {
+      log_error "Cannot determine the numeric group for Bark secret '$secret_path'."
+      return 1
+    }
+    if [[ -n "$detected_group" && "$detected_group" != "$group_id" ]]; then
+      log_error "Bark secrets must share one group; found groups $detected_group and $group_id."
+      return 1
     fi
-    if ! chmod 0640 "$secret_path" 2>/dev/null; then
-      if ! command -v sudo >/dev/null 2>&1 || ! sudo -n chmod 0640 "$secret_path"; then
-        log_error "Cannot set least-privilege mode 0640 on Bark secret '$secret_path'."
-        return 1
-      fi
+    detected_group="$group_id"
+    if ! chmod 0640 "$secret_path"; then
+      log_error "Cannot set least-privilege mode 0640 on Bark secret '$secret_path'."
+      return 1
     fi
   done
+  BARK_SECRET_GROUP="$detected_group"
+  export BARK_SECRET_GROUP
 }
 
 preflight_bark_secret_access() {
@@ -186,7 +186,7 @@ check_secret_permissions() {
           log_error "Bark secret file '$target_path' has unsafe permissions (${mode}); expected 600 before preparation or 640 for runtime access."
           return 1
         fi
-        if [[ "$mode" == "640" ]]; then
+        if [[ "$mode" == "640" && -n "$BARK_SECRET_GROUP" ]]; then
           local group_id=""
           group_id="$(stat -c '%g' "$target_path" 2>/dev/null || true)"
           if [[ -n "$group_id" && "$group_id" != "$BARK_SECRET_GROUP" ]]; then

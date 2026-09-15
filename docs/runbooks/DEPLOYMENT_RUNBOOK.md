@@ -70,7 +70,7 @@ deploy/provision-secrets.sh --confirm-fresh-provision
 
 ### Bark Secret Runtime Permissions
 
-Bark and the worker share only `bark_basic_auth_user` and `bark_basic_auth_password`. The deployment keeps both files at mode `0640` with numeric group `1000`; Bark receives supplementary group `1000` and the worker already runs as `1000:1000`. Never make these files world-readable and never regenerate them while repairing permissions.
+Bark and the worker share only `bark_basic_auth_user` and `bark_basic_auth_password`. The deployment keeps both files at mode `0640`, preserves their existing common numeric group, and gives Bark that group as a supplementary group. The worker already runs as `1000:1000`, so its production secret files must retain a group that maps to GID 1000 inside the worker container. Never make these files world-readable and never regenerate them while repairing permissions.
 
 If the Bark preflight reports a permissions error, inspect metadata without printing secret contents:
 
@@ -79,7 +79,7 @@ stat -c '%U:%G %a %n' deploy/secrets/bark_basic_auth_user deploy/secrets/bark_ba
 docker inspect acb-bark --format '{{json .Config.User}} {{json .HostConfig.GroupAdd}}'
 ```
 
-The trusted deployer normalizes these two existing files and opens them from one-off Bark and worker identities before any component transaction. If `chgrp` fails, an operator must assign group `1000`; do not use `chmod 644`, `chmod 777`, or rerun fresh provisioning. A `TX_ROLLBACK_FAILED` journal must be reconciled by the existing rollout recovery after permissions are repaired; do not delete the journal manually.
+The trusted deployer normalizes these two existing files without changing their owner/group and opens them from one-off Bark and worker identities before any component transaction. If the two files do not share a group, an operator must align them with the worker runtime group; do not use `chmod 644`, `chmod 777`, or rerun fresh provisioning. A `TX_ROLLBACK_FAILED` journal must be reconciled by the existing rollout recovery after permissions are repaired; do not delete the journal manually.
 
 ### Step 4: Configure Production Environment
 ```bash
