@@ -27,9 +27,11 @@ type Scheduler struct {
 	notify chan struct{}
 	wg     sync.WaitGroup
 
-	running atomic.Bool
-	stopped atomic.Bool
-	paused  atomic.Bool
+	running     atomic.Bool
+	stopped     atomic.Bool
+	paused      atomic.Bool
+	dispatching atomic.Bool
+	admissionMu sync.Mutex
 
 	delayedMu sync.Mutex
 	delayed   []delayedItem
@@ -106,18 +108,36 @@ func (s *Scheduler) Stop() error {
 
 // Pause halts the processing of queued tasks and cancels any currently running quantum so it yields promptly.
 func (s *Scheduler) Pause() {
+	s.admissionMu.Lock()
 	s.paused.Store(true)
-	s.currentMu.RLock()
-	cancel := s.currentCancel
-	s.currentMu.RUnlock()
-	if cancel != nil {
-		cancel()
+	s.admissionMu.Unlock()
+}
+
+// PauseAndDrain stops accepting new tasks and waits for the active step to
+// finish without canceling its stateful upstream request.
+func (s *Scheduler) PauseAndDrain(ctx context.Context) error {
+	s.Pause()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !s.dispatching.Load() && s.CurrentTaskKind() == "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.stopCh:
+			return ErrSchedulerStopped
+		case <-ticker.C:
+		}
 	}
 }
 
 // Resume unpauses the scheduler loop and signals readiness.
 func (s *Scheduler) Resume() {
+	s.admissionMu.Lock()
 	s.paused.Store(false)
+	s.admissionMu.Unlock()
 	s.signalReady()
 }
 
@@ -128,11 +148,17 @@ func (s *Scheduler) IsPaused() bool {
 
 // Enqueue submits an upstream task. Returns ErrQueueFull on overload, ErrSchedulerPaused if paused, or ErrSchedulerStopped if stopped.
 func (s *Scheduler) Enqueue(task UpstreamTask) error {
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
 	if s.stopped.Load() {
 		return ErrSchedulerStopped
 	}
 	if s.paused.Load() {
 		return ErrSchedulerPaused
+	}
+
+	if s.coalesceDelayed(task) {
+		return nil
 	}
 
 	err := s.queue.Push(task, time.Now())
@@ -210,7 +236,14 @@ func (s *Scheduler) run(ctx context.Context) {
 		// 2. Pop highest priority ready task
 		task := s.queue.Pop()
 		if task != nil {
+			s.dispatching.Store(true)
+			if s.paused.Load() {
+				s.dispatching.Store(false)
+				_ = s.queue.Push(task, time.Now())
+				continue
+			}
 			s.executeQuantum(ctx, task)
+			s.dispatching.Store(false)
 			continue
 		}
 
@@ -268,8 +301,39 @@ func (s *Scheduler) promoteDelayedTasks() time.Time {
 	return earliest
 }
 
+func (s *Scheduler) coalesceDelayed(task UpstreamTask) bool {
+	key := taskKey(task)
+	s.delayedMu.Lock()
+	defer s.delayedMu.Unlock()
+	for i := range s.delayed {
+		if taskKey(s.delayed[i].task) != key {
+			continue
+		}
+		if task.Generation() > s.delayed[i].task.Generation() {
+			s.delayed[i].task = task
+		}
+		return true
+	}
+	return false
+}
+
 func (s *Scheduler) scheduleDelayed(task UpstreamTask, requeueAt time.Time) {
 	s.delayedMu.Lock()
+	key := taskKey(task)
+	for i := range s.delayed {
+		if taskKey(s.delayed[i].task) != key {
+			continue
+		}
+		if task.Generation() > s.delayed[i].task.Generation() {
+			s.delayed[i].task = task
+		}
+		if requeueAt.After(s.delayed[i].requeueAt) {
+			s.delayed[i].requeueAt = requeueAt
+		}
+		s.delayedMu.Unlock()
+		s.signalReady()
+		return
+	}
 	s.delayed = append(s.delayed, delayedItem{task: task, requeueAt: requeueAt})
 	s.delayedMu.Unlock()
 	s.signalReady()

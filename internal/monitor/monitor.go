@@ -48,8 +48,10 @@ type Monitor struct {
 	sessions       *SessionLoader
 	scheduler      *scheduler.Scheduler
 
-	backoffMu    sync.RWMutex
-	backoffUntil time.Time
+	backoffMu                sync.RWMutex
+	backoffUntil             time.Time
+	consecutiveNetworkErrors int
+	now                      func() time.Time
 
 	pollWaitersMu sync.Mutex
 	pollWaiters   []chan error
@@ -86,14 +88,24 @@ func (m *Monitor) WithPollNotifier(fn func(poll storage.PollRun, insertedCount i
 }
 
 func (m *Monitor) finishPoll(ctx context.Context, poll storage.PollRun, insertedCount int) error {
-	err := m.store.FinishPoll(ctx, poll)
+	finishCtx := ctx
+	cancel := func() {}
+	if ctx.Err() != nil {
+		finishCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	}
+	defer cancel()
+
+	if err := m.store.FinishPoll(finishCtx, poll); err != nil {
+		slog.Error("finish ACB poll", "poll_id", poll.ID, "generation", poll.Generation, "status", poll.Status, "error", err)
+		return err
+	}
 	m.configMu.RLock()
 	fn := m.onPollFinished
 	m.configMu.RUnlock()
 	if fn != nil {
 		fn(poll, insertedCount)
 	}
-	return err
+	return nil
 }
 
 func New(store *storage.Store, client BankClient, minInterval, maxInterval time.Duration) *Monitor {
@@ -117,6 +129,7 @@ func New(store *storage.Store, client BankClient, minInterval, maxInterval time.
 		settingsCh:     make(chan struct{}, 1),
 		cachedSettings: storage.DefaultMonitorSettings,
 		scheduler:      scheduler.New(&scheduler.Options{Metrics: telemetry.NewSchedulerAdapter(telemetry.Default)}),
+		now:            time.Now,
 	}
 }
 
@@ -166,15 +179,40 @@ func (m *Monitor) PersistSession(ctx context.Context) error {
 }
 
 func (m *Monitor) SetBackoff(duration time.Duration) {
+	if duration <= 0 {
+		return
+	}
 	m.backoffMu.Lock()
-	m.backoffUntil = time.Now().Add(duration)
+	until := m.now().Add(duration)
+	if until.After(m.backoffUntil) {
+		m.backoffUntil = until
+	}
 	m.backoffMu.Unlock()
 	telemetry.Default.SetCircuitBreaker(true)
+}
+
+func (m *Monitor) RecordNetworkFailure(err error) time.Time {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return m.BackoffUntil()
+	}
+	m.backoffMu.Lock()
+	m.consecutiveNetworkErrors++
+	shift := min(m.consecutiveNetworkErrors-1, 4)
+	duration := 5 * time.Second * time.Duration(1<<shift)
+	until := m.now().Add(duration)
+	if until.After(m.backoffUntil) {
+		m.backoffUntil = until
+	}
+	result := m.backoffUntil
+	m.backoffMu.Unlock()
+	telemetry.Default.SetCircuitBreaker(true)
+	return result
 }
 
 func (m *Monitor) ClearBackoff() {
 	m.backoffMu.Lock()
 	m.backoffUntil = time.Time{}
+	m.consecutiveNetworkErrors = 0
 	m.backoffMu.Unlock()
 	telemetry.Default.SetCircuitBreaker(false)
 }
@@ -188,7 +226,7 @@ func (m *Monitor) BackoffUntil() time.Time {
 func (m *Monitor) IsBackoffActive() bool {
 	m.backoffMu.RLock()
 	defer m.backoffMu.RUnlock()
-	return time.Now().Before(m.backoffUntil)
+	return m.now().Before(m.backoffUntil)
 }
 
 func (m *Monitor) registerPollWaiter() chan error {

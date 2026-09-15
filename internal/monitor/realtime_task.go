@@ -80,9 +80,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	}
 
 	if t.m.IsBackoffActive() {
-		slog.Info("skipping poll: circuit breaker backoff active", "until", t.m.BackoffUntil())
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+		until := t.m.BackoffUntil()
+		slog.Info("delaying poll: upstream backoff active", "until", until)
+		return scheduler.TaskStepResult{Done: false, RequeueAt: until, Outcome: scheduler.OutcomeTransient}, nil
 	}
 
 	hasActiveAttempt, err := t.m.store.HasActiveAuthAttempt(ctx, conn.ID)
@@ -122,8 +122,13 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	resp, err := t.m.client.Bootstrap(ctx)
 	if err != nil {
 		poll.Status = "FAILED"
-		poll.Error = err.Error()
-		_ = t.m.finishPoll(ctx, poll, 0)
+		poll.Error = acb.SanitizeTransportError(err)
+		finishErr := t.m.finishPoll(ctx, poll, 0)
+		if finishErr != nil {
+			err = errors.Join(err, finishErr)
+		}
+		until := t.m.RecordNetworkFailure(err)
+		slog.Warn("ACB request failed", "phase", "bootstrap", "generation", conn.Generation, "elapsed_backoff_until", until, "error", poll.Error)
 		t.m.notifyPollWaiters(err)
 		t.finishDone(err)
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
@@ -136,7 +141,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		poll.Status = "AUTH_REQUIRED"
 		poll.Error = "SESSION_EXPIRED"
 		_ = t.m.finishPoll(ctx, poll, 0)
-		slog.Warn("ACB confirmed the session is no longer authenticated; transitioned to AUTH_REQUIRED")
+		slog.Warn("ACB confirmed the session is no longer authenticated; transitioned to AUTH_REQUIRED", "phase", "bootstrap", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
 		t.m.notifyPollWaiters(nil)
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
@@ -192,8 +197,13 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		histResp, histErr := t.m.client.History(ctx, form.Action, form.Fields)
 		if histErr != nil {
 			poll.Status = "FAILED"
-			poll.Error = histErr.Error()
-			_ = t.m.finishPoll(ctx, poll, 0)
+			poll.Error = acb.SanitizeTransportError(histErr)
+			finishErr := t.m.finishPoll(ctx, poll, 0)
+			if finishErr != nil {
+				histErr = errors.Join(histErr, finishErr)
+			}
+			until := t.m.RecordNetworkFailure(histErr)
+			slog.Warn("ACB request failed", "phase", "history", "generation", conn.Generation, "elapsed_backoff_until", until, "error", poll.Error)
 			t.m.notifyPollWaiters(histErr)
 			t.finishDone(histErr)
 			return scheduler.TaskStepResult{Done: true, Error: histErr, Outcome: scheduler.OutcomeTransient}, histErr
@@ -206,6 +216,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 			poll.Status = "AUTH_REQUIRED"
 			poll.Error = "SESSION_EXPIRED"
 			_ = t.m.finishPoll(ctx, poll, 0)
+			slog.Warn("ACB session expired during history fetch; transitioned to AUTH_REQUIRED", "phase", "history", "generation", conn.Generation, "status", histResp.StatusCode, "classifier_reason", histResp.ClassifierReason, "path", acb.SafePath(histResp.URL))
 			t.m.notifyPollWaiters(nil)
 			t.finishDone(nil)
 			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
@@ -237,6 +248,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
 		}
 	}
+
+	// Any complete non-authenticated response proves the transport recovered.
+	t.m.ClearBackoff()
 
 	// Parse transaction history
 	pageResult, parseErr := acb.ParseHistoryPage(historyMarkup)
@@ -322,9 +336,10 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 				curFields["_raw"] = "true"
 				nextResp, nextErr := t.m.client.History(ctx, curAction, curFields)
 				if nextErr != nil {
-					slog.Warn("realtime poll next page fetch error", "page", pagesCount+1, "error", nextErr)
+					until := t.m.RecordNetworkFailure(nextErr)
+					slog.Warn("realtime poll next page fetch error", "page", pagesCount+1, "backoff_until", until, "error", acb.SanitizeTransportError(nextErr))
 					isPartial = true
-					pollErr = nextErr
+					pollErr = errors.New(acb.SanitizeTransportError(nextErr))
 					break
 				}
 				pagesCount++
@@ -377,8 +392,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		t.m.ScheduleCatchUp()
 	} else {
 		poll.Status = "SUCCEEDED"
+		t.m.ClearBackoff()
 	}
-	t.m.ClearBackoff()
 	if err := t.m.finishPoll(ctx, poll, totalInserted); err != nil {
 		t.m.notifyPollWaiters(err)
 		t.finishDone(err)

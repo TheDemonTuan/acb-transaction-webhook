@@ -45,11 +45,11 @@ func NewCatchUpTask(m *Monitor, connectionID string, generation int64) *CatchUpT
 	}
 }
 
-func (t *CatchUpTask) ID() string                { return t.id }
-func (t *CatchUpTask) Kind() string              { return "CATCH_UP" }
+func (t *CatchUpTask) ID() string                 { return t.id }
+func (t *CatchUpTask) Kind() string               { return "CATCH_UP" }
 func (t *CatchUpTask) Priority() UpstreamPriority { return PriorityCatchUp }
-func (t *CatchUpTask) Generation() int64         { return t.generation }
-func (t *CatchUpTask) CoalesceKey() string       { return "CATCH_UP" }
+func (t *CatchUpTask) Generation() int64          { return t.generation }
+func (t *CatchUpTask) CoalesceKey() string        { return "CATCH_UP" }
 
 func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -162,9 +162,11 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		}
 		resp, err := t.m.client.Bootstrap(ctx)
 		if err != nil {
+			until := t.m.RecordNetworkFailure(err)
+			slog.Warn("ACB request failed", "phase", "catchup_bootstrap", "generation", conn.Generation, "backoff_until", until, "error", acb.SanitizeTransportError(err))
 			return scheduler.TaskStepResult{
 				Done:      false,
-				RequeueAt: time.Now().Add(5 * time.Second),
+				RequeueAt: until,
 				Outcome:   scheduler.OutcomeTransient,
 				Error:     err,
 			}, nil
@@ -178,7 +180,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			t.m.SetBackoff(60 * time.Second)
 			return scheduler.TaskStepResult{
 				Done:      false,
-				RequeueAt: time.Now().Add(60 * time.Second),
+				RequeueAt: t.m.BackoffUntil(),
 				Outcome:   scheduler.OutcomeTransient,
 			}, nil
 		}
@@ -186,10 +188,11 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			t.m.SetBackoff(60 * time.Second)
 			return scheduler.TaskStepResult{
 				Done:      false,
-				RequeueAt: time.Now().Add(60 * time.Second),
+				RequeueAt: t.m.BackoffUntil(),
 				Outcome:   scheduler.OutcomeTransient,
 			}, nil
 		}
+		t.m.ClearBackoff()
 		t.currentResp = resp
 	}
 
@@ -218,9 +221,11 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	// EXECUTE AT MOST ONE ACB History HTTP Request
 	histResp, histErr := t.m.client.History(ctx, t.nextAction, t.nextFields)
 	if histErr != nil {
+		until := t.m.RecordNetworkFailure(histErr)
+		slog.Warn("ACB request failed", "phase", "catchup_history", "generation", conn.Generation, "backoff_until", until, "error", acb.SanitizeTransportError(histErr))
 		return scheduler.TaskStepResult{
 			Done:      false,
-			RequeueAt: time.Now().Add(5 * time.Second),
+			RequeueAt: until,
 			Outcome:   scheduler.OutcomeTransient,
 			Error:     histErr,
 		}, nil
@@ -229,7 +234,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		t.m.SetBackoff(60 * time.Second)
 		return scheduler.TaskStepResult{
 			Done:      false,
-			RequeueAt: time.Now().Add(60 * time.Second),
+			RequeueAt: t.m.BackoffUntil(),
 			Outcome:   scheduler.OutcomeTransient,
 		}, nil
 	}
@@ -244,6 +249,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		t.currentResp = histResp
 	}
 
+	t.m.ClearBackoff()
 	pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
 	if parseErr != nil {
 		return scheduler.TaskStepResult{

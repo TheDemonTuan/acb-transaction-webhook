@@ -23,10 +23,10 @@ type mockTask struct {
 	stepFn         func(ctx context.Context) (TaskStepResult, error)
 }
 
-func (m *mockTask) ID() string                { return m.id }
-func (m *mockTask) Kind() string              { return m.kind }
+func (m *mockTask) ID() string                 { return m.id }
+func (m *mockTask) Kind() string               { return m.kind }
 func (m *mockTask) Priority() UpstreamPriority { return m.priority }
-func (m *mockTask) Generation() int64         { return m.generation }
+func (m *mockTask) Generation() int64          { return m.generation }
 func (m *mockTask) CoalesceKey() string {
 	if m.key != "" {
 		return m.key
@@ -286,6 +286,85 @@ func TestScheduler_BoundedQueue_Overload(t *testing.T) {
 	err := sched.Enqueue(t3)
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("expected ErrQueueFull on queue overload, got %v", err)
+	}
+}
+
+func TestSchedulerCoalescesTaskWhileOriginalIsDelayed(t *testing.T) {
+	sched := New(nil)
+	task := &mockTask{id: "first", key: "REALTIME_POLL", priority: PriorityRealtime, generation: 7}
+	sched.scheduleDelayed(task, time.Now().Add(time.Minute))
+	if err := sched.Enqueue(&mockTask{id: "second", key: "REALTIME_POLL", priority: PriorityRealtime, generation: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sched.TotalQueueDepth(); got != 0 {
+		t.Fatalf("duplicate task entered ready queue, depth=%d", got)
+	}
+	if len(sched.delayed) != 1 {
+		t.Fatalf("expected one delayed task, got %d", len(sched.delayed))
+	}
+}
+
+func TestSchedulerPauseAndDrainWaitsWithoutCancelingActiveStep(t *testing.T) {
+	sched := New(&Options{QuantumTimeout: time.Second})
+	sched.Start(context.Background())
+	defer sched.Stop()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	canceled := atomic.Bool{}
+	task := &mockTask{id: "stateful", kind: "REALTIME_POLL", priority: PriorityRealtime, stepFn: func(ctx context.Context) (TaskStepResult, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			canceled.Store(true)
+			return TaskStepResult{Done: true, Error: ctx.Err(), Outcome: OutcomeTransient}, ctx.Err()
+		case <-release:
+			return TaskStepResult{Done: true, Outcome: OutcomeSuccess}, nil
+		}
+	}}
+	if err := sched.Enqueue(task); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	drained := make(chan error, 1)
+	go func() { drained <- sched.PauseAndDrain(context.Background()) }()
+	select {
+	case err := <-drained:
+		t.Fatalf("drain returned before active step finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := sched.Enqueue(&mockTask{id: "rejected", priority: PriorityRealtime}); !errors.Is(err, ErrSchedulerPaused) {
+		t.Fatalf("expected paused error, got %v", err)
+	}
+	close(release)
+	if err := <-drained; err != nil {
+		t.Fatal(err)
+	}
+	if canceled.Load() {
+		t.Fatal("pause canceled the active stateful request")
+	}
+}
+
+func TestSchedulerPauseAndDrainHonorsDeadline(t *testing.T) {
+	sched := New(&Options{QuantumTimeout: time.Second})
+	sched.Start(context.Background())
+	defer sched.Stop()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	if err := sched.Enqueue(&mockTask{id: "blocked", kind: "REALTIME_POLL", priority: PriorityRealtime, stepFn: func(context.Context) (TaskStepResult, error) {
+		close(started)
+		<-release
+		return TaskStepResult{Done: true, Outcome: OutcomeSuccess}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := sched.PauseAndDrain(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
 	}
 }
 

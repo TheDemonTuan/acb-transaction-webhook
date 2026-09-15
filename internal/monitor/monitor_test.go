@@ -80,6 +80,56 @@ func TestTransportFailureKeepsMonitoringGeneration(t *testing.T) {
 	if err != nil || len(runs) != 1 || runs[0].Status != "FAILED" {
 		t.Fatalf("unexpected poll records: %+v %v", runs, err)
 	}
+	if runs[0].Error != acb.ErrNetwork {
+		t.Fatalf("expected sanitized network error, got %q", runs[0].Error)
+	}
+	if !m.IsBackoffActive() {
+		t.Fatal("expected transport failure to activate backoff")
+	}
+}
+
+func TestFinishPollUsesCleanupContextAfterTaskTimeout(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, _ = store.ConfigureConnection(ctx, "***1234")
+	_, _ = store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING'`)
+
+	poll, err := store.StartPoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll.Status = "FAILED"
+	poll.Error = acb.ErrRequestTimeout
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := New(store, &mockBankClient{}, 5*time.Second, 5*time.Second).finishPoll(canceled, poll, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := store.ListPollRuns(ctx, 10)
+	if err != nil || len(runs) != 1 || runs[0].Status != "FAILED" || runs[0].FinishedAt == "" {
+		t.Fatalf("poll was not finalized after timeout: %+v %v", runs, err)
+	}
+}
+
+func TestNetworkBackoffIncreasesAndSuccessClearsIt(t *testing.T) {
+	m := New(nil, nil, 5*time.Second, 5*time.Second)
+	base := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return base }
+	if got := m.RecordNetworkFailure(errors.New("reset")); !got.Equal(base.Add(5 * time.Second)) {
+		t.Fatalf("first backoff=%s", got)
+	}
+	if got := m.RecordNetworkFailure(errors.New("reset")); !got.Equal(base.Add(10 * time.Second)) {
+		t.Fatalf("second backoff=%s", got)
+	}
+	m.ClearBackoff()
+	if m.IsBackoffActive() {
+		t.Fatal("expected successful upstream response to clear backoff")
+	}
 }
 
 func TestMonitorUsesConfiguredAccountWhenResponseOmitsAccountNbr(t *testing.T) {
@@ -789,6 +839,10 @@ func TestMonitorSuccessResetResetSuccessPreservesSessionVsTrueLogin(t *testing.T
 	if err != nil || conn.State != "MONITORING" || conn.Generation != connection.Generation {
 		t.Fatalf("poll 2: transient reset changed session state: state=%s gen=%d", conn.State, conn.Generation)
 	}
+	if !m.IsBackoffActive() {
+		t.Fatal("poll 2: expected network backoff")
+	}
+	m.ClearBackoff() // Simulate retry after the backoff window.
 
 	// 3. Third poll: connection reset 2
 	mock.getErr = errors.New("read: connection reset by peer")
@@ -799,6 +853,7 @@ func TestMonitorSuccessResetResetSuccessPreservesSessionVsTrueLogin(t *testing.T
 	if err != nil || conn.State != "MONITORING" || conn.Generation != connection.Generation {
 		t.Fatalf("poll 3: transient reset changed session state: state=%s gen=%d", conn.State, conn.Generation)
 	}
+	m.ClearBackoff() // Simulate retry after the backoff window.
 
 	// 4. Fourth poll: success again, verifying session preserved across resets
 	mock.getErr = nil

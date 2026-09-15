@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+func TestCoordinatorQuiesceHookFailureReturnsToReady(t *testing.T) {
+	c := NewCoordinator()
+	if err := c.SetReady(); err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("persist failed")
+	c.RegisterQuiesceHook(func(context.Context) error { return want })
+	if err := c.Quiesce(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("expected hook failure, got %v", err)
+	}
+	if c.State() != StateReady {
+		t.Fatalf("expected READY after failed quiesce, got %s", c.State())
+	}
+}
+
 func TestCoordinatorLifecycle(t *testing.T) {
 	c := NewCoordinator(
 		WithDrainTimeout(100*time.Millisecond),

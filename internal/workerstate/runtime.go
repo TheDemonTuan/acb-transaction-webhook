@@ -179,7 +179,10 @@ func (c *Coordinator) Quiesce(ctx context.Context) error {
 
 	for _, hook := range hooks {
 		if err := hook(ctx); err != nil {
-			c.logger.Warn("quiesce hook error", "error", err)
+			c.mu.Lock()
+			c.state = StateReady
+			c.mu.Unlock()
+			return fmt.Errorf("quiesce hook: %w", err)
 		}
 	}
 

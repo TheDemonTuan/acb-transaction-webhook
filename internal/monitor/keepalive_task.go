@@ -30,11 +30,11 @@ func NewKeepaliveTask(m *Monitor, connectionID string, generation int64) *Keepal
 	}
 }
 
-func (t *KeepaliveTask) ID() string                { return t.id }
-func (t *KeepaliveTask) Kind() string              { return "KEEPALIVE" }
+func (t *KeepaliveTask) ID() string                 { return t.id }
+func (t *KeepaliveTask) Kind() string               { return "KEEPALIVE" }
 func (t *KeepaliveTask) Priority() UpstreamPriority { return PriorityKeepalive }
-func (t *KeepaliveTask) Generation() int64         { return t.generation }
-func (t *KeepaliveTask) CoalesceKey() string       { return "KEEPALIVE" }
+func (t *KeepaliveTask) Generation() int64          { return t.generation }
+func (t *KeepaliveTask) CoalesceKey() string        { return "KEEPALIVE" }
 
 func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -60,8 +60,7 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 	}
 
 	if t.m.IsBackoffActive() {
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+		return scheduler.TaskStepResult{Done: false, RequeueAt: t.m.BackoffUntil(), Outcome: scheduler.OutcomeTransient}, nil
 	}
 
 	hasActiveAttempt, err := t.m.store.HasActiveAuthAttempt(ctx, conn.ID)
@@ -100,8 +99,12 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 	resp, err := t.m.client.Bootstrap(ctx)
 	if err != nil {
 		poll.Status = "FAILED"
-		poll.Error = err.Error()
-		_ = t.m.finishPoll(ctx, poll, 0)
+		poll.Error = acb.SanitizeTransportError(err)
+		if finishErr := t.m.finishPoll(ctx, poll, 0); finishErr != nil {
+			err = errors.Join(err, finishErr)
+		}
+		until := t.m.RecordNetworkFailure(err)
+		slog.Warn("ACB request failed", "phase", "keepalive", "generation", conn.Generation, "backoff_until", until, "error", poll.Error)
 		t.finishDone(err)
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
 	}
@@ -113,7 +116,7 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 		poll.Status = "AUTH_REQUIRED"
 		poll.Error = "SESSION_EXPIRED"
 		_ = t.m.finishPoll(ctx, poll, 0)
-		slog.Warn("ACB session expired during keepalive; transitioned to AUTH_REQUIRED")
+		slog.Warn("ACB session expired during keepalive; transitioned to AUTH_REQUIRED", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
 	}
@@ -137,9 +140,12 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 	}
 
 	if s := t.m.SessionLoader(); s != nil {
-		_ = s.Persist(ctx, conn.ID, conn.Generation)
+		if err := s.Persist(ctx, conn.ID, conn.Generation); err != nil {
+			slog.Warn("could not persist refreshed ACB session", "generation", conn.Generation, "error", err)
+		}
 	}
 
+	t.m.ClearBackoff()
 	poll.Status = "SUCCEEDED"
 	poll.Pages = 0
 	poll.RowsSeen = 0

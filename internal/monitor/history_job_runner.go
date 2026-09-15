@@ -354,11 +354,13 @@ func NewHistoryJobTask(runner *HistoryJobRunner, job storage.HistorySyncJob, con
 	}
 }
 
-func (t *HistoryJobTask) ID() string                          { return "hist_job_" + t.job.ID }
-func (t *HistoryJobTask) Kind() string                        { return "FILTER_HISTORY" }
-func (t *HistoryJobTask) Priority() scheduler.UpstreamPriority { return scheduler.PriorityFilterHistory }
-func (t *HistoryJobTask) Generation() int64                   { return t.job.Generation }
-func (t *HistoryJobTask) CoalesceKey() string                 { return "hist_job_" + t.job.ID }
+func (t *HistoryJobTask) ID() string   { return "hist_job_" + t.job.ID }
+func (t *HistoryJobTask) Kind() string { return "FILTER_HISTORY" }
+func (t *HistoryJobTask) Priority() scheduler.UpstreamPriority {
+	return scheduler.PriorityFilterHistory
+}
+func (t *HistoryJobTask) Generation() int64   { return t.job.Generation }
+func (t *HistoryJobTask) CoalesceKey() string { return "hist_job_" + t.job.ID }
 
 func (t *HistoryJobTask) Done() <-chan struct{} { return t.done }
 
@@ -499,9 +501,13 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		resp, err := t.runner.client.Bootstrap(ctx)
 		if err != nil {
 			bootErr := fmt.Errorf("bootstrap ACB session: %w", err)
+			retryAt := time.Now().Add(5 * time.Second)
+			if mon := t.runner.Monitor(); mon != nil {
+				retryAt = mon.RecordNetworkFailure(err)
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", bootErr.Error(), time.Now().Add(5*time.Second))
+			_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", acb.SanitizeTransportError(err), retryAt)
 			t.finish(bootErr)
 			return scheduler.TaskStepResult{Done: true, Error: bootErr, Outcome: scheduler.OutcomeTransient}, bootErr
 		}
@@ -547,9 +553,13 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 	histResp, histErr := t.runner.client.History(ctx, t.nextAction, t.nextFields)
 	if histErr != nil {
 		qErr := fmt.Errorf("query ACB history for %s: %w", dayStr, histErr)
+		retryAt := time.Now().Add(5 * time.Second)
+		if mon := t.runner.Monitor(); mon != nil {
+			retryAt = mon.RecordNetworkFailure(histErr)
+		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", qErr.Error(), time.Now().Add(5*time.Second))
+		_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", acb.SanitizeTransportError(histErr), retryAt)
 		t.finish(qErr)
 		return scheduler.TaskStepResult{Done: true, Error: qErr, Outcome: scheduler.OutcomeTransient}, qErr
 	}
@@ -570,6 +580,10 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", maintErr.Error(), time.Now().Add(60*time.Second))
 		t.finish(maintErr)
 		return scheduler.TaskStepResult{Done: true, Error: maintErr, Outcome: scheduler.OutcomeTransient}, maintErr
+	}
+
+	if mon := t.runner.Monitor(); mon != nil {
+		mon.ClearBackoff()
 	}
 
 	pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)

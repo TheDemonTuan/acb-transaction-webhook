@@ -32,10 +32,10 @@ type verifyTask struct {
 	done       chan error
 }
 
-func (t *verifyTask) ID() string                { return t.id }
-func (t *verifyTask) Kind() string              { return "INTERACTIVE_VERIFY" }
+func (t *verifyTask) ID() string                 { return t.id }
+func (t *verifyTask) Kind() string               { return "INTERACTIVE_VERIFY" }
 func (t *verifyTask) Priority() UpstreamPriority { return PriorityInteractiveVerify }
-func (t *verifyTask) Generation() int64         { return t.generation }
+func (t *verifyTask) Generation() int64          { return t.generation }
 
 func (t *verifyTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	err := t.stepFn(ctx)
@@ -62,7 +62,7 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 		if err != nil {
 			return err
 		}
-		slog.Info("ACB session bootstrap verified", "kind", response.Kind, "status", response.StatusCode, "url", response.URL)
+		slog.Info("ACB session bootstrap verified", "kind", response.Kind, "classifier_reason", response.ClassifierReason, "status", response.StatusCode, "path", acb.SafePath(response.URL))
 		switch response.Kind {
 		case acb.AccountDetailPage, acb.HistoryPage:
 			return nil

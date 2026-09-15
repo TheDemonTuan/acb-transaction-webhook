@@ -9,7 +9,7 @@ func TestClassifyPage(t *testing.T) {
 	}{
 		{"login HTTP 200", "https://online.acb.com.vn/acbib/Request", `<input name="username"><input type="password" name="password">`, LoginPage},
 		{"login with captcha", "https://online.acb.com.vn/acbib/Request", `<input name="username"><input type="password" name="password"><input name="captcha" placeholder="Mã xác nhận">`, LoginPage},
-		{"login redirect errorPage", "https://online.acb.com.vn/acbib/Request?dse_errorPage=login.jsp", `some text`, LoginPage},
+		{"login errorPage parameter alone is inconclusive", "https://online.acb.com.vn/acbib/Request?dse_errorPage=login.jsp", `some text`, UnknownPage},
 		{"login redirect displayPageNotLoginOp", "https://online.acb.com.vn/acbib/Request?dse_operationName=displayPageNotLoginOp", `some text`, LoginPage},
 		{"login webmbtt redirect", "https://online.acb.com.vn/acbib/webmbtt", `some text`, LoginPage},
 		{"login meta refresh to webmbtt", "https://online.acb.com.vn/acbib/", `<meta HTTP-EQUIV="REFRESH" content="0; url=https://online.acb.com.vn/acbib/webmbtt">`, LoginPage},
@@ -31,6 +31,7 @@ func TestClassifyPage(t *testing.T) {
 		{"actual login path /acbib/login.jsp", "https://online.acb.com.vn/acbib/login.jsp", `some markup`, LoginPage},
 		{"actual login path /login", "https://online.acb.com.vn/login", `some markup`, LoginPage},
 		{"actual login op obkLoginOp", "https://online.acb.com.vn/acbib/Request?op=obkLoginOp", `some markup`, LoginPage},
+		{"login operation substring is inconclusive", "https://online.acb.com.vn/acbib/Request?note=obkLoginOp", `some markup`, UnknownPage},
 		{"actual login op displayPageNotLoginOp", "https://online.acb.com.vn/acbib/Request?dse_operationName=displayPageNotLoginOp", `some markup`, LoginPage},
 		{"actual login form username and password inputs", "https://online.acb.com.vn/acbib/Request", `<form><input name="username"><input type="password" name="password"></form>`, LoginPage},
 		{"actual login expired message phien lam viec da het han", "https://online.acb.com.vn/acbib/Request", `Phiên làm việc đã hết hạn. Vui lòng đăng nhập lại.`, LoginPage},
@@ -48,5 +49,17 @@ func TestClassifyPage(t *testing.T) {
 				t.Fatalf("got %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestClassifyPageWithReason(t *testing.T) {
+	kind, reason := ClassifyPageWithReason("https://online.acb.com.vn/acbib/Request", `<input name="username"><input type="password" name="password">`)
+	if kind != LoginPage || reason != "LOGIN_FORM" {
+		t.Fatalf("kind=%s reason=%s", kind, reason)
+	}
+
+	kind, reason = ClassifyPageWithReason("https://online.acb.com.vn/acbib/Request?dse_errorPage=login.jsp", `temporary upstream response`)
+	if kind != UnknownPage || reason != "NO_KNOWN_SIGNALS" {
+		t.Fatalf("kind=%s reason=%s", kind, reason)
 	}
 }

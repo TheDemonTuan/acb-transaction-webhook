@@ -385,8 +385,9 @@ func TestProgressiveCatchUpAdvancesCheckpointPerDay(t *testing.T) {
 		t.Fatalf("expected %s to be covered, got covered=%v, err=%v", yesterday, covered, err)
 	}
 
-	// Now fix 12/09/2026 and run catchUp again
+	// Now fix 12/09/2026 and run catchUp again after the transient backoff.
 	client.failOnDate = ""
+	mon.ClearBackoff()
 	err = mon.catchUp(ctx)
 	if err != nil {
 		t.Fatalf("expected second catchUp to succeed, got: %v", err)

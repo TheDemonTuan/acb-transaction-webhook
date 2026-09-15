@@ -292,9 +292,12 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 		return workerrpc.QuiesceResponse{}, fmt.Errorf("coordinator quiesce: %w", err)
 	}
 
-	// 2. Pause scheduler
+	// 2. Stop new ACB work and let the current stateful request finish.
 	if w.bankMonitor != nil && w.bankMonitor.Scheduler() != nil {
-		w.bankMonitor.Scheduler().Pause()
+		if err := w.bankMonitor.Scheduler().PauseAndDrain(ctx); err != nil {
+			_ = w.coordinator.Resume(context.Background())
+			return workerrpc.QuiesceResponse{}, fmt.Errorf("drain ACB scheduler: %w", err)
+		}
 	}
 
 	// 3. Pause background history runner and requeue RUNNING jobs
@@ -303,8 +306,12 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 	}
 	if w.store != nil {
 		requeueCtx, rCancel := context.WithTimeout(ctx, 3*time.Second)
-		_, _ = w.store.RequeueRunningHistorySyncJobs(requeueCtx, "Worker quiesced for upgrade")
+		_, requeueErr := w.store.RequeueRunningHistorySyncJobs(requeueCtx, "Worker quiesced for upgrade")
 		rCancel()
+		if requeueErr != nil {
+			_ = w.Resume(context.Background())
+			return workerrpc.QuiesceResponse{}, fmt.Errorf("checkpoint history jobs on quiesce: %w", requeueErr)
+		}
 	}
 
 	// 4. Pause notification dispatcher
@@ -317,13 +324,15 @@ func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse,
 		w.maintRunner.Pause()
 	}
 
-	// 6. Persist freshest session snapshot
+	// 6. Persist freshest session snapshot before the singleton is stopped.
 	if w.bankMonitor != nil {
 		persistCtx, pCancel := context.WithTimeout(ctx, 3*time.Second)
-		if err := w.bankMonitor.PersistSession(persistCtx); err != nil {
-			slog.Warn("persist session snapshot on quiesce", "error", err)
-		}
+		persistErr := w.bankMonitor.PersistSession(persistCtx)
 		pCancel()
+		if persistErr != nil {
+			_ = w.Resume(context.Background())
+			return workerrpc.QuiesceResponse{}, fmt.Errorf("persist session snapshot on quiesce: %w", persistErr)
+		}
 	}
 
 	// 7. Report generation and latest checkpoint
@@ -705,7 +714,7 @@ func main() {
 		maintRunner:           maintRunner,
 	}
 
-	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken)
+	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken, workerrpc.WithServerTimeout(45*time.Second))
 	if err != nil {
 		logger.Error("create worker RPC server failed", "error", err)
 		os.Exit(1)

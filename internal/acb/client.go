@@ -32,10 +32,11 @@ type Client struct {
 }
 
 type Response struct {
-	URL        string
-	StatusCode int
-	Body       string
-	Kind       PageKind
+	URL              string
+	StatusCode       int
+	Body             string
+	Kind             PageKind
+	ClassifierReason string
 }
 
 func NewClient(base string, transport http.RoundTripper) (*Client, error) {
@@ -315,7 +316,8 @@ func (c *Client) do(req *http.Request) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	result := Response{URL: resp.Request.URL.String(), StatusCode: resp.StatusCode, Body: string(body), Kind: ClassifyPage(resp.Request.URL.String(), string(body))}
+	kind, reason := ClassifyPageWithReason(resp.Request.URL.String(), string(body))
+	result := Response{URL: resp.Request.URL.String(), StatusCode: resp.StatusCode, Body: string(body), Kind: kind, ClassifierReason: reason}
 	c.updateFormState(result)
 	return result, nil
 }
