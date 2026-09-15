@@ -80,7 +80,15 @@ log_info "Pre-pulling candidate worker image before quiesce..."
 WORKER_IMAGE_REF="$CANDIDATE_WORKER_IMAGE" compose_prod pull worker
 if [[ -n "$PREV_WORKER_REF" && "$PREV_WORKER_REF" != "$CANDIDATE_WORKER_IMAGE" ]]; then
   log_info "Pre-pulling rollback worker image before quiesce..."
-  WORKER_IMAGE_REF="$PREV_WORKER_REF" compose_prod pull worker
+  rollback_pull_output=""
+  if ! rollback_pull_output="$(WORKER_IMAGE_REF="$PREV_WORKER_REF" compose_prod pull worker 2>&1)"; then
+    if docker image inspect "$PREV_WORKER_REF" >/dev/null 2>&1; then
+      log_warn "Registry pull for the previous worker digest failed, but the immutable rollback image is present locally."
+    else
+      log_error "Previous worker digest cannot be pulled and is not present locally: ${rollback_pull_output}"
+      exit 1
+    fi
+  fi
 fi
 
 OLD_WORKER_RUNNING=0
