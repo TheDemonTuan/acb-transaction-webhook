@@ -80,7 +80,7 @@ if [[ -n "$files_from" ]]; then
     # Handle git diff --name-status format (e.g. "M\tpath", "R100\told\tnew")
     if [[ "$line" =~ ^[A-Z][0-9]*[[:space:]]+(.+)$ ]]; then
       rest="${BASH_REMATCH[1]}"
-      while IFS=$'\t ' read -r -a tokens; do
+      while IFS=$'\t' read -r -a tokens; do
         for tok in "${tokens[@]}"; do
           [[ -n "$tok" ]] && raw_paths+=("$tok")
         done
@@ -114,7 +114,7 @@ else
     [[ -z "$line" ]] && continue
     if [[ "$line" =~ ^[A-Z][0-9]*[[:space:]]+(.+)$ ]]; then
       rest="${BASH_REMATCH[1]}"
-      while IFS=$'\t ' read -r -a tokens; do
+      while IFS=$'\t' read -r -a tokens; do
         for tok in "${tokens[@]}"; do
           [[ -n "$tok" ]] && raw_paths+=("$tok")
         done
@@ -191,6 +191,17 @@ PY_MAP
       bark) scope_bark=true ;;
       failover_controller) scope_failover_controller=true ;;
       platform) scope_platform=true ;;
+      orchestrator)
+        scope_frontend=true
+        scope_gateway=true
+        scope_worker=true
+        scope_schema=true
+        scope_auth_browser=true
+        scope_tts=true
+        scope_bark=true
+        scope_failover_controller=true
+        scope_platform=true
+        ;;
       *) printf 'Unknown component %q in %s\n' "$component" "$component_map" >&2; exit 1 ;;
     esac
   done
