@@ -73,6 +73,16 @@ jobs:
           bash deploy/tests/test_worker_deploy.sh
           bash deploy/tests/test_aux_deploy.sh
           bash deploy/tests/test_traefik_switch.sh
+          bash deploy/tests/test_runtime_layout.sh
+          bash deploy/tests/test_bootstrap_recovery.sh
+          bash deploy/tests/test_legacy_frontend_recovery.sh
+          bash deploy/tests/test_release_state.sh
+          bash deploy/tests/test_release_rollback.sh
+          bash deploy/tests/test_slot_resolution.sh
+          bash deploy/tests/test_failover_bundle.sh
+          bash deploy/tests/test_drift_complete.sh
+          bash deploy/tests/test_component_map_coverage.sh
+          bash deploy/tests/test_schema_compatibility.sh
       - name: Verify deployment and platform script syntax
         run: |
           shopt -s nullglob
