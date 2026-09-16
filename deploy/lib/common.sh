@@ -40,7 +40,14 @@ if [[ -z "${EDGE_PROBE_SCRIPT:-}" ]]; then
   fi
 fi
 export TRAEFIK_DYNAMIC_DIR ACB_CONFIG EDGE_PROBE_SCRIPT
-FAILOVER_STATE_DIR="${FAILOVER_STATE_DIR:-/var/lib/vps-failover/apps/acb}"
+if [[ -z "${FAILOVER_STATE_DIR:-}" ]]; then
+  if [[ -n "${RUNTIME_STATE_DIR:-}" && -d "$RUNTIME_STATE_DIR" && ! -w "/var/lib/vps-failover/apps/acb" ]]; then
+    FAILOVER_STATE_DIR="$RUNTIME_STATE_DIR/failover"
+  else
+    FAILOVER_STATE_DIR="/var/lib/vps-failover/apps/acb"
+  fi
+fi
+export FAILOVER_STATE_DIR
 DATA_VOLUME_NAME="${DATA_VOLUME_NAME:-bank-event-gateway_gateway_data}"
 BARK_VOLUME_NAME="${BARK_VOLUME_NAME:-bank-event-gateway_bark_data}"
 
