@@ -87,15 +87,15 @@ validate_canonical_env() {
 }
 
 compose_prod() {
-  local compose_flags=()
+  local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
+  local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
+  local compose_flags=(--project-directory "$ctx_dir")
   if [[ -f "$ENV_FILE" ]]; then
     compose_flags+=(--env-file "$ENV_FILE")
   fi
   if [[ -f "$RELEASE_ENV_FILE" ]]; then
     compose_flags+=(--env-file "$RELEASE_ENV_FILE")
   fi
-  local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
-  local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
   if [[ -d "$compose_dir" ]]; then
     local COMPOSE_FILES=(
       "$compose_dir/base.yaml"
