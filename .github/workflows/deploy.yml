@@ -1123,7 +1123,11 @@ jobs:
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
           export PATH="$DEPLOY_PATH/deploy:$PATH"
-          exec "$DEPLOY_PATH/deploy/stable-deployer.sh" \
+          deployer_cmd="$DEPLOY_PATH/deploy/stable-deployer.sh"
+          if [[ ! -f "$deployer_cmd" ]]; then
+            deployer_cmd="$RELEASE_DIR/stable-deployer.sh"
+          fi
+          exec "$deployer_cmd" \
             --release-dir "$RELEASE_DIR" \
             --data-dir "$DEPLOY_PATH/data" \
             --expected-identity "$EXPECTED_IDENTITY" \
