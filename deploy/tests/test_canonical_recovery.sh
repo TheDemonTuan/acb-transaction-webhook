@@ -10,6 +10,10 @@ DEPLOY_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/acb-canonical-recovery-test.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
+export ALLOW_TEST_LOCK_PATH=1
+export FAILOVER_STATE_DIR="$TEST_TMP/failover"
+mkdir -p "$FAILOVER_STATE_DIR"
+
 TESTS_PASSED=0
 TESTS_FAILED=0
 
