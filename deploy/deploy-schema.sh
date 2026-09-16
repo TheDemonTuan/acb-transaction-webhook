@@ -101,7 +101,7 @@ release_mutation_gate "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" "$SCHEMA_DEPLOY_OWNER"
 GATE_TOKEN=""
 
 # 8. Record migration metadata
-MIGRATION_RECORD="${MIGRATION_RECORD:-${DATA_DIR:-$SCRIPT_DIR/data}/migration-record.json}"
+MIGRATION_RECORD="${MIGRATION_RECORD:-${RUNTIME_DATA_DIR:-${DATA_DIR:-$SCRIPT_DIR/data}}/migration-record.json}"
 mkdir -p "$(dirname "$MIGRATION_RECORD")"
 cat <<EOF > "$MIGRATION_RECORD"
 {

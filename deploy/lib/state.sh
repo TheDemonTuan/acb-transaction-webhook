@@ -3,7 +3,7 @@
 # Deployment lock, slot state, transaction journal, intentional stop markers, and soak management.
 set -euo pipefail
 
-TX_JOURNAL_FILE="${TX_JOURNAL_FILE:-$SCRIPT_DIR/data/deploy-journal.json}"
+TX_JOURNAL_FILE="${TX_JOURNAL_FILE:-${RUNTIME_DATA_DIR:-$SCRIPT_DIR/data}/deploy-journal.json}"
 atomic_write_file() {
   local target="$1"
   local mode="${2:-600}"
