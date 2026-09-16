@@ -128,13 +128,66 @@ if [[ "$actual_gateway_slot" != "$expected_gateway_slot" ]]; then
   log_error "PRODUCTION_DRIFT component=gateway_slot expected=$expected_gateway_slot actual=${actual_gateway_slot:-unknown}"
   failures=$((failures + 1))
 fi
+
 route_slot=""
 if [[ -f "$ACB_CONFIG" ]]; then
-  grep -q 'acb-web-blue' "$ACB_CONFIG" && route_slot=blue
-  grep -q 'acb-web-green' "$ACB_CONFIG" && route_slot=green
+  has_gw_blue=0
+  has_gw_green=0
+  grep -q 'acb-web-blue' "$ACB_CONFIG" && has_gw_blue=1 || true
+  grep -q 'acb-web-green' "$ACB_CONFIG" && has_gw_green=1 || true
+  if (( has_gw_blue == 1 && has_gw_green == 1 )); then
+    log_error "PRODUCTION_DRIFT component=gateway_route both blue and green discovered in active route (ambiguous)"
+    failures=$((failures + 1))
+  elif (( has_gw_blue == 1 )); then
+    route_slot="blue"
+  elif (( has_gw_green == 1 )); then
+    route_slot="green"
+  else
+    log_error "PRODUCTION_DRIFT component=gateway_route neither blue nor green discovered in route"
+    failures=$((failures + 1))
+  fi
 fi
-if [[ "$route_slot" != "$expected_gateway_slot" ]]; then
+if [[ -n "$route_slot" && "$route_slot" != "$expected_gateway_slot" ]]; then
   log_error "PRODUCTION_DRIFT component=gateway_route expected=$expected_gateway_slot actual=${route_slot:-unknown}"
+  failures=$((failures + 1))
+fi
+
+# Frontend drift verification
+expected_frontend_slot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["active_slots"].get("frontend") or "")' "$STATE_FILE" 2>/dev/null || true)"
+if [[ -n "$expected_frontend_slot" ]]; then
+  actual_fe_slot="$(resolve_frontend_slot_strict 2>/dev/null || cat "${FRONTEND_ACTIVE_SLOT_FILE:-}" 2>/dev/null || true)"
+  if [[ "$actual_fe_slot" != "$expected_frontend_slot" ]]; then
+    log_error "PRODUCTION_DRIFT component=frontend_slot expected=$expected_frontend_slot actual=${actual_fe_slot:-unknown}"
+    failures=$((failures + 1))
+  fi
+
+  fe_route_slot=""
+  if [[ -f "$ACB_CONFIG" ]]; then
+    has_fe_blue=0
+    has_fe_green=0
+    grep -q 'acb-frontend-blue' "$ACB_CONFIG" && has_fe_blue=1 || true
+    grep -q 'acb-frontend-green' "$ACB_CONFIG" && has_fe_green=1 || true
+    if (( has_fe_blue == 1 && has_fe_green == 1 )); then
+      log_error "PRODUCTION_DRIFT component=frontend_route both blue and green discovered in active route (ambiguous)"
+      failures=$((failures + 1))
+    elif (( has_fe_blue == 1 )); then
+      fe_route_slot="blue"
+    elif (( has_fe_green == 1 )); then
+      fe_route_slot="green"
+    elif grep -q 'http://acb-frontend:8080' "$ACB_CONFIG"; then
+      fe_route_slot="legacy"
+    fi
+  fi
+  if [[ -n "$fe_route_slot" && "$fe_route_slot" != "$expected_frontend_slot" ]]; then
+    log_error "PRODUCTION_DRIFT component=frontend_route expected=$expected_frontend_slot actual=${fe_route_slot:-unknown}"
+    failures=$((failures + 1))
+  fi
+fi
+
+# Journal path identity check
+expected_journal="${TX_JOURNAL_FILE:-${RUNTIME_DATA_DIR:-${DEPLOY_PATH:-/opt/acb-transaction-webhook}/data}/deploy-journal.json}"
+if [[ -n "${TX_JOURNAL_FILE:-}" && "$TX_JOURNAL_FILE" != "$expected_journal" ]]; then
+  log_error "PRODUCTION_DRIFT component=tx_journal_path expected=$expected_journal actual=$TX_JOURNAL_FILE"
   failures=$((failures + 1))
 fi
 
