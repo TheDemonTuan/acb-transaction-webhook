@@ -1075,6 +1075,7 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_DIR='$REMOTE_RELEASE_DIR' OWNER='$owner' EXPECTED_IDENTITY='$expected_identity' EXPECTED_ISSUER='$expected_issuer' bash -s" <<'REMOTE'
           set -Eeuo pipefail
+          export PATH="$DEPLOY_PATH/deploy:$PATH"
           env_file="$DEPLOY_PATH/deploy/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
           chmod 600 "$env_file"
