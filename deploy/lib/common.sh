@@ -94,7 +94,27 @@ compose_prod() {
   if [[ -f "$RELEASE_ENV_FILE" ]]; then
     compose_flags+=(--env-file "$RELEASE_ENV_FILE")
   fi
-  docker compose "${compose_flags[@]}" -f "$COMPOSE_FILE" "$@"
+  local compose_dir="${COMPOSE_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}/compose}"
+  if [[ -d "$compose_dir" ]]; then
+    local COMPOSE_FILES=(
+      "$compose_dir/base.yaml"
+      "$compose_dir/gateway.yaml"
+      "$compose_dir/frontend.yaml"
+      "$compose_dir/worker.yaml"
+      "$compose_dir/auth-browser.yaml"
+      "$compose_dir/tts.yaml"
+      "$compose_dir/bark.yaml"
+      "$compose_dir/dbtool.yaml"
+    )
+    for file in "${COMPOSE_FILES[@]}"; do
+      if [[ -f "$file" ]]; then
+        compose_flags+=(-f "$file")
+      fi
+    done
+  else
+    compose_flags+=(-f "$COMPOSE_FILE")
+  fi
+  docker compose "${compose_flags[@]}" "$@"
 }
 
 ensure_secret_permissions() {

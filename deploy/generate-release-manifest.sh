@@ -219,6 +219,17 @@ compute_hash() {
 # Collect deploy bundle files
 bundle_files=(
   "compose.prod.yaml"
+  "compose/base.yaml"
+  "compose/gateway.yaml"
+  "compose/frontend.yaml"
+  "compose/worker.yaml"
+  "compose/auth-browser.yaml"
+  "compose/tts.yaml"
+  "compose/bark.yaml"
+  "compose/dbtool.yaml"
+  "runtime-layout.sh"
+  "reconcile-release.sh"
+  "release-state.py"
   "component-map.json"
   "lib.sh"
   "deploy-warm.sh"
