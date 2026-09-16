@@ -129,6 +129,9 @@ populate_candidate_release() {
   cp "$DEPLOY_DIR/edge-probe.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/bootstrap-deployment-engine.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$rel_dir/"
+  cp "$DEPLOY_DIR/verify-release-baseline.sh" "$rel_dir/"
+  cp "$DEPLOY_DIR/preflight-runtime.sh" "$rel_dir/"
+  cp "$DEPLOY_DIR/stage-immutable-release.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/component-map.json" "$rel_dir/"
   cp "$DEPLOY_DIR/compose.prod.yaml" "$rel_dir/"
   cp "$DEPLOY_DIR/lib.sh" "$rel_dir/"
@@ -166,6 +169,7 @@ populate_candidate_release() {
   "release_id": "$rel_id",
   "git_sha": "0123456789abcdef0123456789abcdef01234567",
   "created_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+  "base": {"git_sha": "0000000000000000000000000000000000000000", "generation": 1},
   "schema_version": 2,
   "compatibility": {"schema_version": 9, "min_supported_schema_version": 9, "worker_rpc_version": 2},
   "promotion": {},
@@ -538,25 +542,22 @@ EOF
   touch "$tdir/deploy/.env.production" "$tdir/deploy/.release.env"
   mkdir -p "$tdir/deploy/secrets"
   populate_candidate_release "$tdir/releases/rel-candidate" "rel-candidate"
-  cat <<'EOF' > "$tdir/releases/rel-candidate/dispatch-rollout.sh"
-#!/usr/bin/env bash
-printf 'MOCK_ROLLOUT_SUCCESS\n'
-exit 0
-EOF
-  chmod +x "$tdir/releases/rel-candidate/dispatch-rollout.sh"
 
   # Current canonical state
-  cat <<EOF > "$tdir/state/current-release.json"
-{
-  "schema_version": 2,
-  "generation": 1,
-  "status": "COMPLETED",
-  "git_sha": "0000000000000000000000000000000000000000"
-}
-EOF
+  mkdir -p "$tdir/releases/rel-current"
+  cp "$DEPLOY_DIR/tests/fixtures/release-state-v2.json" "$tdir/state/current-release.json"
+  python3 - "$tdir/state/current-release.json" "$tdir/releases/rel-current" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["release_dir"] = sys.argv[2]
+data["git_sha"] = "0000000000000000000000000000000000000000"
+data["generation"] = 1
+json.dump(data, open(sys.argv[1], "w"), indent=2)
+PY
 
   # Run stable-deployer.sh
   local deploy_ec=0
+  ALLOW_TEST_LOCK_PATH=1 \
   RUNTIME_ROOT="$tdir" \
   SOAK_SECONDS=0 \
   bash "$tdir/deploy/stable-deployer.sh" \

@@ -51,9 +51,9 @@ if ! "$SCRIPT_DIR/verify-manifest.sh" \
   --expected-identity "$EXPECTED_IDENTITY" \
   --expected-issuer "$EXPECTED_ISSUER" \
   --require-cosign; then
-  if [[ -x "$SCRIPT_DIR/bootstrap-deployment-engine.sh" ]]; then
+  if [[ -f "$SCRIPT_DIR/bootstrap-deployment-engine.sh" ]]; then
     printf 'Trusted manifest verifier failed. Attempting signed engine bootstrap...\n'
-    "$SCRIPT_DIR/bootstrap-deployment-engine.sh" \
+    bash "$SCRIPT_DIR/bootstrap-deployment-engine.sh" \
       --release-dir "$RELEASE_DIR" \
       --runtime-deploy-dir "$SCRIPT_DIR" \
       --expected-identity "$EXPECTED_IDENTITY" \
@@ -61,7 +61,7 @@ if ! "$SCRIPT_DIR/verify-manifest.sh" \
       --require-cosign \
       --skip-semantic-check
     printf 'Signed engine bootstrap succeeded. Retrying manifest verification with updated verifier...\n'
-    "$SCRIPT_DIR/verify-manifest.sh" \
+    bash "$SCRIPT_DIR/verify-manifest.sh" \
       --manifest "$RELEASE_DIR/release-manifest.json" \
       --bundle "$RELEASE_DIR/release-manifest.bundle" \
       --deploy-dir "$RELEASE_DIR" \
@@ -160,23 +160,25 @@ for required in .env.production .release.env secrets; do
 done
 
 export DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
-deploy_group="$(id -gn)"
-if [[ "$(id -u)" -eq 0 ]]; then
-  install -d -m 0770 -o root -g "$deploy_group" /run/lock/vps-failover
-  install -d -m 0755 -o root -g root /var/lib/vps-failover
-  install -d -m 0750 -o root -g "$deploy_group" /var/lib/vps-failover/apps
-  install -d -m 0770 -o root -g "$deploy_group" /var/lib/vps-failover/apps/acb
-else
-  command -v sudo >/dev/null 2>&1 || { printf 'sudo is required to provision canonical deployment locks.\n' >&2; exit 1; }
-  sudo -n install -d -m 0770 -o root -g "$deploy_group" /run/lock/vps-failover
-  sudo -n install -d -m 0755 -o root -g root /var/lib/vps-failover
-  sudo -n install -d -m 0750 -o root -g "$deploy_group" /var/lib/vps-failover/apps
-  sudo -n install -d -m 0770 -o root -g "$deploy_group" /var/lib/vps-failover/apps/acb
+if [[ -z "${ALLOW_TEST_LOCK_PATH:-}" ]]; then
+  deploy_group="$(id -gn 2>/dev/null || id -g)"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    install -d -m 0770 -o root -g "$deploy_group" /run/lock/vps-failover
+    install -d -m 0755 -o root -g root /var/lib/vps-failover
+    install -d -m 0750 -o root -g "$deploy_group" /var/lib/vps-failover/apps
+    install -d -m 0770 -o root -g "$deploy_group" /var/lib/vps-failover/apps/acb
+  else
+    command -v sudo >/dev/null 2>&1 || { printf 'sudo is required to provision canonical deployment locks.\n' >&2; exit 1; }
+    sudo -n install -d -m 0770 -o root -g "$deploy_group" /run/lock/vps-failover
+    sudo -n install -d -m 0755 -o root -g root /var/lib/vps-failover
+    sudo -n install -d -m 0750 -o root -g "$deploy_group" /var/lib/vps-failover/apps
+    sudo -n install -d -m 0770 -o root -g "$deploy_group" /var/lib/vps-failover/apps/acb
+  fi
+  [[ -w /run/lock/vps-failover && -w /var/lib/vps-failover/apps/acb ]] || {
+    printf 'Canonical deployment lock/state directories are not writable.\n' >&2
+    exit 1
+  }
 fi
-[[ -w /run/lock/vps-failover && -w /var/lib/vps-failover/apps/acb ]] || {
-  printf 'Canonical deployment lock/state directories are not writable.\n' >&2
-  exit 1
-}
 export PATH="$runtime_dir:$PATH"
 if [[ -f "$RELEASE_DIR/edge-probe.sh" ]]; then
   export EDGE_PROBE_SCRIPT="$RELEASE_DIR/edge-probe.sh"
