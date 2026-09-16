@@ -95,9 +95,32 @@ except Exception:
 PY
 )"
 
+# If .env.production or secrets are absent (e.g. In CI runner prior to remote deployment), provide temporary placeholder
+created_dummy_env=0
+if [[ ! -f "$DEPLOY_DIR/.env.production" ]]; then
+  touch "$DEPLOY_DIR/.env.production"
+  created_dummy_env=1
+fi
+
+created_dummy_secrets=()
+mkdir -p "$DEPLOY_DIR/secrets"
+for s in app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password; do
+  if [[ ! -f "$DEPLOY_DIR/secrets/$s" ]]; then
+    touch "$DEPLOY_DIR/secrets/$s"
+    created_dummy_secrets+=("$DEPLOY_DIR/secrets/$s")
+  fi
+done
+
 # shellcheck source=deploy/lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
 compose_prod config --quiet >/dev/null
+
+if [[ "$created_dummy_env" -eq 1 ]]; then
+  rm -f "$DEPLOY_DIR/.env.production"
+fi
+for sf in "${created_dummy_secrets[@]}"; do
+  rm -f "$sf"
+done
 
 bash -n "$DEPLOY_DIR"/*.sh "$DEPLOY_DIR"/lib/*.sh
 python3 -m py_compile "$DEPLOY_DIR/release-state.py"
