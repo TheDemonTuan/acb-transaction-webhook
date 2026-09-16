@@ -811,6 +811,45 @@ log_info "Starting Rollout Orchestration for [${RELEASE_ID}] (${GIT_SHA})"
 log_info "Authorized Promotion Scope: [${scope_str}]"
 log_info "=========================================================="
 
+# Planned candidate state construction before any runtime mutation
+planned_candidate_dir="${RUNTIME_STATE_DIR:-$(dirname "$CURRENT_RELEASE_FILE")}/candidate"
+mkdir -p "$planned_candidate_dir"
+planned_candidate_file="$planned_candidate_dir/${RELEASE_ID}.json"
+
+planned_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+if [[ "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
+  case "$planned_gw_slot" in
+    blue) planned_gw_slot="green" ;;
+    green) planned_gw_slot="blue" ;;
+    *) planned_gw_slot="blue" ;;
+  esac
+fi
+planned_fe_slot="$(cat "$FRONTEND_ACTIVE_SLOT_FILE" 2>/dev/null || printf 'legacy')"
+if [[ "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
+  case "$planned_fe_slot" in
+    blue) planned_fe_slot="green" ;;
+    green) planned_fe_slot="blue" ;;
+    *) planned_fe_slot="blue" ;;
+  esac
+fi
+
+if [[ -f "$DEPLOY_DIR/release-state.py" ]]; then
+  prev_arg=()
+  if [[ -f "$CURRENT_RELEASE_FILE" ]]; then
+    prev_arg=(--previous "$CURRENT_RELEASE_FILE")
+  fi
+  python3 "$DEPLOY_DIR/release-state.py" build \
+    "${prev_arg[@]}" \
+    --release-dir "$DEPLOY_DIR" \
+    --manifest "$MANIFEST_FILE" \
+    --gateway-slot "$planned_gw_slot" \
+    --frontend-slot "$planned_fe_slot" \
+    --scope "$scope_str" \
+    --output "$planned_candidate_file"
+  python3 "$DEPLOY_DIR/release-state.py" validate "$planned_candidate_file" --allow-candidate
+  log_info "Planned candidate release state validated: $planned_candidate_file"
+fi
+
 if [[ "$PROMOTION_BARK" == "true" || "$PROMOTION_WORKER" == "true" ]]; then
   [[ -n "$IMAGE_BARK" ]] || { log_error "BARK image digest is required to verify shared Bark secrets."; exit 1; }
   validate_secrets
@@ -1079,11 +1118,26 @@ PY
 )"
 fi
 candidate_release_state="$(mktemp "$(dirname "$CURRENT_RELEASE_FILE")/.current-release.candidate.XXXXXX")"
-R_STATE_PREVIOUS="$CURRENT_RELEASE_FILE" R_STATE_ENV="$staged_release_env" R_STATE_RELEASE_ID="$RELEASE_ID" \
-R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$manifest_digest" R_STATE_NOW="$now" \
-R_STATE_GATEWAY_SLOT="$active_gateway_slot" R_STATE_FRONTEND_SLOT="$active_frontend_slot" \
-R_STATE_CONTROLLER_HASH="$controller_digest" R_STATE_CONTROLLER_BUNDLE_HASH="$controller_bundle_digest" \
-python3 - <<'PY_STATE' > "$candidate_release_state"
+if [[ -f "$DEPLOY_DIR/release-state.py" ]]; then
+  prev_arg=()
+  if [[ -f "$CURRENT_RELEASE_FILE" ]]; then
+    prev_arg=(--previous "$CURRENT_RELEASE_FILE")
+  fi
+  python3 "$DEPLOY_DIR/release-state.py" build \
+    "${prev_arg[@]}" \
+    --release-dir "$DEPLOY_DIR" \
+    --manifest "$MANIFEST_FILE" \
+    --gateway-slot "$active_gateway_slot" \
+    ${active_frontend_slot:+--frontend-slot "$active_frontend_slot"} \
+    --scope "$scope_str" \
+    --output "$candidate_release_state"
+  python3 "$DEPLOY_DIR/release-state.py" validate "$candidate_release_state"
+else
+  R_STATE_PREVIOUS="$CURRENT_RELEASE_FILE" R_STATE_ENV="$staged_release_env" R_STATE_RELEASE_ID="$RELEASE_ID" \
+  R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$manifest_digest" R_STATE_NOW="$now" \
+  R_STATE_GATEWAY_SLOT="$active_gateway_slot" R_STATE_FRONTEND_SLOT="$active_frontend_slot" \
+  R_STATE_CONTROLLER_HASH="$controller_digest" R_STATE_CONTROLLER_BUNDLE_HASH="$controller_bundle_digest" \
+  python3 - <<'PY_STATE' > "$candidate_release_state"
 import json, os, re
 
 def read_env(path):
@@ -1103,7 +1157,7 @@ previous_release_id = None
 if os.path.isfile(previous_path):
     with open(previous_path, encoding="utf-8") as handle:
         previous = json.load(handle)
-    if previous.get("schema_version") != 1 or previous.get("status") != "COMPLETED":
+    if previous.get("schema_version") not in (1, 2) or previous.get("status") != "COMPLETED":
         raise SystemExit("existing canonical release state is invalid")
     generation = int(previous.get("generation", 0)) + 1
     previous_release_id = previous.get("release_id")
@@ -1115,7 +1169,7 @@ missing = [key for key in required if not digest.match(env.get(key, ""))]
 if missing:
     raise SystemExit("invalid canonical image refs: " + ", ".join(missing))
 state = {
-    "schema_version": 1,
+    "schema_version": 2,
     "generation": generation,
     "release_id": os.environ["R_STATE_RELEASE_ID"],
     "previous_release_id": previous_release_id,
@@ -1143,6 +1197,7 @@ state = {
 }
 print(json.dumps(state, indent=2, sort_keys=True))
 PY_STATE
+fi
 python3 -m json.tool "$candidate_release_state" >/dev/null
 if [[ "$SKIP_MANIFEST_CHECK" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
   eval "$RUNTIME_DRIFT_CHECK_CMD"
@@ -1178,10 +1233,15 @@ if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
 fi
 
 # Compatibility projection for Compose and older operator tooling. It is not authoritative.
-if ! atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"; then
-  rm -f "$staged_release_env"
-  log_error "Canonical release committed, but the legacy .release.env projection could not be refreshed."
-  exit 1
+if [[ -f "$DEPLOY_DIR/release-state.py" ]]; then
+  python3 "$DEPLOY_DIR/release-state.py" export-env "$CURRENT_RELEASE_FILE" --output "$canonical_release_env"
+  chmod 600 "$canonical_release_env"
+else
+  if ! atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"; then
+    rm -f "$staged_release_env"
+    log_error "Canonical release committed, but the legacy .release.env projection could not be refreshed."
+    exit 1
+  fi
 fi
 rm -f "$staged_release_env"
 export USE_CANONICAL_RELEASE_STATE=1

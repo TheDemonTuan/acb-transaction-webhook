@@ -17,7 +17,7 @@ command -v docker >/dev/null 2>&1 || { log_error "Docker is required for runtime
 mapfile -t expectations < <(python3 - "$STATE_FILE" <<'PY'
 import json, re, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
-if state.get("schema_version") != 1 or state.get("status") != "COMPLETED":
+if state.get("schema_version") not in (1, 2) or state.get("status") != "COMPLETED":
     raise SystemExit("invalid canonical release state")
 slots = state.get("active_slots", {})
 images = state.get("images", {})
