@@ -40,7 +40,14 @@ if [[ -z "${EDGE_PROBE_SCRIPT:-}" ]]; then
   fi
 fi
 export TRAEFIK_DYNAMIC_DIR ACB_CONFIG EDGE_PROBE_SCRIPT
-FAILOVER_STATE_DIR="${FAILOVER_STATE_DIR:-/var/lib/vps-failover/apps/acb}"
+if [[ -z "${FAILOVER_STATE_DIR:-}" ]]; then
+  if [[ -n "${RUNTIME_STATE_DIR:-}" && -d "$RUNTIME_STATE_DIR" && ! -w "/var/lib/vps-failover/apps/acb" ]]; then
+    FAILOVER_STATE_DIR="$RUNTIME_STATE_DIR/failover"
+  else
+    FAILOVER_STATE_DIR="/var/lib/vps-failover/apps/acb"
+  fi
+fi
+export FAILOVER_STATE_DIR
 DATA_VOLUME_NAME="${DATA_VOLUME_NAME:-bank-event-gateway_gateway_data}"
 BARK_VOLUME_NAME="${BARK_VOLUME_NAME:-bank-event-gateway_bark_data}"
 
@@ -87,15 +94,15 @@ validate_canonical_env() {
 }
 
 compose_prod() {
-  local compose_flags=()
+  local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
+  local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
+  local compose_flags=(--project-directory "$ctx_dir")
   if [[ -f "$ENV_FILE" ]]; then
     compose_flags+=(--env-file "$ENV_FILE")
   fi
   if [[ -f "$RELEASE_ENV_FILE" ]]; then
     compose_flags+=(--env-file "$RELEASE_ENV_FILE")
   fi
-  local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
-  local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
   if [[ -d "$compose_dir" ]]; then
     local COMPOSE_FILES=(
       "$compose_dir/base.yaml"

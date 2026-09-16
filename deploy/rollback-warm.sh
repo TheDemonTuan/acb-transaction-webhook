@@ -28,7 +28,7 @@ clear_intentional_stop "$PREVIOUS_SLOT"
 STATUS=$(docker inspect --format '{{.State.Status}}' "acb-gateway-${PREVIOUS_SLOT}" 2>/dev/null || echo "not_found")
 if [[ "$STATUS" != "running" ]]; then
   log_info "Starting stopped previous container acb-gateway-${PREVIOUS_SLOT}..."
-  docker compose -f "$COMPOSE_FILE" start "gateway-${PREVIOUS_SLOT}" 2>/dev/null || docker start "acb-gateway-${PREVIOUS_SLOT}"
+  compose_prod start "gateway-${PREVIOUS_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" start "gateway-${PREVIOUS_SLOT}" 2>/dev/null || docker start "acb-gateway-${PREVIOUS_SLOT}"
 fi
 
 # 2. Probe health

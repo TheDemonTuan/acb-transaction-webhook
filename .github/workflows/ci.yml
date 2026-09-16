@@ -97,6 +97,15 @@ jobs:
           bash deploy/tests/test_worker_deploy.sh
           bash deploy/tests/test_aux_deploy.sh
           bash deploy/tests/test_traefik_switch.sh
+          bash deploy/tests/test_staged_release_compose.sh
+          bash deploy/tests/test_canonical_recovery.sh
+          bash deploy/tests/test_component_tx_recovery.sh
+          bash deploy/tests/test_preflight_vps.sh
+          bash deploy/tests/test_deploy_workflow_runtime_preflight.sh
+          bash deploy/tests/test_release_baseline.sh
+          bash deploy/tests/test_deploy_rerun_contract.sh
+          if [[ -f deploy/tests/test_trusted_engine_bootstrap.sh ]]; then bash deploy/tests/test_trusted_engine_bootstrap.sh; fi
+          bash deploy/tests/test_release_bundle_runtime_contract.sh
           bash deploy/tests/test_runtime_layout.sh
           bash deploy/tests/test_bootstrap_recovery.sh
           bash deploy/tests/test_legacy_frontend_recovery.sh

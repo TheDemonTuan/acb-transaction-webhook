@@ -69,7 +69,7 @@ cleanup_frontend_deploy() {
 trap cleanup_frontend_deploy EXIT HUP INT TERM
 
 wait_for_frontend_ready() {
-  local timeout="${FRONTEND_READY_TIMEOUT:-30}"
+  local timeout="${FRONTEND_READY_TIMEOUT:-120}"
   local elapsed=0
   while [[ "$elapsed" -lt "$timeout" ]]; do
     if docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CANDIDATE_CONTAINER" 2>/dev/null | grep -qx healthy; then

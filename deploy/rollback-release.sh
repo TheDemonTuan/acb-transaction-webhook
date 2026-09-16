@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # deploy/rollback-release.sh
 # Restores the exact previous release bundle (code, compose config, scripts, images, routes).
+# Intentional rollback requires a validated previous release identity in authoritative state.
 set -Eeuo pipefail
 umask 077
 
@@ -35,7 +36,7 @@ trap 'release_deploy_lock' EXIT
 
 [[ -s "$STATE_FILE" ]] || { log_error "Canonical state file is missing: $STATE_FILE"; exit 1; }
 
-# Step 1: Validate canonical state
+# Step 1: Validate canonical state schema
 if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
   python3 "$SCRIPT_DIR/release-state.py" validate "$STATE_FILE" || {
     log_error "Canonical release state failed schema validation; refusing unsafe rollback."
@@ -43,37 +44,37 @@ if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
   }
 fi
 
-# Step 2: Determine previous release bundle directory
-prev_dir=""
-if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
-  prev_dir="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" previous.release_dir 2>/dev/null || true)"
-fi
-if [[ -z "$prev_dir" && -f "$JOURNAL_FILE" ]]; then
-  prev_dir="$(python3 - "$JOURNAL_FILE" <<'PY' 2>/dev/null || true
+# Step 2: Validate previous release identity (strictly require state.previous; never journal/current fallback)
+prev_json="$(python3 - "$STATE_FILE" <<'PY' 2>/dev/null || true
 import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get("previous_release_dir", ""))
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        d = json.load(f)
+    prev = d.get("previous")
+    if not prev or not isinstance(prev, dict):
+        sys.exit(1)
+    for req in ("generation", "release_id", "release_dir", "git_sha", "manifest_sha256"):
+        val = prev.get(req)
+        if val is None or val == "":
+            sys.exit(1)
+    print(json.dumps(prev))
 except Exception:
-    pass
+    sys.exit(1)
 PY
 )"
-fi
 
-if [[ -z "$prev_dir" || ! -d "$prev_dir" ]]; then
-  # Fallback: check release_dir of current state
-  prev_dir="$(python3 - "$STATE_FILE" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get("release_dir", ""))
-except Exception:
-    pass
-PY
-)"
-fi
+[[ -n "$prev_json" ]] || {
+  log_error "Canonical state file does not contain a validated previous release identity (generation, release_id, release_dir, git_sha, manifest_sha256 required); refusing unsafe rollback."
+  exit 1
+}
+
+prev_dir="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['release_dir'])" "$prev_json")"
+expected_prev_manifest_sha="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['manifest_sha256'])" "$prev_json")"
+prev_git_sha="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['git_sha'])" "$prev_json")"
+prev_release_id="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['release_id'])" "$prev_json")"
 
 [[ -n "$prev_dir" && -d "$prev_dir" ]] || {
-  log_error "Could not resolve valid previous release directory."
+  log_error "Previous release directory does not exist or is not a directory: $prev_dir"
   exit 1
 }
 
@@ -84,15 +85,16 @@ fi
 
 PREVIOUS_RELEASE_DIR="$(cd -- "$prev_dir" && pwd -P)"
 log_info "Resolved Previous Release Directory: $PREVIOUS_RELEASE_DIR"
+log_info "Previous Release ID: $prev_release_id, Git SHA: $prev_git_sha"
 
 # Verify previous release directory resolves under RUNTIME_RELEASES_DIR if configured
 if [[ -n "${RUNTIME_RELEASES_DIR:-}" ]]; then
-  real_prev="$(readlink -f "$PREVIOUS_RELEASE_DIR" 2>/dev/null || echo "$PREVIOUS_RELEASE_DIR")"
-  real_root="$(readlink -f "$RUNTIME_RELEASES_DIR" 2>/dev/null || echo "$RUNTIME_RELEASES_DIR")"
+  real_prev="$(cd -- "$PREVIOUS_RELEASE_DIR" 2>/dev/null && pwd -P || echo "$PREVIOUS_RELEASE_DIR")"
+  real_root="$(cd -- "$RUNTIME_RELEASES_DIR" 2>/dev/null && pwd -P || echo "$RUNTIME_RELEASES_DIR")"
   case "$real_prev" in
-    "$real_root"/*) ;;
+    "$real_root"/*|"$real_root") ;;
     *)
-      if [[ -z "${DEPLOY_PATH:-}" || "$real_prev" != "${DEPLOY_PATH}"* ]]; then
+      if [[ -z "${DEPLOY_PATH:-}" || "$PREVIOUS_RELEASE_DIR" != "${DEPLOY_PATH:-}"* ]]; then
         log_error "Previous release directory escapes RUNTIME_RELEASES_DIR ($RUNTIME_RELEASES_DIR): $PREVIOUS_RELEASE_DIR"
         exit 1
       fi
@@ -114,23 +116,8 @@ done
   exit 1
 }
 
-expected_prev_manifest_sha="$(python3 - "$STATE_FILE" "$PREVIOUS_RELEASE_DIR" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    prev = d.get("previous")
-    pdir = sys.argv[2]
-    if prev and prev.get("manifest_sha256") and (prev.get("release_dir") == pdir or not prev.get("release_dir")):
-        print(prev["manifest_sha256"])
-    elif d.get("manifest_sha256") and (d.get("release_dir") == pdir or not prev):
-        print(d["manifest_sha256"])
-except Exception:
-    pass
-PY
-)"
-
 actual_prev_manifest_sha="$(sha256sum "$prev_manifest" | awk '{print $1}')"
-if [[ -n "$expected_prev_manifest_sha" && "$actual_prev_manifest_sha" != "$expected_prev_manifest_sha" ]]; then
+if [[ "${actual_prev_manifest_sha,,}" != "${expected_prev_manifest_sha,,}" ]]; then
   log_error "Previous release manifest SHA mismatch! Expected: $expected_prev_manifest_sha, actual: $actual_prev_manifest_sha"
   exit 1
 fi
@@ -174,94 +161,145 @@ fi
 
 # Step 3: Set execution context to previous release bundle
 export RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR"
+export RELEASE_DIR="$PREVIOUS_RELEASE_DIR"
 export COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose"
 export ROLLOUT_JOURNAL_FILE="$JOURNAL_FILE"
 
 rollback_failures=0
 
+# Helper to resolve image reference for a component from previous bundle (never candidate)
+get_previous_image_ref() {
+  local comp="$1"
+  python3 - "$prev_manifest" "$STATE_FILE" "$comp" <<'PY'
+import json, sys
+mpath, spath, comp = sys.argv[1:4]
+img = ""
+try:
+    with open(mpath, "r", encoding="utf-8") as f:
+        m = json.load(f)
+    img = m.get("images", {}).get(comp, "")
+except Exception:
+    pass
+if not img:
+    try:
+        with open(spath, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        img = s.get("previous", {}).get("images", {}).get(comp, "")
+        if not img:
+            img = s.get("images", {}).get(comp, "")
+    except Exception:
+        pass
+print(img or "")
+PY
+}
+
+should_rollback_component() {
+  local comp="$1"
+  if [[ -f "$JOURNAL_FILE" ]]; then
+    step_was_completed "$comp"
+  else
+    return 0
+  fi
+}
+
 # Step 4: Reverse dependency order component rollback
 log_info "Reverting completed components in reverse order..."
 
 # 4a. Failover Controller
-if step_was_completed failover_controller && [[ -f "$SCRIPT_DIR/deploy-failover-controller.sh" ]]; then
+if should_rollback_component failover_controller && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-failover-controller.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-failover-controller.sh" ]]); then
   log_info "Restoring previous failover controller bundle..."
-  FAILOVER_ROLLBACK_ONLY=1 RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-    bash "$SCRIPT_DIR/deploy-failover-controller.sh" || rollback_failures=$((rollback_failures + 1))
+  fo_deployer="$PREVIOUS_RELEASE_DIR/deploy-failover-controller.sh"
+  [[ -f "$fo_deployer" ]] || fo_deployer="$SCRIPT_DIR/deploy-failover-controller.sh"
+  EXPECTED_COMMIT="$prev_git_sha" FAILOVER_ROLLBACK_ONLY=1 RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+    RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+    bash "$fo_deployer" || rollback_failures=$((rollback_failures + 1))
 fi
 
 # 4b. Gateway Route
-if [[ -f "${PENDING_GATEWAY_RETIRE_FILE:-}" ]] || step_was_completed gateway; then
+if [[ -f "${PENDING_GATEWAY_RETIRE_FILE:-}" ]] || should_rollback_component gateway; then
   log_info "Restoring previous gateway route..."
   rollback_gateway_route || rollback_failures=$((rollback_failures + 1))
 fi
 
 # 4c. Worker
-if step_was_completed worker && [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]; then
+if should_rollback_component worker && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-worker.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]); then
   log_info "Restoring previous worker container using previous bundle..."
-  worker_img=""
-  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
-    worker_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.worker 2>/dev/null || true)"
-  fi
+  worker_img="$(get_previous_image_ref "worker")"
   if [[ -z "$worker_img" ]]; then
     worker_img="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$worker_img" ]]; then
+    worker_deployer="$PREVIOUS_RELEASE_DIR/deploy-worker.sh"
+    [[ -f "$worker_deployer" ]] || worker_deployer="$SCRIPT_DIR/deploy-worker.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-worker.sh" "$worker_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$worker_deployer" "$worker_img" || rollback_failures=$((rollback_failures + 1))
+  else
+    log_error "Failed to resolve previous worker image reference."
+    rollback_failures=$((rollback_failures + 1))
   fi
 fi
 
 # 4d. Frontend Route
-if [[ -f "${PENDING_FRONTEND_RETIRE_FILE:-}" ]] || step_was_completed frontend; then
+if [[ -f "${PENDING_FRONTEND_RETIRE_FILE:-}" ]] || should_rollback_component frontend; then
   log_info "Restoring previous frontend route..."
   rollback_frontend_route || rollback_failures=$((rollback_failures + 1))
 fi
 
 # 4e. Bark
-if step_was_completed bark && [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]; then
+if should_rollback_component bark && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-bark.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]); then
   log_info "Restoring previous Bark service using previous bundle..."
-  bark_img=""
-  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
-    bark_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.bark 2>/dev/null || true)"
-  fi
+  bark_img="$(get_previous_image_ref "bark")"
   if [[ -z "$bark_img" ]]; then
     bark_img="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$bark_img" ]]; then
+    bark_deployer="$PREVIOUS_RELEASE_DIR/deploy-bark.sh"
+    [[ -f "$bark_deployer" ]] || bark_deployer="$SCRIPT_DIR/deploy-bark.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-bark.sh" "$bark_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$bark_deployer" "$bark_img" || rollback_failures=$((rollback_failures + 1))
+  else
+    log_error "Failed to resolve previous Bark image reference."
+    rollback_failures=$((rollback_failures + 1))
   fi
 fi
 
 # 4f. TTS
-if step_was_completed tts && [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]; then
+if should_rollback_component tts && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-tts.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]); then
   log_info "Restoring previous TTS service using previous bundle..."
-  tts_img=""
-  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
-    tts_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.tts 2>/dev/null || true)"
-  fi
+  tts_img="$(get_previous_image_ref "tts")"
   if [[ -z "$tts_img" ]]; then
     tts_img="$(get_release_env TTS_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$tts_img" ]]; then
+    tts_deployer="$PREVIOUS_RELEASE_DIR/deploy-tts.sh"
+    [[ -f "$tts_deployer" ]] || tts_deployer="$SCRIPT_DIR/deploy-tts.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-tts.sh" "$tts_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$tts_deployer" "$tts_img" || rollback_failures=$((rollback_failures + 1))
+  else
+    log_error "Failed to resolve previous TTS image reference."
+    rollback_failures=$((rollback_failures + 1))
   fi
 fi
 
 # 4g. Auth Browser
-if step_was_completed auth_browser && [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]; then
+if should_rollback_component auth_browser && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-auth-browser.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]); then
   log_info "Restoring previous Auth-Browser service using previous bundle..."
-  br_img=""
-  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
-    br_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.auth_browser 2>/dev/null || true)"
-  fi
+  br_img="$(get_previous_image_ref "auth_browser")"
   if [[ -z "$br_img" ]]; then
     br_img="$(get_release_env BROWSER_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$br_img" ]]; then
+    ab_deployer="$PREVIOUS_RELEASE_DIR/deploy-auth-browser.sh"
+    [[ -f "$ab_deployer" ]] || ab_deployer="$SCRIPT_DIR/deploy-auth-browser.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-auth-browser.sh" "$br_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$ab_deployer" "$br_img" || rollback_failures=$((rollback_failures + 1))
+  else
+    log_error "Failed to resolve previous auth-browser image reference."
+    rollback_failures=$((rollback_failures + 1))
   fi
 fi
 

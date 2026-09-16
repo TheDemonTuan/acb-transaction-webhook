@@ -14,7 +14,9 @@ done
 [[ -s "$STATE_FILE" ]] || { log_error "Canonical release state is missing: $STATE_FILE"; exit 1; }
 command -v docker >/dev/null 2>&1 || { log_error "Docker is required for runtime drift verification."; exit 1; }
 
-mapfile -t expectations < <(python3 - "$STATE_FILE" <<'PY'
+expectations_file="$(mktemp)"
+trap 'rm -f "$expectations_file"' EXIT
+python3 - "$STATE_FILE" > "$expectations_file" <<'PY'
 import json, re, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 if state.get("schema_version") not in (1, 2) or state.get("status") != "COMPLETED":
@@ -60,11 +62,13 @@ if controller.get("sha256"):
 if controller.get("bundle_sha256"):
     print(f"@controller_bundle\t{controller['bundle_sha256']}")
 PY
-)
+mapfile -t expectations < "$expectations_file"
+[[ "${#expectations[@]}" -gt 0 ]] || { log_error "Canonical runtime expectations are empty."; exit 1; }
 
 failures=0
 release_dir=""
 for row in "${expectations[@]}"; do
+  row="${row%$'\r'}"
   name="${row%%$'\t'*}"
   expected="${row#*$'\t'}"
   if [[ "$name" == "@release_dir" ]]; then

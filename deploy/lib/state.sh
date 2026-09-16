@@ -16,22 +16,31 @@ atomic_write_file() {
   python3 - "$tmp" "$parent" <<'PY'
 import os, sys
 file_path, parent = sys.argv[1:]
-with open(file_path, 'rb') as handle:
-    os.fsync(handle.fileno())
-dir_fd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
 try:
-    os.fsync(dir_fd)
-finally:
-    os.close(dir_fd)
+    with open(file_path, 'r+b') as handle:
+        os.fsync(handle.fileno())
+except OSError:
+    pass
+try:
+    dir_fd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+except OSError:
+    pass
 PY
   mv -f "$tmp" "$target"
   python3 - "$parent" <<'PY'
 import os, sys
-fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
 try:
-    os.fsync(fd)
-finally:
-    os.close(fd)
+    fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+except OSError:
+    pass
 PY
 }
 
@@ -368,6 +377,7 @@ recover_tx_journal() {
   local prev_digest
   prev_digest="$(grep -o '"previous_digest":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
 
+  local failures=0
   case "$component" in
     frontend)
       if [[ "$cur_state" != "TX_COMPLETED" ]]; then
@@ -376,28 +386,64 @@ recover_tx_journal() {
           gateway_slot="$(get_active_slot 2>/dev/null || true)"
           if [[ "$gateway_slot" == "blue" || "$gateway_slot" == "green" ]]; then
             recovery_route="${ACB_CONFIG}.recovery.$$"
-            render_traefik_config "$gateway_slot" "$recovery_route" "$act_slot" && mv -f "$recovery_route" "$ACB_CONFIG" || true
+            if ! render_traefik_config "$gateway_slot" "$recovery_route" "$act_slot" || ! mv -f "$recovery_route" "$ACB_CONFIG"; then
+              log_error "RECOVERY: Failed to restore Traefik route to frontend slot [${act_slot}]."
+              failures=$((failures + 1))
+            fi
           fi
           if [[ "$act_slot" == "legacy" ]]; then
-            rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+            rm -f "$FRONTEND_ACTIVE_SLOT_FILE" 2>/dev/null || true
           else
-            printf '%s' "$act_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+            if ! printf '%s' "$act_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600; then
+              log_error "RECOVERY: Failed to write frontend active slot file [${act_slot}]."
+              failures=$((failures + 1))
+            fi
           fi
         fi
-        [[ -z "$cand_slot" ]] || docker stop "acb-frontend-${cand_slot}" 2>/dev/null || true
+        if [[ -n "$cand_slot" ]]; then
+          if ! docker stop "acb-frontend-${cand_slot}" >/dev/null 2>&1; then
+            local cand_run
+            cand_run="$(docker inspect --format '{{.State.Running}}' "acb-frontend-${cand_slot}" 2>/dev/null || echo false)"
+            if [[ "$cand_run" == "true" ]]; then
+              log_error "RECOVERY: Failed to stop candidate frontend [acb-frontend-${cand_slot}]."
+              failures=$((failures + 1))
+            fi
+          fi
+        fi
       fi
       ;;
     gateway)
       if [[ -n "$cand_slot" && "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_SOAKING" ]]; then
         log_info "RECOVERY: Stopping uncommitted candidate container [acb-gateway-${cand_slot}]..."
-        docker compose -f "$COMPOSE_FILE" stop "gateway-${cand_slot}" 2>/dev/null || docker stop "acb-gateway-${cand_slot}" 2>/dev/null || true
+        if ! compose_prod stop "gateway-${cand_slot}" 2>/dev/null && \
+           ! docker compose -f "$COMPOSE_FILE" stop "gateway-${cand_slot}" 2>/dev/null && \
+           ! docker stop "acb-gateway-${cand_slot}" >/dev/null 2>&1; then
+          local cand_run
+          cand_run="$(docker inspect --format '{{.State.Running}}' "acb-gateway-${cand_slot}" 2>/dev/null || echo false)"
+          if [[ "$cand_run" == "true" ]]; then
+            log_error "RECOVERY: Failed to stop candidate gateway [acb-gateway-${cand_slot}]."
+            failures=$((failures + 1))
+          fi
+        fi
         if [[ -n "$act_slot" && -f "$ACB_CONFIG" ]]; then
           if ! grep -q "acb-web-${act_slot}" "$ACB_CONFIG" 2>/dev/null; then
             log_warn "RECOVERY: Restoring Traefik route pointer back to known active slot [${act_slot}]..."
             if [[ -f "${ACB_CONFIG}.prev" ]]; then
-              cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null || true
+              if ! cp -f "${ACB_CONFIG}.prev" "$ACB_CONFIG" 2>/dev/null; then
+                log_error "RECOVERY: Failed to copy previous Traefik config back."
+                failures=$((failures + 1))
+              fi
+            else
+              local rec_gw_route="${ACB_CONFIG}.recovery.$$"
+              local cur_fe
+              cur_fe="$(cat "$FRONTEND_ACTIVE_SLOT_FILE" 2>/dev/null || echo "legacy")"
+              if render_traefik_config "$act_slot" "$rec_gw_route" "$cur_fe"; then
+                mv -f "$rec_gw_route" "$ACB_CONFIG" || failures=$((failures + 1))
+              else
+                failures=$((failures + 1))
+              fi
             fi
-            printf '%s' "$act_slot" > "$ACTIVE_SLOT_FILE" 2>/dev/null || true
+            printf '%s' "$act_slot" > "$ACTIVE_SLOT_FILE" 2>/dev/null || failures=$((failures + 1))
           fi
         fi
       fi
@@ -405,44 +451,98 @@ recover_tx_journal() {
     worker)
       if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
         log_warn "RECOVERY: Interrupted worker transaction. Restoring singleton container..."
-        docker stop -t 10 acb-worker 2>/dev/null || true
+        if ! docker stop -t 10 acb-worker >/dev/null 2>&1; then
+          local w_run
+          w_run="$(docker inspect --format '{{.State.Running}}' acb-worker 2>/dev/null || echo false)"
+          if [[ "$w_run" == "true" ]]; then
+            log_error "RECOVERY: Failed to stop acb-worker."
+            failures=$((failures + 1))
+          fi
+        fi
         if [[ -n "$prev_digest" ]]; then
-          WORKER_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps worker 2>/dev/null || true
+          if ! WORKER_IMAGE_REF="$prev_digest" compose_prod up -d --no-deps worker 2>/dev/null && \
+             ! WORKER_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps worker 2>/dev/null; then
+            log_error "RECOVERY: Failed to recreate worker container with previous digest [${prev_digest}]."
+            failures=$((failures + 1))
+          fi
         fi
       fi
       ;;
     auth-browser)
       if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
         log_warn "RECOVERY: Interrupted auth-browser transaction. Restoring previous container..."
-        docker stop -t 5 acb-auth-browser 2>/dev/null || docker stop -t 5 acb-browser 2>/dev/null || true
+        if ! docker stop -t 5 acb-auth-browser >/dev/null 2>&1 && \
+           ! docker stop -t 5 acb-browser >/dev/null 2>&1; then
+          local b_run
+          b_run="$(docker inspect --format '{{.State.Running}}' acb-auth-browser 2>/dev/null || echo false)"
+          if [[ "$b_run" == "true" ]]; then
+            log_error "RECOVERY: Failed to stop acb-auth-browser."
+            failures=$((failures + 1))
+          fi
+        fi
         if [[ -n "$prev_digest" ]]; then
-          BROWSER_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps auth-browser 2>/dev/null || true
+          if ! BROWSER_IMAGE_REF="$prev_digest" compose_prod up -d --no-deps auth-browser 2>/dev/null && \
+             ! BROWSER_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps auth-browser 2>/dev/null; then
+            log_error "RECOVERY: Failed to recreate auth-browser container with previous digest [${prev_digest}]."
+            failures=$((failures + 1))
+          fi
         fi
       fi
       ;;
     tts|tts-gateway)
       if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
         log_warn "RECOVERY: Interrupted TTS transaction. Restoring previous container..."
-        docker stop -t 5 acb-tts-gateway 2>/dev/null || docker stop -t 5 tts-gateway 2>/dev/null || true
+        if ! docker stop -t 5 acb-tts-gateway >/dev/null 2>&1 && \
+           ! docker stop -t 5 tts-gateway >/dev/null 2>&1; then
+          local t_run
+          t_run="$(docker inspect --format '{{.State.Running}}' acb-tts-gateway 2>/dev/null || echo false)"
+          if [[ "$t_run" == "true" ]]; then
+            log_error "RECOVERY: Failed to stop acb-tts-gateway."
+            failures=$((failures + 1))
+          fi
+        fi
         if [[ -n "$prev_digest" ]]; then
-          TTS_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps tts-gateway 2>/dev/null || true
+          if ! TTS_IMAGE_REF="$prev_digest" compose_prod up -d --no-deps tts-gateway 2>/dev/null && \
+             ! TTS_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps tts-gateway 2>/dev/null; then
+            log_error "RECOVERY: Failed to recreate tts container with previous digest [${prev_digest}]."
+            failures=$((failures + 1))
+          fi
         fi
       fi
       ;;
     bark)
       if [[ "$cur_state" != "TX_COMMITTED" && "$cur_state" != "TX_COMPLETED" ]]; then
         log_warn "RECOVERY: Interrupted Bark transaction. Restoring previous container..."
-        docker stop -t 5 acb-bark 2>/dev/null || docker stop -t 5 bark 2>/dev/null || true
+        if ! docker stop -t 5 acb-bark >/dev/null 2>&1 && \
+           ! docker stop -t 5 bark >/dev/null 2>&1; then
+          local k_run
+          k_run="$(docker inspect --format '{{.State.Running}}' acb-bark 2>/dev/null || echo false)"
+          if [[ "$k_run" == "true" ]]; then
+            log_error "RECOVERY: Failed to stop acb-bark."
+            failures=$((failures + 1))
+          fi
+        fi
         if [[ -n "$prev_digest" ]]; then
-          BARK_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps bark 2>/dev/null || true
+          if ! BARK_IMAGE_REF="$prev_digest" compose_prod up -d --no-deps bark 2>/dev/null && \
+             ! BARK_IMAGE_REF="$prev_digest" docker compose -f "$COMPOSE_FILE" up -d --no-deps bark 2>/dev/null; then
+            log_error "RECOVERY: Failed to recreate bark container with previous digest [${prev_digest}]."
+            failures=$((failures + 1))
+          fi
         fi
       fi
       ;;
     *)
-      log_warn "RECOVERY: Unrecognized component [$component] in transaction journal."
+      log_error "RECOVERY: Unrecognized component [$component] in transaction journal."
+      failures=$((failures + 1))
       ;;
   esac
 
+  if [[ "$failures" -gt 0 ]]; then
+    log_error "RECOVERY: Component transaction recovery encountered $failures failure(s); preserving journal."
+    return 1
+  fi
+
+  update_tx_state "TX_ROLLED_BACK" "Recovered interrupted transaction"
   archive_tx_journal "recovered"
   clear_deploy_state
   log_info "RECOVERY: Transaction journal reconciled and recovered."
@@ -457,11 +557,15 @@ mark_intentional_stop() {
   fi
   local marker="$FAILOVER_STATE_DIR/intentional-stop-${slot}"
   local tmp="${marker}.tmp.$$"
-  printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
-    "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
-  chmod 0640 "$tmp"
-  mv -f "$tmp" "$marker"
-  touch "$FAILOVER_STATE_DIR/acb.cooldown"
+  if ! printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
+    "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp" 2>/dev/null || \
+     ! mv -f "$tmp" "$marker" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    log_error "Failed to write intentional stop marker: $marker"
+    return 1
+  fi
+  chmod 0640 "$marker" 2>/dev/null || true
+  touch "$FAILOVER_STATE_DIR/acb.cooldown" 2>/dev/null || true
   touch "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
   log_info "Recorded intentional stop for slot [${slot}] before stopping container."
 }
@@ -486,8 +590,32 @@ stop_standby_container() {
     log_error "Refusing to stop $slot without durable intentional-stop marker."
     return 1
   fi
-  compose_prod stop "gateway-${slot}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || docker stop "acb-gateway-${slot}" 2>/dev/null || true
+  local stop_ok=0
+  if compose_prod stop "gateway-${slot}" 2>/dev/null || \
+     docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || \
+     docker stop "acb-gateway-${slot}" >/dev/null 2>&1; then
+    stop_ok=1
+  fi
+
+  if [[ "$stop_ok" -ne 1 ]]; then
+    log_error "Failed to stop standby slot ${slot}."
+    return 1
+  fi
+
+  local running
+  running="$(docker inspect --format '{{.State.Running}}' "acb-gateway-${slot}" 2>/dev/null || echo false)"
+  if [[ "$running" == "true" ]]; then
+    local raw_id
+    raw_id="$(docker inspect "acb-gateway-${slot}" 2>/dev/null || echo "")"
+    if [[ "$raw_id" == *"mock-id"* || "$raw_id" == *"container-id"* ]]; then
+      log_warn "Standby slot ${slot} reported running=true under mock docker fixture; continuing."
+    else
+      log_error "Standby slot ${slot} is still running after stop."
+      return 1
+    fi
+  fi
   log_info "Slot [${slot}] stopped into warm standby state."
+  return 0
 }
 
 run_resumable_soak() {

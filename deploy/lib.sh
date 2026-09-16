@@ -30,3 +30,5 @@ source "$LIB_DIR/traefik.sh"
 source "$LIB_DIR/database.sh"
 # shellcheck source=deploy/lib/rollout-journal.sh
 source "$LIB_DIR/rollout-journal.sh"
+# shellcheck source=deploy/lib/recovery.sh
+source "$LIB_DIR/recovery.sh"

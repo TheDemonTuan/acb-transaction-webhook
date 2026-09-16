@@ -521,15 +521,23 @@ mkdir -p "$T13/no-jq-bin"
 for bin in bash sh env date tr grep egrep sed cut rm mv cp wc mkdir chmod cat touch sleep mktemp tail head awk python3 uname sort uniq dirname pwd basename flock false true; do
   bin_path="$(command -v "$bin" 2>/dev/null || true)"
   if [[ -n "$bin_path" && -x "$bin_path" ]]; then
-    ln -sf "$bin_path" "$T13/no-jq-bin/$bin"
+    cp -f "$bin_path" "$T13/no-jq-bin/$bin" 2>/dev/null || ln -sf "$bin_path" "$T13/no-jq-bin/$bin"
   fi
 done
+if ls /usr/bin/*.dll >/dev/null 2>&1; then
+  cp -f /usr/bin/*.dll "$T13/no-jq-bin/" 2>/dev/null || true
+fi
 # Copy mock docker
 cp "$T13/bin/docker" "$T13/no-jq-bin/docker"
 chmod +x "$T13/no-jq-bin/docker"
 
+win_extra=""
+if [[ -d "/c/Windows/system32" ]]; then
+  win_extra=":/c/Windows/system32:/c/Windows"
+fi
+
 (
-  export PATH="$T13/no-jq-bin"
+  export PATH="$T13/no-jq-bin${win_extra}"
   "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T13/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
@@ -537,7 +545,7 @@ assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 # Also directly test verify_quiesce_response fail-closed and parsing logic in no-jq environment
 (
-  export PATH="$T13/no-jq-bin"
+  export PATH="$T13/no-jq-bin${win_extra}"
   eval "$(sed -n '/^verify_quiesce_response() {/,/^}/p' "$DEPLOY_DIR/deploy-worker.sh")"
 
   rc_ok=0

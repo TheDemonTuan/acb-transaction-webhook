@@ -16,7 +16,7 @@ To prevent unverified mutations from reaching the production environment, the `m
 - **Required approvals**: 0 or 1 (solo maintainer choice)
 - **Dismiss stale pull request approvals on new commits**: ON
 - **Require status checks to pass before merging**: ON
-  - Required check: `verify` (Production Contract)
+  - Required check: `Production Contract`
 - **Require branches to be up to date before merging**: ON
 - **Require linear history**: ON
 - **Block force pushes**: ON

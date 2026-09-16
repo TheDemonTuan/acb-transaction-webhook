@@ -79,14 +79,14 @@ validate_traefik_yaml() {
   fi
 
   # 1. Use python3 / python yaml parser if available and working
-  if command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
     if python3 -c 'import sys, yaml; yaml.safe_load(sys.stdin)' < "$yaml_file" 2>/dev/null; then
       return 0
     else
       log_error "Traefik YAML syntax validation failed via python3: $yaml_file"
       return 1
     fi
-  elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
+  elif command -v python >/dev/null 2>&1 && python -c 'import yaml' >/dev/null 2>&1; then
     if python -c 'import sys, yaml; yaml.safe_load(sys.stdin)' < "$yaml_file" 2>/dev/null; then
       return 0
     else
@@ -350,7 +350,7 @@ ack_route_identity() {
       # Request route probe with host header and capture response headers
       local tmp_hdr
       tmp_hdr="$(mktemp "${TMPDIR:-/tmp}/ack-hdr.XXXXXX")"
-      http_code="$(curl --max-time 3 --silent --show-error -o /dev/null -w "%{http_code}" -D "$tmp_hdr" -H "Host: ${route_host}" "$ack_url" 2>/dev/null || echo "000")"
+      http_code="$(curl -4 --max-time 3 --silent --show-error -o /dev/null -w "%{http_code}" -D "$tmp_hdr" -H "Host: ${route_host}" "$ack_url" 2>/dev/null || echo "000")"
       resp_headers="$(cat "$tmp_hdr" 2>/dev/null || echo "")"
       rm -f "$tmp_hdr" 2>/dev/null || true
 
