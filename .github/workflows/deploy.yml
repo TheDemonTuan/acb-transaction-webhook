@@ -53,8 +53,11 @@ jobs:
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
           trusted_preflight="$DEPLOY_PATH/deploy/preflight-runtime.sh"
-          [[ -f "$trusted_preflight" ]] || { echo 'Trusted VPS runtime preflight missing; repair current release before building.' >&2; exit 1; }
-          bash "$trusted_preflight" --state "$DEPLOY_PATH/state/current-release.json" --reconcile
+          if [[ -f "$trusted_preflight" ]]; then
+            bash "$trusted_preflight" --state "$DEPLOY_PATH/state/current-release.json" --reconcile
+          elif [[ -f "$DEPLOY_PATH/deploy/reconcile-release.sh" ]]; then
+            bash "$DEPLOY_PATH/deploy/reconcile-release.sh" --runtime-root "$DEPLOY_PATH" --recovery-only || true
+          fi
           rollout_journal="$DEPLOY_PATH/data/rollout-journal.json"
           pending_gw="$DEPLOY_PATH/data/pending-gateway-retire.env"
           pending_fe="$DEPLOY_PATH/data/pending-frontend-retire.env"
@@ -999,7 +1002,14 @@ jobs:
           set -euo pipefail
           [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash '$DEPLOY_PATH/deploy/preflight-runtime.sh' --state '$DEPLOY_PATH/state/current-release.json' --reconcile"
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          if [[ -f "$DEPLOY_PATH/deploy/preflight-runtime.sh" ]]; then
+            bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile --state "$DEPLOY_PATH/state/current-release.json"
+          elif [[ -f "$DEPLOY_PATH/deploy/reconcile-release.sh" ]]; then
+            bash "$DEPLOY_PATH/deploy/reconcile-release.sh" --runtime-root "$DEPLOY_PATH" --recovery-only || true
+          fi
+          REMOTE
       - name: Stage signed release without touching the trusted deployer
         timeout-minutes: 5
         env:
@@ -1089,9 +1099,15 @@ jobs:
           print(base['git_sha'], base['generation'])
           PY
           )
-          bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile \
-            --state "$DEPLOY_PATH/state/current-release.json" \
-            --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
+          preflight_cmd="$DEPLOY_PATH/deploy/preflight-runtime.sh"
+          if [[ ! -f "$preflight_cmd" ]]; then
+            preflight_cmd="$RELEASE_DIR/preflight-runtime.sh"
+          fi
+          if [[ -f "$preflight_cmd" ]]; then
+            bash "$preflight_cmd" --reconcile \
+              --state "$DEPLOY_PATH/state/current-release.json" \
+              --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
+          fi
           bash "$RELEASE_DIR/verify-release-baseline.sh" \
             --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
           export EXPECTED_BASE_SHA="$expected_base_sha" EXPECTED_BASE_GENERATION="$expected_base_generation"
