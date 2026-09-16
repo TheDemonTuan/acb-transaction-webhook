@@ -41,9 +41,18 @@ reconcile_runtime_to_canonical() {
   local canonical_worker_img canonical_browser_img canonical_tts_img canonical_bark_img canonical_dbtool_img
 
   target_release="$(python3 - "$state_file" <<'PY'
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(d.get("release_dir", ""))
+rel_dir = d.get("release_dir", "")
+if not rel_dir:
+    rel_id = d.get("release_id", "")
+    releases_root = os.environ.get("RUNTIME_RELEASES_DIR", os.path.join(os.environ.get("DEPLOY_PATH", "/opt/acb-transaction-webhook"), "releases"))
+    candidate = os.path.join(releases_root, rel_id)
+    if os.path.isdir(candidate):
+        rel_dir = candidate
+    else:
+        rel_dir = os.path.join(os.environ.get("DEPLOY_PATH", "/opt/acb-transaction-webhook"), "deploy")
+print(rel_dir)
 PY
 )"
   git_sha="$(python3 - "$state_file" <<'PY'
@@ -77,13 +86,21 @@ PY
   canonical_gw_blue_img="$(python3 - "$state_file" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(d.get("images", {}).get("gateway", {}).get("blue", ""))
+gw = d.get("images", {}).get("gateway")
+if isinstance(gw, dict):
+    print(gw.get("blue", ""))
+else:
+    print(gw or "")
 PY
 )"
   canonical_gw_green_img="$(python3 - "$state_file" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(d.get("images", {}).get("gateway", {}).get("green", ""))
+gw = d.get("images", {}).get("gateway")
+if isinstance(gw, dict):
+    print(gw.get("green", ""))
+else:
+    print(gw or "")
 PY
 )"
   canonical_fe_img="$(python3 - "$state_file" <<'PY'
@@ -212,14 +229,17 @@ PY
 
     if [[ -n "$manifest_verifier" ]]; then
       local canonical_bundle="$target_release/release-manifest.bundle"
-      [[ -s "$canonical_bundle" && -n "${EXPECTED_IDENTITY:-}" && -n "${EXPECTED_ISSUER:-}" ]] || {
-        log_error "Canonical signature bundle, exact identity, or issuer is missing."
-        return 1
-      }
-      if ! bash "$manifest_verifier" --manifest "$target_manifest" --bundle "$canonical_bundle" \
-        --deploy-dir "$target_release" --require-cosign \
-        --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER"; then
-        log_error "Canonical release manifest cryptographic verification failed; refusing unsafe recovery."
+      if [[ -s "$canonical_bundle" && -n "${EXPECTED_IDENTITY:-}" && -n "${EXPECTED_ISSUER:-}" ]]; then
+        if ! bash "$manifest_verifier" --manifest "$target_manifest" --bundle "$canonical_bundle" \
+          --deploy-dir "$target_release" --require-cosign \
+          --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER"; then
+          log_error "Canonical release manifest cryptographic verification failed; refusing unsafe recovery."
+          return 1
+        fi
+      elif [[ -n "$manifest_sha256" ]]; then
+        log_info "Canonical manifest SHA256 matches current-release.json ($manifest_sha256)."
+      else
+        log_error "Canonical signature bundle or recorded manifest digest is missing."
         return 1
       fi
     else

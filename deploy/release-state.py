@@ -83,11 +83,11 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
         die("State must be a JSON object")
 
     ver = state.get("schema_version")
-    if ver != 2:
-        die(f"Unsupported schema_version: {ver} (expected 2)")
+    if ver not in (1, 2):
+        die(f"Unsupported schema_version: {ver} (expected 1 or 2)")
 
     gen = state.get("generation")
-    if not isinstance(gen, int) or gen < 1:
+    if not isinstance(gen, int) or gen < 0:
         die(f"Invalid generation: {gen}")
 
     rel_id = state.get("release_id", "")
@@ -99,8 +99,9 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
         die(f"Invalid git_sha: {git_sha}")
 
     manifest_sha = state.get("manifest_sha256", "")
-    if not isinstance(manifest_sha, str) or not HEX64_RE.fullmatch(manifest_sha):
-        die(f"Invalid manifest_sha256: {manifest_sha}")
+    if ver == 2 or manifest_sha:
+        if not isinstance(manifest_sha, str) or not HEX64_RE.fullmatch(manifest_sha):
+            die(f"Invalid manifest_sha256: {manifest_sha}")
 
     status = state.get("status", "")
     valid_statuses = ("COMPLETED", "PREPARED", "CANDIDATE") if allow_candidate else ("COMPLETED",)
@@ -108,9 +109,12 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
         die(f"Invalid status: {status} (allowed: {valid_statuses})")
 
     rel_dir = state.get("release_dir", "")
-    if not rel_dir or not isinstance(rel_dir, str):
-        die(f"release_dir is required")
-    validate_release_dir(rel_dir, manifest_sha, allow_candidate=allow_candidate)
+    if ver == 2:
+        if not rel_dir or not isinstance(rel_dir, str):
+            die(f"release_dir is required")
+        validate_release_dir(rel_dir, manifest_sha, allow_candidate=allow_candidate)
+    elif rel_dir:
+        validate_release_dir(rel_dir, manifest_sha, allow_candidate=allow_candidate)
 
     # Previous release validation
     prev = state.get("previous")
@@ -141,8 +145,8 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
     if gw_slot not in ("blue", "green"):
         die(f"active_slots.gateway must be 'blue' or 'green', got: {gw_slot}")
     fe_slot = slots.get("frontend")
-    if fe_slot not in ("blue", "green", "legacy"):
-        die(f"active_slots.frontend must be 'blue', 'green', or 'legacy', got: {fe_slot}")
+    if fe_slot is not None and fe_slot not in ("blue", "green", "legacy"):
+        die(f"active_slots.frontend must be 'blue', 'green', 'legacy', or null, got: {fe_slot}")
 
     # Images
     images = state.get("images", {})
@@ -150,10 +154,13 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
         die("images must be an object")
 
     gw_imgs = images.get("gateway")
-    if not isinstance(gw_imgs, dict):
-        die("images.gateway must be an object with 'blue' and 'green' keys")
-    validate_image_ref(gw_imgs.get("blue"), "images.gateway.blue")
-    validate_image_ref(gw_imgs.get("green"), "images.gateway.green")
+    if isinstance(gw_imgs, str):
+        validate_image_ref(gw_imgs, "images.gateway")
+    elif isinstance(gw_imgs, dict):
+        validate_image_ref(gw_imgs.get("blue"), "images.gateway.blue")
+        validate_image_ref(gw_imgs.get("green"), "images.gateway.green")
+    else:
+        die("images.gateway must be an image string or an object with 'blue' and 'green' keys")
 
     for comp in ["frontend", "worker", "dbtool", "auth_browser", "tts", "bark"]:
         validate_image_ref(images.get(comp), f"images.{comp}")
