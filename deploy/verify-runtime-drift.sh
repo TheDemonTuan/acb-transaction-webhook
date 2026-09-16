@@ -65,6 +65,7 @@ PY
 failures=0
 release_dir=""
 for row in "${expectations[@]}"; do
+  row="${row%$'\r'}"
   name="${row%%$'\t'*}"
   expected="${row#*$'\t'}"
   if [[ "$name" == "@release_dir" ]]; then

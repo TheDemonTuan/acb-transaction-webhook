@@ -20,6 +20,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 DEPLOY_DIR="$SCRIPT_DIR"
+export RELEASE_CONTEXT_DIR="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$DEPLOY_DIR}}"
 DATA_DIR="${DATA_DIR:-}"
 if [[ -z "$DATA_DIR" ]]; then
   if [[ -n "${DEPLOY_PATH:-}" && -d "${DEPLOY_PATH}/data" ]]; then
@@ -340,27 +341,73 @@ PY
 }
 
 rollback_completed_components() {
-  local image rollback_sha
+  local image rollback_sha rollback_dir
   rollback_sha="$(rollout_journal_git_sha)"
+  rollback_dir=""
+  if [[ -f "${CURRENT_RELEASE_FILE:-}" ]]; then
+    rollback_dir="$(python3 - "$CURRENT_RELEASE_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8')).get("release_dir", ""))
+except Exception:
+    pass
+PY
+)"
+  fi
+  if [[ -z "$rollback_dir" && -f "${ROLLOUT_JOURNAL_FILE:-}" ]]; then
+    rollback_dir="$(python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8')).get("previous_release_dir", ""))
+except Exception:
+    pass
+PY
+)"
+  fi
+  if [[ -n "$rollback_dir" && -d "$rollback_dir" ]]; then
+    log_info "Using previous release compose and scripts from: $rollback_dir"
+  else
+    rollback_dir="$DEPLOY_DIR"
+  fi
+
   if rollout_step_completed failover_controller; then
+    local fc_script="$rollback_dir/deploy-failover-controller.sh"
+    [[ -f "$fc_script" ]] || fc_script="$DEPLOY_DIR/deploy-failover-controller.sh"
     EXPECTED_COMMIT="$rollback_sha" RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 FAILOVER_ROLLBACK_ONLY=1 \
-      bash "$DEPLOY_DIR/deploy-failover-controller.sh" || return 1
+      RELEASE_DIR="$rollback_dir" RELEASE_CONTEXT_DIR="$rollback_dir" COMPOSE_ROOT="$rollback_dir/compose" \
+      bash "$fc_script" || return 1
   fi
   if rollout_step_completed worker; then
     image="$(get_release_env WORKER_IMAGE_REF)" || return 1
-    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-worker.sh" "$image" || return 1
+    local worker_script="$rollback_dir/deploy-worker.sh"
+    [[ -f "$worker_script" ]] || worker_script="$DEPLOY_DIR/deploy-worker.sh"
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+      RELEASE_DIR="$rollback_dir" RELEASE_CONTEXT_DIR="$rollback_dir" COMPOSE_ROOT="$rollback_dir/compose" \
+      bash "$worker_script" "$image" || return 1
   fi
   if rollout_step_completed bark; then
     image="$(get_release_env BARK_IMAGE_REF)" || return 1
-    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-bark.sh" "$image" || return 1
+    local bark_script="$rollback_dir/deploy-bark.sh"
+    [[ -f "$bark_script" ]] || bark_script="$DEPLOY_DIR/deploy-bark.sh"
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+      RELEASE_DIR="$rollback_dir" RELEASE_CONTEXT_DIR="$rollback_dir" COMPOSE_ROOT="$rollback_dir/compose" \
+      bash "$bark_script" "$image" || return 1
   fi
   if rollout_step_completed tts; then
     image="$(get_release_env TTS_IMAGE_REF)" || return 1
-    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-tts.sh" "$image" || return 1
+    local tts_script="$rollback_dir/deploy-tts.sh"
+    [[ -f "$tts_script" ]] || tts_script="$DEPLOY_DIR/deploy-tts.sh"
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+      RELEASE_DIR="$rollback_dir" RELEASE_CONTEXT_DIR="$rollback_dir" COMPOSE_ROOT="$rollback_dir/compose" \
+      bash "$tts_script" "$image" || return 1
   fi
   if rollout_step_completed auth_browser; then
     image="$(get_release_env BROWSER_IMAGE_REF)" || return 1
-    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-auth-browser.sh" "$image" || return 1
+    local ab_script="$rollback_dir/deploy-auth-browser.sh"
+    [[ -f "$ab_script" ]] || ab_script="$DEPLOY_DIR/deploy-auth-browser.sh"
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+      RELEASE_DIR="$rollback_dir" RELEASE_CONTEXT_DIR="$rollback_dir" COMPOSE_ROOT="$rollback_dir/compose" \
+      bash "$ab_script" "$image" || return 1
   fi
 }
 
@@ -371,22 +418,17 @@ cleanup_rollout() {
   fi
   if [[ "$ROLLOUT_EXIT_CODE" -ne 0 ]]; then
     log_warn "Rollout terminated with code ${ROLLOUT_EXIT_CODE}."
-    local final_status="INTERRUPTED"
     if ! release_is_committed; then
-      local rollback_failures=0
-      rollback_gateway_route || rollback_failures=$((rollback_failures + 1))
-      rollback_frontend_route || rollback_failures=$((rollback_failures + 1))
-      rollback_completed_components || rollback_failures=$((rollback_failures + 1))
-      verify_previous_runtime || rollback_failures=$((rollback_failures + 1))
-      if (( rollback_failures == 0 )); then
-        final_status="ROLLED_BACK"
-      else
-        log_error "Release rollback did not fully verify ($rollback_failures failure(s)); preserving evidence and blocking subsequent mutation."
-        ROLLOUT_EXIT_CODE=1
+      if [[ -f "${ROLLOUT_JOURNAL_FILE:-}" ]]; then
+        finish_rollout_journal "INTERRUPTED" "Rollout failed with code ${ROLLOUT_EXIT_CODE}" || true
       fi
-    fi
-    if [[ -f "${ROLLOUT_JOURNAL_FILE:-}" ]]; then
-      finish_rollout_journal "$final_status" ""
+      log_warn "Invoking canonical runtime reconciliation to recover from interrupted candidate rollout..."
+      if ! reconcile_runtime_to_canonical "$CURRENT_RELEASE_FILE" "${ROLLOUT_JOURNAL_FILE:-}"; then
+        log_error "Release rollback did not fully verify; preserving evidence and blocking subsequent mutation."
+        ROLLOUT_EXIT_CODE=1
+      else
+        log_info "Canonical runtime reconciliation completed successfully."
+      fi
     fi
   fi
   release_deploy_lock
@@ -407,6 +449,14 @@ trap cleanup_rollout EXIT
 
 # 1. Acquire explicit remote release lock
 acquire_deploy_lock
+
+# 1b. Strict VPS Preflight Verification
+if [[ -f "$DEPLOY_DIR/preflight-vps.sh" && "${SKIP_MANIFEST_CHECK:-0}" -ne 1 ]]; then
+  bash "$DEPLOY_DIR/preflight-vps.sh" \
+    --state "${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}" \
+    --data-dir "$DATA_DIR" \
+    --config "${ACB_CONFIG:-/opt/platform/edge/dynamic/acb.yml}"
+fi
 
 # 2. Inspect previous rollout state. Recovery runs only after new release preflights.
 PREVIOUS_ROLLOUT_STATUS=""

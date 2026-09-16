@@ -87,8 +87,8 @@ log_info "Resolved Previous Release Directory: $PREVIOUS_RELEASE_DIR"
 
 # Verify previous release directory resolves under RUNTIME_RELEASES_DIR if configured
 if [[ -n "${RUNTIME_RELEASES_DIR:-}" ]]; then
-  real_prev="$(readlink -f "$PREVIOUS_RELEASE_DIR" 2>/dev/null || echo "$PREVIOUS_RELEASE_DIR")"
-  real_root="$(readlink -f "$RUNTIME_RELEASES_DIR" 2>/dev/null || echo "$RUNTIME_RELEASES_DIR")"
+  real_prev="$(cd -- "$PREVIOUS_RELEASE_DIR" 2>/dev/null && pwd -P || readlink -f "$PREVIOUS_RELEASE_DIR" 2>/dev/null || echo "$PREVIOUS_RELEASE_DIR")"
+  real_root="$(cd -- "$RUNTIME_RELEASES_DIR" 2>/dev/null && pwd -P || readlink -f "$RUNTIME_RELEASES_DIR" 2>/dev/null || echo "$RUNTIME_RELEASES_DIR")"
   case "$real_prev" in
     "$real_root"/*) ;;
     *)
@@ -206,8 +206,11 @@ if step_was_completed worker && [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]; then
     worker_img="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$worker_img" ]]; then
+    worker_deployer="$PREVIOUS_RELEASE_DIR/deploy-worker.sh"
+    [[ -f "$worker_deployer" ]] || worker_deployer="$SCRIPT_DIR/deploy-worker.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-worker.sh" "$worker_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$worker_deployer" "$worker_img" || rollback_failures=$((rollback_failures + 1))
   fi
 fi
 
@@ -218,7 +221,7 @@ if [[ -f "${PENDING_FRONTEND_RETIRE_FILE:-}" ]] || step_was_completed frontend; 
 fi
 
 # 4e. Bark
-if step_was_completed bark && [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]; then
+if step_was_completed bark && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-bark.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]); then
   log_info "Restoring previous Bark service using previous bundle..."
   bark_img=""
   if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
@@ -228,13 +231,16 @@ if step_was_completed bark && [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]; then
     bark_img="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$bark_img" ]]; then
+    bark_deployer="$PREVIOUS_RELEASE_DIR/deploy-bark.sh"
+    [[ -f "$bark_deployer" ]] || bark_deployer="$SCRIPT_DIR/deploy-bark.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-bark.sh" "$bark_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$bark_deployer" "$bark_img" || rollback_failures=$((rollback_failures + 1))
   fi
 fi
 
 # 4f. TTS
-if step_was_completed tts && [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]; then
+if step_was_completed tts && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-tts.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]); then
   log_info "Restoring previous TTS service using previous bundle..."
   tts_img=""
   if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
@@ -244,13 +250,16 @@ if step_was_completed tts && [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]; then
     tts_img="$(get_release_env TTS_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$tts_img" ]]; then
+    tts_deployer="$PREVIOUS_RELEASE_DIR/deploy-tts.sh"
+    [[ -f "$tts_deployer" ]] || tts_deployer="$SCRIPT_DIR/deploy-tts.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-tts.sh" "$tts_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$tts_deployer" "$tts_img" || rollback_failures=$((rollback_failures + 1))
   fi
 fi
 
 # 4g. Auth Browser
-if step_was_completed auth_browser && [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]; then
+if step_was_completed auth_browser && ([[ -f "$PREVIOUS_RELEASE_DIR/deploy-auth-browser.sh" ]] || [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]); then
   log_info "Restoring previous Auth-Browser service using previous bundle..."
   br_img=""
   if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
@@ -260,8 +269,11 @@ if step_was_completed auth_browser && [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh"
     br_img="$(get_release_env BROWSER_IMAGE_REF 2>/dev/null || true)"
   fi
   if [[ -n "$br_img" ]]; then
+    ab_deployer="$PREVIOUS_RELEASE_DIR/deploy-auth-browser.sh"
+    [[ -f "$ab_deployer" ]] || ab_deployer="$SCRIPT_DIR/deploy-auth-browser.sh"
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
-      bash "$SCRIPT_DIR/deploy-auth-browser.sh" "$br_img" || rollback_failures=$((rollback_failures + 1))
+      RELEASE_DIR="$PREVIOUS_RELEASE_DIR" RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR" COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose" \
+      bash "$ab_deployer" "$br_img" || rollback_failures=$((rollback_failures + 1))
   fi
 fi
 

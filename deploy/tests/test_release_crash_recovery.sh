@@ -30,7 +30,7 @@ assert_eq() {
 
 setup_chaos_fixture() {
   local tdir="$1"
-  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state" "$tdir/traefik" "$tdir/mock_bin"
+  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state" "$tdir/traefik" "$tdir/mock_bin" "$tdir/releases/rel-A/compose"
 
   # Copy engine files
   cp -r "$DEPLOY_DIR/lib"* "$tdir/deploy/"
@@ -40,18 +40,47 @@ setup_chaos_fixture() {
   cp "$DEPLOY_DIR/reconcile-release.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/rollback-release.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/edge-probe.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/verify-runtime-drift.sh" "$tdir/deploy/"
+
+  cp -r "$DEPLOY_DIR/compose/"* "$tdir/releases/rel-A/compose/"
+  cp "$DEPLOY_DIR/verify-runtime-drift.sh" "$tdir/releases/rel-A/"
+  cp -r "$DEPLOY_DIR/lib"* "$tdir/releases/rel-A/"
+  cp "$DEPLOY_DIR/release-env.sh" "$tdir/releases/rel-A/"
+  cp "$DEPLOY_DIR/runtime-layout.sh" "$tdir/releases/rel-A/"
+  cp "$DEPLOY_DIR/release-state.py" "$tdir/releases/rel-A/"
 
   printf 'mock-master\n' > "$tdir/secrets/app_master_key"
   printf 'mock-worker\n' > "$tdir/secrets/worker_auth_token"
   printf 'admin\n' > "$tdir/secrets/bark_basic_auth_user"
   printf 'pass\n' > "$tdir/secrets/bark_basic_auth_password"
 
+  cat <<'EOF' > "$tdir/releases/rel-A/release-manifest.json"
+{
+  "release_id": "rel-A",
+  "git_sha": "1111111111111111111111111111111111111111",
+  "images": {
+    "gateway": "ghcr.io/test/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "frontend": "ghcr.io/test/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "worker": "ghcr.io/test/worker@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "dbtool": "ghcr.io/test/dbtool@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "auth_browser": "ghcr.io/test/auth@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "tts": "ghcr.io/test/tts@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "bark": "ghcr.io/test/bark@sha256:0000000000000000000000000000000000000000000000000000000000000001"
+  }
+}
+EOF
+
+  local m_sha
+  m_sha="$(sha256sum "$tdir/releases/rel-A/release-manifest.json" | cut -d' ' -f1)"
+
   # Initial canonical release A
-  cat <<'EOF' > "$tdir/state/current-release.json"
+  cat <<EOF > "$tdir/state/current-release.json"
 {
   "schema_version": 2,
   "generation": 10,
   "release_id": "rel-A",
+  "release_dir": "$tdir/releases/rel-A",
+  "manifest_sha256": "$m_sha",
   "status": "COMPLETED",
   "git_sha": "1111111111111111111111111111111111111111",
   "active_slots": {
@@ -65,6 +94,7 @@ setup_chaos_fixture() {
     },
     "frontend": "ghcr.io/test/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000001",
     "worker": "ghcr.io/test/worker@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "dbtool": "ghcr.io/test/dbtool@sha256:0000000000000000000000000000000000000000000000000000000000000001",
     "auth_browser": "ghcr.io/test/auth@sha256:0000000000000000000000000000000000000000000000000000000000000001",
     "tts": "ghcr.io/test/tts@sha256:0000000000000000000000000000000000000000000000000000000000000001",
     "bark": "ghcr.io/test/bark@sha256:0000000000000000000000000000000000000000000000000000000000000001"
@@ -171,6 +201,7 @@ EOF
   local ec=0
   PATH="$tdir/mock_bin:$PATH" \
   RUNTIME_ROOT="$tdir" \
+  RUNTIME_RELEASES_DIR="$tdir/releases" \
   DEPLOY_PATH="$tdir" \
   ACB_CONFIG="$tdir/traefik/acb.yml" \
   ACTIVE_SLOT_FILE="$tdir/state/gateway-active-slot" \

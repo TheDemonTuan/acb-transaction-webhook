@@ -37,22 +37,33 @@ def validate_image_ref(ref: Any, name: str) -> None:
         die(f"Image for '{name}' must be immutable @sha256:64hex digest, got: {ref}")
 
 
+def to_platform_path(path_str: str) -> Path:
+    if os.name == 'nt':
+        if path_str.startswith('/tmp/'):
+            import tempfile
+            return (Path(tempfile.gettempdir()) / path_str[5:]).resolve()
+        if len(path_str) > 2 and path_str[0] == '/' and path_str[2] == '/':
+            return Path(path_str[1].upper() + ':' + path_str[2:]).resolve()
+    return Path(path_str)
+
 def validate_release_dir(path_str: str, expected_manifest_sha: Optional[str] = None, allow_candidate: bool = False) -> Path:
     p = Path(path_str)
-    if not p.is_absolute():
+    if not p.is_absolute() and not path_str.startswith("/"):
         die(f"release_dir must be absolute: {path_str}")
     if p.is_symlink():
         die(f"release_dir must not be a symlink: {path_str}")
     
+    resolved_p = to_platform_path(path_str)
+
     releases_root_env = os.environ.get("RUNTIME_RELEASES_DIR")
     if releases_root_env:
         try:
-            resolved_root = Path(releases_root_env).resolve()
-            p.resolve().relative_to(resolved_root)
+            resolved_root = Path(os.path.realpath(to_platform_path(releases_root_env)))
+            Path(os.path.realpath(resolved_p)).relative_to(resolved_root)
         except Exception:
             die(f"release_dir {path_str} must resolve under RUNTIME_RELEASES_DIR ({releases_root_env})")
 
-    manifest_path = p / "release-manifest.json"
+    manifest_path = resolved_p / "release-manifest.json"
     if not manifest_path.is_file():
         if not allow_candidate:
             die(f"Missing release-manifest.json in release_dir: {path_str}")
@@ -115,6 +126,12 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
         p_dir = prev.get("release_dir", "")
         if p_dir:
             validate_release_dir(p_dir, allow_candidate=True)
+        p_git = prev.get("git_sha")
+        if p_git is not None and (not isinstance(p_git, str) or (p_git and not HEX40_RE.fullmatch(p_git))):
+            die(f"Invalid previous git_sha: {p_git}")
+        p_msha = prev.get("manifest_sha256")
+        if p_msha is not None and (not isinstance(p_msha, str) or (p_msha and not HEX64_RE.fullmatch(p_msha))):
+            die(f"Invalid previous manifest_sha256: {p_msha}")
 
     # Active slots
     slots = state.get("active_slots", {})
@@ -263,6 +280,8 @@ def build_candidate_state(
             "generation": prev_gen,
             "release_id": prev_id,
             "release_dir": prev_dir,
+            "git_sha": prev_state.get("git_sha", ""),
+            "manifest_sha256": prev_state.get("manifest_sha256", ""),
         } if prev_id else None,
         "active_slots": {
             "gateway": candidate_gw_slot,
@@ -339,6 +358,8 @@ def advance_doc_only_state(
             "generation": prev_gen,
             "release_id": prev_id,
             "release_dir": prev_dir,
+            "git_sha": prev_raw.get("git_sha", ""),
+            "manifest_sha256": prev_raw.get("manifest_sha256", ""),
         } if prev_id else None,
         "active_slots": active_slots,
         "images": images,
