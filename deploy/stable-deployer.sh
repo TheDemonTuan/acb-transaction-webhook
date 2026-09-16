@@ -48,7 +48,73 @@ esac
   --expected-issuer "$EXPECTED_ISSUER" \
   --require-cosign
 
+# Determine runtime root and source runtime layout
+RUNTIME_ROOT="${RUNTIME_ROOT:-${DEPLOY_PATH:-$(cd -- "$SCRIPT_DIR/.." && pwd -P)}}"
+export RUNTIME_ROOT
+
+if [[ -f "$SCRIPT_DIR/runtime-layout.sh" ]]; then
+  # shellcheck source=deploy/runtime-layout.sh
+  source "$SCRIPT_DIR/runtime-layout.sh"
+elif [[ -f "$RELEASE_DIR/runtime-layout.sh" ]]; then
+  # shellcheck source=deploy/runtime-layout.sh
+  source "$RELEASE_DIR/runtime-layout.sh"
+fi
+
+# One-time atomic path migration from legacy locations to canonical runtime-state locations
+migrate_runtime_state_path() {
+  local old_path="$1"
+  local new_path="$2"
+  if [[ -e "$old_path" ]]; then
+    if [[ -e "$new_path" ]]; then
+      local old_sum new_sum
+      old_sum="$(sha256sum "$old_path" | awk '{print $1}')"
+      new_sum="$(sha256sum "$new_path" | awk '{print $1}')"
+      if [[ "$old_sum" != "$new_sum" ]]; then
+        printf 'Conflicting state between legacy (%s) and canonical (%s); failing closed.\n' "$old_path" "$new_path" >&2
+        exit 1
+      fi
+      rm -f "$old_path"
+    else
+      local parent tmp
+      parent="$(dirname "$new_path")"
+      mkdir -p "$parent"
+      tmp="$(mktemp "${parent}/.$(basename "$new_path").tmp.XXXXXX")"
+      cp -p "$old_path" "$tmp"
+      python3 - "$tmp" "$parent" <<'PY'
+import os, sys
+p, parent = sys.argv[1:3]
+with open(p, 'rb') as f:
+    os.fsync(f.fileno())
+pfd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+try:
+    os.fsync(pfd)
+finally:
+    os.close(pfd)
+PY
+      mv -f "$tmp" "$new_path"
+      python3 - "$parent" <<'PY'
+import os, sys
+pfd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+try:
+    os.fsync(pfd)
+finally:
+    os.close(pfd)
+PY
+      rm -f "$old_path"
+    fi
+  fi
+}
+
 runtime_dir="$SCRIPT_DIR"
+mkdir -p "$RUNTIME_ROOT/state" "$RUNTIME_ROOT/data"
+
+migrate_runtime_state_path "$runtime_dir/.active-slot" "${ACTIVE_SLOT_FILE:-$RUNTIME_ROOT/state/gateway-active-slot}"
+migrate_runtime_state_path "$runtime_dir/.previous-slot" "${PREVIOUS_SLOT_FILE:-$RUNTIME_ROOT/state/gateway-previous-slot}"
+migrate_runtime_state_path "$runtime_dir/.active-frontend-slot" "${FRONTEND_ACTIVE_SLOT_FILE:-$RUNTIME_ROOT/state/frontend-active-slot}"
+migrate_runtime_state_path "$runtime_dir/.previous-frontend-slot" "${FRONTEND_PREVIOUS_SLOT_FILE:-$RUNTIME_ROOT/state/frontend-previous-slot}"
+migrate_runtime_state_path "$runtime_dir/.deploy-state" "${DEPLOY_STATE_FILE:-$RUNTIME_ROOT/state/deploy-state.json}"
+migrate_runtime_state_path "$runtime_dir/.soak-state" "${SOAK_STATE_FILE:-$RUNTIME_ROOT/state/soak-state.env}"
+
 for required in .env.production .release.env secrets; do
   [[ -e "$runtime_dir/$required" ]] || { printf 'Missing canonical runtime state: %s\n' "$runtime_dir/$required" >&2; exit 1; }
 done
@@ -58,15 +124,6 @@ for required in .env.production .release.env secrets; do
   fi
 done
 
-export ENV_FILE="$runtime_dir/.env.production"
-export RELEASE_ENV_FILE="$runtime_dir/.release.env"
-export SECRETS_DIR="$runtime_dir/secrets"
-export ACTIVE_SLOT_FILE="$runtime_dir/.active-slot"
-export PREVIOUS_SLOT_FILE="$runtime_dir/.previous-slot"
-export FRONTEND_ACTIVE_SLOT_FILE="$runtime_dir/.active-frontend-slot"
-export FRONTEND_PREVIOUS_SLOT_FILE="$runtime_dir/.previous-frontend-slot"
-export DEPLOY_STATE_FILE="$runtime_dir/.deploy-state"
-export SOAK_STATE_FILE="$runtime_dir/.soak-state"
 export DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
 deploy_group="$(id -gn)"
 if [[ "$(id -u)" -eq 0 ]]; then
@@ -94,15 +151,20 @@ bash "$RELEASE_DIR/dispatch-rollout.sh" \
   --manifest "$RELEASE_DIR/release-manifest.json" \
   --bundle "$RELEASE_DIR/release-manifest.bundle" \
   --deploy-dir "$RELEASE_DIR" \
+  --runtime-root "$RUNTIME_ROOT" \
   --data-dir "$DATA_DIR" \
   --expected-identity "$EXPECTED_IDENTITY" \
   --expected-issuer "$EXPECTED_ISSUER" \
   --require-cosign \
   --soak-seconds "$SOAK_SECONDS"
 
-# The candidate is already covered by the signed manifest and artifact hashes.
-for file in stable-deployer.sh verify-manifest.sh; do
-  tmp="$runtime_dir/.${file}.next.$$"
-  install -m 0755 "$RELEASE_DIR/$file" "$tmp"
-  mv -f "$tmp" "$runtime_dir/$file"
+# Atomically promote verifier/launcher and engine components after a successful release
+for file in stable-deployer.sh verify-manifest.sh runtime-layout.sh reconcile-release.sh release-state.py; do
+  if [[ -f "$RELEASE_DIR/$file" ]]; then
+    tmp="$runtime_dir/.${file}.next.$$"
+    mode="0755"
+    [[ "$file" != *.py ]] || mode="0644"
+    install -m "$mode" "$RELEASE_DIR/$file" "$tmp"
+    mv -f "$tmp" "$runtime_dir/$file"
+  fi
 done

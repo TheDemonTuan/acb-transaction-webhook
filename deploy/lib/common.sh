@@ -9,17 +9,17 @@ if [[ -z "${SCRIPT_DIR:-}" ]]; then
   export SCRIPT_DIR
 fi
 
-ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env.production}"
-RELEASE_ENV_FILE="${RELEASE_ENV_FILE:-$SCRIPT_DIR/.release.env}"
+ENV_FILE="${ENV_FILE:-${RUNTIME_DEPLOY_DIR:-$SCRIPT_DIR}/.env.production}"
+RELEASE_ENV_FILE="${RELEASE_ENV_FILE:-${RUNTIME_DEPLOY_DIR:-$SCRIPT_DIR}/.release.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/compose.prod.yaml}"
-SECRETS_DIR="${SECRETS_DIR:-$SCRIPT_DIR/secrets}"
-BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/data/backups}"
-ACTIVE_SLOT_FILE="${ACTIVE_SLOT_FILE:-$SCRIPT_DIR/.active-slot}"
-PREVIOUS_SLOT_FILE="${PREVIOUS_SLOT_FILE:-$SCRIPT_DIR/.previous-slot}"
-FRONTEND_ACTIVE_SLOT_FILE="${FRONTEND_ACTIVE_SLOT_FILE:-$SCRIPT_DIR/.active-frontend-slot}"
-FRONTEND_PREVIOUS_SLOT_FILE="${FRONTEND_PREVIOUS_SLOT_FILE:-$SCRIPT_DIR/.previous-frontend-slot}"
-DEPLOY_STATE_FILE="${DEPLOY_STATE_FILE:-$SCRIPT_DIR/.deploy-state}"
-SOAK_STATE_FILE="${SOAK_STATE_FILE:-$SCRIPT_DIR/.soak-state}"
+SECRETS_DIR="${SECRETS_DIR:-${RUNTIME_DEPLOY_DIR:-$SCRIPT_DIR}/secrets}"
+BACKUP_DIR="${BACKUP_DIR:-${RUNTIME_ROOT:-$SCRIPT_DIR}/data/backups}"
+ACTIVE_SLOT_FILE="${ACTIVE_SLOT_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/gateway-active-slot}"
+PREVIOUS_SLOT_FILE="${PREVIOUS_SLOT_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/gateway-previous-slot}"
+FRONTEND_ACTIVE_SLOT_FILE="${FRONTEND_ACTIVE_SLOT_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/frontend-active-slot}"
+FRONTEND_PREVIOUS_SLOT_FILE="${FRONTEND_PREVIOUS_SLOT_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/frontend-previous-slot}"
+DEPLOY_STATE_FILE="${DEPLOY_STATE_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/deploy-state.json}"
+SOAK_STATE_FILE="${SOAK_STATE_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/soak-state.env}"
 DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
 if [[ -z "${TRAEFIK_DYNAMIC_DIR:-}" ]]; then
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -94,7 +94,33 @@ compose_prod() {
   if [[ -f "$RELEASE_ENV_FILE" ]]; then
     compose_flags+=(--env-file "$RELEASE_ENV_FILE")
   fi
-  docker compose "${compose_flags[@]}" -f "$COMPOSE_FILE" "$@"
+  local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
+  local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
+  if [[ -d "$compose_dir" ]]; then
+    local COMPOSE_FILES=(
+      "$compose_dir/base.yaml"
+      "$compose_dir/gateway.yaml"
+      "$compose_dir/frontend.yaml"
+      "$compose_dir/worker.yaml"
+      "$compose_dir/auth-browser.yaml"
+      "$compose_dir/tts.yaml"
+      "$compose_dir/bark.yaml"
+      "$compose_dir/dbtool.yaml"
+    )
+    for file in "${COMPOSE_FILES[@]}"; do
+      if [[ -f "$file" ]]; then
+        compose_flags+=(-f "$file")
+      fi
+    done
+  else
+    local legacy_compose="$ctx_dir/compose.prod.yaml"
+    if [[ -f "$legacy_compose" ]]; then
+      compose_flags+=(-f "$legacy_compose")
+    else
+      compose_flags+=(-f "$COMPOSE_FILE")
+    fi
+  fi
+  docker compose "${compose_flags[@]}" "$@"
 }
 
 ensure_secret_permissions() {

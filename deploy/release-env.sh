@@ -65,7 +65,7 @@ import json, sys
 path, key = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     state = json.load(handle)
-if state.get("schema_version") != 1 or state.get("status") != "COMPLETED":
+if state.get("schema_version") not in (1, 2) or state.get("status") != "COMPLETED":
     raise SystemExit("invalid canonical release state")
 paths = {
     "IMAGE_REF_BLUE": ("images", "gateway", "blue"),
@@ -108,6 +108,9 @@ get_release_env() {
       printf '%s\n' "$default_val"
     fi
     return 0
+  elif [[ "${REQUIRE_CANONICAL_RELEASE_STATE:-0}" == "1" && ! -f "$CURRENT_RELEASE_FILE" && "${ALLOW_CANONICAL_STATE_BOOTSTRAP:-0}" != "1" ]]; then
+    log_release_error "Canonical release state missing: ${CURRENT_RELEASE_FILE}. Automatic legacy fallback is forbidden."
+    return 1
   fi
 
   if [[ ! -f "$file" ]]; then

@@ -29,6 +29,8 @@ assert_eq() {
 
 setup_aux_mock_env() {
   local test_dir="$1"
+  export DEPLOY_PATH="$test_dir"
+  export RUNTIME_ROOT="$test_dir"
   export RELEASE_ORCHESTRATED=1
   export ALLOW_TEST_LOCK_PATH=1
   unset BARK_START_CMD BARK_READY_CHECK_CMD BARK_UNCHANGED_CHECK_CMD

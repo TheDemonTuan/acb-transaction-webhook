@@ -183,7 +183,7 @@ declare -A images=(
   ["worker"]="$worker_image"
   ["dbtool"]="$dbtool_image"
   ["auth_browser"]="$auth_browser_image"
-  ["tts_gateway"]="$tts_image"
+  ["tts"]="$tts_image"
   ["bark"]="$bark_image"
 )
 
@@ -219,6 +219,17 @@ compute_hash() {
 # Collect deploy bundle files
 bundle_files=(
   "compose.prod.yaml"
+  "compose/base.yaml"
+  "compose/gateway.yaml"
+  "compose/frontend.yaml"
+  "compose/worker.yaml"
+  "compose/auth-browser.yaml"
+  "compose/tts.yaml"
+  "compose/bark.yaml"
+  "compose/dbtool.yaml"
+  "runtime-layout.sh"
+  "reconcile-release.sh"
+  "release-state.py"
   "component-map.json"
   "lib.sh"
   "deploy-warm.sh"
@@ -247,6 +258,7 @@ bundle_files=(
   "lib/images.sh"
   "lib/state.sh"
   "lib/traefik.sh"
+  "lib/rollout-journal.sh"
   "verify-compose-runtime.sh"
   "verify-runtime-drift.sh"
   "cve-allowlist.json"
@@ -288,6 +300,44 @@ for filename in "${bundle_files[@]}"; do
   hash="$(compute_hash "$filepath")"
   printf '%s=%s\n' "$filename" "$hash" >> "$tmp_artifacts"
 done
+
+# Deterministic split-compose bundle hash
+compose_bundle_hash="$(python3 - "$deploy_dir" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256()
+for p in sorted((root / "compose").glob("*.yaml")):
+    rel = f"compose/{p.name}"
+    h.update(rel.encode() + b"\0" + p.read_bytes() + b"\0")
+print(h.hexdigest())
+PY
+)"
+printf 'compose_bundle=%s\n' "$compose_bundle_hash" >> "$tmp_artifacts"
+printf 'compose_bundle_sha256=%s\n' "$compose_bundle_hash" >> "$tmp_artifacts"
+
+# Deterministic failover controller bundle hash
+failover_bundle_hash="$(python3 - "$deploy_dir" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1]) / "failover"
+paths = [
+    pathlib.Path("vps-failover-controller.py"),
+    pathlib.Path("vps-failover-controller.service"),
+    pathlib.Path("vps-failover-reconcile.service"),
+    pathlib.Path("vps-failover-reconcile.timer"),
+    pathlib.Path("apps.d/acb.json"),
+    pathlib.Path("apps.d/auth-browser.json"),
+    pathlib.Path("apps.d/worker.json"),
+]
+h = hashlib.sha256()
+for rel in paths:
+    p = root / rel
+    if p.is_file():
+        h.update(str(rel).encode() + b"\0" + p.read_bytes() + b"\0")
+print(h.hexdigest())
+PY
+)"
+printf 'failover-bundle=%s\n' "$failover_bundle_hash" >> "$tmp_artifacts"
+printf 'failover_bundle_sha256=%s\n' "$failover_bundle_hash" >> "$tmp_artifacts"
 
 if command -v node >/dev/null 2>&1; then
   node - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
@@ -355,7 +405,7 @@ const manifest = {
     worker,
     dbtool,
     auth_browser: authBrowser,
-    tts_gateway: tts,
+    tts,
     bark
   },
   artifacts
@@ -433,7 +483,7 @@ manifest = {
         "worker": worker,
         "dbtool": dbtool,
         "auth_browser": auth_browser,
-        "tts_gateway": tts,
+        "tts": tts,
         "bark": bark
     },
     "artifacts": artifacts

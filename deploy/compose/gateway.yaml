@@ -1,0 +1,162 @@
+services:
+  gateway-blue:
+    image: ${IMAGE_REF_BLUE:?IMAGE_REF_BLUE is required}
+    container_name: acb-gateway-blue
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file:
+      - .env.production
+    environment:
+      APP_ENV: production
+      RUNTIME_ROLE: gateway
+      PLATFORM_SLOT: blue
+      RELEASE_COMMIT: ${RELEASE_COMMIT:-unknown}
+      PORT: 8090
+      LISTEN_ADDR: 0.0.0.0:8090
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
+      DATA_DIR: /data
+      DATABASE_PATH: /data/gateway.db
+      TZ: Asia/Ho_Chi_Minh
+      APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+      WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_REALTIME_URL: http://acb-worker:8191
+      WORKER_REALTIME_ENABLED: "true"
+      WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
+      AUTH_BROWSER_URL: http://auth-browser:8181
+      AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      TTS_GATEWAY_URL: http://tts-gateway:8081
+      TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
+    expose:
+      - "8090"
+    networks:
+      edge-acb:
+        aliases:
+          - acb-web-blue
+      acb-core:
+      acb-egress:
+    volumes:
+      - gateway_data:/data
+    secrets:
+      - app_master_key
+      - tts_internal_token
+      - worker_internal_token
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=edge-acb"
+      - "traefik.http.routers.acb-blue.entrypoints=slot-probe"
+      - "traefik.http.routers.acb-blue.rule=Host(`acb-blue.internal.invalid`)"
+      - "traefik.http.services.acb-blue.loadbalancer.server.port=8090"
+      - "traefik.http.services.acb-blue.loadbalancer.healthcheck.path=/readyz"
+      - "traefik.http.services.acb-blue.loadbalancer.healthcheck.interval=3s"
+      - "traefik.http.services.acb-blue.loadbalancer.healthcheck.timeout=1s"
+      - "platform.failover.enabled=true"
+      - "platform.failover.app=acb"
+      - "platform.failover.slot=blue"
+      - "platform.failover.peer=acb-gateway-green"
+      - "platform.workload.class=http"
+      - "platform.failover.mode=warm"
+    healthcheck:
+      test: ["CMD", "/gateway", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: "0.75"
+    mem_limit: 512M
+    pids_limit: 100
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+          pids: 100
+
+  gateway-green:
+    image: ${IMAGE_REF_GREEN:?IMAGE_REF_GREEN is required}
+    container_name: acb-gateway-green
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file:
+      - .env.production
+    environment:
+      APP_ENV: production
+      RUNTIME_ROLE: gateway
+      PLATFORM_SLOT: green
+      RELEASE_COMMIT: ${RELEASE_COMMIT:-unknown}
+      PORT: 8090
+      LISTEN_ADDR: 0.0.0.0:8090
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
+      DATA_DIR: /data
+      DATABASE_PATH: /data/gateway.db
+      TZ: Asia/Ho_Chi_Minh
+      APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+      WORKER_RPC_URL: http://acb-worker:8190
+      WORKER_REALTIME_URL: http://acb-worker:8191
+      WORKER_REALTIME_ENABLED: "true"
+      WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
+      AUTH_BROWSER_URL: http://auth-browser:8181
+      AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      TTS_GATEWAY_URL: http://tts-gateway:8081
+      TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
+    expose:
+      - "8090"
+    networks:
+      edge-acb:
+        aliases:
+          - acb-web-green
+      acb-core:
+      acb-egress:
+    volumes:
+      - gateway_data:/data
+    secrets:
+      - app_master_key
+      - tts_internal_token
+      - worker_internal_token
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=edge-acb"
+      - "traefik.http.routers.acb-green.entrypoints=slot-probe"
+      - "traefik.http.routers.acb-green.rule=Host(`acb-green.internal.invalid`)"
+      - "traefik.http.services.acb-green.loadbalancer.server.port=8090"
+      - "traefik.http.services.acb-green.loadbalancer.healthcheck.path=/readyz"
+      - "traefik.http.services.acb-green.loadbalancer.healthcheck.interval=3s"
+      - "traefik.http.services.acb-green.loadbalancer.healthcheck.timeout=1s"
+      - "platform.failover.enabled=true"
+      - "platform.failover.app=acb"
+      - "platform.failover.slot=green"
+      - "platform.failover.peer=acb-gateway-blue"
+      - "platform.workload.class=http"
+      - "platform.failover.mode=warm"
+    healthcheck:
+      test: ["CMD", "/gateway", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: "0.75"
+    mem_limit: 512M
+    pids_limit: 100
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+          pids: 100

@@ -338,20 +338,23 @@ if (!manifest.images || typeof manifest.images !== 'object') {
   process.exit(1);
 }
 
-const requiredImages = ['frontend', 'gateway', 'worker', 'dbtool', 'auth_browser', 'tts_gateway', 'bark'];
+const requiredImages = ['frontend', 'gateway', 'worker', 'dbtool', 'auth_browser', 'tts', 'bark'];
 const expectedMap = {
   frontend: expFe,
   gateway: expGw,
   worker: expWk,
   dbtool: expDb,
   auth_browser: expBr,
-  tts_gateway: expTts,
+  tts: expTts,
   bark: expBk
 };
 const digestRe = /^[^ \t\r\n]+@sha256:[a-f0-9]{64}$/;
 
 for (const key of requiredImages) {
-  const img = manifest.images[key];
+  let img = manifest.images[key];
+  if (!img && key === 'tts' && manifest.images.tts_gateway) {
+    img = manifest.images.tts_gateway;
+  }
   if (!img || !digestRe.test(img)) {
     console.error(`Error: image '${key}' is missing or not an immutable sha256 digest: ${img}`);
     process.exit(1);
@@ -484,21 +487,23 @@ if not isinstance(images, dict):
     print("Error: missing images section in manifest", file=sys.stderr)
     sys.exit(1)
 
-required = ["frontend", "gateway", "worker", "dbtool", "auth_browser", "tts_gateway", "bark"]
+required = ["frontend", "gateway", "worker", "dbtool", "auth_browser", "tts", "bark"]
 expected_map = {
     "frontend": exp_fe,
     "gateway": exp_gw,
     "worker": exp_wk,
     "dbtool": exp_db,
     "auth_browser": exp_br,
-    "tts_gateway": exp_tts,
+    "tts": exp_tts,
     "bark": exp_bk
 }
 digest_re = re.compile(r"^[^ \t\r\n]+@sha256:[a-f0-9]{64}$")
 
 for k in required:
-    img = images.get(k, "")
-    if not digest_re.match(img):
+    img = images.get(k)
+    if not img and k == "tts" and "tts_gateway" in images:
+        img = images.get("tts_gateway")
+    if not img or not digest_re.match(img):
         print(f"Error: image '{k}' is missing or not an immutable sha256 digest: {img}", file=sys.stderr)
         sys.exit(1)
     exp = expected_map.get(k)
@@ -571,6 +576,10 @@ while IFS= read -r line; do
     if [[ -z "$art_file" || "$art_file" == /* || "$art_file" == *\\* || "$art_file" == *".."* || ! "$expected_hash" =~ ^[a-f0-9]{64}$ ]]; then
       printf 'Error: unsafe artifact entry in manifest: %s\n' "$art_file" >&2
       exit 1
+    fi
+    if [[ "$art_file" == "compose_bundle"* || "$art_file" == "failover-bundle"* || "$art_file" == "failover_bundle"* ]]; then
+      # Virtual bundle hash verified by drift verifier
+      continue
     fi
     target_path="$canonical_deploy_dir/$art_file"
     if [[ ! -f "$target_path" || -L "$target_path" ]]; then

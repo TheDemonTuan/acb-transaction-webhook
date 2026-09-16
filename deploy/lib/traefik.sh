@@ -212,7 +212,10 @@ atomic_switch_frontend_route() {
   }
   local gateway_slot
   gateway_slot="$(get_active_slot)"
-  verify_traefik_prerequisites
+  if ! verify_traefik_prerequisites; then
+    log_error "Frontend route prerequisites failed; no route mutation performed."
+    return 1
+  fi
   local tmp_config="${ACB_CONFIG}.tmp.$$"
   render_traefik_config "$gateway_slot" "$tmp_config" "$target_slot"
   if ! validate_traefik_yaml "$tmp_config"; then
@@ -250,7 +253,10 @@ atomic_switch_route() {
   fi
 
   log_info "Atomically updating Traefik route pointer to slot: ${target_slot}..."
-  verify_traefik_prerequisites
+  if ! verify_traefik_prerequisites; then
+    log_error "Route prerequisites failed; no route mutation performed."
+    return 1
+  fi
 
   local tmp_config="${ACB_CONFIG}.tmp.$$"
   render_traefik_config "$target_slot" "$tmp_config"
@@ -412,4 +418,174 @@ central_switch_route() {
   fi
   atomic_switch_route "$target_slot"
   ack_route_identity "$target_slot" "$expected_commit" 15
+}
+
+rollback_gateway_route() {
+  if [[ -f "${PENDING_GATEWAY_RETIRE_FILE:-}" ]]; then
+    local old_slot candidate_slot
+    old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
+    candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
+    if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting gateway route to [$old_slot] from pending evidence..."
+      if ! atomic_switch_route "$old_slot"; then
+        log_error "Gateway route rollback switch to [$old_slot] failed; preserving pending evidence."
+        return 1
+      fi
+      if ! ack_route_identity "$old_slot" "" 30; then
+        log_error "Gateway route rollback ACK failed for [$old_slot]; preserving both slots and evidence."
+        return 1
+      fi
+      printf '%s' "$old_slot" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
+      stop_standby_container "$candidate_slot" || true
+      rm -f "$PENDING_GATEWAY_RETIRE_FILE"
+      log_info "Gateway route restored to [$old_slot]."
+    else
+      log_error "Gateway rollback evidence is malformed; refusing to discard it."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+parse_pending_frontend_evidence() {
+  local file="${1:-${PENDING_FRONTEND_RETIRE_FILE:-}}"
+  [[ -n "$file" && -f "$file" ]] || return 1
+  python3 - "$file" <<'PY'
+import json, sys
+path = sys.argv[1]
+prev_top = ""
+cand_top = ""
+prev_cnt = ""
+cand_cnt = ""
+gw_slot = ""
+
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    if content.startswith("{"):
+        d = json.loads(content)
+        prev_top = d.get("previous_topology", "")
+        cand_top = d.get("candidate_topology", "")
+        prev_cnt = d.get("previous_container", "")
+        cand_cnt = d.get("candidate_container", "")
+        gw_slot = d.get("gateway_slot_at_switch", "")
+    else:
+        for line in content.splitlines():
+            line = line.strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                if k == "old_slot":
+                    prev_top = v
+                elif k == "candidate_slot":
+                    cand_top = v
+        if prev_top == "legacy":
+            prev_cnt = "acb-frontend"
+        elif prev_top:
+            prev_cnt = f"acb-frontend-{prev_top}"
+        if cand_top:
+            cand_cnt = f"acb-frontend-{cand_top}"
+except Exception:
+    pass
+
+print(f"PREV_TOP='{prev_top}'; CAND_TOP='{cand_top}'; PREV_CNT='{prev_cnt}'; CAND_CNT='{cand_cnt}'; GW_SLOT='{gw_slot}'")
+PY
+}
+
+cleanup_pending_frontend() {
+  local evidence_file="${1:-${PENDING_FRONTEND_RETIRE_FILE:-}}"
+  [[ -n "$evidence_file" && -f "$evidence_file" ]] || return 0
+
+  local cleanup_file="${evidence_file}.cleanup"
+  mv -f "$evidence_file" "$cleanup_file"
+
+  local PREV_TOP="" CAND_TOP="" PREV_CNT="" CAND_CNT="" GW_SLOT=""
+  eval "$(parse_pending_frontend_evidence "$cleanup_file" 2>/dev/null || true)"
+
+  local container_to_stop="${PREV_CNT:-}"
+  if [[ -z "$container_to_stop" && -n "$PREV_TOP" ]]; then
+    if [[ "$PREV_TOP" == "legacy" ]]; then
+      container_to_stop="acb-frontend"
+    else
+      container_to_stop="acb-frontend-${PREV_TOP}"
+    fi
+  fi
+
+  if [[ -n "$container_to_stop" ]]; then
+    if docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$container_to_stop" >/dev/null 2>&1; then
+      rm -f "$cleanup_file"
+      log_info "Old frontend container [$container_to_stop] retired successfully."
+      return 0
+    else
+      log_warn "Committed release is healthy, but old frontend container [$container_to_stop] cleanup remains pending: $cleanup_file"
+      return 1
+    fi
+  else
+    rm -f "$cleanup_file"
+    return 0
+  fi
+}
+
+rollback_frontend_route() {
+  local evidence_file="${1:-${PENDING_FRONTEND_RETIRE_FILE:-}}"
+  if [[ -n "$evidence_file" && -f "$evidence_file" ]]; then
+    local PREV_TOP="" CAND_TOP="" PREV_CNT="" CAND_CNT="" GW_SLOT=""
+    eval "$(parse_pending_frontend_evidence "$evidence_file" 2>/dev/null || true)"
+    local prev_top="$PREV_TOP" cand_top="$CAND_TOP" prev_cnt="$PREV_CNT" cand_cnt="$CAND_CNT"
+
+    if [[ -z "$cand_cnt" && -n "$cand_top" ]]; then
+      cand_cnt="acb-frontend-${cand_top}"
+    fi
+    if [[ -z "$prev_cnt" && -n "$prev_top" ]]; then
+      if [[ "$prev_top" == "legacy" ]]; then
+        prev_cnt="acb-frontend"
+      else
+        prev_cnt="acb-frontend-${prev_top}"
+      fi
+    fi
+
+    if [[ "$prev_top" =~ ^(blue|green|legacy)$ && "$cand_top" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting frontend route to topology [$prev_top]..."
+      if [[ "$prev_top" == "legacy" ]]; then
+        if ! docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "acb-frontend" 2>/dev/null | grep -Eq '^(healthy|running)$'; then
+          log_error "Legacy frontend container acb-frontend is missing or unhealthy; failing closed."
+          return 1
+        fi
+        local current_gw_slot
+        current_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+        local tmp_route="${ACB_CONFIG}.rollback.$$"
+        render_traefik_config "$current_gw_slot" "$tmp_route" "legacy"
+        if ! atomic_write_file "$ACB_CONFIG" 644 < "$tmp_route"; then
+          rm -f "$tmp_route"
+          log_error "Frontend legacy route rollback file write failed; preserving evidence."
+          return 1
+        fi
+        rm -f "$tmp_route"
+        if ! ack_frontend_route 30; then
+          log_error "Frontend legacy route rollback ACK failed; preserving both containers and pending evidence."
+          return 1
+        fi
+        rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+        log_info "Frontend reverted to legacy container acb-frontend."
+      else
+        if ! atomic_switch_frontend_route "$prev_top"; then
+          log_error "Frontend route rollback switch to [$prev_top] failed; preserving evidence."
+          return 1
+        fi
+        if ! ack_frontend_route 30; then
+          log_error "Frontend route rollback ACK failed for [$prev_top]; preserving both containers and pending evidence."
+          return 1
+        fi
+        printf '%s' "$prev_top" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+        log_info "Frontend reverted to slot [$prev_top]."
+      fi
+    else
+      log_error "Frontend rollback evidence is malformed; refusing to discard it."
+      return 1
+    fi
+  fi
+  return 0
 }

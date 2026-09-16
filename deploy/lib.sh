@@ -6,6 +6,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
 
+if [[ -f "$SCRIPT_DIR/runtime-layout.sh" ]]; then
+  # shellcheck source=deploy/runtime-layout.sh
+  source "$SCRIPT_DIR/runtime-layout.sh"
+elif [[ -f "$SCRIPT_DIR/../deploy/runtime-layout.sh" ]]; then
+  source "$SCRIPT_DIR/../deploy/runtime-layout.sh"
+fi
+
 LIB_DIR="$SCRIPT_DIR/lib"
 if [[ ! -d "$LIB_DIR" && -d "$SCRIPT_DIR/../deploy/lib" ]]; then
   LIB_DIR="$SCRIPT_DIR/../deploy/lib"
@@ -21,3 +28,5 @@ source "$LIB_DIR/state.sh"
 source "$LIB_DIR/traefik.sh"
 # shellcheck source=deploy/lib/database.sh
 source "$LIB_DIR/database.sh"
+# shellcheck source=deploy/lib/rollout-journal.sh
+source "$LIB_DIR/rollout-journal.sh"

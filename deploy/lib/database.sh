@@ -3,6 +3,8 @@
 # Database migrations, active-auth fail-closed gate, read-only WAL probes, backups, and candidate readiness probes.
 set -euo pipefail
 
+DEFAULT_GATEWAY_DB="${GATEWAY_DB_FILE:-${RUNTIME_DATA_DIR:-$SCRIPT_DIR/data}/gateway.db}"
+
 check_active_auth_gate() {
   log_info "Evaluating active-auth gate before migration / core modification..."
   local active_count=""
@@ -66,7 +68,7 @@ check_active_auth_gate() {
       return 1
     fi
   elif command -v sqlite3 >/dev/null 2>&1; then
-    local db_file="${1:-$SCRIPT_DIR/data/gateway.db}"
+    local db_file="${1:-$DEFAULT_GATEWAY_DB}"
     if [[ ! -r "$db_file" ]]; then
       log_error "check_active_auth_gate: Database file '$db_file' is missing or not readable."
       return 1
@@ -127,8 +129,8 @@ acquire_mutation_gate() {
       log_error "acquire_mutation_gate: dbtool execution failed: ${gate_json}"
       return 1
     fi
-  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v dbtool >/dev/null 2>&1; then
-    if ! gate_json="$(dbtool -path "$SCRIPT_DIR/data/gateway.db" -gate-acquire -owner "$owner" -reason "$reason" -lease-duration "$lease_duration" 2>&1)"; then
+  elif [[ -f "$DEFAULT_GATEWAY_DB" ]] && command -v dbtool >/dev/null 2>&1; then
+    if ! gate_json="$(dbtool -path "$DEFAULT_GATEWAY_DB" -gate-acquire -owner "$owner" -reason "$reason" -lease-duration "$lease_duration" 2>&1)"; then
       log_error "acquire_mutation_gate: local dbtool failed: ${gate_json}"
       return 1
     fi
@@ -166,8 +168,8 @@ release_mutation_gate() {
       -gate-release \
       -owner "$owner" \
       -lease-token "$token" >/dev/null 2>&1 || true
-  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v dbtool >/dev/null 2>&1; then
-    dbtool -path "$SCRIPT_DIR/data/gateway.db" -gate-release -owner "$owner" -lease-token "$token" >/dev/null 2>&1 || true
+  elif [[ -f "$DEFAULT_GATEWAY_DB" ]] && command -v dbtool >/dev/null 2>&1; then
+    dbtool -path "$DEFAULT_GATEWAY_DB" -gate-release -owner "$owner" -lease-token "$token" >/dev/null 2>&1 || true
   fi
   log_info "Durable mutation gate released."
   return 0
@@ -194,8 +196,8 @@ verify_schema_compat() {
       log_error "Schema compatibility verification failed via dbtool"
       return 1
     fi
-  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v dbtool >/dev/null 2>&1; then
-    if ! dbtool -path "$SCRIPT_DIR/data/gateway.db" -schema-compat -min-version "$min_version"; then
+  elif [[ -f "$DEFAULT_GATEWAY_DB" ]] && command -v dbtool >/dev/null 2>&1; then
+    if ! dbtool -path "$DEFAULT_GATEWAY_DB" -schema-compat -min-version "$min_version"; then
       log_error "Schema compatibility verification failed via local dbtool"
       return 1
     fi
@@ -218,8 +220,8 @@ verify_wal_probe() {
         return 1
       fi
     fi
-  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]] && command -v sqlite3 >/dev/null 2>&1; then
-    if ! sqlite3 "file:$SCRIPT_DIR/data/gateway.db?mode=ro" "PRAGMA quick_check;" >/dev/null 2>&1; then
+  elif [[ -f "$DEFAULT_GATEWAY_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+    if ! sqlite3 "file:$DEFAULT_GATEWAY_DB?mode=ro" "PRAGMA quick_check;" >/dev/null 2>&1; then
       log_error "Read-only WAL probe failed via sqlite3 quick_check."
       return 1
     fi
@@ -249,10 +251,10 @@ perform_sqlite_backup() {
       -v "${db_volume}:/data:rw" \
       -v "${BACKUP_DIR}:/backup:rw" \
       "$dbtool_img" -path /data/gateway.db -backup-to "/backup/gateway-${ts}.db" >&2
-  elif [[ -f "$SCRIPT_DIR/data/gateway.db" ]]; then
+  elif [[ -f "$DEFAULT_GATEWAY_DB" ]]; then
     if command -v sqlite3 >/dev/null 2>&1; then
-      sqlite3 "$SCRIPT_DIR/data/gateway.db" "PRAGMA wal_checkpoint(TRUNCATE);" || true
-      sqlite3 "$SCRIPT_DIR/data/gateway.db" ".backup '$backup_file'"
+      sqlite3 "$DEFAULT_GATEWAY_DB" "PRAGMA wal_checkpoint(TRUNCATE);" || true
+      sqlite3 "$DEFAULT_GATEWAY_DB" ".backup '$backup_file'"
     fi
   fi
 

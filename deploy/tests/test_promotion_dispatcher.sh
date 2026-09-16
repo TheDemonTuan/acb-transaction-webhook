@@ -55,11 +55,16 @@ assert_file_contains() {
 
 setup_dispatcher_env() {
   local tdir="$1"
-  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state"
+  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state" "$tdir/releases"
+  export RUNTIME_ROOT="$tdir"
+  export RUNTIME_RELEASES_DIR="$tdir"
+  export SOAK_SECONDS=0
 
   # Copy library and helper files
   cp -r "$DEPLOY_DIR/lib"* "$tdir/deploy/"
+  cp "$DEPLOY_DIR/runtime-layout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/release-env.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/release-state.py" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-runtime-drift.sh" "$tdir/deploy/"
@@ -90,6 +95,8 @@ BARK_IMAGE_REF=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04e
 EOF
   printf 'blue' > "$tdir/deploy/.active-slot"
   printf 'blue' > "$tdir/deploy/.active-frontend-slot"
+  printf 'blue' > "$tdir/state/gateway-active-slot"
+  printf 'blue' > "$tdir/state/frontend-active-slot"
   cat <<'EOF' > "$tdir/state/current-release.json"
 {
   "schema_version": 1,
@@ -213,7 +220,7 @@ write_mock_manifest() {
     "worker": "ghcr.io/test/worker@sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "dbtool": "ghcr.io/test/dbtool@sha256:3333333333333333333333333333333333333333333333333333333333333333",
     "auth_browser": "ghcr.io/test/auth-browser@sha256:4444444444444444444444444444444444444444444444444444444444444444",
-    "tts_gateway": "ghcr.io/test/tts-gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "tts": "ghcr.io/test/tts-gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555",
     "bark": "ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4"
   },
   "artifacts": {}
@@ -652,6 +659,95 @@ worker_calls="$(grep -c '^WORKER:' "$T12/data/trace.log")"
 assert_eq "2" "$worker_calls" "Worker ran exactly once for promotion and once for rollback"
 canonical_release="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$T12/state/current-release.json")"
 assert_eq "baseline" "$canonical_release" "Failed release does not mutate canonical state"
+
+# ----------------------------------------------------
+# 13. Pre-soak runtime contract check & soak sequencing (Task 5)
+# ----------------------------------------------------
+printf "\nTEST 13: Pre-Soak Runtime Contract Verification & Soak Execution...\n"
+T13="$TEST_TMP/t13"
+setup_dispatcher_env "$T13"
+manifest_t13="$T13/deploy/release-manifest.json"
+sha_t13="1313131313131313131313131313131313131313"
+write_mock_manifest "$manifest_t13" "$sha_t13" '{"gateway":true,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false}'
+
+# 13a. Pre-soak check fails -> soak command is NEVER invoked
+cat <<EOF > "$T13/data/fake_soak.sh"
+#!/usr/bin/env bash
+echo "SOAK_INVOKED" >> "$TEST_TMP/soak_trace.log"
+exit 0
+EOF
+chmod +x "$T13/data/fake_soak.sh"
+rm -f "$TEST_TMP/soak_trace.log"
+
+# Simulate runtime drift by having RUNTIME_DRIFT_CHECK_CMD fail on pre-soak
+set +e
+SOAK_SECONDS=900 \
+RELEASE_SOAK_CMD="bash $T13/data/fake_soak.sh" \
+RUNTIME_DRIFT_CHECK_CMD="false" \
+TRACE_FILE="$T13/data/trace.log" DEPLOY_LOCK_FILE="$T13/data/deploy.lock" \
+  bash "$T13/deploy/dispatch-rollout.sh" --manifest "$manifest_t13" --deploy-dir "$T13/deploy" --data-dir "$T13/data" --skip-manifest-check
+presoak_rc=$?
+set -e
+
+assert_eq "1" "$(( presoak_rc != 0 ? 1 : 0 ))" "Rollout fails immediately when pre-soak contract check fails"
+if [[ ! -f "$TEST_TMP/soak_trace.log" ]]; then
+  printf 'PASS: Soak command was NEVER invoked when pre-soak contract check failed\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: Soak command was invoked despite pre-soak failure\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+# 13b. Pre-soak passes -> soak runs -> final check passes -> canonical commit
+rm -f "$TEST_TMP/soak_trace.log"
+T13B="$TEST_TMP/t13b"
+setup_dispatcher_env "$T13B"
+manifest_t13b="$T13B/deploy/release-manifest.json"
+write_mock_manifest "$manifest_t13b" "$sha_t13" '{"gateway":true,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false}'
+
+SOAK_SECONDS=900 \
+RELEASE_SOAK_CMD="bash $T13/data/fake_soak.sh" \
+RUNTIME_DRIFT_CHECK_CMD="true" \
+TRACE_FILE="$T13B/data/trace.log" DEPLOY_LOCK_FILE="$T13B/data/deploy.lock" \
+  bash "$T13B/deploy/dispatch-rollout.sh" --manifest "$manifest_t13b" --deploy-dir "$T13B/deploy" --data-dir "$T13B/data" --skip-manifest-check
+
+assert_file_exists "$TEST_TMP/soak_trace.log" "Soak command was executed when pre-soak passed"
+canonical_t13b="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["git_sha"])' "$T13B/state/current-release.json")"
+assert_eq "$sha_t13" "$canonical_t13b" "Canonical state committed after soak and final drift pass"
+
+# 13c. Pre-soak passes -> soak runs -> final check fails after soak -> rollback
+rm -f "$TEST_TMP/soak_trace.log"
+T13C="$TEST_TMP/t13c"
+setup_dispatcher_env "$T13C"
+manifest_t13c="$T13C/deploy/release-manifest.json"
+write_mock_manifest "$manifest_t13c" "$sha_t13" '{"gateway":true,"worker":false,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false}'
+
+cat <<EOF > "$T13C/data/flip_drift.sh"
+#!/usr/bin/env bash
+flag="$TEST_TMP/presoak_passed"
+if [[ ! -f "\$flag" ]]; then
+  touch "\$flag"
+  exit 0
+else
+  exit 1
+fi
+EOF
+chmod +x "$T13C/data/flip_drift.sh"
+rm -f "$TEST_TMP/presoak_passed"
+
+set +e
+SOAK_SECONDS=900 \
+RELEASE_SOAK_CMD="bash $T13/data/fake_soak.sh" \
+RUNTIME_DRIFT_CHECK_CMD="bash $T13C/data/flip_drift.sh" \
+TRACE_FILE="$T13C/data/trace.log" DEPLOY_LOCK_FILE="$T13C/data/deploy.lock" \
+  bash "$T13C/deploy/dispatch-rollout.sh" --manifest "$manifest_t13c" --deploy-dir "$T13C/deploy" --data-dir "$T13C/data" --skip-manifest-check
+postsoak_rc=$?
+set -e
+
+assert_eq "1" "$(( postsoak_rc != 0 ? 1 : 0 ))" "Rollout fails when post-soak final drift check fails"
+assert_file_exists "$TEST_TMP/soak_trace.log" "Soak executed before post-soak check"
+canonical_t13c="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$T13C/state/current-release.json")"
+assert_eq "baseline" "$canonical_t13c" "Canonical state was preserved as previous release on post-soak failure"
 
 printf "\n========================================================\n"
 printf "Results: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"

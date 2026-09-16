@@ -292,6 +292,31 @@ assert_eq "empty: PROMOTION_DOC_ONLY is true" "$(printf '%s' "$emp_out" | grep '
 assert_eq "empty: PROMOTION_GATEWAY is false" "$(printf '%s' "$emp_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
 assert_eq "empty: PROMOTION_WORKER is false" "$(printf '%s' "$emp_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
 
+# 21. Testing compose fragment ownership
+printf "\n21. Testing compose fragment ownership...\n"
+printf "M\tdeploy/compose/worker.yaml\n" > "$test_tmp/compose_worker.txt"
+cw_out="$(run_case "$test_tmp/compose_worker.txt" --format env)"
+assert_eq "compose-worker: PROMOTION_WORKER is true" "$(printf '%s' "$cw_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "compose-worker: PROMOTION_GATEWAY is false" "$(printf '%s' "$cw_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "compose-worker: PROMOTION_FRONTEND is false" "$(printf '%s' "$cw_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "false"
+
+printf "M\tdeploy/compose/frontend.yaml\n" > "$test_tmp/compose_frontend.txt"
+cf_out="$(run_case "$test_tmp/compose_frontend.txt" --format env)"
+assert_eq "compose-frontend: PROMOTION_FRONTEND is true" "$(printf '%s' "$cf_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
+assert_eq "compose-frontend: PROMOTION_WORKER is false" "$(printf '%s' "$cf_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "compose-frontend: PROMOTION_GATEWAY is false" "$(printf '%s' "$cf_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+
+printf "M\tdeploy/compose/bark.yaml\n" > "$test_tmp/compose_bark.txt"
+cb_out="$(run_case "$test_tmp/compose_bark.txt" --format env)"
+assert_eq "compose-bark: PROMOTION_BARK is true" "$(printf '%s' "$cb_out" | grep '^PROMOTION_BARK=' | cut -d= -f2)" "true"
+assert_eq "compose-bark: PROMOTION_WORKER is false" "$(printf '%s' "$cb_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+
+printf "M\tdeploy/compose/base.yaml\n" > "$test_tmp/compose_base.txt"
+cbase_out="$(run_case "$test_tmp/compose_base.txt" --format env)"
+assert_eq "compose-base: PROMOTION_WORKER is true" "$(printf '%s' "$cbase_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "compose-base: PROMOTION_GATEWAY is true" "$(printf '%s' "$cbase_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "compose-base: PROMOTION_FRONTEND is true" "$(printf '%s' "$cbase_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"

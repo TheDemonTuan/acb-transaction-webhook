@@ -72,6 +72,24 @@ if [[ ! -s "$BACKUP_FILE" ]]; then
 fi
 log_info "Pre-migration backup verified at: ${BACKUP_FILE}"
 
+if [[ -f "${ROLLOUT_JOURNAL_FILE:-}" ]]; then
+  python3 - "$ROLLOUT_JOURNAL_FILE" "$BACKUP_FILE" "$SCHEMA_DEPLOY_OWNER" <<'PY' 2>/dev/null || true
+import json, sys
+j_path, b_path, owner = sys.argv[1:4]
+try:
+    with open(j_path, "r", encoding="utf-8") as f:
+        d = json.load(f)
+    d["migration_backup"] = {
+        "backup_file": b_path,
+        "owner": owner,
+    }
+    with open(j_path, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2)
+except Exception:
+    pass
+PY
+fi
+
 # 5. Run migration via immutable dbtool
 if ! run_dbtool_migration "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE"; then
   log_error "CRITICAL: Database migration failed. Live database preserved without automatic overwrite."
@@ -101,7 +119,7 @@ release_mutation_gate "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" "$SCHEMA_DEPLOY_OWNER"
 GATE_TOKEN=""
 
 # 8. Record migration metadata
-MIGRATION_RECORD="${MIGRATION_RECORD:-${DATA_DIR:-$SCRIPT_DIR/data}/migration-record.json}"
+MIGRATION_RECORD="${MIGRATION_RECORD:-${RUNTIME_DATA_DIR:-${DATA_DIR:-$SCRIPT_DIR/data}}/migration-record.json}"
 mkdir -p "$(dirname "$MIGRATION_RECORD")"
 cat <<EOF > "$MIGRATION_RECORD"
 {

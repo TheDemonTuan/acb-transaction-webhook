@@ -52,18 +52,51 @@ jobs:
           state="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
+          rollout_journal="$DEPLOY_PATH/data/rollout-journal.json"
+          pending_gw="$DEPLOY_PATH/data/pending-gateway-retire.env"
+          pending_fe="$DEPLOY_PATH/data/pending-frontend-retire.env"
+          runtime_dirty="false"
+          rollout_status="NONE"
+          pending_gateway_retire="false"
+          pending_frontend_retire="false"
+          if [[ -f "$rollout_journal" ]]; then
+            rollout_status="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("status", "UNKNOWN"))' "$rollout_journal" 2>/dev/null || echo "UNKNOWN")"
+            if [[ "$rollout_status" == "INTERRUPTED" ]]; then
+              runtime_dirty="true"
+            fi
+          fi
+          if [[ -f "$pending_gw" ]]; then
+            runtime_dirty="true"
+            pending_gateway_retire="true"
+          fi
+          if [[ -f "$pending_fe" ]]; then
+            runtime_dirty="true"
+            pending_frontend_retire="true"
+          fi
+          if [[ "$runtime_dirty" == "true" ]]; then
+            echo "Dirty runtime state detected; executing recovery-only reconcile before builds..." >&2
+            if [[ -x "$DEPLOY_PATH/deploy/reconcile-release.sh" ]]; then
+              bash "$DEPLOY_PATH/deploy/reconcile-release.sh" --runtime-root "$DEPLOY_PATH" --recovery-only
+              runtime_dirty="false"
+            else
+              echo "Reconciliation script missing on host; cannot safely recover." >&2
+              exit 1
+            fi
+          fi
+
           current_release="$DEPLOY_PATH/state/current-release.json"
           receipt="$DEPLOY_PATH/data/last-release.json"
           release_env="$DEPLOY_PATH/deploy/.release.env"
           [[ -s "$current_release" || ( -s "$receipt" && -s "$release_env" ) ]] || { echo 'Production state is missing' >&2; exit 1; }
-          python3 - "$current_release" "$receipt" "$release_env" <<'PY'
+          python3 - "$current_release" "$receipt" "$release_env" "$rollout_status" "$pending_gateway_retire" "$pending_frontend_retire" "$runtime_dirty" <<'PY'
           import json, os, re, sys
-          current_path, receipt_path, env_path = sys.argv[1:]
+          current_path, receipt_path, env_path, r_status, p_gw, p_fe, r_dirty = sys.argv[1:8]
           digest = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
+          canonical_generation = 0
           if os.path.isfile(current_path):
               state = json.load(open(current_path, encoding="utf-8"))
               sha = state.get("git_sha", "")
-              if state.get("schema_version") != 1 or state.get("status") != "COMPLETED" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+              if state.get("schema_version") not in (1, 2) or state.get("status") != "COMPLETED" or not re.fullmatch(r"[0-9a-f]{40}", sha):
                   raise SystemExit("Canonical production release is invalid")
               active_slot = state.get("active_slots", {}).get("gateway")
               if active_slot not in ("blue", "green"):
@@ -71,14 +104,16 @@ jobs:
               images = state.get("images", {})
               values = {
                   "frontend_image": images.get("frontend", ""),
-                  "gateway_image": images.get("gateway", {}).get(active_slot, ""),
+                  "gateway_image": images.get("gateway", {}).get(active_slot, "") if isinstance(images.get("gateway"), dict) else images.get("gateway", ""),
                   "worker_image": images.get("worker", ""),
                   "dbtool_image": images.get("dbtool", ""),
                   "auth_browser_image": images.get("auth_browser", ""),
                   "tts_image": images.get("tts", ""),
                   "bark_image": images.get("bark", ""),
               }
-              print(f"generation={state.get('generation', 0)}")
+              canonical_generation = state.get('generation', 0)
+              print(f"generation={canonical_generation}")
+              print(f"canonical_generation={canonical_generation}")
           else:
               receipt = json.load(open(receipt_path, encoding="utf-8"))
               sha = receipt.get("git_sha", "")
@@ -104,7 +139,12 @@ jobs:
                   "bark_image": env.get("BARK_IMAGE_REF", ""),
               }
               print("generation=0")
+              print("canonical_generation=0")
           print(f"sha={sha}")
+          print(f"rollout_status={r_status}")
+          print(f"pending_gateway_retire={p_gw}")
+          print(f"pending_frontend_retire={p_fe}")
+          print(f"runtime_dirty={r_dirty}")
           for output, value in values.items():
               if not digest.fullmatch(value):
                   raise SystemExit(f"Missing or invalid production image ref: {output}")
@@ -231,6 +271,18 @@ jobs:
           bash deploy/tests/test_secrets.sh
           bash deploy/tests/test_aux_deploy.sh
           bash deploy/tests/test_runtime_policy.sh
+          bash deploy/tests/test_runtime_layout.sh
+          bash deploy/tests/test_bootstrap_recovery.sh
+          bash deploy/tests/test_legacy_frontend_recovery.sh
+          bash deploy/tests/test_release_state.sh
+          bash deploy/tests/test_release_rollback.sh
+          bash deploy/tests/test_slot_resolution.sh
+          bash deploy/tests/test_failover_bundle.sh
+          bash deploy/tests/test_drift_complete.sh
+          bash deploy/tests/test_component_map_coverage.sh
+          bash deploy/tests/test_schema_compatibility.sh
+          bash deploy/tests/test_release_simulator.sh
+          bash deploy/tests/test_release_crash_recovery.sh
       - name: Verify CI workflow timeouts, keepalives, and action pinning
         run: bash deploy/tests/test_ci_workflow.sh
       - name: Verify deployment and platform script syntax

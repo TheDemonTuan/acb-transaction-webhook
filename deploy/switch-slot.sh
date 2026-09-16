@@ -31,7 +31,7 @@ fi
 
 atomic_switch_route "$TARGET_SLOT"
 
-if ! ack_route_identity "$TARGET_SLOT" 15; then
+if ! ack_route_identity "$TARGET_SLOT" "${EXPECTED_COMMIT:-}" 15; then
   log_error "Route identity acknowledgment failed for ${TARGET_SLOT}! Reverting to previous slot ${CURRENT_ACTIVE}..."
   rollback_route "$CURRENT_ACTIVE" "" 15 || true
   exit 1

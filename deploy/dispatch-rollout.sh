@@ -46,7 +46,7 @@ REQUIRE_COSIGN="${REQUIRE_COSIGN:-0}"
 SKIP_MANIFEST_CHECK="${SKIP_MANIFEST_CHECK:-0}"
 ALLOW_REDEPLOY="${ALLOW_REDEPLOY:-0}"
 MAX_AGE_SECONDS="${MAX_AGE_SECONDS:-86400}"
-SOAK_SECONDS="${SOAK_DURATION_SEC:-900}"
+SOAK_SECONDS="${SOAK_SECONDS:-${SOAK_DURATION_SEC:-900}}"
 DETACH_SOAK="${DETACH_SOAK:-0}"
 RESUME_SOAK="${RESUME_SOAK:-0}"
 REQUESTED_SCOPE="${REQUESTED_SCOPE:-}"
@@ -106,6 +106,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --data-dir)
       DATA_DIR="$2"
+      shift 2
+      ;;
+    --runtime-root)
+      RUNTIME_ROOT="$2"
       shift 2
       ;;
     --expected-identity)
@@ -210,115 +214,119 @@ PENDING_FRONTEND_RETIRE_FILE="$DATA_DIR/pending-frontend-retire.env"
 # CI must wait for soak completion before recording a successful release.
 # Detached soak remains an explicit operator-only mode.
 
-# Rollout Journal Helpers
-init_rollout_journal() {
-  local r_id="$1"
-  local git_sha="$2"
-  local scope="$3"
-  local now
-  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-  R_ID="$r_id" R_GIT_SHA="$git_sha" R_SCOPE="$scope" R_NOW="$now" python3 - <<'PY_JSON' | atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600
-import json, os
-print(json.dumps({
-    "rollout_id": os.environ["R_ID"],
-    "git_sha": os.environ["R_GIT_SHA"],
-    "status": "RUNNING",
-    "scope": os.environ["R_SCOPE"],
-    "started_at": os.environ["R_NOW"],
-    "updated_at": os.environ["R_NOW"],
-    "current_step": "INITIALIZED",
-    "completed_steps": [],
-}, indent=2))
-PY_JSON
-}
-
-update_rollout_step() {
-  local step="$1"
-  local status="$2"
-  [[ -f "$ROLLOUT_JOURNAL_FILE" ]] || return 0
-  local now tmp
-  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-  tmp="$(mktemp "$(dirname "$ROLLOUT_JOURNAL_FILE")/.rollout-update.XXXXXX")"
-  R_FILE="$ROLLOUT_JOURNAL_FILE" R_STEP="$step" R_STATUS="$status" R_NOW="$now" python3 - <<'PY_JSON' > "$tmp"
-import json, os
-with open(os.environ["R_FILE"], encoding="utf-8") as handle:
-    data = json.load(handle)
-data["current_step"] = os.environ["R_STEP"]
-data["status"] = os.environ["R_STATUS"]
-data["updated_at"] = os.environ["R_NOW"]
-completed = data.setdefault("completed_steps", [])
-if data["status"] == "STEP_COMPLETED" and data["current_step"] not in completed:
-    completed.append(data["current_step"])
-print(json.dumps(data, indent=2))
-PY_JSON
-  atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600 < "$tmp"
-  rm -f "$tmp"
-}
-
-finish_rollout_journal() {
-  local final_status="$1"
-  local evidence_dir="${2:-}"
-  [[ -f "$ROLLOUT_JOURNAL_FILE" ]] || return 0
-  local now tmp
-  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-  tmp="$(mktemp "$(dirname "$ROLLOUT_JOURNAL_FILE")/.rollout-finish.XXXXXX")"
-  R_FILE="$ROLLOUT_JOURNAL_FILE" R_STATUS="$final_status" R_NOW="$now" python3 - <<'PY_JSON' > "$tmp"
-import json, os
-with open(os.environ["R_FILE"], encoding="utf-8") as handle:
-    data = json.load(handle)
-data["status"] = os.environ["R_STATUS"]
-data["updated_at"] = os.environ["R_NOW"]
-print(json.dumps(data, indent=2))
-PY_JSON
-  atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600 < "$tmp"
-  rm -f "$tmp"
-  if [[ -n "$evidence_dir" && -d "$evidence_dir" ]]; then
-    atomic_write_file "$evidence_dir/rollout-journal.json" 600 < "$ROLLOUT_JOURNAL_FILE"
-  fi
-  if [[ "$final_status" == "COMPLETED" || "$final_status" == "DOC_ONLY" ]]; then
-    atomic_write_file "${ROLLOUT_JOURNAL_FILE}.previous" 600 < "$ROLLOUT_JOURNAL_FILE"
-    rm -f "$ROLLOUT_JOURNAL_FILE"
-  fi
-}
 ROLLOUT_EXIT_CODE=0
-rollback_pending_routes() {
+rollback_gateway_route() {
   local old_slot candidate_slot
   if [[ -f "$PENDING_GATEWAY_RETIRE_FILE" ]]; then
     old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
     candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
     if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
       log_warn "Reverting gateway route to [$old_slot] because the release did not commit."
-      if atomic_switch_route "$old_slot" && ack_route_identity "$old_slot" "" 30; then
-        printf '%s' "$old_slot" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
-        stop_standby_container "$candidate_slot" || true
-        rm -f "$PENDING_GATEWAY_RETIRE_FILE"
-      else
-        log_error "Gateway route rollback failed; preserving pending rollback evidence."
+      if ! atomic_switch_route "$old_slot"; then
+        log_error "Gateway route rollback switch to [$old_slot] failed; preserving pending rollback evidence."
         return 1
       fi
+      if ! ack_route_identity "$old_slot" "" 30; then
+        log_error "Gateway route rollback ACK failed for [$old_slot]; preserving both slots and evidence."
+        return 1
+      fi
+      printf '%s' "$old_slot" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
+      stop_standby_container "$candidate_slot" || true
+      rm -f "$PENDING_GATEWAY_RETIRE_FILE"
     else
       log_error "Gateway rollback evidence is malformed; refusing to discard it."
       return 1
     fi
   fi
+  return 0
+}
+
+rollback_frontend_route() {
   if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
-    old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
-    candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
-    if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
-      log_warn "Reverting frontend route to [$old_slot] because the release did not commit."
-      if atomic_switch_frontend_route "$old_slot" && ack_frontend_route 30; then
-        printf '%s' "$old_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
-        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "acb-frontend-${candidate_slot}" >/dev/null 2>&1 || true
-        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+    local PREV_TOP="" CAND_TOP="" PREV_CNT="" CAND_CNT="" GW_SLOT=""
+    eval "$(parse_pending_frontend_evidence "$PENDING_FRONTEND_RETIRE_FILE" 2>/dev/null || true)"
+    local prev_top="$PREV_TOP" cand_top="$CAND_TOP" prev_cnt="$PREV_CNT" cand_cnt="$CAND_CNT"
+
+    if [[ -z "$cand_cnt" && -n "$cand_top" ]]; then
+      cand_cnt="acb-frontend-${cand_top}"
+    fi
+    if [[ -z "$prev_cnt" && -n "$prev_top" ]]; then
+      if [[ "$prev_top" == "legacy" ]]; then
+        prev_cnt="acb-frontend"
       else
-        log_error "Frontend route rollback failed; preserving pending rollback evidence."
-        return 1
+        prev_cnt="acb-frontend-${prev_top}"
+      fi
+    fi
+
+    if [[ "$prev_top" =~ ^(blue|green|legacy)$ && "$cand_top" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting frontend route to topology [$prev_top] because the release did not commit."
+      if [[ "$prev_top" == "legacy" ]]; then
+        if ! docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "acb-frontend" 2>/dev/null | grep -Eq '^(healthy|running)$'; then
+          log_error "Legacy frontend container acb-frontend is missing or unhealthy; failing closed."
+          return 1
+        fi
+        local current_gw_slot
+        current_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+        local tmp_route="${ACB_CONFIG}.rollback.$$"
+        render_traefik_config "$current_gw_slot" "$tmp_route" "legacy"
+        if ! atomic_write_file "$ACB_CONFIG" 644 < "$tmp_route"; then
+          rm -f "$tmp_route"
+          log_error "Frontend legacy route rollback file write failed; preserving evidence."
+          return 1
+        fi
+        rm -f "$tmp_route"
+        if ! ack_frontend_route 30; then
+          log_error "Frontend legacy route rollback ACK failed; preserving both containers and pending evidence."
+          return 1
+        fi
+        rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+        log_info "Frontend reverted to legacy container acb-frontend."
+      else
+        if ! atomic_switch_frontend_route "$prev_top"; then
+          log_error "Frontend route rollback switch to [$prev_top] failed; preserving evidence."
+          return 1
+        fi
+        if ! ack_frontend_route 30; then
+          log_error "Frontend route rollback ACK failed for [$prev_top]; preserving both containers and pending evidence."
+          return 1
+        fi
+        printf '%s' "$prev_top" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+        log_info "Frontend reverted to slot [$prev_top]."
       fi
     else
       log_error "Frontend rollback evidence is malformed; refusing to discard it."
       return 1
     fi
   fi
+  return 0
+}
+
+rollback_pending_routes() {
+  local failures=0
+  rollback_gateway_route || failures=$((failures + 1))
+  rollback_frontend_route || failures=$((failures + 1))
+  return "$failures"
+}
+
+verify_previous_runtime() {
+  local current_state="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
+  if [[ ! -s "$current_state" ]]; then
+    log_error "Canonical release state is missing: $current_state"
+    return 1
+  fi
+  if [[ "${SKIP_MANIFEST_CHECK:-0}" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
+    eval "$RUNTIME_DRIFT_CHECK_CMD"
+    return $?
+  fi
+  if [[ -f "$DEPLOY_DIR/verify-runtime-drift.sh" ]]; then
+    bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$current_state"
+    return $?
+  fi
+  return 0
 }
 
 release_is_committed() {
@@ -328,23 +336,6 @@ release_is_committed() {
 import json, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 raise SystemExit(0 if state.get("status") == "COMPLETED" and state.get("release_id") == sys.argv[2] else 1)
-PY
-}
-
-rollout_step_completed() {
-  local step="$1"
-  [[ -f "$ROLLOUT_JOURNAL_FILE" ]] || return 1
-  python3 - "$ROLLOUT_JOURNAL_FILE" "$step" <<'PY' >/dev/null 2>&1
-import json, sys
-state = json.load(open(sys.argv[1], encoding="utf-8"))
-raise SystemExit(0 if sys.argv[2] in state.get("completed_steps", []) else 1)
-PY
-}
-
-rollout_journal_git_sha() {
-  python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null
-import json, sys
-print(json.load(open(sys.argv[1], encoding="utf-8")).get("git_sha", ""))
 PY
 }
 
@@ -382,10 +373,15 @@ cleanup_rollout() {
     log_warn "Rollout terminated with code ${ROLLOUT_EXIT_CODE}."
     local final_status="INTERRUPTED"
     if ! release_is_committed; then
-      if rollback_pending_routes && rollback_completed_components; then
+      local rollback_failures=0
+      rollback_gateway_route || rollback_failures=$((rollback_failures + 1))
+      rollback_frontend_route || rollback_failures=$((rollback_failures + 1))
+      rollback_completed_components || rollback_failures=$((rollback_failures + 1))
+      verify_previous_runtime || rollback_failures=$((rollback_failures + 1))
+      if (( rollback_failures == 0 )); then
         final_status="ROLLED_BACK"
       else
-        log_error "Release rollback did not fully verify; preserving evidence and blocking subsequent mutation."
+        log_error "Release rollback did not fully verify ($rollback_failures failure(s)); preserving evidence and blocking subsequent mutation."
         ROLLOUT_EXIT_CODE=1
       fi
     fi
@@ -469,7 +465,10 @@ if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
     IMAGE_WORKER="$(grep -o '"worker":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
     IMAGE_DBTOOL="$(grep -o '"dbtool":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
     IMAGE_AUTH_BROWSER="$(grep -o '"auth_browser":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    IMAGE_TTS_GATEWAY="$(grep -o '"tts_gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_TTS_GATEWAY="$(grep -o '"tts":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    if [[ -z "$IMAGE_TTS_GATEWAY" ]]; then
+      IMAGE_TTS_GATEWAY="$(grep -o '"tts_gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    fi
     IMAGE_BARK="$(grep -o '"bark":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
   elif [[ -n "$REQUESTED_SCOPE" ]]; then
     IFS=',' read -ra scopes <<< "$REQUESTED_SCOPE"
@@ -677,24 +676,14 @@ if [[ "$is_docs_only" -eq 1 ]]; then
 EOF
 
   if [[ -f "${CURRENT_RELEASE_FILE:-}" ]]; then
-    doc_manifest_digest="$(sha256sum "$MANIFEST_FILE" | awk '{print $1}')"
-    R_STATE_FILE="$CURRENT_RELEASE_FILE" R_STATE_RELEASE_ID="${RELEASE_ID:-rel-doc-$GIT_SHA}" \
-    R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$doc_manifest_digest" R_STATE_NOW="$now" \
-    python3 - <<'PY_DOC_STATE' | atomic_write_file "$CURRENT_RELEASE_FILE" 600
-import json, os
-path = os.environ["R_STATE_FILE"]
-with open(path, encoding="utf-8") as handle:
-    state = json.load(handle)
-if state.get("schema_version") != 1 or state.get("status") != "COMPLETED":
-    raise SystemExit("canonical release state is invalid")
-state["generation"] = int(state.get("generation", 0)) + 1
-state["previous_release_id"] = state.get("release_id")
-state["release_id"] = os.environ["R_STATE_RELEASE_ID"]
-state["git_sha"] = os.environ["R_STATE_SHA"]
-state["manifest_sha256"] = os.environ["R_STATE_MANIFEST"]
-state["committed_at"] = os.environ["R_STATE_NOW"]
-print(json.dumps(state, indent=2, sort_keys=True))
-PY_DOC_STATE
+    tmp_doc_state="$(mktemp "$(dirname "$CURRENT_RELEASE_FILE")/.doc-state.XXXXXX")"
+    python3 "$DEPLOY_DIR/release-state.py" advance-doc-only \
+      --previous "$CURRENT_RELEASE_FILE" \
+      --release-dir "$DEPLOY_DIR" \
+      --manifest "$MANIFEST_FILE" \
+      --output "$tmp_doc_state"
+    atomic_write_file "$CURRENT_RELEASE_FILE" 600 < "$tmp_doc_state"
+    rm -f "$tmp_doc_state"
   fi
   atomic_write_file "$LAST_RELEASE_FILE" 600 <<EOF
 {
@@ -732,6 +721,45 @@ log_info "Starting Rollout Orchestration for [${RELEASE_ID}] (${GIT_SHA})"
 log_info "Authorized Promotion Scope: [${scope_str}]"
 log_info "=========================================================="
 
+# Planned candidate state construction before any runtime mutation
+planned_candidate_dir="${RUNTIME_STATE_DIR:-$(dirname "$CURRENT_RELEASE_FILE")}/candidate"
+mkdir -p "$planned_candidate_dir"
+planned_candidate_file="$planned_candidate_dir/${RELEASE_ID}.json"
+
+planned_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+if [[ "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
+  case "$planned_gw_slot" in
+    blue) planned_gw_slot="green" ;;
+    green) planned_gw_slot="blue" ;;
+    *) planned_gw_slot="blue" ;;
+  esac
+fi
+planned_fe_slot="$(cat "$FRONTEND_ACTIVE_SLOT_FILE" 2>/dev/null || printf 'legacy')"
+if [[ "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
+  case "$planned_fe_slot" in
+    blue) planned_fe_slot="green" ;;
+    green) planned_fe_slot="blue" ;;
+    *) planned_fe_slot="blue" ;;
+  esac
+fi
+
+if [[ -f "$DEPLOY_DIR/release-state.py" ]]; then
+  prev_arg=()
+  if [[ -f "$CURRENT_RELEASE_FILE" ]]; then
+    prev_arg=(--previous "$CURRENT_RELEASE_FILE")
+  fi
+  python3 "$DEPLOY_DIR/release-state.py" build \
+    "${prev_arg[@]}" \
+    --release-dir "$DEPLOY_DIR" \
+    --manifest "$MANIFEST_FILE" \
+    --gateway-slot "$planned_gw_slot" \
+    --frontend-slot "$planned_fe_slot" \
+    --scope "$scope_str" \
+    --output "$planned_candidate_file"
+  python3 "$DEPLOY_DIR/release-state.py" validate "$planned_candidate_file" --allow-candidate
+  log_info "Planned candidate release state validated: $planned_candidate_file"
+fi
+
 if [[ "$PROMOTION_BARK" == "true" || "$PROMOTION_WORKER" == "true" ]]; then
   [[ -n "$IMAGE_BARK" ]] || { log_error "BARK image digest is required to verify shared Bark secrets."; exit 1; }
   validate_secrets
@@ -746,9 +774,15 @@ if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
   recover_tx_journal
 fi
 if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" || "$PREVIOUS_ROLLOUT_STATUS" == "ROLLED_BACK" ]]; then
-  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]] && { ! rollback_pending_routes || ! rollback_completed_components; }; then
-    log_error "Interrupted rollout rollback could not be verified; preserving its journal."
-    exit 1
+  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]]; then
+    r_failures=0
+    rollback_gateway_route || r_failures=$((r_failures + 1))
+    rollback_frontend_route || r_failures=$((r_failures + 1))
+    rollback_completed_components || r_failures=$((r_failures + 1))
+    if (( r_failures != 0 )); then
+      log_error "Interrupted rollout rollback could not be verified; preserving its journal."
+      exit 1
+    fi
   fi
   current_state="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
   if [[ ! -s "$current_state" ]]; then
@@ -861,7 +895,7 @@ if [[ "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
   validate_digest "$IMAGE_GATEWAY" "gateway"
   gw_args=("$IMAGE_GATEWAY")
   [[ -n "$GIT_SHA" ]] && gw_args+=(--expected-commit "$GIT_SHA")
-  [[ "$SOAK_SECONDS" -gt 0 ]] && gw_args+=(--soak-seconds "$SOAK_SECONDS")
+  gw_args+=(--defer-soak)
   if [[ "$DETACH_SOAK" -eq 1 ]]; then
     log_error "Detached gateway soak is not permitted in a release transaction; success must wait for soak completion."
     exit 1
@@ -966,8 +1000,23 @@ active_frontend_slot=""
 if [[ -f "${FRONTEND_ACTIVE_SLOT_FILE:-}" ]]; then
   active_frontend_slot="$(tr -d '[:space:]' < "$FRONTEND_ACTIVE_SLOT_FILE")"
 fi
+if [[ -z "$active_frontend_slot" ]]; then
+  active_frontend_slot="$(resolve_frontend_slot_strict 2>/dev/null || true)"
+fi
+if [[ -z "$active_frontend_slot" && -f "$CURRENT_RELEASE_FILE" ]]; then
+  active_frontend_slot="$(python3 - "$CURRENT_RELEASE_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("active_slots", {}).get("frontend") or "legacy")
+except Exception:
+    pass
+PY
+)"
+fi
+[[ -z "$active_frontend_slot" ]] && active_frontend_slot="legacy"
 case "$active_gateway_slot" in blue|green) ;; *) log_error "Cannot commit release: active gateway slot is unknown."; exit 1 ;; esac
-case "$active_frontend_slot" in blue|green|'') ;; *) log_error "Cannot commit release: active frontend slot is invalid."; exit 1 ;; esac
+case "$active_frontend_slot" in blue|green|legacy) ;; *) log_error "Cannot commit release: active frontend slot is invalid ($active_frontend_slot)."; exit 1 ;; esac
 mkdir -p "$(dirname "$CURRENT_RELEASE_FILE")"
 controller_candidate="$DEPLOY_DIR/failover/vps-failover-controller.py"
 controller_digest=""
@@ -994,11 +1043,26 @@ PY
 )"
 fi
 candidate_release_state="$(mktemp "$(dirname "$CURRENT_RELEASE_FILE")/.current-release.candidate.XXXXXX")"
-R_STATE_PREVIOUS="$CURRENT_RELEASE_FILE" R_STATE_ENV="$staged_release_env" R_STATE_RELEASE_ID="$RELEASE_ID" \
-R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$manifest_digest" R_STATE_NOW="$now" \
-R_STATE_GATEWAY_SLOT="$active_gateway_slot" R_STATE_FRONTEND_SLOT="$active_frontend_slot" \
-R_STATE_CONTROLLER_HASH="$controller_digest" R_STATE_CONTROLLER_BUNDLE_HASH="$controller_bundle_digest" \
-python3 - <<'PY_STATE' > "$candidate_release_state"
+if [[ -f "$DEPLOY_DIR/release-state.py" ]]; then
+  prev_arg=()
+  if [[ -f "$CURRENT_RELEASE_FILE" ]]; then
+    prev_arg=(--previous "$CURRENT_RELEASE_FILE")
+  fi
+  python3 "$DEPLOY_DIR/release-state.py" build \
+    "${prev_arg[@]}" \
+    --release-dir "$DEPLOY_DIR" \
+    --manifest "$MANIFEST_FILE" \
+    --gateway-slot "$active_gateway_slot" \
+    ${active_frontend_slot:+--frontend-slot "$active_frontend_slot"} \
+    --scope "$scope_str" \
+    --output "$candidate_release_state"
+  python3 "$DEPLOY_DIR/release-state.py" validate "$candidate_release_state"
+else
+  R_STATE_PREVIOUS="$CURRENT_RELEASE_FILE" R_STATE_ENV="$staged_release_env" R_STATE_RELEASE_ID="$RELEASE_ID" \
+  R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$manifest_digest" R_STATE_NOW="$now" \
+  R_STATE_GATEWAY_SLOT="$active_gateway_slot" R_STATE_FRONTEND_SLOT="$active_frontend_slot" \
+  R_STATE_CONTROLLER_HASH="$controller_digest" R_STATE_CONTROLLER_BUNDLE_HASH="$controller_bundle_digest" \
+  python3 - <<'PY_STATE' > "$candidate_release_state"
 import json, os, re
 
 def read_env(path):
@@ -1018,7 +1082,7 @@ previous_release_id = None
 if os.path.isfile(previous_path):
     with open(previous_path, encoding="utf-8") as handle:
         previous = json.load(handle)
-    if previous.get("schema_version") != 1 or previous.get("status") != "COMPLETED":
+    if previous.get("schema_version") not in (1, 2) or previous.get("status") != "COMPLETED":
         raise SystemExit("existing canonical release state is invalid")
     generation = int(previous.get("generation", 0)) + 1
     previous_release_id = previous.get("release_id")
@@ -1030,7 +1094,7 @@ missing = [key for key in required if not digest.match(env.get(key, ""))]
 if missing:
     raise SystemExit("invalid canonical image refs: " + ", ".join(missing))
 state = {
-    "schema_version": 1,
+    "schema_version": 2,
     "generation": generation,
     "release_id": os.environ["R_STATE_RELEASE_ID"],
     "previous_release_id": previous_release_id,
@@ -1058,13 +1122,49 @@ state = {
 }
 print(json.dumps(state, indent=2, sort_keys=True))
 PY_STATE
+fi
 python3 -m json.tool "$candidate_release_state" >/dev/null
+
+log_info "Executing Pre-Soak Runtime Contract Verification..."
 if [[ "$SKIP_MANIFEST_CHECK" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
   eval "$RUNTIME_DRIFT_CHECK_CMD"
 else
   CURRENT_RELEASE_FILE="$candidate_release_state" USE_CANONICAL_RELEASE_STATE=1 \
     bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$candidate_release_state"
 fi
+log_info "Pre-soak runtime contract check PASSED."
+
+if [[ "${PROMOTION_GATEWAY:-false}" == "true" && "${SOAK_SECONDS:-0}" -gt 0 ]]; then
+  log_info "Beginning release soak observation (${SOAK_SECONDS}s)..."
+  old_gw_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE" 2>/dev/null || true)"
+  if [[ -z "$old_gw_slot" ]]; then
+    case "$active_gateway_slot" in
+      blue) old_gw_slot="green" ;;
+      green) old_gw_slot="blue" ;;
+    esac
+  fi
+  soak_rc=0
+  if [[ -n "${RELEASE_SOAK_CMD:-}" ]]; then
+    eval "$RELEASE_SOAK_CMD" || soak_rc=$?
+  else
+    run_resumable_soak "$active_gateway_slot" "$old_gw_slot" "$SOAK_SECONDS" || soak_rc=$?
+  fi
+  if [[ "$soak_rc" -ne 0 ]]; then
+    log_error "Release soak observation failed! Aborting rollout."
+    exit 1
+  fi
+  log_info "Release soak completed successfully."
+
+  log_info "Executing Post-Soak Final Runtime Contract Verification..."
+  if [[ "$SKIP_MANIFEST_CHECK" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
+    eval "$RUNTIME_DRIFT_CHECK_CMD"
+  else
+    CURRENT_RELEASE_FILE="$candidate_release_state" USE_CANONICAL_RELEASE_STATE=1 \
+      bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$candidate_release_state"
+  fi
+  log_info "Post-soak final runtime contract check PASSED."
+fi
+
 atomic_write_file "$CURRENT_RELEASE_FILE" 600 < "$candidate_release_state"
 rm -f "$candidate_release_state"
 update_rollout_step "release_commit" "STEP_COMPLETED"
@@ -1082,21 +1182,19 @@ if [[ -f "$PENDING_GATEWAY_RETIRE_FILE" ]]; then
   fi
 fi
 if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
-  frontend_cleanup="${PENDING_FRONTEND_RETIRE_FILE}.cleanup"
-  mv -f "$PENDING_FRONTEND_RETIRE_FILE" "$frontend_cleanup"
-  old_slot="$(sed -n 's/^old_slot=//p' "$frontend_cleanup")"
-  if docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "acb-frontend-${old_slot}" >/dev/null 2>&1; then
-    rm -f "$frontend_cleanup"
-  else
-    log_warn "Committed release is healthy, but old frontend slot cleanup remains pending: $frontend_cleanup"
-  fi
+  cleanup_pending_frontend "$PENDING_FRONTEND_RETIRE_FILE" || true
 fi
 
 # Compatibility projection for Compose and older operator tooling. It is not authoritative.
-if ! atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"; then
-  rm -f "$staged_release_env"
-  log_error "Canonical release committed, but the legacy .release.env projection could not be refreshed."
-  exit 1
+if [[ -f "$DEPLOY_DIR/release-state.py" ]]; then
+  python3 "$DEPLOY_DIR/release-state.py" export-env "$CURRENT_RELEASE_FILE" --output "$canonical_release_env"
+  chmod 600 "$canonical_release_env"
+else
+  if ! atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"; then
+    rm -f "$staged_release_env"
+    log_error "Canonical release committed, but the legacy .release.env projection could not be refreshed."
+    exit 1
+  fi
 fi
 rm -f "$staged_release_env"
 export USE_CANONICAL_RELEASE_STATE=1

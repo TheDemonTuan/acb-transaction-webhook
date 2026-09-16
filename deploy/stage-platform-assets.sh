@@ -11,3 +11,6 @@ install -m 0644 "$REPO_ROOT/platform/failover/vps-failover-reconcile.service" "$
 install -m 0644 "$REPO_ROOT/platform/failover/vps-failover-reconcile.timer" "$SCRIPT_DIR/failover/vps-failover-reconcile.timer"
 install -m 0644 "$REPO_ROOT/platform/failover/apps.d/"*.json "$SCRIPT_DIR/failover/apps.d/"
 chmod 0755 "$SCRIPT_DIR/deploy-failover-controller.sh" "$SCRIPT_DIR/verify-runtime-drift.sh"
+if [[ -f "$REPO_ROOT/deploy/runtime-layout.sh" ]]; then
+  chmod 0755 "$REPO_ROOT/deploy/runtime-layout.sh"
+fi
