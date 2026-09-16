@@ -1112,7 +1112,11 @@ jobs:
           bash "$RELEASE_DIR/verify-release-baseline.sh" \
             --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
           export EXPECTED_BASE_SHA="$expected_base_sha" EXPECTED_BASE_GENERATION="$expected_base_generation"
-          bash "$DEPLOY_PATH/deploy/bootstrap-deployment-engine.sh" \
+          bootstrap_cmd="$DEPLOY_PATH/deploy/bootstrap-deployment-engine.sh"
+          if [[ ! -f "$bootstrap_cmd" ]]; then
+            bootstrap_cmd="$RELEASE_DIR/bootstrap-deployment-engine.sh"
+          fi
+          bash "$bootstrap_cmd" \
             --release-dir "$RELEASE_DIR" --runtime-deploy-dir "$DEPLOY_PATH/deploy" \
             --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER" --require-cosign --no-reconcile
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
