@@ -179,11 +179,22 @@ run_root systemctl is-enabled --quiet vps-failover-reconcile.timer && touch "$BA
 
 run_root systemctl stop vps-failover-reconcile.timer vps-failover-controller.service >/dev/null 2>&1 || true
 INSTALLED=1
-run_root install -d -m 0755 -o root -g root "$INSTALL_DIR" "$REGISTRY_DIR"
-run_root install -m 0755 "$CANDIDATE_DIR/vps-failover-controller.py" "$INSTALL_DIR/vps-failover-controller.py"
+run_root install -d -m 0755 -o root -g root "$INSTALL_DIR"
+
+# Atomic registry directory swap to eliminate stale application configs
+registry_next="${REGISTRY_DIR}.next.$$"
+registry_prev="${REGISTRY_DIR}.backup.$$"
+run_root install -d -m 0755 -o root -g root "$registry_next"
 for config in "$CANDIDATE_DIR"/apps.d/*.json; do
-  run_root install -m 0644 "$config" "$REGISTRY_DIR/$(basename "$config")"
+  [[ -f "$config" ]] || continue
+  run_root install -m 0644 "$config" "$registry_next/$(basename "$config")"
 done
+if run_root test -d "$REGISTRY_DIR"; then
+  run_root mv "$REGISTRY_DIR" "$registry_prev"
+fi
+run_root mv "$registry_next" "$REGISTRY_DIR"
+
+run_root install -m 0755 "$CANDIDATE_DIR/vps-failover-controller.py" "$INSTALL_DIR/vps-failover-controller.py"
 for unit in vps-failover-controller.service vps-failover-reconcile.service vps-failover-reconcile.timer; do
   run_root install -m 0644 "$CANDIDATE_DIR/$unit" "$SYSTEMD_DIR/$unit"
 done
@@ -192,6 +203,7 @@ run_root systemctl enable --now vps-failover-controller.service
 run_root systemctl enable --now vps-failover-reconcile.timer
 run_root systemctl is-active --quiet vps-failover-controller.service
 run_root systemctl is-active --quiet vps-failover-reconcile.timer
+run_root rm -rf "$registry_prev" 2>/dev/null || true
 actual_hash="$(run_root sha256sum "$INSTALL_DIR/vps-failover-controller.py" | awk '{print $1}')"
 [[ "$actual_hash" == "$candidate_hash" ]] || { log_error "Installed failover controller checksum mismatch."; exit 1; }
 run_root python3 "$INSTALL_DIR/vps-failover-controller.py" --status >/dev/null

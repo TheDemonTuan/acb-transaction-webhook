@@ -67,6 +67,12 @@ for row in "${expectations[@]}"; do
     actual="$(python3 - "$controller_root" "$registry_root" "$systemd_root" <<'PY' 2>/dev/null || true
 import hashlib, pathlib, sys
 controller, registry, systemd = map(pathlib.Path, sys.argv[1:])
+# Audit exact registry set: extra or missing files are rejected
+expected_files = sorted(["acb.json", "auth-browser.json", "worker.json"])
+actual_files = sorted([p.name for p in registry.glob("*.json")]) if registry.is_dir() else []
+if actual_files != expected_files:
+    sys.exit(2)
+
 paths = [
     ("vps-failover-controller.py", controller / "vps-failover-controller.py"),
     ("vps-failover-controller.service", systemd / "vps-failover-controller.service"),
@@ -78,13 +84,32 @@ paths = [
 ]
 h = hashlib.sha256()
 for name, path in paths:
+    if not path.is_file():
+        sys.exit(1)
     h.update(name.encode() + b"\0" + path.read_bytes() + b"\0")
 print(h.hexdigest())
 PY
 )"
-    if [[ "$actual" != "$expected" ]]; then
+    py_code=$?
+    if [[ "$py_code" -eq 2 ]]; then
+      log_error "PRODUCTION_DRIFT component=failover_registry extra or missing configuration files detected in $registry_root"
+      failures=$((failures + 1))
+    elif [[ "$actual" != "$expected" ]]; then
       log_error "PRODUCTION_DRIFT component=failover_controller_bundle expected=$expected actual=${actual:-missing}"
       failures=$((failures + 1))
+    fi
+
+    if [[ "${SKIP_SYSTEMD_DRIFT_CHECK:-0}" -ne 1 ]] && command -v systemctl >/dev/null 2>&1; then
+      for unit in vps-failover-controller.service vps-failover-reconcile.timer; do
+        if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+          log_error "PRODUCTION_DRIFT component=systemd unit=$unit expected=active actual=inactive"
+          failures=$((failures + 1))
+        fi
+        if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+          log_error "PRODUCTION_DRIFT component=systemd unit=$unit expected=enabled actual=disabled"
+          failures=$((failures + 1))
+        fi
+      done
     fi
     continue
   fi
