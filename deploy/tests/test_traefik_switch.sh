@@ -57,12 +57,17 @@ assert_file_contains() {
 setup_traefik_mock_env() {
   local test_dir="$1"
   export MOCK_STATE_DIR="$test_dir"
+  export DEPLOY_PATH="$test_dir"
+  export RUNTIME_ROOT="$test_dir"
+  export RUNTIME_STATE_DIR="$test_dir/state"
+  export RUNTIME_DATA_DIR="$test_dir/data"
+  export DEPLOY_STATE_FILE="$test_dir/state/deploy-state.json"
   export MOCK_ACK_WRONG_SLOT=0
   export MOCK_ACK_WRONG_COMMIT=0
   export MOCK_ACK_TIMEOUT=0
   export ROUTE_ACK_TIMEOUT=3
 
-  mkdir -p "$test_dir/bin" "$test_dir/dynamic" "$test_dir/secrets"
+  mkdir -p "$test_dir/bin" "$test_dir/dynamic" "$test_dir/secrets" "$test_dir/state" "$test_dir/data"
   export TRAEFIK_DYNAMIC_DIR="$test_dir/dynamic"
   export ACB_CONFIG="$test_dir/dynamic/acb.yml"
   export ACTIVE_SLOT_FILE="$test_dir/.active-slot"

@@ -55,11 +55,15 @@ assert_file_contains() {
 
 setup_dispatcher_env() {
   local tdir="$1"
-  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state"
+  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state" "$tdir/releases"
+  export RUNTIME_ROOT="$tdir"
+  export RUNTIME_RELEASES_DIR="$tdir"
 
   # Copy library and helper files
   cp -r "$DEPLOY_DIR/lib"* "$tdir/deploy/"
+  cp "$DEPLOY_DIR/runtime-layout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/release-env.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/release-state.py" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-runtime-drift.sh" "$tdir/deploy/"
@@ -90,6 +94,8 @@ BARK_IMAGE_REF=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04e
 EOF
   printf 'blue' > "$tdir/deploy/.active-slot"
   printf 'blue' > "$tdir/deploy/.active-frontend-slot"
+  printf 'blue' > "$tdir/state/gateway-active-slot"
+  printf 'blue' > "$tdir/state/frontend-active-slot"
   cat <<'EOF' > "$tdir/state/current-release.json"
 {
   "schema_version": 1,

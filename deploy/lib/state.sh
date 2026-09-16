@@ -240,7 +240,7 @@ set_deploy_state() {
   local state="$1"
   local details="${2:-}"
   mkdir -p "$(dirname "$DEPLOY_STATE_FILE")" 2>/dev/null || true
-  printf '{"state":"%s","timestamp":"%s","details":"%s"}\n' "$state" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$details" > "$DEPLOY_STATE_FILE"
+  printf '{"state":"%s","timestamp":"%s","details":"%s"}\n' "$state" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$details" > "$DEPLOY_STATE_FILE" 2>/dev/null || true
 }
 
 get_deploy_state() {
