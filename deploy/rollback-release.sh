@@ -77,40 +77,105 @@ fi
   exit 1
 }
 
+if [[ -L "$prev_dir" ]]; then
+  log_error "Previous release directory must not be a symlink: $prev_dir"
+  exit 1
+fi
+
 PREVIOUS_RELEASE_DIR="$(cd -- "$prev_dir" && pwd -P)"
 log_info "Resolved Previous Release Directory: $PREVIOUS_RELEASE_DIR"
 
 # Verify previous release directory resolves under RUNTIME_RELEASES_DIR if configured
 if [[ -n "${RUNTIME_RELEASES_DIR:-}" ]]; then
-  case "$PREVIOUS_RELEASE_DIR" in
-    "$RUNTIME_RELEASES_DIR"/*) ;;
+  real_prev="$(readlink -f "$PREVIOUS_RELEASE_DIR" 2>/dev/null || echo "$PREVIOUS_RELEASE_DIR")"
+  real_root="$(readlink -f "$RUNTIME_RELEASES_DIR" 2>/dev/null || echo "$RUNTIME_RELEASES_DIR")"
+  case "$real_prev" in
+    "$real_root"/*) ;;
     *)
-      # Also allow if it matches current deploy root
-      if [[ "$PREVIOUS_RELEASE_DIR" != "${DEPLOY_PATH:-}"* ]]; then
-        log_warn "Previous release directory is not directly under RUNTIME_RELEASES_DIR: $PREVIOUS_RELEASE_DIR"
+      if [[ -z "${DEPLOY_PATH:-}" || "$real_prev" != "${DEPLOY_PATH}"* ]]; then
+        log_error "Previous release directory escapes RUNTIME_RELEASES_DIR ($RUNTIME_RELEASES_DIR): $PREVIOUS_RELEASE_DIR"
+        exit 1
       fi
       ;;
   esac
 fi
 
+# Step 2b: Verify previous release bundle integrity before Docker mutation
+prev_manifest=""
+for m in "$PREVIOUS_RELEASE_DIR/release-manifest.json" "$PREVIOUS_RELEASE_DIR/manifest.json"; do
+  if [[ -f "$m" ]]; then
+    prev_manifest="$m"
+    break
+  fi
+done
+
+[[ -n "$prev_manifest" && -f "$prev_manifest" ]] || {
+  log_error "Previous release manifest is missing in $PREVIOUS_RELEASE_DIR"
+  exit 1
+}
+
+expected_prev_manifest_sha="$(python3 - "$STATE_FILE" "$PREVIOUS_RELEASE_DIR" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    prev = d.get("previous")
+    pdir = sys.argv[2]
+    if prev and prev.get("manifest_sha256") and (prev.get("release_dir") == pdir or not prev.get("release_dir")):
+        print(prev["manifest_sha256"])
+    elif d.get("manifest_sha256") and (d.get("release_dir") == pdir or not prev):
+        print(d["manifest_sha256"])
+except Exception:
+    pass
+PY
+)"
+
+actual_prev_manifest_sha="$(sha256sum "$prev_manifest" | awk '{print $1}')"
+if [[ -n "$expected_prev_manifest_sha" && "$actual_prev_manifest_sha" != "$expected_prev_manifest_sha" ]]; then
+  log_error "Previous release manifest SHA mismatch! Expected: $expected_prev_manifest_sha, actual: $actual_prev_manifest_sha"
+  exit 1
+fi
+
+if ! python3 - "$prev_manifest" "$PREVIOUS_RELEASE_DIR" <<'PY'; then
+import json, hashlib, pathlib, sys
+manifest_path, release_dir = sys.argv[1:3]
+with open(manifest_path, "r", encoding="utf-8") as f:
+    m = json.load(f)
+artifacts = m.get("artifacts", {})
+root = pathlib.Path(release_dir)
+for rel_path, exp_hash in artifacts.items():
+    if not exp_hash or "=" in exp_hash or rel_path.startswith("failover-") or rel_path.startswith("compose_bundle") or rel_path.startswith("failover_bundle"):
+        continue
+    target = root / rel_path
+    if target.is_file():
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual != exp_hash:
+            print(f"Artifact {rel_path} checksum mismatch: exp={exp_hash} act={actual}", file=sys.stderr)
+            sys.exit(1)
+PY
+  log_error "Previous release bundle artifact checksum verification failed; refusing rollback."
+  exit 1
+fi
+
+if [[ "${SKIP_MANIFEST_CHECK:-0}" -ne 1 && -f "$SCRIPT_DIR/verify-manifest.sh" ]]; then
+  cosign_args=()
+  [[ "${REQUIRE_COSIGN:-0}" == "1" ]] && cosign_args+=(--require-cosign)
+  [[ -n "${EXPECTED_IDENTITY:-}" ]] && cosign_args+=(--expected-identity "$EXPECTED_IDENTITY")
+  [[ -n "${EXPECTED_ISSUER:-}" ]] && cosign_args+=(--expected-issuer "$EXPECTED_ISSUER")
+  if ! bash "$SCRIPT_DIR/verify-manifest.sh" --manifest "$prev_manifest" --deploy-dir "$PREVIOUS_RELEASE_DIR" "${cosign_args[@]}"; then
+    log_error "Previous release manifest validation failed; refusing unsafe rollback."
+    exit 1
+  fi
+fi
+
+[[ -d "$PREVIOUS_RELEASE_DIR/compose" ]] || {
+  log_error "Previous release directory lacks compose/ directory: $PREVIOUS_RELEASE_DIR/compose"
+  exit 1
+}
+
 # Step 3: Set execution context to previous release bundle
 export RELEASE_CONTEXT_DIR="$PREVIOUS_RELEASE_DIR"
 export COMPOSE_ROOT="$PREVIOUS_RELEASE_DIR/compose"
-
-step_was_completed() {
-  local step="$1"
-  if [[ ! -f "$JOURNAL_FILE" ]]; then
-    return 1
-  fi
-  python3 - "$JOURNAL_FILE" "$step" <<'PY' 2>/dev/null
-import json, sys
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-    sys.exit(0 if data.get("steps", {}).get(sys.argv[2]) == "STEP_COMPLETED" else 1)
-except Exception:
-    sys.exit(1)
-PY
-}
+export ROLLOUT_JOURNAL_FILE="$JOURNAL_FILE"
 
 rollback_failures=0
 
@@ -155,7 +220,13 @@ fi
 # 4e. Bark
 if step_was_completed bark && [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]; then
   log_info "Restoring previous Bark service using previous bundle..."
-  bark_img="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
+  bark_img=""
+  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
+    bark_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.bark 2>/dev/null || true)"
+  fi
+  if [[ -z "$bark_img" ]]; then
+    bark_img="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
+  fi
   if [[ -n "$bark_img" ]]; then
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
       bash "$SCRIPT_DIR/deploy-bark.sh" "$bark_img" || rollback_failures=$((rollback_failures + 1))
@@ -165,7 +236,13 @@ fi
 # 4f. TTS
 if step_was_completed tts && [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]; then
   log_info "Restoring previous TTS service using previous bundle..."
-  tts_img="$(get_release_env TTS_IMAGE_REF 2>/dev/null || true)"
+  tts_img=""
+  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
+    tts_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.tts 2>/dev/null || true)"
+  fi
+  if [[ -z "$tts_img" ]]; then
+    tts_img="$(get_release_env TTS_IMAGE_REF 2>/dev/null || true)"
+  fi
   if [[ -n "$tts_img" ]]; then
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
       bash "$SCRIPT_DIR/deploy-tts.sh" "$tts_img" || rollback_failures=$((rollback_failures + 1))
@@ -175,7 +252,13 @@ fi
 # 4g. Auth Browser
 if step_was_completed auth_browser && [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]; then
   log_info "Restoring previous Auth-Browser service using previous bundle..."
-  br_img="$(get_release_env BROWSER_IMAGE_REF 2>/dev/null || true)"
+  br_img=""
+  if [[ -f "$SCRIPT_DIR/release-state.py" ]]; then
+    br_img="$(python3 "$SCRIPT_DIR/release-state.py" get "$STATE_FILE" images.auth_browser 2>/dev/null || true)"
+  fi
+  if [[ -z "$br_img" ]]; then
+    br_img="$(get_release_env BROWSER_IMAGE_REF 2>/dev/null || true)"
+  fi
   if [[ -n "$br_img" ]]; then
     RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
       bash "$SCRIPT_DIR/deploy-auth-browser.sh" "$br_img" || rollback_failures=$((rollback_failures + 1))
@@ -191,16 +274,7 @@ fi
 
 if (( rollback_failures == 0 )); then
   if [[ -f "$JOURNAL_FILE" ]]; then
-    python3 - "$JOURNAL_FILE" <<'PY' 2>/dev/null || true
-import json, sys, datetime
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    d = json.load(f)
-d["status"] = "ROLLED_BACK"
-d["rolled_back_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(d, f, indent=2)
-PY
+    finish_rollout_journal "ROLLED_BACK"
     archived="${JOURNAL_FILE}.rolled_back.$(date +%s)"
     mv -f "$JOURNAL_FILE" "$archived"
     log_info "Rollout journal archived as ROLLED_BACK: $archived"

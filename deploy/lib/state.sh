@@ -482,7 +482,10 @@ clear_intentional_stop() {
 stop_standby_container() {
   local slot="$1"
   log_info "Stopping container for slot [${slot}]..."
-  mark_intentional_stop "$slot"
+  if ! mark_intentional_stop "$slot"; then
+    log_error "Refusing to stop $slot without durable intentional-stop marker."
+    return 1
+  fi
   compose_prod stop "gateway-${slot}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${slot}" 2>/dev/null || docker stop "acb-gateway-${slot}" 2>/dev/null || true
   log_info "Slot [${slot}] stopped into warm standby state."
 }

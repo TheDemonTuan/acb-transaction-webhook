@@ -11,6 +11,7 @@ require_release_orchestrator
 RESUME_SOAK="${RESUME_SOAK:-0}"
 SOAK_DURATION_SEC="${SOAK_DURATION_SEC:-900}"
 DETACH_SOAK="${DETACH_SOAK:-0}"
+DEFER_SOAK="${DEFER_SOAK:-0}"
 IMAGE_REF="${IMAGE_REF:-${GATEWAY_IMAGE_REF:-}}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 SKIP_MANIFEST="${SKIP_MANIFEST:-0}"
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --detach-soak)
       DETACH_SOAK=1
+      shift
+      ;;
+    --defer-soak)
+      DEFER_SOAK=1
       shift
       ;;
     --expected-commit)
@@ -211,6 +216,21 @@ if [[ -f "$SCRIPT_DIR/verify-runtime-drift.sh" ]]; then
     fi
     log_info "Pre-soak contract audit PASSED."
   fi
+fi
+
+if [[ "${DEFER_SOAK:-0}" == "1" ]]; then
+  log_info "Gateway route cutover and ACK succeeded; deferring release soak to release orchestrator."
+  if [[ "${DEFER_OLD_SLOT_RETIREMENT:-0}" == "1" ]]; then
+    [[ -n "${PENDING_GATEWAY_RETIRE_FILE:-}" ]] || {
+      log_error "PENDING_GATEWAY_RETIRE_FILE is required when old-slot retirement is deferred."
+      exit 1
+    }
+    printf 'old_slot=%s\ncandidate_slot=%s\n' "$ACTIVE_SLOT" "$CANDIDATE_SLOT" | atomic_write_file "$PENDING_GATEWAY_RETIRE_FILE" 600
+  fi
+  update_tx_state "TX_COMPLETED" "Promotion cutover completed (soak deferred to release orchestrator)"
+  set_deploy_state "COMPLETED" "Slot ${CANDIDATE_SLOT} is live (soak deferred to release orchestrator)"
+  log_info "Gateway deployment transaction completed successfully (soak deferred)."
+  exit 0
 fi
 
 # 8. 15-minute resumable soak observation

@@ -93,6 +93,12 @@ EOF
 cmd="${1:-}"
 case "$cmd" in
   inspect)
+    if [[ "$*" == *"edge-traefik"* ]]; then
+      if [[ "$*" == *"{{range .Mounts}}"* ]]; then
+        printf '%s\n' "${TRAEFIK_DYNAMIC_DIR:-${RUNTIME_ROOT:-$DEPLOY_PATH}/traefik}"
+      fi
+      exit 0
+    fi
     if [[ "$*" == *"{{.State.Running}}"* ]]; then
       echo "true"
       exit 0

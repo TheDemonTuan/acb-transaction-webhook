@@ -233,6 +233,62 @@ else
   assert_eq "true" "false" "verify-actions-pinned.sh failed unpinned action check"
 fi
 
+# 9. Static Validation and ShellCheck Fail-Fast Invariants
+printf "\n9. Testing Static Validation and Fail-Fast Order...\n"
+ci_content="$(cat "$ci_yml")"
+assert_contains "$ci_content" "git ls-files '*.sh'" "CI ShellCheck discovers scripts from git ls-files to include deploy/tests and platform"
+assert_contains "$ci_content" "shellcheck --severity=error" "CI enforces ShellCheck with error severity"
+
+bun_pos="$(grep -n 'setup-bun' "$ci_yml" | head -n1 | cut -d: -f1)"
+syntax_pos="$(grep -n 'Verify deployment and platform script syntax' "$ci_yml" | head -n1 | cut -d: -f1)"
+shellcheck_pos="$(grep -n 'Lint deployment and platform scripts' "$ci_yml" | head -n1 | cut -d: -f1)"
+
+if (( syntax_pos < bun_pos && shellcheck_pos < bun_pos )); then
+  printf 'PASS: static syntax and shellcheck run before expensive build/test phases\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: static checks (syntax:%d, shellcheck:%d) must run before setup-bun (%d)\n' "$syntax_pos" "$shellcheck_pos" "$bun_pos" >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+top_level_locals="$(python3 - <<'PY'
+import os, re
+
+top_locals = []
+for root, dirs, files in os.walk("."):
+    if ".git" in root or "node_modules" in root:
+        continue
+    for f in files:
+        if f.endswith(".sh"):
+            p = os.path.join(root, f)
+            with open(p, errors="ignore") as fp:
+                lines = fp.readlines()
+            in_func = 0
+            for i, line in enumerate(lines, 1):
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                if re.match(r"^(function\s+[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]+\s*\(\))\s*\{?", s):
+                    in_func += 1
+                elif "{" in s and in_func > 0:
+                    in_func += s.count("{")
+                if "}" in s and in_func > 0:
+                    in_func -= s.count("}")
+                    if in_func < 0: in_func = 0
+                if in_func == 0 and re.match(r"^local\s+", s):
+                    top_locals.append(f"{p}:{i}")
+print(", ".join(top_locals))
+PY
+)"
+assert_eq "" "$top_level_locals" "No top-level local declarations in shell scripts"
+
+# 10. Production Contract Fail-Closed Gate Invariants
+printf "\n10. Testing Production Contract Job Invariants...\n"
+assert_contains "$ci_content" "production-contract:" "CI defines production-contract gate job"
+assert_contains "$ci_content" "if: always()" "Production Contract uses if: always() to catch all outcomes"
+assert_contains "$ci_content" "needs: [verify, docker-smoke-gateway, docker-smoke-auth-browser, docker-smoke-tts-gateway]" "Production Contract requires all mandatory upstream jobs"
+assert_contains "$ci_content" '[[ "$result" == "success" ]]' "Production Contract fails closed on any non-success (rejects skipped/failed)"
+
 printf "\n========================================================\n"
 printf "Results: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"
 printf "========================================================\n"

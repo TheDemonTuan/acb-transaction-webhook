@@ -124,8 +124,8 @@ def validate_state(state: Dict[str, Any], allow_candidate: bool = False) -> None
     if gw_slot not in ("blue", "green"):
         die(f"active_slots.gateway must be 'blue' or 'green', got: {gw_slot}")
     fe_slot = slots.get("frontend")
-    if fe_slot is not None and fe_slot not in ("blue", "green", "legacy"):
-        die(f"active_slots.frontend must be 'blue', 'green', 'legacy', or null, got: {fe_slot}")
+    if fe_slot not in ("blue", "green", "legacy"):
+        die(f"active_slots.frontend must be 'blue', 'green', or 'legacy', got: {fe_slot}")
 
     # Images
     images = state.get("images", {})
@@ -216,7 +216,7 @@ def build_candidate_state(
                 "git_sha": prev_raw.get("git_sha", ""),
                 "manifest_sha256": prev_raw.get("manifest_sha256", ""),
                 "status": "COMPLETED",
-                "active_slots": prev_raw.get("active_slots", {"gateway": "blue", "frontend": None}),
+                "active_slots": prev_raw.get("active_slots", {"gateway": "blue", "frontend": "legacy"}),
                 "images": prev_raw.get("images", {}),
             }
 
@@ -248,6 +248,9 @@ def build_candidate_state(
             if manifest_images.get(comp):
                 candidate_images[comp] = manifest_images[comp]
 
+    if not candidate_fe_slot:
+        candidate_fe_slot = prev_state.get("active_slots", {}).get("frontend") or "legacy"
+
     candidate: Dict[str, Any] = {
         "schema_version": 2,
         "generation": candidate_gen,
@@ -272,18 +275,20 @@ def build_candidate_state(
     artifacts = manifest_data.get("artifacts", {})
     cfg_entries = {}
     for k, art_key in [
-        ("compose_bundle_sha256", "compose.prod.yaml"),
+        ("compose_bundle_sha256", "compose_bundle_sha256"),
         ("traefik_template_sha256", "lib/traefik.sh"),
         ("platform_bundle_sha256", "runtime-layout.sh"),
     ]:
-        val = artifacts.get(art_key)
+        val = artifacts.get(art_key) or artifacts.get(art_key.replace("_sha256", ""))
+        if not val and k == "compose_bundle_sha256":
+            val = artifacts.get("compose.prod.yaml")
         if val:
             cfg_entries[k] = val
     if cfg_entries:
         candidate["config"] = cfg_entries
 
     fc_sha = artifacts.get("failover/vps-failover-controller.py", "")
-    fc_bundle = artifacts.get("failover-bundle", "")
+    fc_bundle = artifacts.get("failover_bundle_sha256", "") or artifacts.get("failover-bundle", "")
     if fc_sha or fc_bundle:
         candidate["failover_controller"] = {
             "sha256": fc_sha or None,
@@ -291,6 +296,61 @@ def build_candidate_state(
         }
 
     return candidate
+
+
+def advance_doc_only_state(
+    prev_path: str,
+    release_dir: str,
+    manifest_path: str,
+) -> Dict[str, Any]:
+    with open(prev_path, "r", encoding="utf-8") as f:
+        prev_raw = json.load(f)
+
+    if prev_raw.get("schema_version") not in (1, 2) or prev_raw.get("status") != "COMPLETED":
+        die("canonical release state is invalid")
+
+    prev_gen = int(prev_raw.get("generation", 0))
+    prev_id = prev_raw.get("release_id")
+    prev_dir = prev_raw.get("release_dir")
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest_data = json.load(f)
+
+    manifest_bytes = Path(manifest_path).read_bytes()
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+
+    rel_id = manifest_data.get("release_id") or f"rel-doc-{manifest_data.get('git_sha', '')}"
+    git_sha = manifest_data.get("git_sha")
+
+    active_slots = copy.deepcopy(prev_raw.get("active_slots", {"gateway": "blue", "frontend": "legacy"}))
+    if not active_slots.get("frontend"):
+        active_slots["frontend"] = "legacy"
+    images = copy.deepcopy(prev_raw.get("images", {}))
+
+    state: Dict[str, Any] = {
+        "schema_version": 2,
+        "generation": prev_gen + 1,
+        "release_id": rel_id,
+        "release_dir": str(Path(release_dir).resolve()),
+        "git_sha": git_sha,
+        "manifest_sha256": manifest_sha,
+        "status": "COMPLETED",
+        "previous": {
+            "generation": prev_gen,
+            "release_id": prev_id,
+            "release_dir": prev_dir,
+        } if prev_id else None,
+        "active_slots": active_slots,
+        "images": images,
+    }
+
+    if "config" in prev_raw:
+        state["config"] = copy.deepcopy(prev_raw["config"])
+    if "failover_controller" in prev_raw:
+        state["failover_controller"] = copy.deepcopy(prev_raw["failover_controller"])
+
+    validate_state(state, allow_candidate=False)
+    return state
 
 
 def export_release_env(state: Dict[str, Any], out_path: Optional[str] = None) -> str:
@@ -356,6 +416,13 @@ def main() -> None:
     p_env.add_argument("path", help="Path to release state JSON")
     p_env.add_argument("--output", default=None, help="Output file path (default stdout)")
 
+    # advance-doc-only
+    p_doc = sub.add_parser("advance-doc-only")
+    p_doc.add_argument("--previous", required=True, help="Path to current canonical release state")
+    p_doc.add_argument("--release-dir", required=True, help="Path to signed release directory")
+    p_doc.add_argument("--manifest", required=True, help="Path to signed release manifest")
+    p_doc.add_argument("--output", required=True, help="Output path for advanced release state")
+
     args = parser.parse_args()
 
     if args.cmd == "validate":
@@ -402,6 +469,17 @@ def main() -> None:
         env_content = export_release_env(state, args.output)
         if not args.output:
             sys.stdout.write(env_content)
+        sys.exit(0)
+
+    elif args.cmd == "advance-doc-only":
+        res = advance_doc_only_state(
+            prev_path=args.previous,
+            release_dir=args.release_dir,
+            manifest_path=args.manifest,
+        )
+        content = json.dumps(res, indent=2, sort_keys=True) + "\n"
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(content)
         sys.exit(0)
 
 

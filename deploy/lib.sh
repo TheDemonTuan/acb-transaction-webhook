@@ -28,3 +28,5 @@ source "$LIB_DIR/state.sh"
 source "$LIB_DIR/traefik.sh"
 # shellcheck source=deploy/lib/database.sh
 source "$LIB_DIR/database.sh"
+# shellcheck source=deploy/lib/rollout-journal.sh
+source "$LIB_DIR/rollout-journal.sh"

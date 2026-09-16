@@ -15,6 +15,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check generated source and whitespace
+        run: git diff --check
+      - name: Verify deployment and platform script syntax
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+      - name: Lint deployment and platform scripts
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          shellcheck --severity=error "${scripts[@]}"
+      - name: Verify architecture documentation
+        run: bash scripts/verify-architecture-docs.sh
+      - name: Verify GitHub Actions are pinned to full commit SHAs
+        run: bash scripts/verify-actions-pinned.sh
+      - name: Verify CI workflow timeouts, keepalives, and action pinning
+        run: bash deploy/tests/test_ci_workflow.sh
+      - name: Verify canonical naming and journal contracts
+        run: bash deploy/tests/test_naming_contract.sh
+      - name: Test release state schema v2 and compatibility
+        run: |
+          bash deploy/tests/test_release_state.sh
+          bash deploy/tests/test_schema_compatibility.sh
+      - name: Test component promotion scope classifier
+        run: bash scripts/test-promotion-scope.sh
+      - name: Test component map coverage
+        run: bash deploy/tests/test_component_map_coverage.sh
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -47,25 +83,13 @@ jobs:
           python3 -m pip install pytest
           python3 -m py_compile platform/failover/vps-failover-controller.py
           python3 -m pytest -q platform/failover/test_failover.py
-      - name: Verify GitHub Actions are pinned to full commit SHAs
-        run: bash scripts/verify-actions-pinned.sh
-      - name: Test component promotion scope classifier
-        run: bash scripts/test-promotion-scope.sh
-      - name: Test promotion dispatcher and rollout orchestration
-        run: bash deploy/tests/test_promotion_dispatcher.sh
-      - name: Verify CI workflow timeouts, keepalives, and action pinning
-        run: bash deploy/tests/test_ci_workflow.sh
       - name: Test health endpoints, telemetry and operational alerts
         run: bash deploy/tests/test_health_telemetry.sh
-      - name: Install restore drill dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y age sqlite3
+      - name: Test promotion dispatcher and rollout orchestration
+        run: bash deploy/tests/test_promotion_dispatcher.sh
       - name: Run deployment failure drill tests
         run: |
           bash deploy/tests/test_secrets.sh
-          bash deploy/tests/test_backup.sh
-          bash deploy/tests/test_restore_drill.sh
           bash deploy/tests/test_compose_policy.sh
           bash deploy/tests/test_runtime_policy.sh
           bash deploy/tests/test_gateway_deploy.sh
@@ -76,41 +100,24 @@ jobs:
           bash deploy/tests/test_runtime_layout.sh
           bash deploy/tests/test_bootstrap_recovery.sh
           bash deploy/tests/test_legacy_frontend_recovery.sh
-          bash deploy/tests/test_release_state.sh
           bash deploy/tests/test_release_rollback.sh
           bash deploy/tests/test_slot_resolution.sh
           bash deploy/tests/test_failover_bundle.sh
           bash deploy/tests/test_drift_complete.sh
-          bash deploy/tests/test_component_map_coverage.sh
-          bash deploy/tests/test_schema_compatibility.sh
-          bash deploy/tests/test_release_simulator.sh
-          bash deploy/tests/test_release_crash_recovery.sh
-      - name: Verify deployment and platform script syntax
+      - name: Test real-artifact release lifecycle simulator
+        run: bash deploy/tests/test_release_simulator.sh
+      - name: Test crash recovery and chaos matrix
+        run: bash deploy/tests/test_release_crash_recovery.sh
+      - name: Install restore drill dependencies
         run: |
-          shopt -s nullglob
-          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh deploy/tests/*.sh)
-          if [ ${#scripts[@]} -eq 0 ]; then
-            echo "No shell scripts found" >&2
-            exit 1
-          fi
-          for script in "${scripts[@]}"; do
-            bash -n "$script"
-          done
-      - name: Lint deployment and platform scripts
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y age sqlite3
+      - name: Test backup and restore drill
         run: |
-          shopt -s nullglob
-          scripts=(deploy/*.sh scripts/*.sh scripts/ops/*.sh)
-          if [ ${#scripts[@]} -eq 0 ]; then
-            echo "No shell scripts found" >&2
-            exit 1
-          fi
-          shellcheck --severity=error "${scripts[@]}"
-      - name: Verify architecture documentation
-        run: bash scripts/verify-architecture-docs.sh
+          bash deploy/tests/test_backup.sh
+          bash deploy/tests/test_restore_drill.sh
       - name: Test supply-chain validators and release manifest
         run: bash deploy/test-supply-chain.sh
-      - name: Check generated source and whitespace
-        run: git diff --check
 
   docker-smoke-gateway:
     name: Docker smoke test (gateway)

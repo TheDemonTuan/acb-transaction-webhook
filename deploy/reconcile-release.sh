@@ -67,26 +67,19 @@ rollback_gateway_route_reconcile() {
 
 rollback_frontend_route_reconcile() {
   if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
-    local prev_top="" cand_top="" prev_cnt="" cand_cnt="" gw_slot=""
-    if grep -q '^{' "$PENDING_FRONTEND_RETIRE_FILE" 2>/dev/null; then
-      read -r prev_top cand_top prev_cnt cand_cnt gw_slot < <(python3 - "$PENDING_FRONTEND_RETIRE_FILE" <<'PY'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1], encoding="utf-8"))
-    print(d.get("previous_topology", ""), d.get("candidate_topology", ""), d.get("previous_container", ""), d.get("candidate_container", ""), d.get("gateway_slot_at_switch", ""))
-except Exception:
-    sys.exit(1)
-PY
-)
-    else
-      prev_top="$(sed -n 's/^old_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
-      cand_top="$(sed -n 's/^candidate_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+    local PREV_TOP="" CAND_TOP="" PREV_CNT="" CAND_CNT="" GW_SLOT=""
+    eval "$(parse_pending_frontend_evidence "$PENDING_FRONTEND_RETIRE_FILE" 2>/dev/null || true)"
+    local prev_top="$PREV_TOP" cand_top="$CAND_TOP" prev_cnt="$PREV_CNT" cand_cnt="$CAND_CNT"
+
+    if [[ -z "$cand_cnt" && -n "$cand_top" ]]; then
+      cand_cnt="acb-frontend-${cand_top}"
+    fi
+    if [[ -z "$prev_cnt" && -n "$prev_top" ]]; then
       if [[ "$prev_top" == "legacy" ]]; then
         prev_cnt="acb-frontend"
       else
         prev_cnt="acb-frontend-${prev_top}"
       fi
-      cand_cnt="acb-frontend-${cand_top}"
     fi
 
     if [[ "$prev_top" =~ ^(blue|green|legacy)$ && "$cand_top" =~ ^(blue|green)$ ]]; then
@@ -102,26 +95,33 @@ PY
         current_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
         local tmp_route="${ACB_CONFIG}.rollback.$$"
         render_traefik_config "$current_gw_slot" "$tmp_route" "legacy"
-        if atomic_write_file "$ACB_CONFIG" 644 < "$tmp_route" && rm -f "$tmp_route" && ack_frontend_route 30; then
-          rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
-          docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
-          rm -f "$PENDING_FRONTEND_RETIRE_FILE"
-          log_info "Frontend reverted to legacy container acb-frontend."
-        else
-          log_error "Frontend legacy route rollback failed; preserving evidence."
+        if ! atomic_write_file "$ACB_CONFIG" 644 < "$tmp_route"; then
+          rm -f "$tmp_route"
+          log_error "Frontend legacy route rollback file write failed; preserving evidence."
           return 1
         fi
+        rm -f "$tmp_route"
+        if ! ack_frontend_route 30; then
+          log_error "Frontend legacy route rollback ACK failed; preserving both containers and pending evidence."
+          return 1
+        fi
+        rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+        log_info "Frontend reverted to legacy container acb-frontend."
       else
-        # blue or green
-        if atomic_switch_frontend_route "$prev_top" && ack_frontend_route 30; then
-          printf '%s' "$prev_top" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
-          docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
-          rm -f "$PENDING_FRONTEND_RETIRE_FILE"
-          log_info "Frontend reverted to slot [$prev_top]."
-        else
-          log_error "Frontend route rollback failed; preserving pending rollback evidence."
+        if ! atomic_switch_frontend_route "$prev_top"; then
+          log_error "Frontend route rollback switch to [$prev_top] failed; preserving evidence."
           return 1
         fi
+        if ! ack_frontend_route 30; then
+          log_error "Frontend route rollback ACK failed for [$prev_top]; preserving both containers and pending evidence."
+          return 1
+        fi
+        printf '%s' "$prev_top" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+        log_info "Frontend reverted to slot [$prev_top]."
       fi
     else
       log_error "Frontend rollback evidence is malformed; refusing to discard it."
@@ -147,14 +147,7 @@ PY
 
   step_completed() {
     local step="$1"
-    python3 - "$ROLLOUT_JOURNAL_FILE" "$step" <<'PY' 2>/dev/null
-import json, sys
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-    sys.exit(0 if data.get("steps", {}).get(sys.argv[2]) == "STEP_COMPLETED" else 1)
-except Exception:
-    sys.exit(1)
-PY
+    step_was_completed "$step" "$ROLLOUT_JOURNAL_FILE"
   }
 
   local comp_failures=0
@@ -167,6 +160,9 @@ PY
   if step_completed worker; then
     if [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]; then
       image="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
+      if [[ -z "$image" && -f "$SCRIPT_DIR/release-state.py" && -f "$CURRENT_RELEASE_FILE" ]]; then
+        image="$(python3 "$SCRIPT_DIR/release-state.py" get "$CURRENT_RELEASE_FILE" images.worker 2>/dev/null || true)"
+      fi
       if [[ -n "$image" ]]; then
         RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$SCRIPT_DIR/deploy-worker.sh" "$image" || comp_failures=$((comp_failures + 1))
       fi
@@ -175,6 +171,9 @@ PY
   if step_completed bark; then
     if [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]; then
       image="$(get_release_env BARK_IMAGE_REF 2>/dev/null || true)"
+      if [[ -z "$image" && -f "$SCRIPT_DIR/release-state.py" && -f "$CURRENT_RELEASE_FILE" ]]; then
+        image="$(python3 "$SCRIPT_DIR/release-state.py" get "$CURRENT_RELEASE_FILE" images.bark 2>/dev/null || true)"
+      fi
       if [[ -n "$image" ]]; then
         RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$SCRIPT_DIR/deploy-bark.sh" "$image" || comp_failures=$((comp_failures + 1))
       fi
@@ -183,6 +182,9 @@ PY
   if step_completed tts; then
     if [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]; then
       image="$(get_release_env TTS_IMAGE_REF 2>/dev/null || true)"
+      if [[ -z "$image" && -f "$SCRIPT_DIR/release-state.py" && -f "$CURRENT_RELEASE_FILE" ]]; then
+        image="$(python3 "$SCRIPT_DIR/release-state.py" get "$CURRENT_RELEASE_FILE" images.tts 2>/dev/null || true)"
+      fi
       if [[ -n "$image" ]]; then
         RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$SCRIPT_DIR/deploy-tts.sh" "$image" || comp_failures=$((comp_failures + 1))
       fi
@@ -191,6 +193,9 @@ PY
   if step_completed auth_browser; then
     if [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]; then
       image="$(get_release_env BROWSER_IMAGE_REF 2>/dev/null || true)"
+      if [[ -z "$image" && -f "$SCRIPT_DIR/release-state.py" && -f "$CURRENT_RELEASE_FILE" ]]; then
+        image="$(python3 "$SCRIPT_DIR/release-state.py" get "$CURRENT_RELEASE_FILE" images.auth_browser 2>/dev/null || true)"
+      fi
       if [[ -n "$image" ]]; then
         RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$SCRIPT_DIR/deploy-auth-browser.sh" "$image" || comp_failures=$((comp_failures + 1))
       fi

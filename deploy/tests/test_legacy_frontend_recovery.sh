@@ -58,6 +58,12 @@ setup_fixture_247() {
 cmd="${1:-}"
 case "$cmd" in
   inspect)
+    if [[ "$*" == *"edge-traefik"* ]]; then
+      if [[ "$*" == *"{{range .Mounts}}"* ]]; then
+        printf '%s\n' "${TRAEFIK_DYNAMIC_DIR:-$RUNTIME_ROOT/traefik}"
+      fi
+      exit 0
+    fi
     # Return healthy for legacy container acb-frontend, green gateway, etc.
     target="${@: -1}"
     if [[ "$target" == "acb-frontend" || "$target" == "acb-gateway-green" || "$target" == "acb-worker" ]]; then
@@ -78,11 +84,18 @@ case "$cmd" in
       fi
       printf 'container-id-%s\n' "$target"
       exit 0
+    elif [[ "$target" == "edge-traefik" ]]; then
+      if [[ "$*" == *"{{range .Mounts}}"* ]]; then
+        printf '%s\n' "${TRAEFIK_DYNAMIC_DIR:-$RUNTIME_ROOT/traefik}"
+        exit 0
+      fi
+      exit 0
     fi
     printf 'mock-id\n'
     exit 0
     ;;
   stop|rm)
+    printf 'DOCKER_%s: %s\n' "$cmd" "$*" >> "${RUNTIME_ROOT:-/tmp}/docker_ops.log"
     exit 0
     ;;
   *)
@@ -215,7 +228,75 @@ test_reconcile_run_247() {
   }
 }
 
+test_task6_json_cleanup_evidence() {
+  printf '\nTesting JSON cleanup evidence (Task 6)...\n'
+  local tdir="$TEST_TMP/task6_cleanup"
+  setup_fixture_247 "$tdir"
+  export RUNTIME_ROOT="$tdir"
+  export PATH="$tdir/mock_bin:$PATH"
+  source "$DEPLOY_DIR/lib.sh"
+
+  # 1. Legacy -> Blue cleanup: must stop acb-frontend, NOT acb-frontend-legacy
+  rm -f "$tdir/docker_ops.log"
+  local legacy_json="$tdir/data/pending-frontend-retire.env"
+  cat <<'EOF' > "$legacy_json"
+{
+  "schema_version": 1,
+  "previous_topology": "legacy",
+  "previous_container": "acb-frontend",
+  "candidate_topology": "blue",
+  "candidate_container": "acb-frontend-blue",
+  "gateway_slot_at_switch": "blue",
+  "route_switched": true
+}
+EOF
+
+  cleanup_pending_frontend "$legacy_json"
+  assert_eq "0" "$?" "cleanup_pending_frontend succeeds for legacy JSON evidence"
+  [[ ! -f "$legacy_json" ]] && printf 'PASS: Legacy JSON evidence removed after cleanup\n' || {
+    printf 'FAIL: Legacy JSON evidence still present\n' >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+  }
+  if grep -q "DOCKER_stop: stop --time 10 acb-frontend$" "$tdir/docker_ops.log"; then
+    printf 'PASS: Legacy cleanup stopped exact container acb-frontend (not acb-frontend-legacy)\n'
+    TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  else
+    printf 'FAIL: Legacy cleanup did not stop acb-frontend: %s\n' "$(cat "$tdir/docker_ops.log" 2>/dev/null)" >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+  fi
+
+  # 2. Blue -> Green cleanup: must stop acb-frontend-blue
+  rm -f "$tdir/docker_ops.log"
+  local blue_json="$tdir/data/pending-frontend-retire.env"
+  cat <<'EOF' > "$blue_json"
+{
+  "schema_version": 1,
+  "previous_topology": "blue",
+  "previous_container": "acb-frontend-blue",
+  "candidate_topology": "green",
+  "candidate_container": "acb-frontend-green",
+  "gateway_slot_at_switch": "green",
+  "route_switched": true
+}
+EOF
+
+  cleanup_pending_frontend "$blue_json"
+  assert_eq "0" "$?" "cleanup_pending_frontend succeeds for blue->green JSON evidence"
+  if grep -q "DOCKER_stop: stop --time 10 acb-frontend-blue$" "$tdir/docker_ops.log"; then
+    printf 'PASS: Blue->Green cleanup stopped acb-frontend-blue\n'
+    TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  else
+    printf 'FAIL: Blue->Green cleanup did not stop acb-frontend-blue\n' >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+  fi
+
+  # 3. Rerun cleanup is idempotent
+  cleanup_pending_frontend "$blue_json"
+  assert_eq "0" "$?" "Rerun cleanup is idempotent when evidence file is absent"
+}
+
 test_reconcile_run_247
+test_task6_json_cleanup_evidence
 
 echo "Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
 [[ "$TESTS_FAILED" -eq 0 ]] || exit 1

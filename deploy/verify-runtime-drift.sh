@@ -34,11 +34,26 @@ rows = [
 ]
 if fe in {"blue", "green"}:
     rows.append((f"acb-frontend-{fe}", images.get("frontend", "")))
+elif fe == "legacy":
+    rows.append(("acb-frontend", images.get("frontend", "")))
+dbtool_img = images.get("dbtool", "")
 digest = re.compile(r"^[^\s]+@sha256:[a-f0-9]{64}$")
+if dbtool_img and not digest.match(dbtool_img):
+    raise SystemExit("invalid expected image for dbtool")
 for container, image in rows:
     if not digest.match(image):
         raise SystemExit(f"invalid expected image for {container}")
     print(f"{container}\t{image}")
+rel_dir = state.get("release_dir", "")
+if rel_dir:
+    print(f"@release_dir\t{rel_dir}")
+cfg = state.get("config", {})
+if cfg.get("compose_bundle_sha256"):
+    print(f"@compose_bundle\t{cfg['compose_bundle_sha256']}")
+if cfg.get("traefik_template_sha256"):
+    print(f"@traefik_template\t{cfg['traefik_template_sha256']}")
+if cfg.get("platform_bundle_sha256"):
+    print(f"@platform_bundle\t{cfg['platform_bundle_sha256']}")
 controller = state.get("failover_controller", {})
 if controller.get("sha256"):
     print(f"@controller\t{controller['sha256']}")
@@ -48,9 +63,78 @@ PY
 )
 
 failures=0
+release_dir=""
 for row in "${expectations[@]}"; do
   name="${row%%$'\t'*}"
   expected="${row#*$'\t'}"
+  if [[ "$name" == "@release_dir" ]]; then
+    release_dir="$expected"
+    continue
+  fi
+  if [[ "$name" == "@compose_bundle" ]]; then
+    compose_root=""
+    if [[ -n "${release_dir:-}" && -d "$release_dir/compose" ]]; then
+      compose_root="$release_dir/compose"
+    elif [[ -d "${COMPOSE_ROOT:-}" ]]; then
+      compose_root="$COMPOSE_ROOT"
+    elif [[ -d "${DEPLOY_PATH:-}/compose" ]]; then
+      compose_root="${DEPLOY_PATH}/compose"
+    elif [[ -d "$SCRIPT_DIR/compose" ]]; then
+      compose_root="$SCRIPT_DIR/compose"
+    fi
+    if [[ -z "$compose_root" || ! -d "$compose_root" ]]; then
+      log_error "PRODUCTION_DRIFT component=compose_bundle expected=$expected actual=missing_directory"
+      failures=$((failures + 1))
+    else
+      actual_bundle="$(python3 - "$compose_root" <<'PY' 2>/dev/null || true
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256()
+for p in sorted(root.glob("*.yaml")):
+    rel = f"compose/{p.name}"
+    h.update(rel.encode() + b"\0" + p.read_bytes() + b"\0")
+print(h.hexdigest())
+PY
+)"
+      if [[ "$actual_bundle" != "$expected" ]]; then
+        log_error "PRODUCTION_DRIFT component=compose_bundle expected=$expected actual=${actual_bundle:-mismatch}"
+        failures=$((failures + 1))
+      fi
+    fi
+    continue
+  fi
+  if [[ "$name" == "@traefik_template" ]]; then
+    traefik_path=""
+    if [[ -n "${release_dir:-}" && -f "$release_dir/lib/traefik.sh" ]]; then
+      traefik_path="$release_dir/lib/traefik.sh"
+    elif [[ -f "${DEPLOY_PATH:-}/lib/traefik.sh" ]]; then
+      traefik_path="${DEPLOY_PATH}/lib/traefik.sh"
+    elif [[ -f "$SCRIPT_DIR/lib/traefik.sh" ]]; then
+      traefik_path="$SCRIPT_DIR/lib/traefik.sh"
+    fi
+    actual_traefik="$(sha256sum "$traefik_path" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ "$actual_traefik" != "$expected" ]]; then
+      log_error "PRODUCTION_DRIFT component=traefik_template expected=$expected actual=${actual_traefik:-missing}"
+      failures=$((failures + 1))
+    fi
+    continue
+  fi
+  if [[ "$name" == "@platform_bundle" ]]; then
+    platform_path=""
+    if [[ -n "${release_dir:-}" && -f "$release_dir/runtime-layout.sh" ]]; then
+      platform_path="$release_dir/runtime-layout.sh"
+    elif [[ -f "${DEPLOY_PATH:-}/runtime-layout.sh" ]]; then
+      platform_path="${DEPLOY_PATH}/runtime-layout.sh"
+    elif [[ -f "$SCRIPT_DIR/runtime-layout.sh" ]]; then
+      platform_path="$SCRIPT_DIR/runtime-layout.sh"
+    fi
+    actual_platform="$(sha256sum "$platform_path" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ "$actual_platform" != "$expected" ]]; then
+      log_error "PRODUCTION_DRIFT component=platform_bundle expected=$expected actual=${actual_platform:-missing}"
+      failures=$((failures + 1))
+    fi
+    continue
+  fi
   if [[ "$name" == "@controller" ]]; then
     controller_path="${FAILOVER_INSTALL_DIR:-/opt/platform/failover}/vps-failover-controller.py"
     actual="$(sha256sum "$controller_path" 2>/dev/null | awk '{print $1}' || true)"
@@ -185,10 +269,14 @@ if [[ -n "$expected_frontend_slot" ]]; then
 fi
 
 # Journal path identity check
-expected_journal="${TX_JOURNAL_FILE:-${RUNTIME_DATA_DIR:-${DEPLOY_PATH:-/opt/acb-transaction-webhook}/data}/deploy-journal.json}"
-if [[ -n "${TX_JOURNAL_FILE:-}" && "$TX_JOURNAL_FILE" != "$expected_journal" ]]; then
-  log_error "PRODUCTION_DRIFT component=tx_journal_path expected=$expected_journal actual=$TX_JOURNAL_FILE"
-  failures=$((failures + 1))
+canonical_journal="${RUNTIME_DATA_DIR:-${DEPLOY_PATH:-/opt/acb-transaction-webhook}/data}/deploy-journal.json"
+if [[ -n "${TX_JOURNAL_FILE:-}" ]]; then
+  actual_journal_norm="$(readlink -f "$TX_JOURNAL_FILE" 2>/dev/null || echo "$TX_JOURNAL_FILE")"
+  canonical_journal_norm="$(readlink -f "$canonical_journal" 2>/dev/null || echo "$canonical_journal")"
+  if [[ "$actual_journal_norm" != "$canonical_journal_norm" ]]; then
+    log_error "PRODUCTION_DRIFT component=tx_journal_path expected=$canonical_journal actual=$TX_JOURNAL_FILE"
+    failures=$((failures + 1))
+  fi
 fi
 
 if [[ "$failures" -gt 0 ]]; then

@@ -63,7 +63,7 @@ setup_simulator_base() {
   "release_id": "rel-init",
   "status": "COMPLETED",
   "git_sha": "0000000000000000000000000000000000000000",
-  "active_slots": {"gateway": "blue", "frontend": null},
+  "active_slots": {"gateway": "blue", "frontend": "legacy"},
   "images": {}
 }
 EOF
@@ -73,6 +73,12 @@ EOF
 cmd="${1:-}"
 case "$cmd" in
   inspect)
+    if [[ "$*" == *"edge-traefik"* ]]; then
+      if [[ "$*" == *"{{range .Mounts}}"* ]]; then
+        printf '%s\n' "${TRAEFIK_DYNAMIC_DIR:-${RUNTIME_ROOT:-$DEPLOY_PATH}/traefik}"
+      fi
+      exit 0
+    fi
     target="${@: -1}"
     if [[ "$*" == *"{{.State.Running}}"* ]]; then
       echo "true"
@@ -211,7 +217,7 @@ EOF
   "release_id": "rel-prev",
   "status": "COMPLETED",
   "git_sha": "0000000000000000000000000000000000000000",
-  "active_slots": {"gateway": "green", "frontend": null},
+  "active_slots": {"gateway": "green", "frontend": "legacy"},
   "images": {}
 }
 EOF

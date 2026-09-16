@@ -65,6 +65,7 @@ setup_traefik_mock_env() {
   export MOCK_ACK_WRONG_SLOT=0
   export MOCK_ACK_WRONG_COMMIT=0
   export MOCK_ACK_TIMEOUT=0
+  export MOCK_TRAEFIK_MOUNT_MISMATCH=0
   export ROUTE_ACK_TIMEOUT=3
 
   mkdir -p "$test_dir/bin" "$test_dir/dynamic" "$test_dir/secrets" "$test_dir/state" "$test_dir/data"
@@ -379,6 +380,7 @@ set -e
 assert_eq "1" "$(( mismatch_code != 0 ? 1 : 0 ))" "switch-slot.sh failed closed on dynamic mount mismatch"
 assert_eq "blue" "$(cat "$T6/.active-slot")" "Active slot untouched after preflight failure"
 assert_file_contains "$T6/dynamic/acb.yml" "acb-web-blue" "Route configuration untouched after preflight failure"
+export MOCK_TRAEFIK_MOUNT_MISMATCH=0
 
 # ==============================================================================
 # TEST 7: Route identity ACK failure on wrong commit triggers rollback
@@ -414,6 +416,60 @@ export EXPECTED_COMMIT=""
 
 assert_eq "blue" "$(cat "$T8/.active-slot")" "Legacy slot successfully rolled back to blue"
 assert_file_contains "$T8/dynamic/acb.yml" "acb-web-blue" "Route reverted to blue on legacy rollback"
+
+# ==============================================================================
+# TEST 9: Explicit Route and Stop Safety Fail-Closed Contract
+# ==============================================================================
+printf '\n=== TEST 9: Explicit Route and Stop Safety Fail-Closed Contract ===\n'
+T9="$TEST_TMP/t9"
+setup_traefik_mock_env "$T9"
+source "$DEPLOY_DIR/lib.sh"
+
+# 1. Traefik dynamic directory mismatch inside if / && conditional context
+export MOCK_TRAEFIK_MOUNT_MISMATCH=1
+route_before="$(cat "$ACB_CONFIG")"
+sw_code=0
+if atomic_switch_route green && ack_route_identity green "" 3; then
+  sw_code=0
+else
+  sw_code=1
+fi
+assert_eq "1" "$sw_code" "atomic_switch_route fails closed inside if/&& conditional when prerequisites fail"
+route_after="$(cat "$ACB_CONFIG")"
+assert_eq "$route_before" "$route_after" "Route config bytes untouched on prerequisite failure"
+assert_eq "blue" "$(cat "$ACTIVE_SLOT_FILE")" "Active slot untouched on prerequisite failure"
+export MOCK_TRAEFIK_MOUNT_MISMATCH=0
+
+# 2. Stop standby fails closed when failover state dir is unwritable
+mkdir -p "$T9/unwritable_failover"
+chmod 500 "$T9/unwritable_failover"
+export FAILOVER_STATE_DIR="$T9/unwritable_failover"
+
+stop_code=0
+if stop_standby_container green; then
+  stop_code=0
+else
+  stop_code=1
+fi
+assert_eq "1" "$stop_code" "stop_standby_container returns nonzero when intentional-stop marker cannot be written"
+chmod 700 "$T9/unwritable_failover"
+export FAILOVER_STATE_DIR="$T9/failover"
+
+# 3. Rollback route ACK failure preserves both slots and pending evidence
+export PENDING_GATEWAY_RETIRE_FILE="$T9/pending-gateway-retire.env"
+printf 'old_slot=blue\ncandidate_slot=green\n' > "$PENDING_GATEWAY_RETIRE_FILE"
+export MOCK_ACK_TIMEOUT=1
+export ROUTE_ACK_TIMEOUT=1
+
+rb_code=0
+if rollback_gateway_route; then
+  rb_code=0
+else
+  rb_code=1
+fi
+assert_eq "1" "$rb_code" "rollback_gateway_route fails when route ACK fails"
+assert_file_exists "$PENDING_GATEWAY_RETIRE_FILE" "Pending evidence preserved when rollback route ACK fails"
+unset MOCK_ACK_TIMEOUT
 
 printf '\n==================================================\n'
 printf 'TRAEFIK SWITCH TEST RESULTS: %d PASSED, %d FAILED\n' "$TESTS_PASSED" "$TESTS_FAILED"

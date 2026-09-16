@@ -216,9 +216,146 @@ test_build_candidate_state() {
   assert_eq "CANONICAL_GENERATION=43" "$(grep '^CANONICAL_GENERATION=' "$env_out")" "export-env contains CANONICAL_GENERATION=43"
 }
 
+test_task2_canonical_naming_and_advance_doc_only() {
+  local tdir="$TEST_TMP/task2_test"
+  mkdir -p "$tdir/releases/rel-current/compose" "$tdir/state" "$tdir/data" "$tdir/secrets"
+  export RUNTIME_RELEASES_DIR="$tdir/releases"
+
+  local tts_cand="ghcr.io/test/tts@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+  local tts_prev="ghcr.io/test/tts@sha256:0000000000000000000000000000000000000000000000000000000000000007"
+  local fe_img="ghcr.io/test/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000004"
+  local gw_img="ghcr.io/test/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000005"
+  local wk_img="ghcr.io/test/worker@sha256:0000000000000000000000000000000000000000000000000000000000000008"
+  local db_img="ghcr.io/test/dbtool@sha256:0000000000000000000000000000000000000000000000000000000000000003"
+  local br_img="ghcr.io/test/auth-browser@sha256:0000000000000000000000000000000000000000000000000000000000000001"
+  local bk_img="ghcr.io/test/bark@sha256:0000000000000000000000000000000000000000000000000000000000000002"
+
+  local manifest_file="$tdir/releases/rel-current/release-manifest.json"
+  bash "$DEPLOY_DIR/generate-release-manifest.sh" \
+    --git-sha "2222222222222222222222222222222222222222" \
+    --release-id "rel-task2" \
+    --promotion-scope '{"tts":true}' \
+    --frontend-image "$fe_img" \
+    --gateway-image "$gw_img" \
+    --worker-image "$wk_img" \
+    --dbtool-image "$db_img" \
+    --auth-browser-image "$br_img" \
+    --tts-image "$tts_cand" \
+    --bark-image "$bk_img" \
+    --deploy-dir "$DEPLOY_DIR" \
+    --output "$manifest_file"
+
+  # 1. Assert new manifest contains "tts" and NOT "tts_gateway"
+  local has_tts_key
+  has_tts_key="$(python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print("tts" in d.get("images", {}))' "$manifest_file")"
+  assert_eq "True" "$has_tts_key" "Real manifest generator writes images.tts"
+
+  local has_tts_gw_key
+  has_tts_gw_key="$(python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print("tts_gateway" in d.get("images", {}))' "$manifest_file")"
+  assert_eq "False" "$has_tts_gw_key" "Real manifest generator does not emit tts_gateway"
+
+  # 2. Assert verify-manifest.sh passes on real manifest
+  local ec=0
+  local v_out
+  v_out="$(bash "$DEPLOY_DIR/verify-manifest.sh" --manifest "$manifest_file" --deploy-dir "$DEPLOY_DIR" 2>&1)" || ec=$?
+  if [[ "$ec" -ne 0 ]]; then
+    printf "verify-manifest error: %s\n" "$v_out" >&2
+  fi
+  assert_eq "0" "$ec" "verify-manifest.sh succeeds on generated manifest"
+
+  # 3. Assert old tts_gateway manifest is supported for backwards compatibility
+  local old_manifest="$tdir/releases/rel-current/old-manifest.json"
+  sed 's/"tts":/"tts_gateway":/' "$manifest_file" > "$old_manifest"
+  ec=0
+  v_out="$(bash "$DEPLOY_DIR/verify-manifest.sh" --manifest "$old_manifest" --deploy-dir "$DEPLOY_DIR" 2>&1)" || ec=$?
+  if [[ "$ec" -ne 0 ]]; then
+    printf "verify-manifest old error: %s\n" "$v_out" >&2
+  fi
+  assert_eq "0" "$ec" "verify-manifest.sh accepts legacy tts_gateway key for compatibility"
+
+  # 4. Previous canonical state with explicit legacy frontend
+  local prev_state="$tdir/state/current-release.json"
+  cat <<EOF > "$prev_state"
+{
+  "schema_version": 2,
+  "generation": 50,
+  "release_id": "rel-prev50",
+  "release_dir": "$tdir/releases/rel-current",
+  "git_sha": "1111111111111111111111111111111111111111",
+  "manifest_sha256": "$(sha256sum "$manifest_file" | awk '{print $1}')",
+  "status": "COMPLETED",
+  "active_slots": {
+    "gateway": "blue",
+    "frontend": "legacy"
+  },
+  "images": {
+    "gateway": { "blue": "$gw_img", "green": "$gw_img" },
+    "frontend": "$fe_img",
+    "worker": "$wk_img",
+    "dbtool": "$db_img",
+    "auth_browser": "$br_img",
+    "tts": "$tts_prev",
+    "bark": "$bk_img"
+  }
+}
+EOF
+
+  # 5. Build candidate state with TTS promotion
+  local cand_state="$tdir/state/candidate-tts.json"
+  python3 "$DEPLOY_DIR/release-state.py" build \
+    --previous "$prev_state" \
+    --release-dir "$tdir/releases/rel-current" \
+    --manifest "$manifest_file" \
+    --gateway-slot "blue" \
+    --frontend-slot "legacy" \
+    --scope "tts" \
+    --output "$cand_state"
+
+  ec=0
+  python3 "$DEPLOY_DIR/release-state.py" validate "$cand_state" || ec=$?
+  assert_eq "0" "$ec" "TTS candidate state passes schema v2 validation"
+
+  local built_tts
+  built_tts="$(python3 "$DEPLOY_DIR/release-state.py" get "$cand_state" images.tts)"
+  assert_eq "$tts_cand" "$built_tts" "TTS candidate state contains candidate digest for images.tts"
+
+  local fe_topo
+  fe_topo="$(python3 "$DEPLOY_DIR/release-state.py" get "$cand_state" active_slots.frontend)"
+  assert_eq "legacy" "$fe_topo" "Frontend topology remains explicit 'legacy'"
+
+  # 6. Test advance-doc-only
+  local doc_state="$tdir/state/doc-state.json"
+  python3 "$DEPLOY_DIR/release-state.py" advance-doc-only \
+    --previous "$prev_state" \
+    --release-dir "$tdir/releases/rel-current" \
+    --manifest "$manifest_file" \
+    --output "$doc_state"
+
+  ec=0
+  python3 "$DEPLOY_DIR/release-state.py" validate "$doc_state" || ec=$?
+  assert_eq "0" "$ec" "advance-doc-only state passes schema v2 validation"
+
+  local doc_gen
+  doc_gen="$(python3 "$DEPLOY_DIR/release-state.py" get "$doc_state" generation)"
+  assert_eq "51" "$doc_gen" "advance-doc-only advances generation from 50 to 51"
+
+  local doc_prev_id
+  doc_prev_id="$(python3 "$DEPLOY_DIR/release-state.py" get "$doc_state" previous.release_id)"
+  assert_eq "rel-prev50" "$doc_prev_id" "advance-doc-only records exact previous release_id"
+
+  local doc_fe_slot
+  doc_fe_slot="$(python3 "$DEPLOY_DIR/release-state.py" get "$doc_state" active_slots.frontend)"
+  assert_eq "legacy" "$doc_fe_slot" "advance-doc-only preserves explicit legacy frontend slot"
+
+  local doc_tts
+  doc_tts="$(python3 "$DEPLOY_DIR/release-state.py" get "$doc_state" images.tts)"
+  assert_eq "$tts_prev" "$doc_tts" "advance-doc-only preserves previous runtime images (no mutations)"
+}
+
 test_valid_schema_v2
 test_reject_invalid_states
 test_build_candidate_state
+test_task2_canonical_naming_and_advance_doc_only
 
 echo "Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
 [[ "$TESTS_FAILED" -eq 0 ]] || exit 1
