@@ -329,7 +329,13 @@ if [[ -e "$RELEASE_DIR" || -L "$RELEASE_DIR" ]]; then
 
   printf 'Existing release %s is identical and verified. Reusing existing release.\n' "$release_id"
   # Ensure runtime links (.env.production, .release.env, secrets) exist in release directory
-  runtime_deploy="${DEPLOY_PATH:-/opt/acb-transaction-webhook}/deploy"
+  runtime_deploy="${DEPLOY_PATH:-$(cd -- "$(dirname "$RELEASE_DIR")/../deploy" 2>/dev/null && pwd || echo "/opt/acb-transaction-webhook/deploy")}/deploy"
+  if [[ ! -d "$runtime_deploy" && -d "${DEPLOY_PATH:-}/deploy" ]]; then
+    runtime_deploy="${DEPLOY_PATH}/deploy"
+  fi
+  if [[ ! -d "$runtime_deploy" && -d "$(dirname "$RELEASE_DIR")/../deploy" ]]; then
+    runtime_deploy="$(cd -- "$(dirname "$RELEASE_DIR")/../deploy" && pwd)"
+  fi
   if [[ -d "$runtime_deploy/secrets" && ! -e "$RELEASE_DIR/secrets" ]]; then
     ln -s "$runtime_deploy/secrets" "$RELEASE_DIR/secrets" 2>/dev/null || true
   fi
@@ -349,7 +355,13 @@ else
   installed=1
   chmod -R go-w "$RELEASE_DIR" 2>/dev/null || true
   # Link canonical runtime secrets and env into release dir for compose interpolation
-  runtime_deploy="${DEPLOY_PATH:-/opt/acb-transaction-webhook}/deploy"
+  runtime_deploy="${DEPLOY_PATH:-$(cd -- "$(dirname "$RELEASE_DIR")/../deploy" 2>/dev/null && pwd || echo "/opt/acb-transaction-webhook/deploy")}/deploy"
+  if [[ ! -d "$runtime_deploy" && -d "${DEPLOY_PATH:-}/deploy" ]]; then
+    runtime_deploy="${DEPLOY_PATH}/deploy"
+  fi
+  if [[ ! -d "$runtime_deploy" && -d "$(dirname "$RELEASE_DIR")/../deploy" ]]; then
+    runtime_deploy="$(cd -- "$(dirname "$RELEASE_DIR")/../deploy" && pwd)"
+  fi
   if [[ -d "$runtime_deploy/secrets" && ! -e "$RELEASE_DIR/secrets" ]]; then
     ln -s "$runtime_deploy/secrets" "$RELEASE_DIR/secrets" 2>/dev/null || true
   fi
