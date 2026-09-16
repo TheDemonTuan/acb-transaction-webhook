@@ -108,32 +108,123 @@ release_deploy_lock() {
   fi
 }
 
-get_active_slot() {
-  local slot=""
-  if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
-    slot="$(tr -d ' \r\n[:space:]' < "$ACTIVE_SLOT_FILE")"
-  fi
-  if [[ "$slot" != "blue" && "$slot" != "green" ]]; then
-    if [[ -f "$ACB_CONFIG" ]]; then
-      if grep -q "acb-web-green" "$ACB_CONFIG" 2>/dev/null; then
-        slot="green"
-      elif grep -q "acb-web-blue" "$ACB_CONFIG" 2>/dev/null; then
-        slot="blue"
-      fi
+resolve_gateway_slot_strict() {
+  local state_slot=""
+  if [[ -f "${ACTIVE_SLOT_FILE:-}" ]]; then
+    state_slot="$(tr -d ' \r\n[:space:]' < "$ACTIVE_SLOT_FILE")"
+    if [[ "$state_slot" != "blue" && "$state_slot" != "green" ]]; then
+      state_slot=""
     fi
   fi
-  if [[ "$slot" != "blue" && "$slot" != "green" ]]; then
-    local blue_running
+
+  local route_slot=""
+  if [[ -f "${ACB_CONFIG:-}" ]]; then
+    local has_blue=0 has_green=0
+    grep -q "acb-web-blue" "$ACB_CONFIG" 2>/dev/null && has_blue=1 || true
+    grep -q "acb-web-green" "$ACB_CONFIG" 2>/dev/null && has_green=1 || true
+    if (( has_blue == 1 && has_green == 0 )); then
+      route_slot="blue"
+    elif (( has_green == 1 && has_blue == 0 )); then
+      route_slot="green"
+    elif (( has_blue == 1 && has_green == 1 )); then
+      log_error "resolve_gateway_slot_strict: route config contains both blue and green; ambiguous state."
+      return 1
+    fi
+  fi
+
+  # Conflict check: if both state and route are present, they must match!
+  if [[ -n "$state_slot" && -n "$route_slot" ]]; then
+    if [[ "$state_slot" != "$route_slot" ]]; then
+      log_error "resolve_gateway_slot_strict: state ($state_slot) conflicts with route ($route_slot); failing closed."
+      return 1
+    fi
+    printf '%s' "$state_slot"
+    return 0
+  fi
+
+  if [[ -n "$state_slot" ]]; then
+    printf '%s' "$state_slot"
+    return 0
+  fi
+
+  if [[ -n "$route_slot" ]]; then
+    printf '%s' "$route_slot"
+    return 0
+  fi
+
+  # Neither state nor route is present; check running containers
+  local blue_running="false" green_running="false"
+  if command -v docker >/dev/null 2>&1; then
     blue_running="$(docker inspect --format '{{.State.Running}}' acb-gateway-blue 2>/dev/null || echo "false")"
-    local green_running
     green_running="$(docker inspect --format '{{.State.Running}}' acb-gateway-green 2>/dev/null || echo "false")"
-    if [[ "$green_running" == "true" && "$blue_running" != "true" ]]; then
-      slot="green"
-    else
-      slot="blue"
+  fi
+
+  if [[ "$blue_running" == "true" && "$green_running" != "true" ]]; then
+    printf 'blue'
+    return 0
+  elif [[ "$green_running" == "true" && "$blue_running" != "true" ]]; then
+    printf 'green'
+    return 0
+  fi
+
+  log_error "resolve_gateway_slot_strict: ambiguous runtime (blue_running=$blue_running, green_running=$green_running, state=$state_slot, route=$route_slot); failing closed."
+  return 1
+}
+
+resolve_frontend_slot_strict() {
+  local state_slot=""
+  if [[ -f "${FRONTEND_ACTIVE_SLOT_FILE:-}" ]]; then
+    state_slot="$(tr -d ' \r\n[:space:]' < "$FRONTEND_ACTIVE_SLOT_FILE")"
+    if [[ "$state_slot" =~ ^(blue|green)$ ]]; then
+      printf '%s' "$state_slot"
+      return 0
     fi
   fi
-  printf '%s' "$slot"
+
+  local route_slot=""
+  if [[ -f "${ACB_CONFIG:-}" ]]; then
+    local has_blue=0 has_green=0 has_legacy=0
+    grep -q "acb-frontend-blue" "$ACB_CONFIG" 2>/dev/null && has_blue=1 || true
+    grep -q "acb-frontend-green" "$ACB_CONFIG" 2>/dev/null && has_green=1 || true
+    grep -q "http://acb-frontend:8080" "$ACB_CONFIG" 2>/dev/null && has_legacy=1 || true
+    if (( has_blue == 1 && has_green == 0 && has_legacy == 0 )); then
+      route_slot="blue"
+    elif (( has_green == 1 && has_blue == 0 && has_legacy == 0 )); then
+      route_slot="green"
+    elif (( has_legacy == 1 && has_blue == 0 && has_green == 0 )); then
+      route_slot="legacy"
+    fi
+  fi
+
+  if [[ -n "$route_slot" ]]; then
+    printf '%s' "$route_slot"
+    return 0
+  fi
+
+  local blue_r="false" green_r="false" legacy_r="false"
+  if command -v docker >/dev/null 2>&1; then
+    blue_r="$(docker inspect --format '{{.State.Running}}' acb-frontend-blue 2>/dev/null || echo "false")"
+    green_r="$(docker inspect --format '{{.State.Running}}' acb-frontend-green 2>/dev/null || echo "false")"
+    legacy_r="$(docker inspect --format '{{.State.Running}}' acb-frontend 2>/dev/null || echo "false")"
+  fi
+
+  if [[ "$blue_r" == "true" && "$green_r" != "true" && "$legacy_r" != "true" ]]; then
+    printf 'blue'
+    return 0
+  elif [[ "$green_r" == "true" && "$blue_r" != "true" && "$legacy_r" != "true" ]]; then
+    printf 'green'
+    return 0
+  elif [[ "$legacy_r" == "true" && "$blue_r" != "true" && "$green_r" != "true" ]]; then
+    printf 'legacy'
+    return 0
+  fi
+
+  log_error "resolve_frontend_slot_strict: ambiguous frontend slot state; failing closed."
+  return 1
+}
+
+get_active_slot() {
+  resolve_gateway_slot_strict
 }
 
 get_candidate_slot() {
