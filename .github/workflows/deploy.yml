@@ -1051,6 +1051,7 @@ jobs:
             "$VPS_USER@$VPS_HOST" "STAGE='$remote_stage' RELEASE='$remote_release' SIGNER='$expected_identity' DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
           export PATH="$DEPLOY_PATH/deploy:$PATH"
+          export DEPLOY_PATH
           cosign verify-blob --bundle "$STAGE/release-manifest.bundle" \
             --certificate-identity "$SIGNER" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$STAGE/release-manifest.json" >/dev/null
