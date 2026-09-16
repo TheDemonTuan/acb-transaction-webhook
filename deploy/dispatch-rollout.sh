@@ -427,6 +427,9 @@ cleanup_rollout() {
         log_error "Release rollback did not fully verify; preserving evidence and blocking subsequent mutation."
         ROLLOUT_EXIT_CODE=1
       else
+        if [[ -f "${ROLLOUT_JOURNAL_FILE:-}" ]]; then
+          finish_rollout_journal "ROLLED_BACK" "Rollout failed with code ${ROLLOUT_EXIT_CODE}; recovered to canonical release" || true
+        fi
         log_info "Canonical runtime reconciliation completed successfully."
       fi
     fi

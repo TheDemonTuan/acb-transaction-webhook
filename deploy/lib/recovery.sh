@@ -635,7 +635,7 @@ PY
     fi
   fi
 
-  # Step 8: ONLY after drift verification passes: delete pending evidence and archive rollout journal
+  # Step 8: ONLY after drift verification passes: delete pending evidence
   if [[ -f "${PENDING_GATEWAY_RETIRE_FILE:-}" ]]; then
     rm -f "$PENDING_GATEWAY_RETIRE_FILE" 2>/dev/null || true
     log_info "Cleaned up pending gateway retire evidence after verified drift check."
@@ -645,7 +645,9 @@ PY
     log_info "Cleaned up pending frontend retire evidence after verified drift check."
   fi
 
-  if [[ -f "$rollout_journal" ]]; then
+  # Rollout journal is preserved and marked ROLLED_BACK by dispatcher on candidate failure,
+  # or archived with .reconciled suffix when explicitly requested.
+  if [[ "${ARCHIVE_ROLLOUT_JOURNAL:-0}" == "1" && -f "$rollout_journal" ]]; then
     local archive_path="${rollout_journal}.reconciled.$(date +%s)"
     mv -f "$rollout_journal" "$archive_path"
     log_info "Archived reconciled rollout journal to: $archive_path"

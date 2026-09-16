@@ -55,7 +55,7 @@ assert_file_contains() {
 
 setup_dispatcher_env() {
   local tdir="$1"
-  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state" "$tdir/releases"
+  mkdir -p "$tdir/deploy/compose" "$tdir/data" "$tdir/secrets" "$tdir/state" "$tdir/releases"
   export RUNTIME_ROOT="$tdir"
   export RUNTIME_RELEASES_DIR="$tdir"
   export SOAK_SECONDS=0
@@ -69,6 +69,8 @@ setup_dispatcher_env() {
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-runtime-drift.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/deploy-frontend.sh" "$tdir/deploy/"
+  cp -r "$DEPLOY_DIR/compose/"* "$tdir/deploy/compose/"
+  cp "$DEPLOY_DIR/compose.prod.yaml" "$tdir/deploy/"
   printf 'mock-master\n' > "$tdir/secrets/app_master_key"
   printf 'mock-worker\n' > "$tdir/secrets/worker_internal_token"
   printf 'mock-tts\n' > "$tdir/secrets/tts_internal_token"
@@ -122,9 +124,9 @@ EOF
   cat <<'EOF' > "$tdir/deploy/compose.prod.yaml"
 services:
   gateway-blue:
-    image: ${GATEWAY_IMAGE_REF}
+    image: ${IMAGE_REF_BLUE}
   gateway-green:
-    image: ${GATEWAY_IMAGE_REF}
+    image: ${IMAGE_REF_GREEN}
   worker:
     image: ${WORKER_IMAGE_REF}
 EOF
@@ -136,6 +138,32 @@ EOF
   export BARK_SECRET_PREFLIGHT_CMD=true
   export RUNTIME_DRIFT_CHECK_CMD=true
   export ALLOW_TEST_LOCK_PATH=1
+
+  # Create mock docker binary that reports running/healthy for mock containers
+  mkdir -p "$tdir/bin"
+  cat <<'EOF' > "$tdir/bin/docker"
+#!/usr/bin/env bash
+if [[ "$1" == "inspect" ]]; then
+  if [[ "$*" == *".State.Running"* ]]; then
+    echo "true"
+    exit 0
+  fi
+  if [[ "$*" == *".State.Health"* ]]; then
+    echo "healthy"
+    exit 0
+  fi
+  if [[ "$*" == *".Config.Image"* ]]; then
+    echo "ghcr.io/test/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    exit 0
+  fi
+fi
+if [[ "$1" == "compose" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  chmod 755 "$tdir/bin/docker"
+  export PATH="$tdir/bin:$PATH"
 
   cat <<'EOF' > "$tdir/deploy/deploy-schema.sh"
 #!/usr/bin/env bash
@@ -685,8 +713,7 @@ SOAK_SECONDS=900 \
 RELEASE_SOAK_CMD="bash $T13/data/fake_soak.sh" \
 RUNTIME_DRIFT_CHECK_CMD="false" \
 TRACE_FILE="$T13/data/trace.log" DEPLOY_LOCK_FILE="$T13/data/deploy.lock" \
-  bash "$T13/deploy/dispatch-rollout.sh" --manifest "$manifest_t13" --deploy-dir "$T13/deploy" --data-dir "$T13/data" --skip-manifest-check
-presoak_rc=$?
+  bash "$T13/deploy/dispatch-rollout.sh" --manifest "$manifest_t13" --deploy-dir "$T13/deploy" --data-dir "$T13/data" --skip-manifest-check || presoak_rc=$?
 set -e
 
 assert_eq "1" "$(( presoak_rc != 0 ? 1 : 0 ))" "Rollout fails immediately when pre-soak contract check fails"

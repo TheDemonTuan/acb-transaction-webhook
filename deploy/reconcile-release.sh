@@ -29,4 +29,4 @@ source "$SCRIPT_DIR/lib.sh"
 acquire_deploy_lock
 trap 'release_deploy_lock' EXIT
 
-reconcile_runtime_to_canonical "${CURRENT_RELEASE_FILE:-}" "${ROLLOUT_JOURNAL_FILE:-}"
+ARCHIVE_ROLLOUT_JOURNAL=1 reconcile_runtime_to_canonical "${CURRENT_RELEASE_FILE:-}" "${ROLLOUT_JOURNAL_FILE:-}"
