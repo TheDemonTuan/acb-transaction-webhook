@@ -94,7 +94,8 @@ compose_prod() {
   if [[ -f "$RELEASE_ENV_FILE" ]]; then
     compose_flags+=(--env-file "$RELEASE_ENV_FILE")
   fi
-  local compose_dir="${COMPOSE_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}/compose}"
+  local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
+  local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
   if [[ -d "$compose_dir" ]]; then
     local COMPOSE_FILES=(
       "$compose_dir/base.yaml"
@@ -112,7 +113,12 @@ compose_prod() {
       fi
     done
   else
-    compose_flags+=(-f "$COMPOSE_FILE")
+    local legacy_compose="$ctx_dir/compose.prod.yaml"
+    if [[ -f "$legacy_compose" ]]; then
+      compose_flags+=(-f "$legacy_compose")
+    else
+      compose_flags+=(-f "$COMPOSE_FILE")
+    fi
   fi
   docker compose "${compose_flags[@]}" "$@"
 }

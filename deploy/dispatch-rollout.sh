@@ -221,7 +221,21 @@ init_rollout_journal() {
   local scope="$3"
   local now
   now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-  R_ID="$r_id" R_GIT_SHA="$git_sha" R_SCOPE="$scope" R_NOW="$now" python3 - <<'PY_JSON' | atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600
+  local prev_id="" prev_dir="" prev_gen=0
+  if [[ -f "${CURRENT_RELEASE_FILE:-}" ]]; then
+    read -r prev_id prev_dir prev_gen < <(python3 - "$CURRENT_RELEASE_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("release_id", ""), d.get("release_dir", ""), d.get("generation", 0))
+except Exception:
+    pass
+PY
+)
+  fi
+  R_ID="$r_id" R_GIT_SHA="$git_sha" R_SCOPE="$scope" R_NOW="$now" \
+  R_CAND_DIR="${DEPLOY_DIR:-}" R_PREV_ID="$prev_id" R_PREV_DIR="$prev_dir" R_PREV_GEN="$prev_gen" \
+  python3 - <<'PY_JSON' | atomic_write_file "$ROLLOUT_JOURNAL_FILE" 600
 import json, os
 print(json.dumps({
     "rollout_id": os.environ["R_ID"],
@@ -230,6 +244,10 @@ print(json.dumps({
     "scope": os.environ["R_SCOPE"],
     "started_at": os.environ["R_NOW"],
     "updated_at": os.environ["R_NOW"],
+    "candidate_release_dir": os.environ.get("R_CAND_DIR", ""),
+    "previous_release_dir": os.environ.get("R_PREV_DIR", ""),
+    "previous_release_id": os.environ.get("R_PREV_ID", ""),
+    "previous_generation": int(os.environ.get("R_PREV_GEN", 0)),
     "current_step": "INITIALIZED",
     "completed_steps": [],
 }, indent=2))

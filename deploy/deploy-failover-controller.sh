@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 require_release_orchestrator
 
-CANDIDATE_DIR="${FAILOVER_CANDIDATE_DIR:-$SCRIPT_DIR/failover}"
+CANDIDATE_DIR="${FAILOVER_CANDIDATE_DIR:-${RELEASE_CONTEXT_DIR:-$SCRIPT_DIR}/failover}"
 INSTALL_DIR="${FAILOVER_INSTALL_DIR:-/opt/platform/failover}"
 REGISTRY_DIR="${FAILOVER_REGISTRY_DIR:-/etc/vps-failover/apps.d}"
 SYSTEMD_DIR="${FAILOVER_SYSTEMD_DIR:-/etc/systemd/system}"

@@ -413,3 +413,90 @@ central_switch_route() {
   atomic_switch_route "$target_slot"
   ack_route_identity "$target_slot" "$expected_commit" 15
 }
+
+rollback_gateway_route() {
+  if [[ -f "${PENDING_GATEWAY_RETIRE_FILE:-}" ]]; then
+    local old_slot candidate_slot
+    old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
+    candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
+    if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting gateway route to [$old_slot] from pending evidence..."
+      if atomic_switch_route "$old_slot" && ack_route_identity "$old_slot" "" 30; then
+        printf '%s' "$old_slot" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
+        stop_standby_container "$candidate_slot" || true
+        rm -f "$PENDING_GATEWAY_RETIRE_FILE"
+        log_info "Gateway route restored to [$old_slot]."
+      else
+        log_error "Gateway route rollback failed; preserving pending evidence."
+        return 1
+      fi
+    else
+      log_error "Gateway rollback evidence is malformed; refusing to discard it."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+rollback_frontend_route() {
+  if [[ -f "${PENDING_FRONTEND_RETIRE_FILE:-}" ]]; then
+    local prev_top="" cand_top="" prev_cnt="" cand_cnt="" gw_slot=""
+    if grep -q '^{' "$PENDING_FRONTEND_RETIRE_FILE" 2>/dev/null; then
+      read -r prev_top cand_top prev_cnt cand_cnt gw_slot < <(python3 - "$PENDING_FRONTEND_RETIRE_FILE" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(d.get("previous_topology", ""), d.get("candidate_topology", ""), d.get("previous_container", ""), d.get("candidate_container", ""), d.get("gateway_slot_at_switch", ""))
+except Exception:
+    sys.exit(1)
+PY
+)
+    else
+      prev_top="$(sed -n 's/^old_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+      cand_top="$(sed -n 's/^candidate_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+      if [[ "$prev_top" == "legacy" ]]; then
+        prev_cnt="acb-frontend"
+      else
+        prev_cnt="acb-frontend-${prev_top}"
+      fi
+      cand_cnt="acb-frontend-${cand_top}"
+    fi
+
+    if [[ "$prev_top" =~ ^(blue|green|legacy)$ && "$cand_top" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting frontend route to topology [$prev_top]..."
+      if [[ "$prev_top" == "legacy" ]]; then
+        if ! docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "acb-frontend" 2>/dev/null | grep -Eq '^(healthy|running)$'; then
+          log_error "Legacy frontend container acb-frontend is missing or unhealthy; failing closed."
+          return 1
+        fi
+        local current_gw_slot
+        current_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+        local tmp_route="${ACB_CONFIG}.rollback.$$"
+        render_traefik_config "$current_gw_slot" "$tmp_route" "legacy"
+        if atomic_write_file "$ACB_CONFIG" 644 < "$tmp_route" && rm -f "$tmp_route" && ack_frontend_route 30; then
+          rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+          docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+          rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+          log_info "Frontend reverted to legacy container acb-frontend."
+        else
+          log_error "Frontend legacy route rollback failed; preserving evidence."
+          return 1
+        fi
+      else
+        if atomic_switch_frontend_route "$prev_top" && ack_frontend_route 30; then
+          printf '%s' "$prev_top" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+          docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+          rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+          log_info "Frontend reverted to slot [$prev_top]."
+        else
+          log_error "Frontend route rollback failed; preserving pending rollback evidence."
+          return 1
+        fi
+      fi
+    else
+      log_error "Frontend rollback evidence is malformed; refusing to discard it."
+      return 1
+    fi
+  fi
+  return 0
+}
