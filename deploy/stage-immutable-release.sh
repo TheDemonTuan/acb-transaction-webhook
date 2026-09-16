@@ -328,6 +328,17 @@ if [[ -e "$RELEASE_DIR" || -L "$RELEASE_DIR" ]]; then
   fi
 
   printf 'Existing release %s is identical and verified. Reusing existing release.\n' "$release_id"
+  # Ensure runtime links (.env.production, .release.env, secrets) exist in release directory
+  runtime_deploy="${DEPLOY_PATH:-/opt/acb-transaction-webhook}/deploy"
+  if [[ -d "$runtime_deploy/secrets" && ! -e "$RELEASE_DIR/secrets" ]]; then
+    ln -s "$runtime_deploy/secrets" "$RELEASE_DIR/secrets" 2>/dev/null || true
+  fi
+  if [[ -f "$runtime_deploy/.env.production" && ! -e "$RELEASE_DIR/.env.production" ]]; then
+    ln -s "$runtime_deploy/.env.production" "$RELEASE_DIR/.env.production" 2>/dev/null || true
+  fi
+  if [[ -f "$runtime_deploy/.release.env" && ! -e "$RELEASE_DIR/.release.env" ]]; then
+    ln -s "$runtime_deploy/.release.env" "$RELEASE_DIR/.release.env" 2>/dev/null || true
+  fi
   exit 0
 else
   # 3. Release absent: install atomically
@@ -337,6 +348,17 @@ else
   fi
   installed=1
   chmod -R go-w "$RELEASE_DIR" 2>/dev/null || true
+  # Link canonical runtime secrets and env into release dir for compose interpolation
+  runtime_deploy="${DEPLOY_PATH:-/opt/acb-transaction-webhook}/deploy"
+  if [[ -d "$runtime_deploy/secrets" && ! -e "$RELEASE_DIR/secrets" ]]; then
+    ln -s "$runtime_deploy/secrets" "$RELEASE_DIR/secrets" 2>/dev/null || true
+  fi
+  if [[ -f "$runtime_deploy/.env.production" && ! -e "$RELEASE_DIR/.env.production" ]]; then
+    ln -s "$runtime_deploy/.env.production" "$RELEASE_DIR/.env.production" 2>/dev/null || true
+  fi
+  if [[ -f "$runtime_deploy/.release.env" && ! -e "$RELEASE_DIR/.release.env" ]]; then
+    ln -s "$runtime_deploy/.release.env" "$RELEASE_DIR/.release.env" 2>/dev/null || true
+  fi
   printf 'Successfully installed release %s to %s\n' "$release_id" "$RELEASE_DIR"
   exit 0
 fi
