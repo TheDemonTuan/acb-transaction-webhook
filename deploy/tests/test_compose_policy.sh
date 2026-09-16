@@ -146,6 +146,7 @@ assert_failure "validate_image_ref rejects unapproved third-party Bark digest" \
 # 2.2 Atomic init and file validation
 T_REL="$TEST_TMP/.release.env"
 export RELEASE_ENV_FILE="$T_REL"
+export USE_CANONICAL_RELEASE_STATE=0
 
 assert_success "init_release_env creates complete .release.env" \
   init_release_env \

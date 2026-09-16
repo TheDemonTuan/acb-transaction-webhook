@@ -96,25 +96,21 @@ get_release_env() {
   local default_val="${2:-}"
   local file="${RELEASE_ENV_FILE}"
 
-  if [[ "${REQUIRE_CANONICAL_RELEASE_STATE:-1}" == "1" || "${USE_CANONICAL_RELEASE_STATE:-1}" == "1" ]]; then
-    if [[ -f "$CURRENT_RELEASE_FILE" ]]; then
-      local canonical_val
-      if ! canonical_val="$(get_current_release_value "$key")"; then
-        log_release_error "Canonical release state is invalid: ${CURRENT_RELEASE_FILE}"
-        return 1
-      fi
-      if [[ -n "$canonical_val" ]]; then
-        printf '%s\n' "$canonical_val"
-      else
-        printf '%s\n' "$default_val"
-      fi
-      return 0
-    elif [[ "${ALLOW_CANONICAL_STATE_BOOTSTRAP:-0}" == "1" ]]; then
-      log_release_info "Canonical release state not found; allowing bootstrap fallback to .release.env"
-    else
-      log_release_error "Canonical release state missing: ${CURRENT_RELEASE_FILE}. Automatic legacy fallback is forbidden."
+  if [[ "${USE_CANONICAL_RELEASE_STATE:-1}" == "1" && -f "$CURRENT_RELEASE_FILE" ]]; then
+    local canonical_val
+    if ! canonical_val="$(get_current_release_value "$key")"; then
+      log_release_error "Canonical release state is invalid: ${CURRENT_RELEASE_FILE}"
       return 1
     fi
+    if [[ -n "$canonical_val" ]]; then
+      printf '%s\n' "$canonical_val"
+    else
+      printf '%s\n' "$default_val"
+    fi
+    return 0
+  elif [[ "${REQUIRE_CANONICAL_RELEASE_STATE:-0}" == "1" && ! -f "$CURRENT_RELEASE_FILE" && "${ALLOW_CANONICAL_STATE_BOOTSTRAP:-0}" != "1" ]]; then
+    log_release_error "Canonical release state missing: ${CURRENT_RELEASE_FILE}. Automatic legacy fallback is forbidden."
+    return 1
   fi
 
   if [[ ! -f "$file" ]]; then

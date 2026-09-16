@@ -57,6 +57,8 @@ assert_file_contains() {
 
 setup_gateway_mock_env() {
   local test_dir="$1"
+  export DEPLOY_PATH="$test_dir"
+  export RUNTIME_ROOT="$test_dir"
   export RELEASE_ORCHESTRATED=1
   export ALLOW_TEST_LOCK_PATH=1
   export MOCK_STATE_DIR="$test_dir"
