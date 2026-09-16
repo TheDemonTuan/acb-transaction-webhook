@@ -61,6 +61,40 @@ export RELEASE_DIR="$DEPLOY_DIR"
 export RELEASE_CONTEXT_DIR="$DEPLOY_DIR"
 export COMPOSE_ROOT="$DEPLOY_DIR/compose"
 export DEPLOY_DIR
+
+# Extract candidate image refs from manifest for compose interpolation
+eval "$(python3 - "$MANIFEST" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding='utf-8'))
+    imgs = data.get("images", {})
+    gw = imgs.get("gateway")
+    if isinstance(gw, dict):
+        gw_blue = gw.get("blue", "")
+        gw_green = gw.get("green", "")
+    else:
+        gw_blue = gw or ""
+        gw_green = gw or ""
+    fe = imgs.get("frontend", "")
+    wk = imgs.get("worker", "")
+    db = imgs.get("dbtool", "")
+    br = imgs.get("auth_browser", "")
+    tts = imgs.get("tts", "")
+    bark = imgs.get("bark", "")
+    dummy = "ghcr.io/test/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    print(f"export IMAGE_REF_BLUE='{gw_blue or dummy}'")
+    print(f"export IMAGE_REF_GREEN='{gw_green or dummy}'")
+    print(f"export FRONTEND_IMAGE_REF='{fe or dummy}'")
+    print(f"export WORKER_IMAGE_REF='{wk or dummy}'")
+    print(f"export DBTOOL_IMAGE_REF='{db or dummy}'")
+    print(f"export BROWSER_IMAGE_REF='{br or dummy}'")
+    print(f"export TTS_IMAGE_REF='{tts or dummy}'")
+    print(f"export BARK_IMAGE_REF='{bark or dummy}'")
+except Exception:
+    pass
+PY
+)"
+
 # shellcheck source=deploy/lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
 compose_prod config --quiet >/dev/null
