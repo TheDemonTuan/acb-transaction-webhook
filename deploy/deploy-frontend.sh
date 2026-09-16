@@ -111,7 +111,24 @@ done < "$snapshot_file"
 if [[ "$ACTIVE_CONTAINER" != "$CANDIDATE_CONTAINER" ]]; then
   if [[ "${DEFER_OLD_SLOT_RETIREMENT:-0}" == "1" ]]; then
     [[ -n "${PENDING_FRONTEND_RETIRE_FILE:-}" ]] || { log_error "PENDING_FRONTEND_RETIRE_FILE is required."; exit 1; }
-    printf 'old_slot=%s\ncandidate_slot=%s\n' "$ACTIVE_FRONTEND_SLOT" "$CANDIDATE_FRONTEND_SLOT" | atomic_write_file "$PENDING_FRONTEND_RETIRE_FILE" 600
+    gw_slot_at_switch="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+    python3 - "$PENDING_FRONTEND_RETIRE_FILE" "$ACTIVE_FRONTEND_SLOT" "$ACTIVE_CONTAINER" "$CANDIDATE_FRONTEND_SLOT" "$CANDIDATE_CONTAINER" "$gw_slot_at_switch" <<'PY'
+import json, sys
+out_path, prev_top, prev_cnt, cand_top, cand_cnt, gw_slot = sys.argv[1:7]
+data = {
+    "schema_version": 1,
+    "previous_topology": prev_top,
+    "previous_container": prev_cnt,
+    "candidate_topology": cand_top,
+    "candidate_container": cand_cnt,
+    "gateway_slot_at_switch": gw_slot,
+    "route_switched": True,
+}
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+    chmod 600 "$PENDING_FRONTEND_RETIRE_FILE"
     log_info "Retaining old frontend slot until the release commits."
   else
     docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$ACTIVE_CONTAINER" >/dev/null 2>&1 || true

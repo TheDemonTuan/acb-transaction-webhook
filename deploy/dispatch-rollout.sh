@@ -108,6 +108,10 @@ while [[ $# -gt 0 ]]; do
       DATA_DIR="$2"
       shift 2
       ;;
+    --runtime-root)
+      RUNTIME_ROOT="$2"
+      shift 2
+      ;;
     --expected-identity)
       EXPECTED_IDENTITY="$2"
       shift 2
@@ -281,7 +285,7 @@ PY_JSON
   fi
 }
 ROLLOUT_EXIT_CODE=0
-rollback_pending_routes() {
+rollback_gateway_route() {
   local old_slot candidate_slot
   if [[ -f "$PENDING_GATEWAY_RETIRE_FILE" ]]; then
     old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
@@ -301,24 +305,94 @@ rollback_pending_routes() {
       return 1
     fi
   fi
+  return 0
+}
+
+rollback_frontend_route() {
   if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
-    old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
-    candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
-    if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
-      log_warn "Reverting frontend route to [$old_slot] because the release did not commit."
-      if atomic_switch_frontend_route "$old_slot" && ack_frontend_route 30; then
-        printf '%s' "$old_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
-        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "acb-frontend-${candidate_slot}" >/dev/null 2>&1 || true
-        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+    local prev_top="" cand_top="" prev_cnt="" cand_cnt="" gw_slot=""
+    if grep -q '^{' "$PENDING_FRONTEND_RETIRE_FILE" 2>/dev/null; then
+      read -r prev_top cand_top prev_cnt cand_cnt gw_slot < <(python3 - "$PENDING_FRONTEND_RETIRE_FILE" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(d.get("previous_topology", ""), d.get("candidate_topology", ""), d.get("previous_container", ""), d.get("candidate_container", ""), d.get("gateway_slot_at_switch", ""))
+except Exception:
+    sys.exit(1)
+PY
+)
+    else
+      prev_top="$(sed -n 's/^old_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+      cand_top="$(sed -n 's/^candidate_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+      if [[ "$prev_top" == "legacy" ]]; then
+        prev_cnt="acb-frontend"
       else
-        log_error "Frontend route rollback failed; preserving pending rollback evidence."
-        return 1
+        prev_cnt="acb-frontend-${prev_top}"
+      fi
+      cand_cnt="acb-frontend-${cand_top}"
+    fi
+
+    if [[ "$prev_top" =~ ^(blue|green|legacy)$ && "$cand_top" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting frontend route to topology [$prev_top] because the release did not commit."
+      if [[ "$prev_top" == "legacy" ]]; then
+        if ! docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "acb-frontend" 2>/dev/null | grep -Eq '^(healthy|running)$'; then
+          log_error "Legacy frontend container acb-frontend is missing or unhealthy; failing closed."
+          return 1
+        fi
+        local current_gw_slot
+        current_gw_slot="$(get_active_slot 2>/dev/null || cat "$ACTIVE_SLOT_FILE" 2>/dev/null || printf 'blue')"
+        local tmp_route="${ACB_CONFIG}.rollback.$$"
+        render_traefik_config "$current_gw_slot" "$tmp_route" "legacy"
+        if atomic_write_file "$ACB_CONFIG" 644 < "$tmp_route" && rm -f "$tmp_route" && ack_frontend_route 30; then
+          rm -f "$FRONTEND_ACTIVE_SLOT_FILE"
+          docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+          rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+          log_info "Frontend reverted to legacy container acb-frontend."
+        else
+          log_error "Frontend legacy route rollback failed; preserving evidence."
+          return 1
+        fi
+      else
+        if atomic_switch_frontend_route "$prev_top" && ack_frontend_route 30; then
+          printf '%s' "$prev_top" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+          docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$cand_cnt" >/dev/null 2>&1 || true
+          rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+          log_info "Frontend reverted to slot [$prev_top]."
+        else
+          log_error "Frontend route rollback failed; preserving pending rollback evidence."
+          return 1
+        fi
       fi
     else
       log_error "Frontend rollback evidence is malformed; refusing to discard it."
       return 1
     fi
   fi
+  return 0
+}
+
+rollback_pending_routes() {
+  local failures=0
+  rollback_gateway_route || failures=$((failures + 1))
+  rollback_frontend_route || failures=$((failures + 1))
+  return "$failures"
+}
+
+verify_previous_runtime() {
+  local current_state="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
+  if [[ ! -s "$current_state" ]]; then
+    log_error "Canonical release state is missing: $current_state"
+    return 1
+  fi
+  if [[ "${SKIP_MANIFEST_CHECK:-0}" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
+    eval "$RUNTIME_DRIFT_CHECK_CMD"
+    return $?
+  fi
+  if [[ -f "$DEPLOY_DIR/verify-runtime-drift.sh" ]]; then
+    bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$current_state"
+    return $?
+  fi
+  return 0
 }
 
 release_is_committed() {
@@ -382,10 +456,15 @@ cleanup_rollout() {
     log_warn "Rollout terminated with code ${ROLLOUT_EXIT_CODE}."
     local final_status="INTERRUPTED"
     if ! release_is_committed; then
-      if rollback_pending_routes && rollback_completed_components; then
+      local rollback_failures=0
+      rollback_gateway_route || rollback_failures=$((rollback_failures + 1))
+      rollback_frontend_route || rollback_failures=$((rollback_failures + 1))
+      rollback_completed_components || rollback_failures=$((rollback_failures + 1))
+      verify_previous_runtime || rollback_failures=$((rollback_failures + 1))
+      if (( rollback_failures == 0 )); then
         final_status="ROLLED_BACK"
       else
-        log_error "Release rollback did not fully verify; preserving evidence and blocking subsequent mutation."
+        log_error "Release rollback did not fully verify ($rollback_failures failure(s)); preserving evidence and blocking subsequent mutation."
         ROLLOUT_EXIT_CODE=1
       fi
     fi
@@ -746,9 +825,15 @@ if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
   recover_tx_journal
 fi
 if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" || "$PREVIOUS_ROLLOUT_STATUS" == "ROLLED_BACK" ]]; then
-  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]] && { ! rollback_pending_routes || ! rollback_completed_components; }; then
-    log_error "Interrupted rollout rollback could not be verified; preserving its journal."
-    exit 1
+  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]]; then
+    local r_failures=0
+    rollback_gateway_route || r_failures=$((r_failures + 1))
+    rollback_frontend_route || r_failures=$((r_failures + 1))
+    rollback_completed_components || r_failures=$((r_failures + 1))
+    if (( r_failures != 0 )); then
+      log_error "Interrupted rollout rollback could not be verified; preserving its journal."
+      exit 1
+    fi
   fi
   current_state="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
   if [[ ! -s "$current_state" ]]; then
