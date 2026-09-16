@@ -34,7 +34,11 @@ setup_env() {
   export ACTIVE_SLOT_FILE="$tdir/state/gateway-active-slot"
   export FRONTEND_ACTIVE_SLOT_FILE="$tdir/state/frontend-active-slot"
   export ACB_CONFIG="$tdir/traefik/acb.yml"
+  export TRAEFIK_DYNAMIC_DIR="$tdir/traefik"
   export PATH="$tdir/mock_bin:$PATH"
+  hash -r 2>/dev/null || true
+
+  set_mock_docker "$tdir" "false" "false"
 
   source "$DEPLOY_DIR/lib.sh"
 }
@@ -44,20 +48,24 @@ set_mock_docker() {
   local blue_running="$2"
   local green_running="$3"
 
-  cat <<EOF > "$tdir/mock_bin/docker"
+  cat <<'EOF' > "$tdir/mock_bin/docker"
 #!/usr/bin/env bash
-target="\${@: -1}"
-if [[ "\$target" == "acb-gateway-blue" ]]; then
-  echo "$blue_running"
-  exit 0
-elif [[ "\$target" == "acb-gateway-green" ]]; then
-  echo "$green_running"
-  exit 0
-fi
+for arg in "$@"; do
+  if [[ "$arg" == "acb-gateway-blue" ]]; then
+    echo "BLUE_MOCK_VAL"
+    exit 0
+  elif [[ "$arg" == "acb-gateway-green" ]]; then
+    echo "GREEN_MOCK_VAL"
+    exit 0
+  fi
+done
 echo "false"
 exit 0
 EOF
+  sed -i "s/BLUE_MOCK_VAL/$blue_running/g" "$tdir/mock_bin/docker"
+  sed -i "s/GREEN_MOCK_VAL/$green_running/g" "$tdir/mock_bin/docker"
   chmod +x "$tdir/mock_bin/docker"
+  hash -r 2>/dev/null || true
 }
 
 set_traefik_route() {

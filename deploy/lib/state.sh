@@ -158,6 +158,8 @@ resolve_gateway_slot_strict() {
     blue_running="$(docker inspect --format '{{.State.Running}}' acb-gateway-blue 2>/dev/null || echo "false")"
     green_running="$(docker inspect --format '{{.State.Running}}' acb-gateway-green 2>/dev/null || echo "false")"
   fi
+  blue_running="$(echo "$blue_running" | tr -d ' \r\n[:space:]')"
+  green_running="$(echo "$green_running" | tr -d ' \r\n[:space:]')"
 
   if [[ "$blue_running" == "true" && "$green_running" != "true" ]]; then
     printf 'blue'
