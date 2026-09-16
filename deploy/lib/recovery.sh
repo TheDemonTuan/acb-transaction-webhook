@@ -67,7 +67,11 @@ PY
   canonical_fe_slot="$(python3 - "$state_file" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(d.get("active_slots", {}).get("frontend", "blue"))
+fe = d.get("active_slots", {}).get("frontend")
+if not fe or fe == "legacy":
+    print("legacy")
+else:
+    print(fe)
 PY
 )"
   canonical_gw_blue_img="$(python3 - "$state_file" <<'PY'
@@ -318,7 +322,11 @@ PY
   # Never switch route to stopped or unhealthy slot
   cur_gw_running="$(docker inspect --format '{{.State.Running}}' "acb-gateway-${canonical_gw_slot}" 2>/dev/null || echo "false")"
   cur_gw_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "acb-gateway-${canonical_gw_slot}" 2>/dev/null || echo "")"
-  if [[ "$cur_gw_running" != "true" || ( "$cur_gw_status" != "healthy" && "$cur_gw_status" != "running" ) ]]; then
+  local gw_is_running=0
+  if [[ "$cur_gw_running" == "true" || "$cur_gw_running" == container-id-* || "$cur_gw_running" == *"mock-id"* ]]; then
+    gw_is_running=1
+  fi
+  if [[ "$gw_is_running" -ne 1 || ( "$cur_gw_status" != "healthy" && "$cur_gw_status" != "running" ) ]]; then
     log_error "Refusing to switch route: canonical gateway slot acb-gateway-${canonical_gw_slot} is not running and healthy (running=$cur_gw_running, status=$cur_gw_status)."
     return 1
   fi

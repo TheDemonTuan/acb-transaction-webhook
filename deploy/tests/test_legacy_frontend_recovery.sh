@@ -66,7 +66,23 @@ case "$cmd" in
     fi
     # Return healthy for legacy container acb-frontend, green gateway, etc.
     target="${@: -1}"
+    if [[ -f "${RUNTIME_ROOT:-/tmp}/docker_stopped_${target}" ]]; then
+      if [[ "$*" == *"{{.State.Running}}"* ]]; then
+        printf 'false\n'
+        exit 0
+      fi
+      if [[ "$*" == *"{{.State.Health.Status}}"* || "$*" == *"{{if .State.Health}}"* ]]; then
+        printf 'stopped\n'
+        exit 0
+      fi
+      printf 'container-id-%s\n' "$target"
+      exit 0
+    fi
     if [[ "$target" == "acb-frontend" || "$target" == "acb-gateway-green" || "$target" == "acb-worker" ]]; then
+      if [[ "$*" == *"{{.State.Running}}"* ]]; then
+        printf 'true\n'
+        exit 0
+      fi
       if [[ "$*" == *"{{.State.Health.Status}}"* || "$*" == *"{{if .State.Health}}"* ]]; then
         printf 'healthy\n'
         exit 0
@@ -78,6 +94,10 @@ case "$cmd" in
       printf 'container-id-%s\n' "$target"
       exit 0
     elif [[ "$target" == "acb-frontend-blue" || "$target" == "acb-gateway-blue" ]]; then
+      if [[ "$*" == *"{{.State.Running}}"* ]]; then
+        printf 'true\n'
+        exit 0
+      fi
       if [[ "$*" == *"{{.State.Health.Status}}"* || "$*" == *"{{if .State.Health}}"* ]]; then
         printf 'healthy\n'
         exit 0
@@ -95,6 +115,8 @@ case "$cmd" in
     exit 0
     ;;
   stop|rm)
+    target="${@: -1}"
+    touch "${RUNTIME_ROOT:-/tmp}/docker_stopped_${target}" 2>/dev/null || true
     printf 'DOCKER_%s: %s\n' "$cmd" "$*" >> "${RUNTIME_ROOT:-/tmp}/docker_ops.log"
     exit 0
     ;;

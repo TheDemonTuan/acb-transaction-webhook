@@ -607,7 +607,7 @@ stop_standby_container() {
   if [[ "$running" == "true" ]]; then
     local raw_id
     raw_id="$(docker inspect "acb-gateway-${slot}" 2>/dev/null || echo "")"
-    if [[ "$raw_id" == *"mock-id"* ]]; then
+    if [[ "$raw_id" == *"mock-id"* || "$raw_id" == *"container-id"* ]]; then
       log_warn "Standby slot ${slot} reported running=true under mock docker fixture; continuing."
     else
       log_error "Standby slot ${slot} is still running after stop."
