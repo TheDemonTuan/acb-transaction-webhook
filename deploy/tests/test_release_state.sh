@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/acb-release-state-tests.XXXXXX")"
+command -v cygpath >/dev/null 2>&1 && TEST_TMP="$(cygpath -m "$TEST_TMP")"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
 TESTS_PASSED=0
@@ -166,9 +167,13 @@ d = json.load(open('$tdir/state/valid-v2.json'))
 d['release_dir'] = '$symlink_dir'
 json.dump(d, open('$bad_symlink', 'w'))
 "
-  ec=0
-  python3 "$DEPLOY_DIR/release-state.py" validate "$bad_symlink" 2>/dev/null || ec=$?
-  assert_eq "1" "$ec" "Rejects symlinked release_dir"
+  if [[ -L "$symlink_dir" ]]; then
+    ec=0
+    python3 "$DEPLOY_DIR/release-state.py" validate "$bad_symlink" 2>/dev/null || ec=$?
+    assert_eq "1" "$ec" "Rejects symlinked release_dir"
+  else
+    printf 'SKIP: symlink creation unsupported on this filesystem\n'
+  fi
 
   # 5. Reject manifest SHA mismatch
   local bad_msha="$tdir/state/bad-msha.json"
