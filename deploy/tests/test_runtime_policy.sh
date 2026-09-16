@@ -139,6 +139,45 @@ sed 's/cpus: "0.75"//' "$PROD_COMPOSE" > "$T_NOLIMITS"
 assert_failure "Rejects service omitting service-level resource limits" \
   bash "$VERIFY_SCRIPT" --compose-file "$T_NOLIMITS"
 
+printf "\n3. Testing Release Transaction Invariants...\n"
+if grep -R -q 'commit_component_release_env' "$DEPLOY_DIR"/deploy-*.sh; then
+  printf '  [FAIL] Component scripts still commit release state\n' >&2
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+  printf '  [PASS] Only the dispatcher commits release state\n'
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+if grep -R -q '/tmp/vps-failover' "$DEPLOY_DIR/lib" "$DEPLOY_DIR/stable-deployer.sh" "$DEPLOY_DIR/../platform/failover/vps-failover-controller.py"; then
+  printf '  [FAIL] Deployment/failover locking still falls back to split /tmp state\n' >&2
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+  printf '  [PASS] Deployment and failover use canonical host lock/state paths\n'
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+if grep -q 'ALLOW_LEGACY_WORKER_RESTART' "$DEPLOY_DIR/deploy-worker.sh" "$DEPLOY_DIR/../.github/workflows/deploy.yml"; then
+  printf '  [FAIL] Legacy worker restart escape hatch remains enabled\n' >&2
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+  printf '  [PASS] Worker deployment is protocol-v2 fail-closed\n'
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+T_LOCK="$TEST_TMP/lock-owner"
+mkdir -p "$T_LOCK"
+if ALLOW_TEST_LOCK_PATH=1 DEPLOY_LOCK_FILE="$T_LOCK/acb.lock" DEPLOY_DIR="$DEPLOY_DIR" bash -c '
+  SCRIPT_DIR="$DEPLOY_DIR"
+  source "$DEPLOY_DIR/lib.sh"
+  acquire_deploy_lock
+  DEPLOY_LOCK_FILE="$DEPLOY_LOCK_FILE" ALLOW_TEST_LOCK_PATH=1 DEPLOY_DIR="$DEPLOY_DIR" bash -c '\''SCRIPT_DIR="$DEPLOY_DIR"; source "$DEPLOY_DIR/lib.sh"; release_deploy_lock'\''
+  exec 8>"$DEPLOY_LOCK_FILE"
+  ! flock -n 8
+'; then
+  printf '  [PASS] Child component cannot release the parent rollout lock\n'
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+  printf '  [FAIL] Child component released the parent rollout lock\n' >&2
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
 printf "\n========================================================\n"
 printf "Runtime Policy Test Results: %d Passed, %d Failed\n" "$TESTS_PASSED" "$TESTS_FAILED"
 printf "========================================================\n"

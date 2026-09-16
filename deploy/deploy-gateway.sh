@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+require_release_orchestrator
 
 RESUME_SOAK="${RESUME_SOAK:-0}"
 SOAK_DURATION_SEC="${SOAK_DURATION_SEC:-900}"
@@ -189,10 +190,6 @@ update_tx_state "TX_ACK_VERIFIED"
 update_tx_state "TX_COMMITTED"
 printf '%s' "$CANDIDATE_SLOT" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
 printf '%s' "$ACTIVE_SLOT" | atomic_write_file "$PREVIOUS_SLOT_FILE" 600
-commit_component_release_env "$CANDIDATE_VAR" "$IMAGE_REF"
-if [[ -n "$EXPECTED_COMMIT" && "$EXPECTED_COMMIT" != "unknown" ]]; then
-  commit_component_release_env "RELEASE_COMMIT" "$EXPECTED_COMMIT"
-fi
 log_info "Transaction COMMITTED: Live traffic routed to [${CANDIDATE_SLOT}]."
 
 # 7. Audit: Core containers must have exact same IDs

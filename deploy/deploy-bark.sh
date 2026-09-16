@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+require_release_orchestrator
 
 CANDIDATE_BARK_IMAGE="${1:-${BARK_IMAGE_REF:-}}"
 
@@ -92,6 +93,63 @@ wait_for_bark_ready() {
   return 1
 }
 
+bark_is_unchanged_and_healthy() {
+  if [[ -n "${BARK_UNCHANGED_CHECK_CMD:-}" ]]; then
+    "$BARK_UNCHANGED_CHECK_CMD" "$CANDIDATE_BARK_IMAGE"
+    return $?
+  fi
+  command -v docker >/dev/null 2>&1 || return 1
+
+  local container="" candidate_hash="" actual_hash="" actual_image="" health="" started_at="" started_epoch="" secret_mtime=""
+  for candidate in acb-bark bark; do
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${candidate}$"; then
+      container="$candidate"
+      break
+    fi
+  done
+  [[ -n "$container" ]] || return 1
+
+  actual_image="$(docker inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)"
+  health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container" 2>/dev/null || true)"
+  actual_hash="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$container" 2>/dev/null || true)"
+  candidate_hash="$(BARK_IMAGE_REF="$CANDIDATE_BARK_IMAGE" compose_prod config --hash bark 2>/dev/null | awk 'NF == 1 {print $1; exit} $1 == "bark" {print $2; exit}')"
+  started_at="$(docker inspect --format '{{.State.StartedAt}}' "$container" 2>/dev/null || true)"
+  started_epoch="$(python3 - "$started_at" <<'PY' 2>/dev/null || true
+from datetime import datetime
+import sys
+value = sys.argv[1].replace('Z', '+00:00')
+print(int(datetime.fromisoformat(value).timestamp()))
+PY
+)"
+  [[ "$started_epoch" =~ ^[0-9]+$ ]] || return 1
+  for secret in "$SECRETS_DIR/bark_basic_auth_user" "$SECRETS_DIR/bark_basic_auth_password"; do
+    secret_mtime="$(stat -c '%Y' "$secret" 2>/dev/null || true)"
+    [[ "$secret_mtime" =~ ^[0-9]+$ && "$secret_mtime" -le "$started_epoch" ]] || return 1
+  done
+
+  [[ "$actual_image" == "$CANDIDATE_BARK_IMAGE" && "$health" == "healthy" && -n "$actual_hash" && "$actual_hash" == "$candidate_hash" ]]
+}
+
+rollback_bark() {
+  local reason="$1"
+  if [[ -z "${PREV_BARK_REF:-}" ]]; then
+    update_tx_state "TX_FAILED" "${reason}; no previous Bark digest available"
+    return 1
+  fi
+
+  update_tx_state "TX_ROLLING_BACK" "$reason"
+  stop_bark
+  if start_bark "$PREV_BARK_REF" && wait_for_bark_ready "${READY_CHECK_TIMEOUT:-20}"; then
+    update_tx_state "TX_ROLLED_BACK" "Restored previous Bark image $PREV_BARK_REF"
+    log_info "Rollback to previous Bark digest succeeded."
+    return 0
+  fi
+
+  update_tx_state "TX_ROLLBACK_FAILED" "Previous Bark image failed to start or become healthy"
+  log_error "Rollback failed: previous Bark digest did not become healthy."
+  return 1
+}
+
 cleanup_bark_deploy() {
   local exit_code=$?
   if [[ -f "$TX_JOURNAL_FILE" ]] && ! is_tx_committed; then
@@ -99,16 +157,7 @@ cleanup_bark_deploy() {
     st="$(get_tx_state)"
     if [[ "$st" != "TX_ROLLED_BACK" && "$st" != "TX_ROLLBACK_FAILED" && "$st" != "TX_COMPLETED" ]]; then
       log_warn "Interruption caught in state [$st]. Rolling back Bark..."
-      if [[ -n "${PREV_BARK_REF:-}" ]]; then
-        update_tx_state "TX_ROLLING_BACK" "Interruption caught, rolling back"
-        stop_bark
-        start_bark "$PREV_BARK_REF" 2>/dev/null || true
-        if wait_for_bark_ready 10; then
-          update_tx_state "TX_ROLLED_BACK" "Rolled back to previous Bark image on interruption"
-        else
-          update_tx_state "TX_ROLLBACK_FAILED" "Rollback Bark container also failed on interruption"
-        fi
-      fi
+      rollback_bark "Interruption caught in state [$st]" || true
     fi
   fi
   release_deploy_lock
@@ -121,6 +170,11 @@ preflight_bark_secret_access "$CANDIDATE_BARK_IMAGE"
 
 trap cleanup_bark_deploy EXIT HUP INT TERM
 recover_tx_journal
+
+if bark_is_unchanged_and_healthy; then
+  log_info "Bark image and effective Compose configuration are unchanged and the container is healthy; skipping restart."
+  exit 0
+fi
 
 log_info "=========================================================="
 log_info "Starting Bark Auxiliary Deployment Transaction"
@@ -136,12 +190,7 @@ update_tx_state "CANDIDATE_STARTING" "Starting candidate Bark container"
 log_info "Starting candidate Bark container..."
 if ! start_bark "$CANDIDATE_BARK_IMAGE"; then
   log_error "Failed to start candidate Bark container."
-  update_tx_state "TX_ROLLING_BACK" "Candidate startup failed"
-  if [[ -n "${PREV_BARK_REF:-}" ]]; then
-    start_bark "$PREV_BARK_REF" || true
-    wait_for_bark_ready 10 || true
-    update_tx_state "TX_ROLLED_BACK" "Restored previous Bark container after candidate startup failure"
-  fi
+  rollback_bark "Candidate startup failed" || true
   exit 1
 fi
 
@@ -150,27 +199,12 @@ READY_CHECK_TIMEOUT="${READY_CHECK_TIMEOUT:-20}"
 update_tx_state "VERIFYING_HEALTH" "Verifying candidate Bark health"
 if ! wait_for_bark_ready "$READY_CHECK_TIMEOUT"; then
   log_error "Candidate Bark failed healthcheck. Rolling back to previous digest..."
-  update_tx_state "TX_ROLLING_BACK" "Candidate failed healthcheck; rolling back"
-  if [[ -n "${PREV_BARK_REF:-}" ]]; then
-    stop_bark
-    start_bark "$PREV_BARK_REF"
-    if wait_for_bark_ready "$READY_CHECK_TIMEOUT"; then
-      update_tx_state "TX_ROLLED_BACK" "Rolled back successfully to $PREV_BARK_REF"
-      log_info "Rollback to previous Bark digest succeeded."
-    else
-      update_tx_state "TX_ROLLBACK_FAILED" "Rollback container also failed healthcheck"
-      log_error "Rollback failed: previous Bark digest also failed healthcheck."
-    fi
-  else
-    update_tx_state "TX_FAILED" "Candidate failed healthcheck and no previous digest available"
-  fi
+  rollback_bark "Candidate failed healthcheck" || true
   exit 1
 fi
 
-# 4. Commit new Bark image ref
+# 4. Record component success; the dispatcher owns release-state commit.
 update_tx_state "TX_COMMITTED" "Candidate Bark verified healthy"
-commit_component_release_env "BARK_IMAGE_REF" "$CANDIDATE_BARK_IMAGE"
-log_info "Committed new BARK_IMAGE_REF to .release.env."
 
 update_tx_state "TX_COMPLETED" "Bark auxiliary deployment transaction completed successfully"
 archive_tx_journal "completed"

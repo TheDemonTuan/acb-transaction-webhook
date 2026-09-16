@@ -176,3 +176,22 @@ jobs:
           done
           docker logs smoke-test-tts
           exit 1
+
+  production-contract:
+    name: Production Contract
+    if: always()
+    needs: [verify, docker-smoke-gateway, docker-smoke-auth-browser, docker-smoke-tts-gateway]
+    timeout-minutes: 2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every production gate
+        env:
+          VERIFY: ${{ needs.verify.result }}
+          GATEWAY: ${{ needs.docker-smoke-gateway.result }}
+          AUTH_BROWSER: ${{ needs.docker-smoke-auth-browser.result }}
+          TTS: ${{ needs.docker-smoke-tts-gateway.result }}
+        run: |
+          set -euo pipefail
+          for result in "$VERIFY" "$GATEWAY" "$AUTH_BROWSER" "$TTS"; do
+            [[ "$result" == "success" ]] || { echo "Required production gate did not succeed: $result" >&2; exit 1; }
+          done

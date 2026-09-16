@@ -66,6 +66,23 @@ export PREVIOUS_SLOT_FILE="$runtime_dir/.previous-slot"
 export DEPLOY_STATE_FILE="$runtime_dir/.deploy-state"
 export SOAK_STATE_FILE="$runtime_dir/.soak-state"
 export DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/vps-failover/acb.lock}"
+deploy_group="$(id -gn)"
+if [[ "$(id -u)" -eq 0 ]]; then
+  install -d -m 0770 -o root -g "$deploy_group" /run/lock/vps-failover
+  install -d -m 0755 -o root -g root /var/lib/vps-failover
+  install -d -m 0750 -o root -g "$deploy_group" /var/lib/vps-failover/apps
+  install -d -m 0770 -o root -g "$deploy_group" /var/lib/vps-failover/apps/acb
+else
+  command -v sudo >/dev/null 2>&1 || { printf 'sudo is required to provision canonical deployment locks.\n' >&2; exit 1; }
+  sudo -n install -d -m 0770 -o root -g "$deploy_group" /run/lock/vps-failover
+  sudo -n install -d -m 0755 -o root -g root /var/lib/vps-failover
+  sudo -n install -d -m 0750 -o root -g "$deploy_group" /var/lib/vps-failover/apps
+  sudo -n install -d -m 0770 -o root -g "$deploy_group" /var/lib/vps-failover/apps/acb
+fi
+[[ -w /run/lock/vps-failover && -w /var/lib/vps-failover/apps/acb ]] || {
+  printf 'Canonical deployment lock/state directories are not writable.\n' >&2
+  exit 1
+}
 export PATH="$runtime_dir:$PATH"
 if [[ -f "$RELEASE_DIR/edge-probe.sh" ]]; then
   export EDGE_PROBE_SCRIPT="$RELEASE_DIR/edge-probe.sh"

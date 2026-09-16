@@ -36,6 +36,19 @@ assert_contains() {
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
   return 0
 }
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if grep -F -q -- "$needle" <<< "$haystack"; then
+    printf 'FAIL: %s (text contained forbidden "%s")\n' "$msg" "$needle" >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+    return 1
+  fi
+  printf 'PASS: %s\n' "$msg"
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  return 0
+}
 
 printf "========================================================\n"
 printf "Running CI Workflow Security & Timeout Invariant Tests\n"
@@ -88,7 +101,7 @@ for key in FRONTEND GATEWAY WORKER DBTOOL AUTH_BROWSER TTS BARK; do
   assert_contains "$deploy_content" "PRODUCTION_${key}_IMAGE" "VPS state provides the ${key} image fallback"
 done
 assert_contains "$deploy_content" "stable-deployer.sh" "VPS rollout executes through the stable deployer"
-assert_contains "$deploy_content" "ALLOW_LEGACY_WORKER_RESTART=1" "Production deploy explicitly authorizes one legacy worker restart"
+assert_not_contains "$deploy_content" "ALLOW_LEGACY_WORKER_RESTART" "Production deploy cannot bypass worker protocol v2"
 assert_contains "$deploy_content" 'releases/$release_id' "Candidate is staged in an immutable release directory"
 
 printf "\n3. Testing Environment Protection...\n"

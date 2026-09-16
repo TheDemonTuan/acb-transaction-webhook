@@ -52,44 +52,62 @@ jobs:
           state="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
+          current_release="$DEPLOY_PATH/state/current-release.json"
           receipt="$DEPLOY_PATH/data/last-release.json"
           release_env="$DEPLOY_PATH/deploy/.release.env"
-          [[ -s "$receipt" && -s "$release_env" ]] || { echo 'Production state is missing' >&2; exit 1; }
-          python3 - "$receipt" "$release_env" <<'PY'
-          import json, re, sys
-          receipt_path, env_path = sys.argv[1:]
-          receipt = json.load(open(receipt_path, encoding="utf-8"))
-          sha = receipt.get("git_sha", "")
-          if receipt.get("status") != "SUCCESS" or not re.fullmatch(r"[0-9a-f]{40}", sha):
-              raise SystemExit("Production receipt is not a valid successful release")
-          values = {}
-          for raw in open(env_path, encoding="utf-8"):
-              raw = raw.strip()
-              if raw and not raw.startswith("#") and "=" in raw:
-                  key, value = raw.split("=", 1)
-                  values[key.strip()] = value.strip()
-          keys = {
-              "frontend_image": "FRONTEND_IMAGE_REF",
-              "worker_image": "WORKER_IMAGE_REF",
-              "dbtool_image": "DBTOOL_IMAGE_REF",
-              "auth_browser_image": "BROWSER_IMAGE_REF",
-              "tts_image": "TTS_IMAGE_REF",
-              "bark_image": "BARK_IMAGE_REF",
-          }
-          active_slot_path = f"{receipt_path.rsplit('/data/', 1)[0]}/deploy/.active-slot"
-          try:
-              active_slot = open(active_slot_path, encoding="utf-8").read().strip()
-          except FileNotFoundError:
-              raise SystemExit("Production active gateway slot is missing")
-          if active_slot not in ("blue", "green"):
-              raise SystemExit("Production active gateway slot is invalid")
-          keys["gateway_image"] = f"IMAGE_REF_{active_slot.upper()}"
+          [[ -s "$current_release" || ( -s "$receipt" && -s "$release_env" ) ]] || { echo 'Production state is missing' >&2; exit 1; }
+          python3 - "$current_release" "$receipt" "$release_env" <<'PY'
+          import json, os, re, sys
+          current_path, receipt_path, env_path = sys.argv[1:]
           digest = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
+          if os.path.isfile(current_path):
+              state = json.load(open(current_path, encoding="utf-8"))
+              sha = state.get("git_sha", "")
+              if state.get("schema_version") != 1 or state.get("status") != "COMPLETED" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                  raise SystemExit("Canonical production release is invalid")
+              active_slot = state.get("active_slots", {}).get("gateway")
+              if active_slot not in ("blue", "green"):
+                  raise SystemExit("Canonical gateway slot is invalid")
+              images = state.get("images", {})
+              values = {
+                  "frontend_image": images.get("frontend", ""),
+                  "gateway_image": images.get("gateway", {}).get(active_slot, ""),
+                  "worker_image": images.get("worker", ""),
+                  "dbtool_image": images.get("dbtool", ""),
+                  "auth_browser_image": images.get("auth_browser", ""),
+                  "tts_image": images.get("tts", ""),
+                  "bark_image": images.get("bark", ""),
+              }
+              print(f"generation={state.get('generation', 0)}")
+          else:
+              receipt = json.load(open(receipt_path, encoding="utf-8"))
+              sha = receipt.get("git_sha", "")
+              if receipt.get("status") != "SUCCESS" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                  raise SystemExit("Legacy production receipt is invalid")
+              env = {}
+              for raw in open(env_path, encoding="utf-8"):
+                  raw = raw.strip()
+                  if raw and not raw.startswith("#") and "=" in raw:
+                      key, value = raw.split("=", 1)
+                      env[key.strip()] = value.strip()
+              active_slot_path = f"{receipt_path.rsplit('/data/', 1)[0]}/deploy/.active-slot"
+              active_slot = open(active_slot_path, encoding="utf-8").read().strip()
+              if active_slot not in ("blue", "green"):
+                  raise SystemExit("Legacy production gateway slot is invalid")
+              values = {
+                  "frontend_image": env.get("FRONTEND_IMAGE_REF", ""),
+                  "gateway_image": env.get(f"IMAGE_REF_{active_slot.upper()}", ""),
+                  "worker_image": env.get("WORKER_IMAGE_REF", ""),
+                  "dbtool_image": env.get("DBTOOL_IMAGE_REF", ""),
+                  "auth_browser_image": env.get("BROWSER_IMAGE_REF", ""),
+                  "tts_image": env.get("TTS_IMAGE_REF", ""),
+                  "bark_image": env.get("BARK_IMAGE_REF", ""),
+              }
+              print("generation=0")
           print(f"sha={sha}")
-          for output, key in keys.items():
-              value = values.get(key, "")
+          for output, value in values.items():
               if not digest.fullmatch(value):
-                  raise SystemExit(f"Missing or invalid production image ref: {key}")
+                  raise SystemExit(f"Missing or invalid production image ref: {output}")
               print(f"{output}={value}")
           PY
           REMOTE
@@ -119,6 +137,7 @@ jobs:
       auth_browser: ${{ steps.scope.outputs.auth_browser }}
       tts: ${{ steps.scope.outputs.tts }}
       bark: ${{ steps.scope.outputs.bark }}
+      failover_controller: ${{ steps.scope.outputs.failover_controller }}
       platform: ${{ steps.scope.outputs.platform }}
       base_sha: ${{ steps.baseline.outputs.sha }}
     steps:
@@ -165,6 +184,7 @@ jobs:
               PROMOTION_AUTH_BROWSER) echo "auth_browser=$value" >> "$GITHUB_OUTPUT" ;;
               PROMOTION_TTS) echo "tts=$value" >> "$GITHUB_OUTPUT" ;;
               PROMOTION_BARK) echo "bark=$value" >> "$GITHUB_OUTPUT" ;;
+              PROMOTION_FAILOVER_CONTROLLER) echo "failover_controller=$value" >> "$GITHUB_OUTPUT" ;;
               PROMOTION_PLATFORM) echo "platform=$value" >> "$GITHUB_OUTPUT" ;;
             esac
           done < scope.env
@@ -808,8 +828,8 @@ jobs:
           echo "Promotion scope computed:"
           cat deploy/promotion-scope.json
 
-      - name: Stage platform probe into the signed release
-        run: install -m 0755 platform/edge/probe.sh deploy/edge-probe.sh
+      - name: Stage platform assets into the signed release
+        run: bash deploy/stage-platform-assets.sh
       - name: Generate release manifest JSON
         env:
           FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || env.PRODUCTION_FRONTEND_IMAGE }}
@@ -874,6 +894,8 @@ jobs:
         with:
           name: release-manifest
           path: deploy/
+      - name: Recreate signed platform artifact layout
+        run: bash deploy/stage-platform-assets.sh
       - name: Configure SSH
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -958,7 +980,6 @@ jobs:
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
-          export ALLOW_LEGACY_WORKER_RESTART=1
           export PATH="$DEPLOY_PATH/deploy:$PATH"
           exec "$DEPLOY_PATH/deploy/stable-deployer.sh" \
             --release-dir "$RELEASE_DIR" \

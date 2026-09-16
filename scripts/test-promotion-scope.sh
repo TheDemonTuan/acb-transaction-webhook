@@ -201,6 +201,7 @@ M	platform/edge/haproxy.cfg
 EOF
 plat_out="$(run_case "$test_tmp/platform_only.txt" --format env)"
 assert_eq "platform: PROMOTION_PLATFORM is true" "$(printf '%s' "$plat_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "failover: PROMOTION_FAILOVER_CONTROLLER is true" "$(printf '%s' "$plat_out" | grep '^PROMOTION_FAILOVER_CONTROLLER=' | cut -d= -f2)" "true"
 assert_eq "platform: PROMOTION_GATEWAY is false" "$(printf '%s' "$plat_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
 assert_eq "platform: PROMOTION_WORKER is false" "$(printf '%s' "$plat_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
 assert_eq "platform: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$plat_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
@@ -271,16 +272,17 @@ assert_eq "code+doc: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$cd_out" | gre
 assert_eq "code+doc: PROMOTION_GATEWAY is true" "$(printf '%s' "$cd_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
 assert_eq "code+doc: PROMOTION_WORKER is false" "$(printf '%s' "$cd_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
 
-# 19. Unclassified unknown path (conservative fallback)
-printf "\n19. Testing unknown path fallback...\n"
+# 19. Unclassified unknown path fails closed
+printf "\n19. Testing unknown path fails closed...\n"
 cat <<'EOF' > "$test_tmp/unknown_path.txt"
 M	unknown/mystery_tool.go
 EOF
-unk_out="$(run_case "$test_tmp/unknown_path.txt" --format env)"
-assert_eq "unknown: PROMOTION_GATEWAY is true" "$(printf '%s' "$unk_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
-assert_eq "unknown: PROMOTION_WORKER is true" "$(printf '%s' "$unk_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
-assert_eq "unknown: PROMOTION_PLATFORM is true" "$(printf '%s' "$unk_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
-assert_eq "unknown: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$unk_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+set +e
+unk_out="$(run_case "$test_tmp/unknown_path.txt" --format env 2>&1)"
+unk_rc=$?
+set -e
+assert_eq "unknown: classifier exits nonzero" "$(( unk_rc != 0 ? 1 : 0 ))" "1"
+assert_eq "unknown: error identifies path" "$([[ "$unk_out" == *"unknown/mystery_tool.go"* ]] && echo true || echo false)" "true"
 
 # 20. Empty changed files list
 printf "\n20. Testing empty file changes...\n"

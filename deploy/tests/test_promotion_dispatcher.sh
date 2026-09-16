@@ -55,13 +55,14 @@ assert_file_contains() {
 
 setup_dispatcher_env() {
   local tdir="$1"
-  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets"
+  mkdir -p "$tdir/deploy" "$tdir/data" "$tdir/secrets" "$tdir/state"
 
   # Copy library and helper files
   cp -r "$DEPLOY_DIR/lib"* "$tdir/deploy/"
   cp "$DEPLOY_DIR/release-env.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/verify-runtime-drift.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/deploy-frontend.sh" "$tdir/deploy/"
   printf 'mock-master\n' > "$tdir/secrets/app_master_key"
   printf 'mock-worker\n' > "$tdir/secrets/worker_internal_token"
@@ -76,6 +77,39 @@ setup_dispatcher_env() {
 APP_ENV=production
 DATA_DIR=/tmp/data
 PUBLIC_ORIGIN=https://acb.example.com
+EOF
+  cat <<'EOF' > "$tdir/deploy/.release.env"
+IMAGE_REF_BLUE=ghcr.io/test/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+IMAGE_REF_GREEN=ghcr.io/test/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FRONTEND_IMAGE_REF=ghcr.io/test/frontend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WORKER_IMAGE_REF=ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DBTOOL_IMAGE_REF=ghcr.io/test/dbtool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BROWSER_IMAGE_REF=ghcr.io/test/browser@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+TTS_IMAGE_REF=ghcr.io/test/tts@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BARK_IMAGE_REF=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
+EOF
+  printf 'blue' > "$tdir/deploy/.active-slot"
+  printf 'blue' > "$tdir/deploy/.active-frontend-slot"
+  cat <<'EOF' > "$tdir/state/current-release.json"
+{
+  "schema_version": 1,
+  "generation": 1,
+  "release_id": "baseline",
+  "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "COMPLETED",
+  "committed_at": "2026-01-01T00:00:00Z",
+  "active_slots": {"gateway": "blue", "frontend": "blue"},
+  "images": {
+    "gateway": {"blue": "ghcr.io/test/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "green": "ghcr.io/test/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "frontend": "ghcr.io/test/frontend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "worker": "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dbtool": "ghcr.io/test/dbtool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "auth_browser": "ghcr.io/test/browser@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tts": "ghcr.io/test/tts@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bark": "ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4"
+  }
+}
 EOF
 
   cat <<'EOF' > "$tdir/deploy/compose.prod.yaml"
@@ -93,6 +127,8 @@ EOF
   rm -f "$trace_file"
   touch "$trace_file"
   export BARK_SECRET_PREFLIGHT_CMD=true
+  export RUNTIME_DRIFT_CHECK_CMD=true
+  export ALLOW_TEST_LOCK_PATH=1
 
   cat <<'EOF' > "$tdir/deploy/deploy-schema.sh"
 #!/usr/bin/env bash
@@ -499,7 +535,7 @@ kill -TERM "$DISPATCHER_PID" 2>/dev/null || true
 wait "$DISPATCHER_PID" 2>/dev/null || true
 
 assert_file_exists "$T9/data/rollout-journal.json" "Rollout journal preserved on SIGTERM"
-assert_file_contains "$T9/data/rollout-journal.json" '"status": "INTERRUPTED"' "Rollout journal marked INTERRUPTED on cancellation"
+assert_file_contains "$T9/data/rollout-journal.json" '"status": "ROLLED_BACK"' "Rollout journal records verified rollback on cancellation"
 
 # A verified release may reconcile and archive an interrupted orchestration.
 cat <<'EOF' > "$T9/deploy/deploy-gateway.sh"
@@ -510,7 +546,7 @@ chmod 755 "$T9/deploy/deploy-gateway.sh"
 TRACE_FILE="$T9/data/trace.log" DEPLOY_LOCK_FILE="$T9/data/deploy.lock" \
   bash "$T9/deploy/dispatch-rollout.sh" --manifest "$manifest_t9" --deploy-dir "$T9/deploy" --data-dir "$T9/data" --skip-manifest-check --allow-redeploy
 assert_eq "0" "$?" "Next verified rollout reconciles interrupted orchestration"
-if compgen -G "$T9/data/rollout-journal.json.interrupted.*" >/dev/null; then
+if compgen -G "$T9/data/rollout-journal.json.reconciled.*" >/dev/null; then
   printf 'PASS: interrupted rollout journal is retained as archived evidence\n'
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
 else
@@ -587,6 +623,35 @@ assert_file_exists "$evidence_dir/release-manifest.json" "release-manifest.json 
 assert_file_contains "$evidence_dir/receipt.json" '"status": "SUCCESS"' "receipt.json records SUCCESS"
 assert_file_contains "$evidence_dir/receipt.json" '"gateway"' "receipt.json lists gateway in promoted components"
 assert_file_contains "$evidence_dir/receipt.json" '"worker"' "receipt.json lists worker in promoted components"
+
+# ----------------------------------------------------
+# 12. Release-wide rollback after a later component fails
+# ----------------------------------------------------
+printf "\nTEST 12: Reverse Rollback of Completed Components...\n"
+T12="$TEST_TMP/t12"
+setup_dispatcher_env "$T12"
+manifest_t12="$T12/deploy/release-manifest.json"
+sha_t12="abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+write_mock_manifest "$manifest_t12" "$sha_t12" '{"gateway":true,"worker":true,"schema":false,"auth_browser":false,"tts":false,"bark":false,"platform":false}'
+cat <<'EOF' > "$T12/deploy/deploy-gateway.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'GATEWAY:%s\n' "$@" >> "${TRACE_FILE}"
+exit 1
+EOF
+chmod 755 "$T12/deploy/deploy-gateway.sh"
+set +e
+TRACE_FILE="$T12/data/trace.log" DEPLOY_LOCK_FILE="$T12/data/deploy.lock" SECRETS_DIR="$T12/secrets" \
+  bash "$T12/deploy/dispatch-rollout.sh" --manifest "$manifest_t12" --deploy-dir "$T12/deploy" --data-dir "$T12/data" --skip-manifest-check
+rollback_rc=$?
+set -e
+assert_eq "1" "$(( rollback_rc != 0 ? 1 : 0 ))" "Release fails when gateway transaction fails"
+assert_file_contains "$T12/data/trace.log" "WORKER:ghcr.io/test/worker@sha256:2222222222222222222222222222222222222222222222222222222222222222" "Candidate worker was promoted before gateway failure"
+assert_file_contains "$T12/data/trace.log" "WORKER:ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "Previous worker was restored by release rollback"
+worker_calls="$(grep -c '^WORKER:' "$T12/data/trace.log")"
+assert_eq "2" "$worker_calls" "Worker ran exactly once for promotion and once for rollback"
+canonical_release="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$T12/state/current-release.json")"
+assert_eq "baseline" "$canonical_release" "Failed release does not mutate canonical state"
 
 printf "\n========================================================\n"
 printf "Results: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"

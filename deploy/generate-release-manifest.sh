@@ -159,6 +159,7 @@ else
     "auth_browser": true,
     "tts": true,
     "bark": true,
+    "failover_controller": true,
     "platform": true
   },
   "promotion_scope": [
@@ -169,6 +170,7 @@ else
     "auth_browser",
     "tts",
     "bark",
+    "failover_controller",
     "platform"
   ]
 }
@@ -238,6 +240,7 @@ bundle_files=(
   "init-fresh-data.sh"
   "release-env.sh"
   "stable-deployer.sh"
+  "stage-platform-assets.sh"
   "edge-probe.sh"
   "lib/common.sh"
   "lib/database.sh"
@@ -245,6 +248,7 @@ bundle_files=(
   "lib/state.sh"
   "lib/traefik.sh"
   "verify-compose-runtime.sh"
+  "verify-runtime-drift.sh"
   "cve-allowlist.json"
   "validate-cve-allowlist.sh"
   "third-party-allowlist.json"
@@ -261,6 +265,14 @@ bundle_files=(
   "deploy-auth-browser.sh"
   "deploy-tts.sh"
   "deploy-bark.sh"
+  "deploy-failover-controller.sh"
+  "failover/vps-failover-controller.py"
+  "failover/vps-failover-controller.service"
+  "failover/vps-failover-reconcile.service"
+  "failover/vps-failover-reconcile.timer"
+  "failover/apps.d/acb.json"
+  "failover/apps.d/auth-browser.json"
+  "failover/apps.d/worker.json"
   "render-traefik-route.sh"
   "README.md"
 )

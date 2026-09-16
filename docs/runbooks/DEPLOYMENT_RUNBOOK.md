@@ -18,6 +18,7 @@ The ACB platform strictly forbids monolithic whole-stack restarts in production.
 | `auth_browser` | Changes to `cmd/auth-browser/**` or browser automation | `deploy/deploy-auth-browser.sh` |
 | `tts` | Changes to `tts-gateway/**` | `deploy/deploy-tts.sh` |
 | `bark` | Upstream Bark image or configuration updates | `deploy/deploy-bark.sh` |
+| `failover_controller` | Controller code, systemd units, or app registry | `deploy/deploy-failover-controller.sh` |
 | `mixed` / `full_stack` | Combined cross-component changes | Executed in strict dependency order via `deploy/dispatch-rollout.sh` |
 
 ---
@@ -26,7 +27,9 @@ The ACB platform strictly forbids monolithic whole-stack restarts in production.
 
 In CI/CD (and for operator-driven multi-component upgrades), `deploy/dispatch-rollout.sh` orchestrates component updates in strict dependency order:
 
-$$\text{schema} \longrightarrow \text{auxiliaries (auth-browser, tts, bark)} \longrightarrow \text{worker} \longrightarrow \text{gateway} \longrightarrow \text{platform}$$
+$$\text{schema} \longrightarrow \text{auxiliaries (auth-browser, tts, bark)} \longrightarrow \text{worker} \longrightarrow \text{gateway} \longrightarrow \text{failover controller} \longrightarrow \text{platform}$$
+
+The dispatcher is the only release-state writer. After every authorized transaction, route acknowledgement, and soak succeeds, it atomically commits `$DEPLOY_PATH/state/current-release.json`. Component scripts never commit `.release.env`; that file is a compatibility projection only. A running worker must expose verified deployment protocol v2 capabilities. Missing or malformed capability/quiesce responses stop the rollout before the worker is stopped.
 
 ### Rollout Command
 ```bash

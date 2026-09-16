@@ -29,6 +29,9 @@ assert_eq() {
 
 setup_aux_mock_env() {
   local test_dir="$1"
+  export RELEASE_ORCHESTRATED=1
+  export ALLOW_TEST_LOCK_PATH=1
+  unset BARK_START_CMD BARK_READY_CHECK_CMD BARK_UNCHANGED_CHECK_CMD
   export MOCK_STATE_DIR="$test_dir"
   export MOCK_ACTIVE_AUTH=0
 
@@ -119,7 +122,7 @@ export BROWSER_READY_CHECK_CMD="true"
 "$DEPLOY_DIR/deploy-auth-browser.sh" "ghcr.io/test/browser@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
 committed_ref="$(grep '^BROWSER_IMAGE_REF=' "$T2/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/browser@sha256:1111111111111111111111111111111111111111111111111111111111111111" "$committed_ref" "Release env committed new browser candidate digest"
+assert_eq "ghcr.io/test/browser@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "$committed_ref" "Component deploy leaves browser release state for the dispatcher"
 # Assert worker digest unchanged
 worker_ref="$(grep '^WORKER_IMAGE_REF=' "$T2/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
 assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$worker_ref" "Worker digest untouched during browser deploy"
@@ -136,7 +139,7 @@ export TTS_READY_CHECK_CMD="true"
 "$DEPLOY_DIR/deploy-tts.sh" "ghcr.io/test/tts@sha256:2222222222222222222222222222222222222222222222222222222222222222"
 
 committed_tts="$(grep '^TTS_IMAGE_REF=' "$T3/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/tts@sha256:2222222222222222222222222222222222222222222222222222222222222222" "$committed_tts" "Release env committed new TTS candidate digest"
+assert_eq "ghcr.io/test/tts@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "$committed_tts" "Component deploy leaves TTS release state for the dispatcher"
 worker_ref="$(grep '^WORKER_IMAGE_REF=' "$T3/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
 assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$worker_ref" "Worker digest untouched during TTS deploy"
 
@@ -285,6 +288,33 @@ fi
 assert_eq "0" "$journal_exists" "Active journal removed after crash recovery"
 recovered_count="$(ls "$T9/data"/deploy-journal.json.recovered.* 2>/dev/null | wc -l || echo 0)"
 assert_eq "1" "$(( recovered_count >= 1 ? 1 : 0 ))" "Archived recovered journal file found"
+
+# ==============================================================================
+# TEST 10: Candidate startup and rollback startup failure is never reported as rolled back
+# ==============================================================================
+printf '\n=== TEST 10: Bark Startup Rollback Failure Status ===\n'
+T10="$TEST_TMP/t10"
+setup_aux_mock_env "$T10"
+export BARK_START_CMD="false"
+export BARK_READY_CHECK_CMD="true"
+set +e
+"$DEPLOY_DIR/deploy-bark.sh" "ghcr.io/finb/bark-server@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+exit_code=$?
+set -e
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Deploy fails when candidate and previous Bark cannot start"
+journal_state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$T10/data/deploy-journal.json")"
+assert_eq "TX_ROLLBACK_FAILED" "$journal_state" "Startup rollback failure is recorded explicitly"
+
+# ==============================================================================
+# TEST 11: Unchanged healthy Bark is not restarted
+# ==============================================================================
+printf '\n=== TEST 11: Bark No-Op Skip ===\n'
+T11="$TEST_TMP/t11"
+setup_aux_mock_env "$T11"
+export BARK_UNCHANGED_CHECK_CMD="true"
+export BARK_START_CMD="printf started > '$T11/started'"
+"$DEPLOY_DIR/deploy-bark.sh" "ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4"
+assert_eq "false" "$([[ -e "$T11/started" ]] && echo true || echo false)" "Unchanged healthy Bark is not restarted"
 
 printf '\n==================================================\n'
 printf 'AUX DEPLOY TEST RESULTS: %d PASSED, %d FAILED\n' "$TESTS_PASSED" "$TESTS_FAILED"

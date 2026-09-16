@@ -68,6 +68,9 @@ setup_traefik_mock_env() {
   export ACTIVE_SLOT_FILE="$test_dir/.active-slot"
   export PREVIOUS_SLOT_FILE="$test_dir/.previous-slot"
   export DEPLOY_LOCK_FILE="$test_dir/.deploy.lock"
+  export ALLOW_TEST_LOCK_PATH=1
+  export FAILOVER_STATE_DIR="$test_dir/failover"
+  mkdir -p "$FAILOVER_STATE_DIR"
   export ENV_FILE="$test_dir/.env.production"
   export SECRETS_DIR="$test_dir/secrets"
 

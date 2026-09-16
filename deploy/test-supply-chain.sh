@@ -221,6 +221,8 @@ mkdir -p "$manifest_test_dir"
 
 # Copy real deploy files to test bundle
 cp -r "$script_dir"/* "$manifest_test_dir/"
+mkdir -p "$manifest_test_dir/failover"
+cp -r "$script_dir/../platform/failover"/. "$manifest_test_dir/failover/"
 rm -f "$manifest_test_dir/release-manifest.json"* "$manifest_test_dir"/*.tmp*
 
 manifest_out="$manifest_test_dir/release-manifest.json"

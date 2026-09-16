@@ -37,6 +37,8 @@ BUNDLE_FILE="${BUNDLE_FILE:-$DEPLOY_DIR/release-manifest.bundle}"
 LAST_RELEASE_FILE="${LAST_RELEASE_FILE:-$DATA_DIR/last-release.json}"
 ROLLOUT_JOURNAL_FILE="${ROLLOUT_JOURNAL_FILE:-$DATA_DIR/rollout-journal.json}"
 RELEASES_DIR="${RELEASES_DIR:-$DATA_DIR/releases}"
+PENDING_GATEWAY_RETIRE_FILE="${PENDING_GATEWAY_RETIRE_FILE:-$DATA_DIR/pending-gateway-retire.env}"
+PENDING_FRONTEND_RETIRE_FILE="${PENDING_FRONTEND_RETIRE_FILE:-$DATA_DIR/pending-frontend-retire.env}"
 
 EXPECTED_IDENTITY="${EXPECTED_IDENTITY:-}"
 EXPECTED_ISSUER="${EXPECTED_ISSUER:-https://token.actions.githubusercontent.com}"
@@ -202,6 +204,8 @@ mkdir -p "$DATA_DIR"
 LAST_RELEASE_FILE="$DATA_DIR/last-release.json"
 ROLLOUT_JOURNAL_FILE="$DATA_DIR/rollout-journal.json"
 RELEASES_DIR="$DATA_DIR/releases"
+PENDING_GATEWAY_RETIRE_FILE="$DATA_DIR/pending-gateway-retire.env"
+PENDING_FRONTEND_RETIRE_FILE="$DATA_DIR/pending-frontend-retire.env"
 
 # CI must wait for soak completion before recording a successful release.
 # Detached soak remains an explicit operator-only mode.
@@ -277,6 +281,98 @@ PY_JSON
   fi
 }
 ROLLOUT_EXIT_CODE=0
+rollback_pending_routes() {
+  local old_slot candidate_slot
+  if [[ -f "$PENDING_GATEWAY_RETIRE_FILE" ]]; then
+    old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
+    candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE")"
+    if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting gateway route to [$old_slot] because the release did not commit."
+      if atomic_switch_route "$old_slot" && ack_route_identity "$old_slot" "" 30; then
+        printf '%s' "$old_slot" | atomic_write_file "$ACTIVE_SLOT_FILE" 600
+        stop_standby_container "$candidate_slot" || true
+        rm -f "$PENDING_GATEWAY_RETIRE_FILE"
+      else
+        log_error "Gateway route rollback failed; preserving pending rollback evidence."
+        return 1
+      fi
+    else
+      log_error "Gateway rollback evidence is malformed; refusing to discard it."
+      return 1
+    fi
+  fi
+  if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
+    old_slot="$(sed -n 's/^old_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+    candidate_slot="$(sed -n 's/^candidate_slot=//p' "$PENDING_FRONTEND_RETIRE_FILE")"
+    if [[ "$old_slot" =~ ^(blue|green)$ && "$candidate_slot" =~ ^(blue|green)$ ]]; then
+      log_warn "Reverting frontend route to [$old_slot] because the release did not commit."
+      if atomic_switch_frontend_route "$old_slot" && ack_frontend_route 30; then
+        printf '%s' "$old_slot" | atomic_write_file "$FRONTEND_ACTIVE_SLOT_FILE" 600
+        docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "acb-frontend-${candidate_slot}" >/dev/null 2>&1 || true
+        rm -f "$PENDING_FRONTEND_RETIRE_FILE"
+      else
+        log_error "Frontend route rollback failed; preserving pending rollback evidence."
+        return 1
+      fi
+    else
+      log_error "Frontend rollback evidence is malformed; refusing to discard it."
+      return 1
+    fi
+  fi
+}
+
+release_is_committed() {
+  local state_file="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
+  [[ -f "$state_file" ]] || return 1
+  python3 - "$state_file" "${RELEASE_ID:-}" <<'PY' >/dev/null 2>&1
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if state.get("status") == "COMPLETED" and state.get("release_id") == sys.argv[2] else 1)
+PY
+}
+
+rollout_step_completed() {
+  local step="$1"
+  [[ -f "$ROLLOUT_JOURNAL_FILE" ]] || return 1
+  python3 - "$ROLLOUT_JOURNAL_FILE" "$step" <<'PY' >/dev/null 2>&1
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if sys.argv[2] in state.get("completed_steps", []) else 1)
+PY
+}
+
+rollout_journal_git_sha() {
+  python3 - "$ROLLOUT_JOURNAL_FILE" <<'PY' 2>/dev/null
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("git_sha", ""))
+PY
+}
+
+rollback_completed_components() {
+  local image rollback_sha
+  rollback_sha="$(rollout_journal_git_sha)"
+  if rollout_step_completed failover_controller; then
+    EXPECTED_COMMIT="$rollback_sha" RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 FAILOVER_ROLLBACK_ONLY=1 \
+      bash "$DEPLOY_DIR/deploy-failover-controller.sh" || return 1
+  fi
+  if rollout_step_completed worker; then
+    image="$(get_release_env WORKER_IMAGE_REF)" || return 1
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-worker.sh" "$image" || return 1
+  fi
+  if rollout_step_completed bark; then
+    image="$(get_release_env BARK_IMAGE_REF)" || return 1
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-bark.sh" "$image" || return 1
+  fi
+  if rollout_step_completed tts; then
+    image="$(get_release_env TTS_IMAGE_REF)" || return 1
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-tts.sh" "$image" || return 1
+  fi
+  if rollout_step_completed auth_browser; then
+    image="$(get_release_env BROWSER_IMAGE_REF)" || return 1
+    RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-auth-browser.sh" "$image" || return 1
+  fi
+}
+
 cleanup_rollout() {
   local code=$?
   if [[ "$code" -ne 0 && "$ROLLOUT_EXIT_CODE" -eq 0 ]]; then
@@ -284,8 +380,17 @@ cleanup_rollout() {
   fi
   if [[ "$ROLLOUT_EXIT_CODE" -ne 0 ]]; then
     log_warn "Rollout terminated with code ${ROLLOUT_EXIT_CODE}."
+    local final_status="INTERRUPTED"
+    if ! release_is_committed; then
+      if rollback_pending_routes && rollback_completed_components; then
+        final_status="ROLLED_BACK"
+      else
+        log_error "Release rollback did not fully verify; preserving evidence and blocking subsequent mutation."
+        ROLLOUT_EXIT_CODE=1
+      fi
+    fi
     if [[ -f "${ROLLOUT_JOURNAL_FILE:-}" ]]; then
-      finish_rollout_journal "INTERRUPTED" ""
+      finish_rollout_journal "$final_status" ""
     fi
   fi
   release_deploy_lock
@@ -316,9 +421,14 @@ with open(sys.argv[1], encoding='utf-8') as handle:
     print(json.load(handle).get('status', ''))
 PY
 )"
-  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "RUNNING" || -z "$PREVIOUS_ROLLOUT_STATUS" ]]; then
-    log_error "A previous rollout is active or unreadable (status: ${PREVIOUS_ROLLOUT_STATUS:-unknown}). Reconcile runtime state before another release."
+  if [[ -z "$PREVIOUS_ROLLOUT_STATUS" ]]; then
+    log_error "A previous rollout journal is unreadable; preserving it and blocking new mutation."
     exit 1
+  fi
+  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "RUNNING" ]]; then
+    log_warn "Found a RUNNING journal after acquiring the exclusive release lock; treating it as an interrupted process."
+    finish_rollout_journal "INTERRUPTED" ""
+    PREVIOUS_ROLLOUT_STATUS="INTERRUPTED"
   fi
 fi
 
@@ -330,6 +440,7 @@ PROMOTION_SCHEMA="false"
 PROMOTION_AUTH_BROWSER="false"
 PROMOTION_TTS="false"
 PROMOTION_BARK="false"
+PROMOTION_FAILOVER_CONTROLLER="false"
 PROMOTION_PLATFORM="false"
 PROMOTION_DOC_ONLY="false"
 PROMOTION_SCOPE=""
@@ -349,16 +460,17 @@ if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
     grep -q '"auth_browser":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_AUTH_BROWSER="true"
     grep -q '"tts":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_TTS="true"
     grep -q '"bark":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_BARK="true"
+    grep -q '"failover_controller":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_FAILOVER_CONTROLLER="true"
     grep -q '"platform":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_PLATFORM="true"
     grep -q '"promotion_doc_only":[[:space:]]*true' "$MANIFEST_FILE" 2>/dev/null && PROMOTION_DOC_ONLY="true"
 
-    [[ -z "$IMAGE_FRONTEND" ]] && IMAGE_FRONTEND="$(grep -o '"frontend":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    [[ -z "$IMAGE_GATEWAY" ]] && IMAGE_GATEWAY="$(grep -o '"gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    [[ -z "$IMAGE_WORKER" ]] && IMAGE_WORKER="$(grep -o '"worker":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    [[ -z "$IMAGE_DBTOOL" ]] && IMAGE_DBTOOL="$(grep -o '"dbtool":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    [[ -z "$IMAGE_AUTH_BROWSER" ]] && IMAGE_AUTH_BROWSER="$(grep -o '"auth_browser":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    [[ -z "$IMAGE_TTS_GATEWAY" ]] && IMAGE_TTS_GATEWAY="$(grep -o '"tts_gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
-    [[ -z "$IMAGE_BARK" ]] && IMAGE_BARK="$(grep -o '"bark":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_FRONTEND="$(grep -o '"frontend":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_GATEWAY="$(grep -o '"gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_WORKER="$(grep -o '"worker":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_DBTOOL="$(grep -o '"dbtool":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_AUTH_BROWSER="$(grep -o '"auth_browser":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_TTS_GATEWAY="$(grep -o '"tts_gateway":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
+    IMAGE_BARK="$(grep -o '"bark":[[:space:]]*"[^"]*"' "$MANIFEST_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)"
   elif [[ -n "$REQUESTED_SCOPE" ]]; then
     IFS=',' read -ra scopes <<< "$REQUESTED_SCOPE"
     for sc in "${scopes[@]}"; do
@@ -370,6 +482,7 @@ if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
         auth_browser|auth-browser) PROMOTION_AUTH_BROWSER="true" ;;
         tts|tts_gateway|tts-gateway) PROMOTION_TTS="true" ;;
         bark) PROMOTION_BARK="true" ;;
+        failover_controller) PROMOTION_FAILOVER_CONTROLLER="true" ;;
         platform) PROMOTION_PLATFORM="true" ;;
         doc_only|doc-only) PROMOTION_DOC_ONLY="true" ;;
       esac
@@ -412,7 +525,7 @@ else
   source "$verified_env"
   rm -f "$verified_env"
 
-  for promotion_var in PROMOTION_FRONTEND PROMOTION_GATEWAY PROMOTION_WORKER PROMOTION_SCHEMA PROMOTION_AUTH_BROWSER PROMOTION_TTS PROMOTION_BARK PROMOTION_PLATFORM PROMOTION_DOC_ONLY; do
+  for promotion_var in PROMOTION_FRONTEND PROMOTION_GATEWAY PROMOTION_WORKER PROMOTION_SCHEMA PROMOTION_AUTH_BROWSER PROMOTION_TTS PROMOTION_BARK PROMOTION_FAILOVER_CONTROLLER PROMOTION_PLATFORM PROMOTION_DOC_ONLY; do
     promotion_value="${!promotion_var:-}"
     [[ "$promotion_value" == "true" || "$promotion_value" == "false" ]] || {
       log_error "Invalid verified promotion flag [$promotion_var=$promotion_value]."
@@ -487,6 +600,12 @@ if [[ -n "$REQUESTED_SCOPE" ]]; then
           exit 1
         fi
         ;;
+      failover_controller)
+        if [[ "$PROMOTION_FAILOVER_CONTROLLER" != "true" ]]; then
+          log_error "Unauthorized promotion request: component [failover_controller] is NOT authorized by signed manifest."
+          exit 1
+        fi
+        ;;
       platform)
         if [[ "$PROMOTION_PLATFORM" != "true" ]]; then
           log_error "Unauthorized promotion request: component [platform] is NOT authorized by signed manifest."
@@ -504,6 +623,7 @@ if [[ -n "$REQUESTED_SCOPE" ]]; then
   PROMOTION_AUTH_BROWSER="false"
   PROMOTION_TTS="false"
   PROMOTION_BARK="false"
+  PROMOTION_FAILOVER_CONTROLLER="false"
   PROMOTION_PLATFORM="false"
   for sc in "${req_scopes[@]}"; do
     case "$sc" in
@@ -514,6 +634,7 @@ if [[ -n "$REQUESTED_SCOPE" ]]; then
       auth_browser|auth-browser) PROMOTION_AUTH_BROWSER="true" ;;
       tts|tts_gateway|tts-gateway) PROMOTION_TTS="true" ;;
       bark) PROMOTION_BARK="true" ;;
+      failover_controller) PROMOTION_FAILOVER_CONTROLLER="true" ;;
       platform) PROMOTION_PLATFORM="true" ;;
     esac
   done
@@ -529,6 +650,7 @@ if [[ "${PROMOTION_DOC_ONLY:-false}" == "true" ]] || \
     [[ "${PROMOTION_AUTH_BROWSER:-false}" != "true" ]] && \
     [[ "${PROMOTION_TTS:-false}" != "true" ]] && \
     [[ "${PROMOTION_BARK:-false}" != "true" ]] && \
+    [[ "${PROMOTION_FAILOVER_CONTROLLER:-false}" != "true" ]] && \
     [[ "${PROMOTION_PLATFORM:-false}" != "true" ]]); then
   is_docs_only=1
 fi
@@ -554,6 +676,26 @@ if [[ "$is_docs_only" -eq 1 ]]; then
 }
 EOF
 
+  if [[ -f "${CURRENT_RELEASE_FILE:-}" ]]; then
+    doc_manifest_digest="$(sha256sum "$MANIFEST_FILE" | awk '{print $1}')"
+    R_STATE_FILE="$CURRENT_RELEASE_FILE" R_STATE_RELEASE_ID="${RELEASE_ID:-rel-doc-$GIT_SHA}" \
+    R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$doc_manifest_digest" R_STATE_NOW="$now" \
+    python3 - <<'PY_DOC_STATE' | atomic_write_file "$CURRENT_RELEASE_FILE" 600
+import json, os
+path = os.environ["R_STATE_FILE"]
+with open(path, encoding="utf-8") as handle:
+    state = json.load(handle)
+if state.get("schema_version") != 1 or state.get("status") != "COMPLETED":
+    raise SystemExit("canonical release state is invalid")
+state["generation"] = int(state.get("generation", 0)) + 1
+state["previous_release_id"] = state.get("release_id")
+state["release_id"] = os.environ["R_STATE_RELEASE_ID"]
+state["git_sha"] = os.environ["R_STATE_SHA"]
+state["manifest_sha256"] = os.environ["R_STATE_MANIFEST"]
+state["committed_at"] = os.environ["R_STATE_NOW"]
+print(json.dumps(state, indent=2, sort_keys=True))
+PY_DOC_STATE
+  fi
   atomic_write_file "$LAST_RELEASE_FILE" 600 <<EOF
 {
   "release_id": "${RELEASE_ID:-rel-doc-$GIT_SHA}",
@@ -580,6 +722,7 @@ active_scope_list=()
 [[ "${PROMOTION_BARK:-false}" == "true" ]] && active_scope_list+=("bark")
 [[ "${PROMOTION_WORKER:-false}" == "true" ]] && active_scope_list+=("worker")
 [[ "${PROMOTION_GATEWAY:-false}" == "true" ]] && active_scope_list+=("gateway")
+[[ "${PROMOTION_FAILOVER_CONTROLLER:-false}" == "true" ]] && active_scope_list+=("failover_controller")
 [[ "${PROMOTION_PLATFORM:-false}" == "true" ]] && active_scope_list+=("platform")
 
 scope_str="$(IFS=,; echo "${active_scope_list[*]}")"
@@ -602,10 +745,28 @@ if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
   log_info "Startup recovery: inspecting prior component transaction journal..."
   recover_tx_journal
 fi
-if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]]; then
-  previous_rollout_archive="${ROLLOUT_JOURNAL_FILE}.interrupted.$(date +%s)"
+if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" || "$PREVIOUS_ROLLOUT_STATUS" == "ROLLED_BACK" ]]; then
+  if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" ]] && { ! rollback_pending_routes || ! rollback_completed_components; }; then
+    log_error "Interrupted rollout rollback could not be verified; preserving its journal."
+    exit 1
+  fi
+  current_state="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
+  if [[ ! -s "$current_state" ]]; then
+    log_error "Interrupted rollout cannot be reconciled automatically before canonical state bootstrap."
+    exit 1
+  fi
+  if [[ "$SKIP_MANIFEST_CHECK" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
+    if ! eval "$RUNTIME_DRIFT_CHECK_CMD"; then
+      log_error "Interrupted rollout test reconciliation failed."
+      exit 1
+    fi
+  elif ! bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$current_state"; then
+    log_error "Interrupted rollout left runtime different from canonical state; preserving the journal and blocking new mutation."
+    exit 1
+  fi
+  previous_rollout_archive="${ROLLOUT_JOURNAL_FILE}.reconciled.$(date +%s)"
   mv -f "$ROLLOUT_JOURNAL_FILE" "$previous_rollout_archive"
-  log_info "Archived reconciled interrupted rollout journal: $previous_rollout_archive"
+  log_info "Runtime matches canonical state; archived reconciled interrupted rollout journal: $previous_rollout_archive"
 fi
 
 init_rollout_journal "$RELEASE_ID" "$GIT_SHA" "$scope_str"
@@ -626,7 +787,7 @@ if [[ "${PROMOTION_SCHEMA:-false}" == "true" ]]; then
   [[ -n "$IMAGE_DBTOOL" ]] || { log_error "DBTOOL image digest is required for schema promotion."; exit 1; }
   validate_digest "$IMAGE_DBTOOL" "dbtool"
   export DBTOOL_IMAGE_REF="$IMAGE_DBTOOL"
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-schema.sh" "$IMAGE_DBTOOL"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-schema.sh" "$IMAGE_DBTOOL"
   update_rollout_step "schema" "STEP_COMPLETED"
   promoted_list+=("schema")
   log_info "Transaction 1: Schema Migration completed."
@@ -638,7 +799,7 @@ if [[ "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]]; then
   update_rollout_step "auth_browser" "RUNNING"
   [[ -n "$IMAGE_AUTH_BROWSER" ]] || { log_error "AUTH_BROWSER image digest is required for browser promotion."; exit 1; }
   validate_digest "$IMAGE_AUTH_BROWSER" "auth-browser"
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-auth-browser.sh" "$IMAGE_AUTH_BROWSER"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-auth-browser.sh" "$IMAGE_AUTH_BROWSER"
   update_rollout_step "auth_browser" "STEP_COMPLETED"
   promoted_list+=("auth_browser")
   log_info "Transaction 2a: Auth Browser completed."
@@ -649,7 +810,7 @@ if [[ "${PROMOTION_TTS:-false}" == "true" ]]; then
   update_rollout_step "tts" "RUNNING"
   [[ -n "$IMAGE_TTS_GATEWAY" ]] || { log_error "TTS image digest is required for TTS promotion."; exit 1; }
   validate_digest "$IMAGE_TTS_GATEWAY" "tts-gateway"
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-tts.sh" "$IMAGE_TTS_GATEWAY"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-tts.sh" "$IMAGE_TTS_GATEWAY"
   update_rollout_step "tts" "STEP_COMPLETED"
   promoted_list+=("tts")
   log_info "Transaction 2b: TTS Gateway completed."
@@ -660,7 +821,7 @@ if [[ "${PROMOTION_BARK:-false}" == "true" ]]; then
   update_rollout_step "bark" "RUNNING"
   [[ -n "$IMAGE_BARK" ]] || { log_error "BARK image digest is required for Bark promotion."; exit 1; }
   validate_digest "$IMAGE_BARK" "bark"
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-bark.sh" "$IMAGE_BARK"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-bark.sh" "$IMAGE_BARK"
   update_rollout_step "bark" "STEP_COMPLETED"
   promoted_list+=("bark")
   log_info "Transaction 2c: Bark Service completed."
@@ -672,7 +833,9 @@ if [[ "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
   update_rollout_step "frontend" "RUNNING"
   [[ -n "$IMAGE_FRONTEND" ]] || { log_error "FRONTEND image digest is required for frontend promotion."; exit 1; }
   validate_digest "$IMAGE_FRONTEND" "frontend"
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-frontend.sh" "$IMAGE_FRONTEND"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 DEFER_OLD_SLOT_RETIREMENT=1 \
+    PENDING_FRONTEND_RETIRE_FILE="$PENDING_FRONTEND_RETIRE_FILE" \
+    bash "$DEPLOY_DIR/deploy-frontend.sh" "$IMAGE_FRONTEND"
   update_rollout_step "frontend" "STEP_COMPLETED"
   promoted_list+=("frontend")
   log_info "Transaction 2d: frontend completed without touching gateway or worker."
@@ -684,7 +847,7 @@ if [[ "${PROMOTION_WORKER:-false}" == "true" ]]; then
   update_rollout_step "worker" "RUNNING"
   [[ -n "$IMAGE_WORKER" ]] || { log_error "WORKER image digest is required for worker promotion."; exit 1; }
   validate_digest "$IMAGE_WORKER" "worker"
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-worker.sh" "$IMAGE_WORKER"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-worker.sh" "$IMAGE_WORKER"
   update_rollout_step "worker" "STEP_COMPLETED"
   promoted_list+=("worker")
   log_info "Transaction 3: Worker Singleton Upgrade completed."
@@ -704,13 +867,26 @@ if [[ "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
     exit 1
   fi
   [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]] && gw_args+=(--skip-manifest-check)
-  DEFER_RELEASE_STATE=1 bash "$DEPLOY_DIR/deploy-gateway.sh" "${gw_args[@]}"
+  RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 DEFER_OLD_SLOT_RETIREMENT=1 \
+    PENDING_GATEWAY_RETIRE_FILE="$PENDING_GATEWAY_RETIRE_FILE" \
+    bash "$DEPLOY_DIR/deploy-gateway.sh" "${gw_args[@]}"
   update_rollout_step "gateway" "STEP_COMPLETED"
   promoted_list+=("gateway")
   log_info "Transaction 4: Gateway Blue/Green Promotion completed."
 fi
 
-# Step 5: Platform / Edge Config (if platform only or platform scoped)
+# Step 5: Release-managed failover controller
+if [[ "${PROMOTION_FAILOVER_CONTROLLER:-false}" == "true" ]]; then
+  log_info "Executing Transaction 5: Failover Controller Installation..."
+  update_rollout_step "failover_controller" "RUNNING"
+  EXPECTED_COMMIT="$GIT_SHA" RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+    bash "$DEPLOY_DIR/deploy-failover-controller.sh"
+  update_rollout_step "failover_controller" "STEP_COMPLETED"
+  promoted_list+=("failover_controller")
+  log_info "Transaction 5: Failover Controller completed."
+fi
+
+# Step 6: Platform / Edge Config (if platform only or platform scoped)
 if [[ "${PROMOTION_PLATFORM:-false}" == "true" && "${PROMOTION_GATEWAY:-false}" != "true" ]]; then
   log_info "Executing Transaction 5: Platform / Edge Config Reload..."
   update_rollout_step "platform" "RUNNING"
@@ -740,8 +916,19 @@ if [[ -f "$DEPLOY_DIR/release-env.sh" ]]; then
   if [[ -f "$canonical_release_env" ]]; then
     cp "$canonical_release_env" "$staged_release_env"
   fi
+  if [[ -f "$CURRENT_RELEASE_FILE" ]]; then
+    for release_key in "${REQUIRED_RELEASE_KEYS[@]}" FRONTEND_IMAGE_REF RELEASE_COMMIT; do
+      release_value="$(get_release_env "$release_key")" || exit 1
+      if [[ -n "$release_value" ]]; then
+        RELEASE_ENV_FILE="$staged_release_env" USE_CANONICAL_RELEASE_STATE=0 set_release_env "$release_key" "$release_value"
+      fi
+    done
+  fi
+  export USE_CANONICAL_RELEASE_STATE=0
   export RELEASE_ENV_FILE="$staged_release_env"
-  [[ -n "${IMAGE_FRONTEND:-}" && "${PROMOTION_FRONTEND:-false}" == "true" ]] && set_release_env "FRONTEND_IMAGE_REF" "$IMAGE_FRONTEND"
+  if [[ -n "${IMAGE_FRONTEND:-}" && "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
+    set_release_env "FRONTEND_IMAGE_REF" "$IMAGE_FRONTEND"
+  fi
   if [[ -n "${IMAGE_GATEWAY:-}" && "${PROMOTION_GATEWAY:-false}" == "true" ]]; then
     active_gateway_slot="$(get_active_slot 2>/dev/null || true)"
     case "$active_gateway_slot" in
@@ -750,16 +937,169 @@ if [[ -f "$DEPLOY_DIR/release-env.sh" ]]; then
       *) log_error "Cannot persist gateway image: active slot is unknown after promotion."; exit 1 ;;
     esac
   fi
-  [[ -n "${IMAGE_WORKER:-}" && "${PROMOTION_WORKER:-false}" == "true" ]] && set_release_env "WORKER_IMAGE_REF" "$IMAGE_WORKER"
-  [[ -n "${IMAGE_DBTOOL:-}" && "${PROMOTION_SCHEMA:-false}" == "true" ]] && set_release_env "DBTOOL_IMAGE_REF" "$IMAGE_DBTOOL"
-  [[ -n "${IMAGE_AUTH_BROWSER:-}" && "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]] && set_release_env "BROWSER_IMAGE_REF" "$IMAGE_AUTH_BROWSER"
-  [[ -n "${IMAGE_TTS_GATEWAY:-}" && "${PROMOTION_TTS:-false}" == "true" ]] && set_release_env "TTS_IMAGE_REF" "$IMAGE_TTS_GATEWAY"
-  [[ -n "${IMAGE_BARK:-}" && "${PROMOTION_BARK:-false}" == "true" ]] && set_release_env "BARK_IMAGE_REF" "$IMAGE_BARK"
+  if [[ -n "${IMAGE_WORKER:-}" && "${PROMOTION_WORKER:-false}" == "true" ]]; then
+    set_release_env "WORKER_IMAGE_REF" "$IMAGE_WORKER"
+  fi
+  if [[ -n "${IMAGE_DBTOOL:-}" && "${PROMOTION_SCHEMA:-false}" == "true" ]]; then
+    set_release_env "DBTOOL_IMAGE_REF" "$IMAGE_DBTOOL"
+  fi
+  if [[ -n "${IMAGE_AUTH_BROWSER:-}" && "${PROMOTION_AUTH_BROWSER:-false}" == "true" ]]; then
+    set_release_env "BROWSER_IMAGE_REF" "$IMAGE_AUTH_BROWSER"
+  fi
+  if [[ -n "${IMAGE_TTS_GATEWAY:-}" && "${PROMOTION_TTS:-false}" == "true" ]]; then
+    set_release_env "TTS_IMAGE_REF" "$IMAGE_TTS_GATEWAY"
+  fi
+  if [[ -n "${IMAGE_BARK:-}" && "${PROMOTION_BARK:-false}" == "true" ]]; then
+    set_release_env "BARK_IMAGE_REF" "$IMAGE_BARK"
+  fi
   set_release_env "RELEASE_COMMIT" "$GIT_SHA"
-  atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"
-  rm -f "$staged_release_env"
   export RELEASE_ENV_FILE="$canonical_release_env"
 fi
+
+# Commit one canonical release document after every component and soak succeeds.
+# Legacy files below are projections only and can be rebuilt from this document.
+update_rollout_step "release_commit" "COMMITTING"
+CURRENT_RELEASE_FILE="${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
+manifest_digest="$(sha256sum "$MANIFEST_FILE" | awk '{print $1}')"
+active_gateway_slot="$(get_active_slot 2>/dev/null || true)"
+active_frontend_slot=""
+if [[ -f "${FRONTEND_ACTIVE_SLOT_FILE:-}" ]]; then
+  active_frontend_slot="$(tr -d '[:space:]' < "$FRONTEND_ACTIVE_SLOT_FILE")"
+fi
+case "$active_gateway_slot" in blue|green) ;; *) log_error "Cannot commit release: active gateway slot is unknown."; exit 1 ;; esac
+case "$active_frontend_slot" in blue|green|'') ;; *) log_error "Cannot commit release: active frontend slot is invalid."; exit 1 ;; esac
+mkdir -p "$(dirname "$CURRENT_RELEASE_FILE")"
+controller_candidate="$DEPLOY_DIR/failover/vps-failover-controller.py"
+controller_digest=""
+controller_bundle_digest=""
+if [[ -f "$controller_candidate" ]]; then
+  controller_digest="$(sha256sum "$controller_candidate" | awk '{print $1}')"
+  controller_bundle_digest="$(python3 - "$(dirname "$controller_candidate")" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+paths = [
+    pathlib.Path("vps-failover-controller.py"),
+    pathlib.Path("vps-failover-controller.service"),
+    pathlib.Path("vps-failover-reconcile.service"),
+    pathlib.Path("vps-failover-reconcile.timer"),
+    pathlib.Path("apps.d/acb.json"),
+    pathlib.Path("apps.d/auth-browser.json"),
+    pathlib.Path("apps.d/worker.json"),
+]
+h = hashlib.sha256()
+for rel in paths:
+    h.update(str(rel).encode() + b"\0" + (root / rel).read_bytes() + b"\0")
+print(h.hexdigest())
+PY
+)"
+fi
+candidate_release_state="$(mktemp "$(dirname "$CURRENT_RELEASE_FILE")/.current-release.candidate.XXXXXX")"
+R_STATE_PREVIOUS="$CURRENT_RELEASE_FILE" R_STATE_ENV="$staged_release_env" R_STATE_RELEASE_ID="$RELEASE_ID" \
+R_STATE_SHA="$GIT_SHA" R_STATE_MANIFEST="$manifest_digest" R_STATE_NOW="$now" \
+R_STATE_GATEWAY_SLOT="$active_gateway_slot" R_STATE_FRONTEND_SLOT="$active_frontend_slot" \
+R_STATE_CONTROLLER_HASH="$controller_digest" R_STATE_CONTROLLER_BUNDLE_HASH="$controller_bundle_digest" \
+python3 - <<'PY_STATE' > "$candidate_release_state"
+import json, os, re
+
+def read_env(path):
+    values = {}
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+previous_path = os.environ["R_STATE_PREVIOUS"]
+generation = 1
+previous_release_id = None
+if os.path.isfile(previous_path):
+    with open(previous_path, encoding="utf-8") as handle:
+        previous = json.load(handle)
+    if previous.get("schema_version") != 1 or previous.get("status") != "COMPLETED":
+        raise SystemExit("existing canonical release state is invalid")
+    generation = int(previous.get("generation", 0)) + 1
+    previous_release_id = previous.get("release_id")
+
+env = read_env(os.environ["R_STATE_ENV"])
+required = ["IMAGE_REF_BLUE", "IMAGE_REF_GREEN", "FRONTEND_IMAGE_REF", "WORKER_IMAGE_REF", "DBTOOL_IMAGE_REF", "BROWSER_IMAGE_REF", "TTS_IMAGE_REF", "BARK_IMAGE_REF"]
+digest = re.compile(r"^[^\s]+@sha256:[a-f0-9]{64}$")
+missing = [key for key in required if not digest.match(env.get(key, ""))]
+if missing:
+    raise SystemExit("invalid canonical image refs: " + ", ".join(missing))
+state = {
+    "schema_version": 1,
+    "generation": generation,
+    "release_id": os.environ["R_STATE_RELEASE_ID"],
+    "previous_release_id": previous_release_id,
+    "git_sha": os.environ["R_STATE_SHA"],
+    "manifest_sha256": os.environ["R_STATE_MANIFEST"],
+    "status": "COMPLETED",
+    "committed_at": os.environ["R_STATE_NOW"],
+    "active_slots": {
+        "gateway": os.environ["R_STATE_GATEWAY_SLOT"],
+        "frontend": os.environ["R_STATE_FRONTEND_SLOT"] or None,
+    },
+    "failover_controller": {
+        "sha256": os.environ.get("R_STATE_CONTROLLER_HASH") or None,
+        "bundle_sha256": os.environ.get("R_STATE_CONTROLLER_BUNDLE_HASH") or None,
+    },
+    "images": {
+        "gateway": {"blue": env["IMAGE_REF_BLUE"], "green": env["IMAGE_REF_GREEN"]},
+        "frontend": env["FRONTEND_IMAGE_REF"],
+        "worker": env["WORKER_IMAGE_REF"],
+        "dbtool": env["DBTOOL_IMAGE_REF"],
+        "auth_browser": env["BROWSER_IMAGE_REF"],
+        "tts": env["TTS_IMAGE_REF"],
+        "bark": env["BARK_IMAGE_REF"],
+    },
+}
+print(json.dumps(state, indent=2, sort_keys=True))
+PY_STATE
+python3 -m json.tool "$candidate_release_state" >/dev/null
+if [[ "$SKIP_MANIFEST_CHECK" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
+  eval "$RUNTIME_DRIFT_CHECK_CMD"
+else
+  CURRENT_RELEASE_FILE="$candidate_release_state" USE_CANONICAL_RELEASE_STATE=1 \
+    bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$candidate_release_state"
+fi
+atomic_write_file "$CURRENT_RELEASE_FILE" 600 < "$candidate_release_state"
+rm -f "$candidate_release_state"
+update_rollout_step "release_commit" "STEP_COMPLETED"
+
+# The release is committed. Old blue/green slots may now retire; cleanup failure
+# never rolls back an already committed healthy release.
+if [[ -f "$PENDING_GATEWAY_RETIRE_FILE" ]]; then
+  gateway_cleanup="${PENDING_GATEWAY_RETIRE_FILE}.cleanup"
+  mv -f "$PENDING_GATEWAY_RETIRE_FILE" "$gateway_cleanup"
+  old_slot="$(sed -n 's/^old_slot=//p' "$gateway_cleanup")"
+  if stop_standby_container "$old_slot"; then
+    rm -f "$gateway_cleanup"
+  else
+    log_warn "Committed release is healthy, but old gateway slot cleanup remains pending: $gateway_cleanup"
+  fi
+fi
+if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
+  frontend_cleanup="${PENDING_FRONTEND_RETIRE_FILE}.cleanup"
+  mv -f "$PENDING_FRONTEND_RETIRE_FILE" "$frontend_cleanup"
+  old_slot="$(sed -n 's/^old_slot=//p' "$frontend_cleanup")"
+  if docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "acb-frontend-${old_slot}" >/dev/null 2>&1; then
+    rm -f "$frontend_cleanup"
+  else
+    log_warn "Committed release is healthy, but old frontend slot cleanup remains pending: $frontend_cleanup"
+  fi
+fi
+
+# Compatibility projection for Compose and older operator tooling. It is not authoritative.
+if ! atomic_write_file "$canonical_release_env" 600 < "$staged_release_env"; then
+  rm -f "$staged_release_env"
+  log_error "Canonical release committed, but the legacy .release.env projection could not be refreshed."
+  exit 1
+fi
+rm -f "$staged_release_env"
+export USE_CANONICAL_RELEASE_STATE=1
 
 atomic_write_file "$evidence_dir/receipt.json" 600 <<EOF
 {

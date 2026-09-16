@@ -11,6 +11,7 @@ Runtime per-app locks:        /run/lock/vps-failover/<app>.lock
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -149,13 +150,8 @@ class AppLock:
         self.release()
 
     def acquire(self) -> AppLock:
-        try:
-            self.lock_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            self.lock_dir = Path("/tmp/vps-failover")
-            self.lock_dir.mkdir(parents=True, exist_ok=True)
-            self.lock_path = self.lock_dir / f"{self.app_name}.lock"
-        self._fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o666)
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o660)
         start_time = time.time()
         while True:
             try:
@@ -336,15 +332,12 @@ def check_deployment_in_progress(journal_path: Optional[Path] = None) -> Tuple[b
 
 def is_intentional_stop(app_name: str, slot_or_container: str, state_dir: Path | str = DEFAULT_STATE_DIR) -> bool:
     """
-    Checks whether a slot or container was intentionally stopped.
-    Checks marker files in state_dir, /tmp/vps-failover, or intentional stop cooldowns.
+    Checks canonical per-app state for an intentional stop marker.
     """
     st_dir = Path(state_dir)
     markers = [
         st_dir / app_name / f"intentional-stop-{slot_or_container}",
         st_dir / app_name / f".intentional-stop-{slot_or_container}",
-        Path("/tmp/vps-failover") / f"intentional-stop-{slot_or_container}",
-        Path("/tmp/vps-failover") / f".intentional-stop-{slot_or_container}",
     ]
     for m in markers:
         if m.exists():
@@ -527,7 +520,10 @@ class FailoverEngine:
             return
 
         try:
-            with AppLock(app_name, self.lock_dir):
+            with contextlib.ExitStack() as locks:
+                locks.enter_context(AppLock("acb", self.lock_dir))
+                if app_name != "acb":
+                    locks.enter_context(AppLock(app_name, self.lock_dir))
                 state = load_state(app_name, self.state_dir)
                 now = self.clock.now()
 
@@ -847,7 +843,10 @@ class FailoverEngine:
         active_slot = None
 
         try:
-            with AppLock(app_name, self.lock_dir):
+            with contextlib.ExitStack() as locks:
+                locks.enter_context(AppLock("acb", self.lock_dir))
+                if app_name != "acb":
+                    locks.enter_context(AppLock(app_name, self.lock_dir))
                 state = load_state(app_name, self.state_dir)
                 now = self.clock.now()
 

@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+require_release_orchestrator
 
 CANDIDATE_BROWSER_IMAGE="${1:-${BROWSER_IMAGE_REF:-}}"
 
@@ -166,9 +167,7 @@ if ! wait_for_browser_ready "$READY_CHECK_TIMEOUT"; then
 fi
 
 # 5. Commit new browser image ref
-update_tx_state "TX_COMMITTED" "Candidate auth-browser verified healthy"
-commit_component_release_env "BROWSER_IMAGE_REF" "$CANDIDATE_BROWSER_IMAGE"
-log_info "Committed new BROWSER_IMAGE_REF to .release.env."
+update_tx_state "TX_COMMITTED" "Candidate auth-browser verified healthy; dispatcher will commit release state"
 
 update_tx_state "TX_COMPLETED" "Auth-browser deployment transaction completed successfully"
 archive_tx_journal "completed"

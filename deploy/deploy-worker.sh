@@ -14,6 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+require_release_orchestrator
 
 CANDIDATE_WORKER_IMAGE="${1:-${WORKER_IMAGE_REF:-}}"
 
@@ -129,8 +130,12 @@ if [[ "$OLD_WORKER_RUNNING" -eq 1 ]]; then
   running_capabilities="$(docker exec acb-worker /worker -deploy-capabilities 2>&1)" || true
   if ! verify_deploy_capabilities "running worker" "$running_capabilities" >/dev/null 2>&1; then
     RUNNING_WORKER_SUPPORTS_HANDOFF=0
-    log_warn "Running worker predates the capability-report flag; the candidate RPC client will verify quiesce/drain responses before any stop."
+    log_error "Running worker does not expose verified deployment protocol v2 capabilities."
   fi
+fi
+if [[ "$OLD_WORKER_RUNNING" -eq 1 && "$RUNNING_WORKER_SUPPORTS_HANDOFF" -ne 1 ]]; then
+  log_error "Worker deployment aborted before quiesce: protocol v2 is mandatory."
+  exit 1
 fi
 
 resume_old_worker() {
@@ -238,9 +243,9 @@ verify_quiesced_json() {
 
 quiesce_old_worker() {
   log_info "Quiescing old worker via RPC..."
-  if [[ "${ALLOW_LEGACY_WORKER_RESTART:-0}" == "1" && "$RUNNING_WORKER_SUPPORTS_HANDOFF" -eq 0 ]]; then
-    log_warn "Running worker lacks safe handoff support; proceeding with an operator-approved graceful stop/restart."
-    return 0
+  if [[ "$RUNNING_WORKER_SUPPORTS_HANDOFF" -ne 1 ]]; then
+    log_error "Running worker does not support deployment protocol v2; refusing unsafe restart."
+    return 1
   fi
 
   if [[ -n "${WORKER_QUIESCE_CMD:-}" ]]; then
@@ -438,9 +443,7 @@ if ! wait_for_worker_ready "${WORKER_READINESS_TIMEOUT:-30}"; then
   exit 1
 fi
 
-# 7. Commit new worker image reference to release state
-commit_component_release_env "WORKER_IMAGE_REF" "$CANDIDATE_WORKER_IMAGE"
-log_info "Committed new WORKER_IMAGE_REF to .release.env."
+# 7. The dispatcher commits release state after every component succeeds.
 
 # 8. Release durable mutation gate
 release_mutation_gate "$DATA_VOLUME_NAME" "${DBTOOL_IMAGE_REF:-}" "$WORKER_DEPLOY_OWNER" "${GATE_TOKEN:-}"

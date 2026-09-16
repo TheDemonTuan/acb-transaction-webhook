@@ -10,6 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+require_release_orchestrator
 
 CANDIDATE_TTS_IMAGE="${1:-${TTS_IMAGE_REF:-}}"
 
@@ -159,10 +160,8 @@ if ! wait_for_tts_ready "$READY_CHECK_TIMEOUT"; then
   exit 1
 fi
 
-# 4. Commit new TTS image ref
+# 4. Record component success; the dispatcher owns release-state commit.
 update_tx_state "TX_COMMITTED" "Candidate TTS verified healthy"
-commit_component_release_env "TTS_IMAGE_REF" "$CANDIDATE_TTS_IMAGE"
-log_info "Committed new TTS_IMAGE_REF to .release.env."
 
 update_tx_state "TX_COMPLETED" "TTS auxiliary deployment transaction completed successfully"
 archive_tx_journal "completed"

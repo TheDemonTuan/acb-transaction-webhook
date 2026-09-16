@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
 
 RELEASE_ENV_FILE="${RELEASE_ENV_FILE:-$SCRIPT_DIR/.release.env}"
+DEPLOY_ROOT="${DEPLOY_PATH:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+CURRENT_RELEASE_FILE="${CURRENT_RELEASE_FILE:-$DEPLOY_ROOT/state/current-release.json}"
 IMAGE_DIGEST_PATTERN='^[^[:space:]]+@sha256:[a-f0-9]{64}$'
 
 REQUIRED_RELEASE_KEYS=(
@@ -56,10 +58,57 @@ validate_image_ref() {
   return 0
 }
 
+get_current_release_value() {
+  local key="$1"
+  python3 - "$CURRENT_RELEASE_FILE" "$key" <<'PY'
+import json, sys
+path, key = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    state = json.load(handle)
+if state.get("schema_version") != 1 or state.get("status") != "COMPLETED":
+    raise SystemExit("invalid canonical release state")
+paths = {
+    "IMAGE_REF_BLUE": ("images", "gateway", "blue"),
+    "IMAGE_REF_GREEN": ("images", "gateway", "green"),
+    "FRONTEND_IMAGE_REF": ("images", "frontend"),
+    "WORKER_IMAGE_REF": ("images", "worker"),
+    "DBTOOL_IMAGE_REF": ("images", "dbtool"),
+    "BROWSER_IMAGE_REF": ("images", "auth_browser"),
+    "TTS_IMAGE_REF": ("images", "tts"),
+    "BARK_IMAGE_REF": ("images", "bark"),
+    "RELEASE_COMMIT": ("git_sha",),
+}
+parts = paths.get(key)
+if not parts:
+    raise SystemExit(0)
+value = state
+for part in parts:
+    if not isinstance(value, dict) or part not in value:
+        raise SystemExit(0)
+    value = value[part]
+if value is not None:
+    print(value)
+PY
+}
+
 get_release_env() {
   local key="$1"
   local default_val="${2:-}"
   local file="${RELEASE_ENV_FILE}"
+
+  if [[ "${USE_CANONICAL_RELEASE_STATE:-1}" == "1" && -f "$CURRENT_RELEASE_FILE" ]]; then
+    local canonical_val
+    if ! canonical_val="$(get_current_release_value "$key")"; then
+      log_release_error "Canonical release state is invalid: ${CURRENT_RELEASE_FILE}"
+      return 1
+    fi
+    if [[ -n "$canonical_val" ]]; then
+      printf '%s\n' "$canonical_val"
+    else
+      printf '%s\n' "$default_val"
+    fi
+    return 0
+  fi
 
   if [[ ! -f "$file" ]]; then
     printf '%s\n' "$default_val"
@@ -73,13 +122,6 @@ get_release_env() {
   else
     printf '%s\n' "$val"
   fi
-}
-
-commit_component_release_env() {
-  if [[ "${DEFER_RELEASE_STATE:-0}" == "1" ]]; then
-    return 0
-  fi
-  set_release_env "$@"
 }
 
 set_release_env() {
@@ -329,6 +371,14 @@ EOF
 
 export_release_env() {
   local file="${1:-$RELEASE_ENV_FILE}"
+  if [[ "${USE_CANONICAL_RELEASE_STATE:-1}" == "1" && -f "$CURRENT_RELEASE_FILE" ]]; then
+    local key val
+    for key in "${REQUIRED_RELEASE_KEYS[@]}" FRONTEND_IMAGE_REF RELEASE_COMMIT; do
+      val="$(get_release_env "$key")" || return 1
+      [[ -n "$val" ]] && export "$key=$val"
+    done
+    return 0
+  fi
   if [[ ! -f "$file" ]]; then
     return 0
   fi

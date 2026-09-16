@@ -111,7 +111,7 @@ Docker Daemon (/var/run/docker.sock)
 The controller coordinates with transactional deployments (`deploy-gateway.sh`, `deploy-worker.sh`, `deploy-schema.sh`, `deploy-auth-browser.sh`, `deploy-tts.sh`, `deploy-bark.sh`):
 1. **Mutual Host Lock (`/run/lock/vps-failover/<app>.lock`)**: Deployment scripts and the failover controller share the exact same per-app lock path. If deploy holds the lock, the failover engine catches lock contention, backs off safely, and never races or corrupts the route pointer.
 2. **Deployment Journal Awareness (`deploy-journal.json`)**: When a deploy transaction is active (`TX_INITIALIZED`, `CANDIDATE_STARTING`, `VERIFYING_HEALTH`, `SWITCHING_ROUTE`, `VERIFYING_ACK`, `TX_SOAKING`, `TX_COMMITTED`), failover promotion is strictly inhibited. The controller treats candidate containers running during tests or soak as candidate state rather than committed state.
-3. **Intentional Stop Markers (`intentional-stop-<slot>`)**: Prior to stopping old slots after deployment or during maintenance, deploy scripts place intentional stop markers in `/var/lib/vps-failover/apps/<app>/` and `/tmp/vps-failover/`. Docker container termination (`die`, `oom`) events matching an intentional stop marker are treated as expected transitions and do not trigger failovers.
+3. **Intentional Stop Markers (`intentional-stop-<slot>`)**: Prior to stopping old slots after deployment or during maintenance, deploy scripts place intentional stop markers only in the canonical `/var/lib/vps-failover/apps/<app>/` state directory. Docker container termination (`die`, `oom`) events matching an intentional stop marker are treated as expected transitions and do not trigger failovers.
 
 ## Exact Route Identity ACK & Bounded Recovery
 
@@ -153,31 +153,9 @@ Deploy processes or maintenance tools may acquire an operation lease in `state.j
 
 ## Installation
 
-```bash
-# 1. Create directories with strict permissions
-sudo mkdir -p /etc/vps-failover/apps.d
-sudo mkdir -p /var/lib/vps-failover/apps
-sudo mkdir -p /run/lock/vps-failover
-sudo mkdir -p /opt/platform/failover
+The controller is a release-managed component. Do not copy the Python file, registry, or systemd units manually. Changes under `platform/failover/**` are classified as `failover_controller`, included in the signed release manifest, and installed transactionally by `deploy/deploy-failover-controller.sh` through `deploy/dispatch-rollout.sh`.
 
-sudo chmod 0755 /etc/vps-failover /etc/vps-failover/apps.d
-sudo chmod 0750 /var/lib/vps-failover /var/lib/vps-failover/apps
-sudo chmod 0755 /run/lock/vps-failover
-sudo chmod 0755 /opt/platform/failover
-
-# 2. Install controller script and units
-sudo cp platform/failover/vps-failover-controller.py /opt/platform/failover/
-sudo chmod 0755 /opt/platform/failover/vps-failover-controller.py
-
-sudo cp platform/failover/vps-failover-controller.service /etc/systemd/system/
-sudo cp platform/failover/vps-failover-reconcile.service /etc/systemd/system/
-sudo cp platform/failover/vps-failover-reconcile.timer /etc/systemd/system/
-
-# 3. Reload systemd and start service
-sudo systemctl daemon-reload
-sudo systemctl enable --now vps-failover-controller.service
-sudo systemctl enable --now vps-failover-reconcile.timer
-```
+The transaction validates Python, JSON registries, systemd units, and checksums before installation. It snapshots the installed code, units, registry, and enablement state; restarts and verifies the candidate; and restores the verified previous controller if installation fails. The stable deployer provisions the shared `/run/lock/vps-failover` and `/var/lib/vps-failover/apps/acb` paths. There is no `/tmp` lock fallback because systemd `PrivateTmp` would split coordination between deployment and failover processes.
 
 ## Running Tests
 

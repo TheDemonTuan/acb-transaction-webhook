@@ -60,7 +60,17 @@ terminate_background_soak() {
 
 acquire_deploy_lock() {
   local timeout="${DEPLOY_LOCK_TIMEOUT:-30}"
-  if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" || "${SKIP_LOCK:-0}" == "1" ]]; then
+  if [[ "${SKIP_LOCK:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" ]]; then
+    local owner="${DEPLOY_LOCK_OWNER_PID:-}"
+    local owner_lock=""
+    [[ "$owner" =~ ^[0-9]+$ ]] && owner_lock="$(readlink -f "/proc/$owner/fd/9" 2>/dev/null || true)"
+    if [[ -z "$owner_lock" || "$owner_lock" != "$(readlink -f "$DEPLOY_LOCK_FILE" 2>/dev/null || true)" ]]; then
+      log_error "Inherited deployment lock ownership could not be verified."
+      return 1
+    fi
     return 0
   fi
   if ! command -v flock >/dev/null 2>&1; then
@@ -70,14 +80,13 @@ acquire_deploy_lock() {
 
   local lock_dir
   lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
-  if ! mkdir -p "$lock_dir" 2>/dev/null; then
-    if command -v sudo >/dev/null 2>&1 && sudo -n mkdir -p -m 0777 "$lock_dir" 2>/dev/null; then
-      :
-    else
-      DEPLOY_LOCK_FILE="/tmp/vps-failover/acb.lock"
-      lock_dir="$(dirname "$DEPLOY_LOCK_FILE")"
-      mkdir -p "$lock_dir" 2>/dev/null || true
-    fi
+  if [[ "${ALLOW_TEST_LOCK_PATH:-0}" != "1" && "$DEPLOY_LOCK_FILE" != /run/lock/vps-failover/*.lock ]]; then
+    log_error "Unsafe deployment lock path: $DEPLOY_LOCK_FILE"
+    return 1
+  fi
+  if ! mkdir -p "$lock_dir" 2>/dev/null || [[ ! -w "$lock_dir" ]]; then
+    log_error "Canonical deployment lock directory is unavailable: $lock_dir"
+    return 1
   fi
   exec 9>"$DEPLOY_LOCK_FILE"
   if ! flock -w "$timeout" 9; then
@@ -85,12 +94,13 @@ acquire_deploy_lock() {
     return 1
   fi
   export DEPLOY_LOCK_HELD=1
+  export DEPLOY_LOCK_OWNER_PID="$BASHPID"
   terminate_background_soak
   return 0
 }
 release_deploy_lock() {
-  if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" ]]; then
-    unset DEPLOY_LOCK_HELD
+  if [[ "${DEPLOY_LOCK_HELD:-0}" == "1" && "${DEPLOY_LOCK_OWNER_PID:-}" == "$BASHPID" ]]; then
+    unset DEPLOY_LOCK_HELD DEPLOY_LOCK_OWNER_PID
     if command -v flock >/dev/null 2>&1; then
       flock -u 9 2>/dev/null || true
     fi
@@ -347,16 +357,17 @@ recover_tx_journal() {
 
 mark_intentional_stop() {
   local slot="$1"
-  if ! mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null; then
-    FAILOVER_STATE_DIR="/tmp/vps-failover"
-    mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null || true
+  if ! mkdir -p "$FAILOVER_STATE_DIR" 2>/dev/null || [[ ! -w "$FAILOVER_STATE_DIR" ]]; then
+    log_error "Canonical failover state directory is unavailable: $FAILOVER_STATE_DIR"
+    return 1
   fi
   local marker="$FAILOVER_STATE_DIR/intentional-stop-${slot}"
   local tmp="${marker}.tmp.$$"
   printf '{"slot":"%s","desired":"stopped","recordedAt":"%s"}\n' \
     "$slot" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
-  mv -f "$tmp" "$marker" 2>/dev/null || true
-  touch "$FAILOVER_STATE_DIR/acb.cooldown" 2>/dev/null || true
+  chmod 0640 "$tmp"
+  mv -f "$tmp" "$marker"
+  touch "$FAILOVER_STATE_DIR/acb.cooldown"
   touch "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
   log_info "Recorded intentional stop for slot [${slot}] before stopping container."
 }
@@ -370,11 +381,7 @@ clear_intentional_stop() {
         "$FAILOVER_STATE_DIR/.intentional-stop-${slot}" \
         "$FAILOVER_STATE_DIR/acb/intentional-stop-${slot}" \
         "$FAILOVER_STATE_DIR/acb/.intentional-stop-${slot}" \
-        "$SCRIPT_DIR/.intentional-stop-${slot}" \
-        "/tmp/vps-failover/intentional-stop-${slot}" \
-        "/tmp/vps-failover/.intentional-stop-${slot}" \
-        "/tmp/vps-failover/acb/intentional-stop-${slot}" \
-        "/tmp/vps-failover/acb/.intentional-stop-${slot}" 2>/dev/null || true
+        "$SCRIPT_DIR/.intentional-stop-${slot}" 2>/dev/null || true
   log_info "Cleared intentional stop marker for slot [${slot}]."
 }
 
@@ -419,8 +426,17 @@ EOF
     elapsed=$(( elapsed + interval ))
   done
 
-  log_info "Soak observation completed successfully. Transitioning [${old_slot}] to stopped warm standby..."
-  stop_standby_container "$old_slot"
+  if [[ "${DEFER_OLD_SLOT_RETIREMENT:-0}" == "1" ]]; then
+    [[ -n "${PENDING_GATEWAY_RETIRE_FILE:-}" ]] || {
+      log_error "PENDING_GATEWAY_RETIRE_FILE is required when old-slot retirement is deferred."
+      return 1
+    }
+    printf 'old_slot=%s\ncandidate_slot=%s\n' "$old_slot" "$candidate" | atomic_write_file "$PENDING_GATEWAY_RETIRE_FILE" 600
+    log_info "Soak completed; retaining old slot [${old_slot}] until the release commits."
+  else
+    log_info "Soak observation completed successfully. Transitioning [${old_slot}] to stopped warm standby..."
+    stop_standby_container "$old_slot"
+  fi
   rm -f "$SOAK_STATE_FILE"
   return 0
 }

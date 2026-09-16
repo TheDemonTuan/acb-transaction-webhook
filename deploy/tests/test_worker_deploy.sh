@@ -29,12 +29,15 @@ assert_eq() {
 
 setup_worker_mock_env() {
   local test_dir="$1"
-  unset WORKER_STOP_CMD WORKER_START_CMD WORKER_READY_CHECK_CMD WORKER_QUIESCE_CMD WORKER_RESUME_CMD WORKER_ROLLBACK_READY_CHECK_CMD
+  export RELEASE_ORCHESTRATED=1
+  unset WORKER_STOP_CMD WORKER_START_CMD WORKER_READY_CHECK_CMD WORKER_QUIESCE_CMD WORKER_RESUME_CMD WORKER_ROLLBACK_READY_CHECK_CMD ALLOW_LEGACY_WORKER_RESTART
+  export ALLOW_TEST_LOCK_PATH=1
   export MOCK_STATE_DIR="$test_dir"
   export MOCK_ACTIVE_AUTH=0
   export MOCK_QUIESCE_FAIL=0
   export MOCK_CANDIDATE_READY_FAIL=0
   export MOCK_EXEC_LEGACY_WORKER=0
+  export MOCK_EXEC_QUIESCE_UNAVAILABLE=0
   export MOCK_CANDIDATE_QUIESCE_BAD_RESPONSE=0
   export MOCK_CANDIDATE_QUIESCE_404=0
   export MOCK_CANDIDATE_QUIESCE_INVALID_JSON=0
@@ -193,11 +196,15 @@ elif [[ "$cmd" == "run" ]]; then
   exit 0
 elif [[ "$cmd" == "exec" ]]; then
   if [[ "$*" =~ -deploy-capabilities ]]; then
+    if [[ "${MOCK_EXEC_LEGACY_WORKER:-0}" == "1" ]]; then
+      printf 'flag provided but not defined: -deploy-capabilities\n' >&2
+      exit 2
+    fi
     printf '{"protocol":2,"quiesce":true,"drain":true,"resume":true,"notificationDrain":true,"sessionCheckpoint":true,"journalCheckpoint":true}\n'
     exit 0
   fi
   if [[ "$*" =~ -quiesce ]]; then
-    if [[ "${MOCK_EXEC_LEGACY_WORKER:-0}" == "1" ]]; then
+    if [[ "${MOCK_EXEC_LEGACY_WORKER:-0}" == "1" || "${MOCK_EXEC_QUIESCE_UNAVAILABLE:-0}" == "1" ]]; then
       printf 'flag provided but not defined: -quiesce\n' >&2
       exit 2
     fi
@@ -299,7 +306,7 @@ export WORKER_READINESS_TIMEOUT="2"
 "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T4/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Release env committed new candidate digest"
+assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$committed_ref" "Component deploy leaves worker release state for the dispatcher"
 
 # ==============================================================================
 # TEST 5: Immutable Core IDs Test (Worker deploy leaves other containers untouched)
@@ -324,36 +331,23 @@ export WORKER_READINESS_TIMEOUT="2"
 
 "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T6/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Container exec loopback quiesced successfully and committed"
+assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$committed_ref" "Container exec succeeds without committing release state"
 
 # ==============================================================================
-# TEST 7: Legacy Worker Lacks -quiesce Flag -> Fallback to Candidate Container RPC
+# TEST 7: Legacy Worker Is Rejected Before Stop
 # ==============================================================================
-printf '\n=== TEST 7: Legacy Worker Lacks -quiesce Flag -> Candidate Container RPC ===\n'
+printf '\n=== TEST 7: Legacy Worker Is Rejected Before Stop ===\n'
 T7="$TEST_TMP/t7"
 setup_worker_mock_env "$T7"
-unset WORKER_QUIESCE_CMD
+unset WORKER_QUIESCE_CMD WORKER_STOP_CMD
 export MOCK_EXEC_LEGACY_WORKER=1
-export WORKER_START_CMD="true"
-export WORKER_STOP_CMD="true"
-export WORKER_READY_CHECK_CMD="true"
-export WORKER_READINESS_TIMEOUT="2"
-
+export ALLOW_LEGACY_WORKER_RESTART=1
+set +e
 "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T7/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Upgraded successfully via candidate container RPC fallback"
-
-candidate_called=0
-if [[ -f "$T7/candidate_client_called" ]]; then
-  candidate_called=1
-fi
-assert_eq "1" "$candidate_called" "Candidate container RPC client (--network container:acb-worker) was invoked"
-
-mount_checked=0
-if [[ -f "$T7/candidate_mount_checked" ]]; then
-  mount_checked=1
-fi
-assert_eq "1" "$mount_checked" "Candidate container uses explicit /worker entrypoint and read-only token mount"
+exit_code=$?
+set -e
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Legacy worker is rejected even if the removed escape-hatch variable is set"
+assert_eq "false" "$([[ -e "$T7/stop_was_called" ]] && echo true || echo false)" "Legacy worker is not stopped"
 
 # ==============================================================================
 # TEST 8: Non-Published Host Port -> Does Not Depend On Host Curl
@@ -362,7 +356,7 @@ printf '\n=== TEST 8: Non-Published Host Port -> Candidate Container RPC Operate
 T8="$TEST_TMP/t8"
 setup_worker_mock_env "$T8"
 unset WORKER_QUIESCE_CMD
-export MOCK_EXEC_LEGACY_WORKER=1
+export MOCK_EXEC_QUIESCE_UNAVAILABLE=1
 export WORKER_RPC_URL="http://127.0.0.1:19999" # Port not listening on host
 export WORKER_START_CMD="true"
 export WORKER_STOP_CMD="true"
@@ -371,7 +365,7 @@ export WORKER_READINESS_TIMEOUT="2"
 
 "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T8/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Upgraded successfully even when host RPC port is unreachable"
+assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$committed_ref" "Upgrade succeeds without host RPC and without component state commit"
 
 # ==============================================================================
 # TEST 9: Bad Quiesce Responses Fail Closed Without Stopping Old Container
@@ -384,6 +378,7 @@ setup_worker_mock_env "$T9A"
 unset WORKER_QUIESCE_CMD
 export MOCK_EXEC_LEGACY_WORKER=1
 export MOCK_CANDIDATE_QUIESCE_404=1
+export ALLOW_LEGACY_WORKER_RESTART=1
 
 set +e
 "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -401,7 +396,7 @@ assert_eq "0" "$stopped" "Old worker container was not stopped after a legacy 40
 T9B="$TEST_TMP/t9b"
 setup_worker_mock_env "$T9B"
 unset WORKER_QUIESCE_CMD
-export MOCK_EXEC_LEGACY_WORKER=1
+export MOCK_EXEC_QUIESCE_UNAVAILABLE=1
 export MOCK_CANDIDATE_QUIESCE_BAD_RESPONSE=1
 
 set +e
@@ -420,7 +415,7 @@ assert_eq "0" "$stopped" "Old worker container was NOT stopped on quiesced: fals
 T9C="$TEST_TMP/t9c"
 setup_worker_mock_env "$T9C"
 unset WORKER_QUIESCE_CMD
-export MOCK_EXEC_LEGACY_WORKER=1
+export MOCK_EXEC_QUIESCE_UNAVAILABLE=1
 export MOCK_CANDIDATE_QUIESCE_INVALID_JSON=1
 
 set +e
@@ -515,7 +510,7 @@ printf '\n=== TEST 13: verify_quiesce_response Works When PATH Excludes jq ===\n
 T13="$TEST_TMP/t13"
 setup_worker_mock_env "$T13"
 unset WORKER_QUIESCE_CMD
-export MOCK_EXEC_LEGACY_WORKER=1
+export MOCK_EXEC_QUIESCE_UNAVAILABLE=1
 export WORKER_START_CMD="true"
 export WORKER_STOP_CMD="true"
 export WORKER_READY_CHECK_CMD="true"
@@ -538,7 +533,7 @@ chmod +x "$T13/no-jq-bin/docker"
   "$DEPLOY_DIR/deploy-worker.sh" "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 committed_ref="$(grep '^WORKER_IMAGE_REF=' "$T13/.release.env" | cut -d'=' -f2 | tr -d '\r\n')"
-assert_eq "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$committed_ref" "Upgraded successfully without jq in PATH"
+assert_eq "ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$committed_ref" "Upgrade succeeds without jq and without component state commit"
 
 # Also directly test verify_quiesce_response fail-closed and parsing logic in no-jq environment
 (

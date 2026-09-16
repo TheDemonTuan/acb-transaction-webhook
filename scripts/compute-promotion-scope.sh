@@ -131,6 +131,7 @@ scope_schema=false
 scope_auth_browser=false
 scope_tts=false
 scope_bark=false
+scope_failover_controller=false
 scope_platform=false
 
 all_doc_only=true
@@ -157,12 +158,12 @@ if any(re.search(pattern, path) for pattern in mapping.get('documentation', []))
 matched = []
 for rule in mapping.get('rules', []):
     if re.search(rule['pattern'], path):
-        for component in rule['components']:
-            if component not in matched:
-                matched.append(component)
+        matched = list(dict.fromkeys(rule['components']))
+        break
 if not matched:
-    matched = mapping.get('unknown', [])
-print('runtime:' + ','.join(matched))
+    print('unclassified:')
+else:
+    print('runtime:' + ','.join(matched))
 PY_MAP
 )"
   kind="${result%%:*}"
@@ -172,6 +173,10 @@ PY_MAP
       printf '  [CLASSIFY] %s -> doc-only\n' "$p" >&2
     fi
     return 0
+  fi
+  if [[ "$kind" == "unclassified" || -z "$components" ]]; then
+    printf 'Unclassified runtime path: %s. Add explicit ownership to %s.\n' "$p" "$component_map" >&2
+    exit 1
   fi
   all_doc_only=false
   IFS=',' read -r -a matched_components <<< "$components"
@@ -184,6 +189,7 @@ PY_MAP
       auth_browser) scope_auth_browser=true ;;
       tts) scope_tts=true ;;
       bark) scope_bark=true ;;
+      failover_controller) scope_failover_controller=true ;;
       platform) scope_platform=true ;;
       *) printf 'Unknown component %q in %s\n' "$component" "$component_map" >&2; exit 1 ;;
     esac
@@ -221,6 +227,7 @@ active_scopes=()
 [[ "$scope_auth_browser" == "true" ]] && active_scopes+=("auth_browser")
 [[ "$scope_tts" == "true" ]] && active_scopes+=("tts")
 [[ "$scope_bark" == "true" ]] && active_scopes+=("bark")
+[[ "$scope_failover_controller" == "true" ]] && active_scopes+=("failover_controller")
 [[ "$scope_platform" == "true" ]] && active_scopes+=("platform")
 
 format_output() {
@@ -236,6 +243,7 @@ PROMOTION_SCHEMA=$scope_schema
 PROMOTION_AUTH_BROWSER=$scope_auth_browser
 PROMOTION_TTS=$scope_tts
 PROMOTION_BARK=$scope_bark
+PROMOTION_FAILOVER_CONTROLLER=$scope_failover_controller
 PROMOTION_PLATFORM=$scope_platform
 PROMOTION_SCOPE=$scope_str
 PROMOTION_DOC_ONLY=$all_doc_only
@@ -268,6 +276,7 @@ EOF
     "auth_browser": $scope_auth_browser,
     "tts": $scope_tts,
     "bark": $scope_bark,
+    "failover_controller": $scope_failover_controller,
     "platform": $scope_platform
   },
   "promotion_scope": $json_scopes,

@@ -65,6 +65,13 @@ log_error() {
   printf '[%s] [ERROR] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
 }
 
+require_release_orchestrator() {
+  if [[ "${RELEASE_ORCHESTRATED:-0}" != "1" ]]; then
+    log_error "Component deployment must run through dispatch-rollout.sh; direct mutation is refused."
+    return 1
+  fi
+}
+
 validate_canonical_env() {
   if [[ ! -f "$ENV_FILE" ]]; then
     log_error "Canonical production environment file '$ENV_FILE' does not exist. Aborting to prevent unconfigured container execution."

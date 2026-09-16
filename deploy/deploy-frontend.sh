@@ -4,6 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+require_release_orchestrator
 
 CANDIDATE_FRONTEND_IMAGE="${1:-${FRONTEND_IMAGE_REF:-}}"
 [[ -n "$CANDIDATE_FRONTEND_IMAGE" ]] || { log_error "Usage: $0 <candidate-frontend-image-digest>"; exit 1; }
@@ -108,9 +109,14 @@ while IFS='=' read -r container expected; do
 done < "$snapshot_file"
 
 if [[ "$ACTIVE_CONTAINER" != "$CANDIDATE_CONTAINER" ]]; then
-  docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$ACTIVE_CONTAINER" >/dev/null 2>&1 || true
+  if [[ "${DEFER_OLD_SLOT_RETIREMENT:-0}" == "1" ]]; then
+    [[ -n "${PENDING_FRONTEND_RETIRE_FILE:-}" ]] || { log_error "PENDING_FRONTEND_RETIRE_FILE is required."; exit 1; }
+    printf 'old_slot=%s\ncandidate_slot=%s\n' "$ACTIVE_FRONTEND_SLOT" "$CANDIDATE_FRONTEND_SLOT" | atomic_write_file "$PENDING_FRONTEND_RETIRE_FILE" 600
+    log_info "Retaining old frontend slot until the release commits."
+  else
+    docker stop --time "${FRONTEND_STOP_TIMEOUT:-10}" "$ACTIVE_CONTAINER" >/dev/null 2>&1 || true
+  fi
 fi
-commit_component_release_env FRONTEND_IMAGE_REF "$CANDIDATE_FRONTEND_IMAGE"
 update_tx_state "TX_COMPLETED"
 archive_tx_journal "completed"
 FRONTEND_COMMITTED=1

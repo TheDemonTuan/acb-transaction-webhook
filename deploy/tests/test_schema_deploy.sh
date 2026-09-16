@@ -56,6 +56,8 @@ assert_file_contains() {
 
 setup_schema_mock_env() {
   local test_dir="$1"
+  export RELEASE_ORCHESTRATED=1
+  export ALLOW_TEST_LOCK_PATH=1
   export MOCK_STATE_DIR="$test_dir"
   export MOCK_ACTIVE_AUTH=0
   export MOCK_ACTIVE_AUTH_FAIL=0

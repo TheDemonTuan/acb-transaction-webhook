@@ -57,6 +57,8 @@ assert_file_contains() {
 
 setup_gateway_mock_env() {
   local test_dir="$1"
+  export RELEASE_ORCHESTRATED=1
+  export ALLOW_TEST_LOCK_PATH=1
   export MOCK_STATE_DIR="$test_dir"
   export MOCK_CANDIDATE_FAIL=0
   export MOCK_ROUTE_ACK_FAIL=0
@@ -262,7 +264,7 @@ export EXPECTED_COMMIT="commit-green-1234"
 assert_eq "green" "$(cat "$T1/.active-slot")" "Active slot switched to green"
 assert_eq "blue" "$(cat "$T1/.previous-slot")" "Previous slot recorded as blue"
 assert_file_contains "$T1/dynamic/acb.yml" "acb-web-green" "Traefik route pointed to acb-web-green"
-assert_file_contains "$T1/.release.env" "IMAGE_REF_GREEN=ghcr.io/test/gateway@sha256:1111111111111111111111111111111111111111111111111111111111111111" "Release env green updated"
+assert_file_contains "$T1/.release.env" "IMAGE_REF_GREEN=ghcr.io/test/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "Gateway component leaves release state for dispatcher"
 assert_file_exists "$T1/failover/acb.cooldown" "Cooldown marker set for failover controller"
 assert_file_exists "$T1/failover/intentional-stop-blue" "Intentional stop marker set for old slot blue"
 
@@ -306,7 +308,7 @@ export EXPECTED_COMMIT="commit-blue-5678"
 assert_eq "blue" "$(cat "$T1/.active-slot")" "Active slot switched back to blue"
 assert_eq "green" "$(cat "$T1/.previous-slot")" "Previous slot recorded as green"
 assert_file_contains "$T1/dynamic/acb.yml" "acb-web-blue" "Traefik route pointed back to acb-web-blue"
-assert_file_contains "$T1/.release.env" "IMAGE_REF_BLUE=ghcr.io/test/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222" "Release env blue updated"
+assert_file_contains "$T1/.release.env" "IMAGE_REF_BLUE=ghcr.io/test/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "Second gateway component deploy still leaves release state for dispatcher"
 assert_file_exists "$T1/failover/intentional-stop-green" "Intentional stop marker set for old slot green"
 if [[ -f "$T1/failover/intentional-stop-blue" ]]; then
   printf 'FAIL: intentional-stop-blue should have been cleared when blue started\n' >&2
