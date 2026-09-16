@@ -450,6 +450,23 @@ trap cleanup_rollout EXIT
 # 1. Acquire explicit remote release lock
 acquire_deploy_lock
 
+if [[ "$SKIP_MANIFEST_CHECK" -ne 1 ]]; then
+  [[ "$REQUIRE_COSIGN" -eq 1 && -n "$EXPECTED_IDENTITY" && -s "$BUNDLE_FILE" ]] || {
+    log_error "A signed release and exact signing identity are required."
+    exit 1
+  }
+  cosign verify-blob --bundle "$BUNDLE_FILE" \
+    --certificate-identity "$EXPECTED_IDENTITY" --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+    "$MANIFEST_FILE" >/dev/null
+  [[ -f "$DEPLOY_DIR/verify-release-baseline.sh" ]] || {
+    log_error "Signed baseline verifier is missing from the release bundle."
+    exit 1
+  }
+  bash "$DEPLOY_DIR/verify-release-baseline.sh" \
+    --manifest "$MANIFEST_FILE" \
+    --state "${CURRENT_RELEASE_FILE:-${DEPLOY_PATH:-$(cd -- "$DEPLOY_DIR/.." && pwd)}/state/current-release.json}"
+fi
+
 # 1b. Strict VPS Preflight Verification
 if [[ -f "$DEPLOY_DIR/preflight-vps.sh" && "${SKIP_MANIFEST_CHECK:-0}" -ne 1 ]]; then
   bash "$DEPLOY_DIR/preflight-vps.sh" \

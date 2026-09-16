@@ -152,7 +152,7 @@ update_tx_state "TX_CANDIDATE_STARTED"
 
 # 3. Candidate readiness probe (twice consecutively)
 set_deploy_state "WAIT_READY"
-if ! wait_for_candidate_ready "$CANDIDATE_SLOT" "${READY_TIMEOUT:-60}" "$EXPECTED_COMMIT"; then
+if ! wait_for_candidate_ready "$CANDIDATE_SLOT" "${READY_TIMEOUT:-120}" "$EXPECTED_COMMIT"; then
   log_error "Candidate slot [${CANDIDATE_SLOT}] failed readiness probe! Aborting cutover."
   log_warn "Stopping candidate container [gateway-${CANDIDATE_SLOT}]. Active slot [${ACTIVE_SLOT}] remains live and untouched."
   compose_prod stop "gateway-${CANDIDATE_SLOT}" 2>/dev/null || docker compose -f "$COMPOSE_FILE" stop "gateway-${CANDIDATE_SLOT}" 2>/dev/null || true

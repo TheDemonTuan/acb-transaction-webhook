@@ -74,7 +74,7 @@ EOF
   local m_sha_a
   m_sha_a="$(sha256sum "$rel_a/release-manifest.json" | awk '{print $1}')"
 
-  # Canonical state pointing to Release A
+  # Canonical state pointing to Release A with validated previous release identity
   cat <<EOF > "$tdir/state/current-release.json"
 {
   "schema_version": 2,
@@ -84,6 +84,13 @@ EOF
   "git_sha": "1111111111111111111111111111111111111111",
   "manifest_sha256": "$m_sha_a",
   "status": "COMPLETED",
+  "previous": {
+    "generation": 40,
+    "release_id": "rel-A",
+    "release_dir": "$rel_a",
+    "git_sha": "1111111111111111111111111111111111111111",
+    "manifest_sha256": "$m_sha_a"
+  },
   "active_slots": {
     "gateway": "green",
     "frontend": "blue"
@@ -238,6 +245,13 @@ EOF
   "git_sha": "1111111111111111111111111111111111111111",
   "manifest_sha256": "$m_sha_a",
   "status": "COMPLETED",
+  "previous": {
+    "generation": 40,
+    "release_id": "rel-A",
+    "release_dir": "$rel_a",
+    "git_sha": "1111111111111111111111111111111111111111",
+    "manifest_sha256": "$m_sha_a"
+  },
   "active_slots": {
     "gateway": "green",
     "frontend": "blue"
@@ -362,6 +376,13 @@ EOF
   "git_sha": "1111111111111111111111111111111111111111",
   "manifest_sha256": "$m_sha",
   "status": "COMPLETED",
+  "previous": {
+    "generation": 40,
+    "release_id": "rel-A",
+    "release_dir": "$rel_a",
+    "git_sha": "1111111111111111111111111111111111111111",
+    "manifest_sha256": "$m_sha"
+  },
   "active_slots": { "gateway": "green", "frontend": "blue" },
   "images": {
     "gateway": { "blue": "ghcr.io/test/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000001", "green": "ghcr.io/test/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000001" },
@@ -414,18 +435,103 @@ EOF
   # 3. Symlink release directory is rejected
   mkdir -p "$tdir/other_releases/rel-symlink"
   ln -s "$tdir/other_releases/rel-symlink" "$tdir/releases/symlinked-rel"
+  cat <<EOF > "$tdir/state/current-release.json"
+{
+  "schema_version": 2,
+  "generation": 41,
+  "release_id": "rel-A",
+  "release_dir": "$rel_a",
+  "git_sha": "1111111111111111111111111111111111111111",
+  "manifest_sha256": "$m_sha",
+  "status": "COMPLETED",
+  "previous": {
+    "generation": 40,
+    "release_id": "rel-symlink",
+    "release_dir": "$tdir/releases/symlinked-rel",
+    "git_sha": "1111111111111111111111111111111111111111",
+    "manifest_sha256": "$m_sha"
+  },
+  "active_slots": { "gateway": "green", "frontend": "blue" },
+  "images": { "gateway": { "blue": "$m_sha", "green": "$m_sha" } }
+}
+EOF
   local code3=0
-  ROLLOUT_JOURNAL_FILE="$tdir/data/rollout-journal.json" \
-    init_rollout_journal "rel-C" "3333333333333333333333333333333333333333" "worker" "$rel_b" "$tdir/releases/symlinked-rel"
   RUNTIME_ROOT="$tdir" DEPLOY_PATH="$tdir" RUNTIME_RELEASES_DIR="$tdir/releases" \
     SKIP_MANIFEST_CHECK=1 RUNTIME_DRIFT_CHECK_CMD="true" \
     bash "$tdir/deploy/rollback-release.sh" --state "$tdir/state/current-release.json" --journal "$tdir/data/rollout-journal.json" >/dev/null 2>&1 || code3=$?
   assert_eq "1" "$code3" "Rollback fails when previous release_dir is a symlink"
 }
 
+test_intentional_rollback_requires_validated_previous_identity() {
+  printf '\n--- Running test_intentional_rollback_requires_validated_previous_identity ---\n'
+  local tdir="$TEST_TMP/req_prev"
+  local rel_a="$tdir/releases/rel-A"
+  mkdir -p "$rel_a/compose" "$tdir/releases/rel-B/compose" "$tdir/state" "$tdir/data" "$tdir/secrets" "$tdir/mock_bin" "$tdir/deploy"
+  cp -r "$DEPLOY_DIR/lib"* "$tdir/deploy/"
+  cp "$DEPLOY_DIR/release-env.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/runtime-layout.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/rollback-release.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/release-state.py" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/edge-probe.sh" "$tdir/deploy/"
+
+  # 1. State missing previous block completely fails closed
+  cat <<EOF > "$tdir/state/current-release.json"
+{
+  "schema_version": 2,
+  "generation": 41,
+  "release_id": "rel-A",
+  "release_dir": "$rel_a",
+  "git_sha": "1111111111111111111111111111111111111111",
+  "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "status": "COMPLETED",
+  "active_slots": { "gateway": "green", "frontend": "blue" },
+  "images": {}
+}
+EOF
+
+  # Candidate journal has previous_release_dir, but rollback MUST NOT fallback to it
+  source "$tdir/deploy/lib.sh"
+  ROLLOUT_JOURNAL_FILE="$tdir/data/rollout-journal.json" \
+    init_rollout_journal "rel-B" "2222222222222222222222222222222222222222" "worker" "$tdir/releases/rel-B" "$rel_a"
+
+  local code_no_prev=0
+  RUNTIME_ROOT="$tdir" DEPLOY_PATH="$tdir" RUNTIME_RELEASES_DIR="$tdir/releases" \
+    SKIP_MANIFEST_CHECK=1 RUNTIME_DRIFT_CHECK_CMD="true" \
+    bash "$tdir/deploy/rollback-release.sh" --state "$tdir/state/current-release.json" --journal "$tdir/data/rollout-journal.json" >/dev/null 2>&1 || code_no_prev=$?
+  assert_eq "1" "$code_no_prev" "Rollback fails when previous block is missing from state"
+
+  # 2. Previous block missing required fields (e.g. manifest_sha256) fails closed
+  cat <<EOF > "$tdir/state/current-release.json"
+{
+  "schema_version": 2,
+  "generation": 41,
+  "release_id": "rel-A",
+  "release_dir": "$rel_a",
+  "git_sha": "1111111111111111111111111111111111111111",
+  "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "status": "COMPLETED",
+  "previous": {
+    "generation": 40,
+    "release_id": "rel-A0",
+    "release_dir": "$rel_a"
+  },
+  "active_slots": { "gateway": "green", "frontend": "blue" },
+  "images": {}
+}
+EOF
+
+  local code_incomplete_prev=0
+  RUNTIME_ROOT="$tdir" DEPLOY_PATH="$tdir" RUNTIME_RELEASES_DIR="$tdir/releases" \
+    SKIP_MANIFEST_CHECK=1 RUNTIME_DRIFT_CHECK_CMD="true" \
+    bash "$tdir/deploy/rollback-release.sh" --state "$tdir/state/current-release.json" --journal "$tdir/data/rollout-journal.json" >/dev/null 2>&1 || code_incomplete_prev=$?
+  assert_eq "1" "$code_incomplete_prev" "Rollback fails when previous block lacks required fields"
+}
+
 test_rollback_restores_previous_config
 test_rollback_failure_accumulation
 test_task8_bundle_integrity_verification
+test_intentional_rollback_requires_validated_previous_identity
 
 echo "Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
 [[ "$TESTS_FAILED" -eq 0 ]] || exit 1

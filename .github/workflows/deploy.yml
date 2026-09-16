@@ -52,6 +52,9 @@ jobs:
           state="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
+          trusted_preflight="$DEPLOY_PATH/deploy/preflight-runtime.sh"
+          [[ -f "$trusted_preflight" ]] || { echo 'Trusted VPS runtime preflight missing; repair current release before building.' >&2; exit 1; }
+          bash "$trusted_preflight" --state "$DEPLOY_PATH/state/current-release.json" --reconcile
           rollout_journal="$DEPLOY_PATH/data/rollout-journal.json"
           pending_gw="$DEPLOY_PATH/data/pending-gateway-retire.env"
           pending_fe="$DEPLOY_PATH/data/pending-frontend-retire.env"
@@ -73,16 +76,7 @@ jobs:
             runtime_dirty="true"
             pending_frontend_retire="true"
           fi
-          if [[ "$runtime_dirty" == "true" ]]; then
-            echo "Dirty runtime state detected; executing recovery-only reconcile before builds..." >&2
-            if [[ -x "$DEPLOY_PATH/deploy/reconcile-release.sh" ]]; then
-              bash "$DEPLOY_PATH/deploy/reconcile-release.sh" --runtime-root "$DEPLOY_PATH" --recovery-only
-              runtime_dirty="false"
-            else
-              echo "Reconciliation script missing on host; cannot safely recover." >&2
-              exit 1
-            fi
-          fi
+          [[ "$runtime_dirty" == "false" ]] || { echo 'Runtime became dirty after trusted preflight; refusing build.' >&2; exit 1; }
 
           current_release="$DEPLOY_PATH/state/current-release.json"
           receipt="$DEPLOY_PATH/data/last-release.json"
@@ -111,7 +105,9 @@ jobs:
                   "tts_image": images.get("tts", ""),
                   "bark_image": images.get("bark", ""),
               }
-              canonical_generation = state.get('generation', 0)
+              canonical_generation = state.get('generation')
+              if type(canonical_generation) is not int or canonical_generation < 0:
+                  raise SystemExit('Canonical production generation is invalid')
               print(f"generation={canonical_generation}")
               print(f"canonical_generation={canonical_generation}")
           else:
@@ -279,6 +275,13 @@ jobs:
           bash deploy/tests/test_slot_resolution.sh
           bash deploy/tests/test_failover_bundle.sh
           bash deploy/tests/test_drift_complete.sh
+          bash deploy/tests/test_preflight_vps.sh
+          bash deploy/tests/test_deploy_workflow_runtime_preflight.sh
+          bash deploy/tests/test_release_baseline.sh
+          bash deploy/tests/test_deploy_rerun_contract.sh
+          if [[ -f deploy/tests/test_trusted_engine_bootstrap.sh ]]; then bash deploy/tests/test_trusted_engine_bootstrap.sh; fi
+          bash deploy/tests/test_release_bundle_runtime_contract.sh
+          bash deploy/tests/test_staged_release_compose.sh
           bash deploy/tests/test_component_map_coverage.sh
           bash deploy/tests/test_schema_compatibility.sh
           bash deploy/tests/test_release_simulator.sh
@@ -882,6 +885,14 @@ jobs:
 
       - name: Stage platform assets into the signed release
         run: bash deploy/stage-platform-assets.sh
+      - name: Read canonical generation used for signing
+        id: baseline_generation
+        run: |
+          set -euo pipefail
+          state=.production-state/production-state.env
+          generation="$(sed -n 's/^canonical_generation=//p' "$state")"
+          [[ "$generation" =~ ^(0|[1-9][0-9]*)$ ]] || { echo 'Canonical baseline generation missing' >&2; exit 1; }
+          printf 'generation=%s\n' "$generation" >> "$GITHUB_OUTPUT"
       - name: Generate release manifest JSON
         env:
           FRONTEND_IMAGE: ${{ needs.build-frontend-image.outputs.digest && format('{0}@{1}', needs.build-frontend-image.outputs.image, needs.build-frontend-image.outputs.digest) || env.PRODUCTION_FRONTEND_IMAGE }}
@@ -895,6 +906,7 @@ jobs:
           bash deploy/generate-release-manifest.sh \
             --git-sha "${{ github.sha }}" \
             --base-sha "${{ needs.verify.outputs.base_sha }}" \
+            --base-generation "${{ steps.baseline_generation.outputs.generation }}" \
             --promotion-scope-file deploy/promotion-scope.json \
             --frontend-image "$FRONTEND_IMAGE" \
             --gateway-image "$GATEWAY_IMAGE" \
@@ -934,7 +946,7 @@ jobs:
 
   deploy:
     name: Deploy to VPS
-    timeout-minutes: 25
+    timeout-minutes: 30
     needs: [production-state, verify, build-frontend-image, build-gateway-image, build-worker-image, build-dbtool-image, build-auth-browser-image, build-tts-gateway-image, scan-and-attest]
     if: always() && needs.scan-and-attest.result == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true))
     runs-on: ubuntu-latest
@@ -948,6 +960,22 @@ jobs:
           path: deploy/
       - name: Recreate signed platform artifact layout
         run: bash deploy/stage-platform-assets.sh
+      - name: Install Cosign for staged release acceptance
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: 'v2.4.3'
+      - name: Accept exact signed staged release before SSH
+        run: |
+          set -euo pipefail
+          cosign verify-blob --bundle deploy/release-manifest.bundle \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/deploy.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            deploy/release-manifest.json
+          bash deploy/verify-manifest.sh --manifest deploy/release-manifest.json \
+            --bundle deploy/release-manifest.bundle --deploy-dir deploy \
+            --expected-identity "https://github.com/${{ github.repository }}/.github/workflows/deploy.yml@refs/heads/main" \
+            --expected-issuer https://token.actions.githubusercontent.com --require-cosign
+          bash deploy/verify-staged-release.sh --deploy-dir deploy --manifest deploy/release-manifest.json
       - name: Configure SSH
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -960,6 +988,18 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
           printf 'Host *\n  ServerAliveInterval 15\n  ServerAliveCountMax 10\n  TCPKeepAlive yes\n  ConnectTimeout 15\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
+      - name: Verify current VPS runtime before staging
+        timeout-minutes: 5
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash '$DEPLOY_PATH/deploy/preflight-runtime.sh' --state '$DEPLOY_PATH/state/current-release.json' --reconcile"
       - name: Stage signed release without touching the trusted deployer
         timeout-minutes: 5
         env:
@@ -972,14 +1012,12 @@ jobs:
           release_id="$(python3 -c 'import json; print(json.load(open("deploy/release-manifest.json"))["release_id"])')"
           [[ "$release_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { echo "Invalid release ID" >&2; exit 1; }
           remote_release="$DEPLOY_PATH/releases/$release_id"
-          remote_stage="$DEPLOY_PATH/releases/.${release_id}.upload-${{ github.run_id }}"
+          remote_stage="$DEPLOY_PATH/releases/.${release_id}.upload-${{ github.run_id }}-${{ github.run_attempt }}"
           printf 'REMOTE_RELEASE_DIR=%s\n' "$remote_release" >> "$GITHUB_ENV"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "set -e; mkdir -p '$DEPLOY_PATH/data' '$DEPLOY_PATH/secrets' '$DEPLOY_PATH/releases' '$DEPLOY_PATH/deploy'; rm -rf '$remote_stage'; mkdir -m 0700 '$remote_stage'"
+            "$VPS_USER@$VPS_HOST" "set -e; mkdir -p '$DEPLOY_PATH/releases'; mkdir -m 0700 '$remote_stage'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 -r \
             deploy/. "$VPS_USER@$VPS_HOST:$remote_stage/"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "set -e; test ! -e '$remote_release'; mv '$remote_stage' '$remote_release'; chmod -R go-w '$remote_release'; if [ ! -x '$DEPLOY_PATH/deploy/stable-deployer.sh' ] || [ ! -x '$DEPLOY_PATH/deploy/verify-manifest.sh' ]; then cp -f '$remote_release/stable-deployer.sh' '$DEPLOY_PATH/deploy/stable-deployer.sh'; cp -f '$remote_release/verify-manifest.sh' '$DEPLOY_PATH/deploy/verify-manifest.sh'; chmod 755 '$DEPLOY_PATH/deploy/stable-deployer.sh' '$DEPLOY_PATH/deploy/verify-manifest.sh'; fi"
           cosign_version="v2.4.3"
           target_arch="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" 'uname -m')"
           case "$target_arch" in
@@ -995,9 +1033,20 @@ jobs:
             --output "$cosign_checksums" "https://github.com/sigstore/cosign/releases/download/${cosign_version}/cosign_checksums.txt"
           grep "  ${cosign_asset}$" "$cosign_checksums" | (cd "$RUNNER_TEMP" && sha256sum --check -)
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$cosign_bin" "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/deploy/cosign.next"
+            "$cosign_bin" "$VPS_USER@$VPS_HOST:$remote_stage/cosign.verified"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "set -e; install -m 0755 '$DEPLOY_PATH/deploy/cosign.next' '$DEPLOY_PATH/deploy/cosign'; rm -f '$DEPLOY_PATH/deploy/cosign.next'"
+            "$VPS_USER@$VPS_HOST" "set -e; mkdir -p '$DEPLOY_PATH/deploy'; install -m 0755 '$remote_stage/cosign.verified' '$DEPLOY_PATH/deploy/cosign'; rm -f '$remote_stage/cosign.verified'"
+          expected_identity="https://github.com/${{ github.repository }}/.github/workflows/deploy.yml@refs/heads/main"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "STAGE='$remote_stage' RELEASE='$remote_release' SIGNER='$expected_identity' DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          export PATH="$DEPLOY_PATH/deploy:$PATH"
+          cosign verify-blob --bundle "$STAGE/release-manifest.bundle" \
+            --certificate-identity "$SIGNER" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$STAGE/release-manifest.json" >/dev/null
+          bash "$STAGE/stage-immutable-release.sh" --staging-dir "$STAGE" \
+            --release-dir "$RELEASE" --expected-identity "$SIGNER" --require-cosign
+          REMOTE
       - name: Deploy immutable image
         timeout-minutes: 20
         env:
@@ -1029,6 +1078,26 @@ jobs:
             esac
           done
           [[ -f "$DEPLOY_PATH/deploy/.release.env" ]] || { printf 'Missing canonical release environment.\n' >&2; exit 1; }
+          cosign verify-blob --bundle "$RELEASE_DIR/release-manifest.bundle" \
+            --certificate-identity "$EXPECTED_IDENTITY" --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+            "$RELEASE_DIR/release-manifest.json" >/dev/null
+          bash "$RELEASE_DIR/verify-release-baseline.sh" \
+            --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
+          read -r expected_base_sha expected_base_generation < <(python3 - "$RELEASE_DIR/release-manifest.json" <<'PY'
+          import json, sys
+          base = json.load(open(sys.argv[1], encoding='utf-8'))['base']
+          print(base['git_sha'], base['generation'])
+          PY
+          )
+          bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile \
+            --state "$DEPLOY_PATH/state/current-release.json" \
+            --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
+          bash "$RELEASE_DIR/verify-release-baseline.sh" \
+            --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
+          export EXPECTED_BASE_SHA="$expected_base_sha" EXPECTED_BASE_GENERATION="$expected_base_generation"
+          bash "$DEPLOY_PATH/deploy/bootstrap-deployment-engine.sh" \
+            --release-dir "$RELEASE_DIR" --runtime-deploy-dir "$DEPLOY_PATH/deploy" \
+            --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER" --require-cosign --no-reconcile
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"

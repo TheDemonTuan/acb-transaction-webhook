@@ -366,7 +366,7 @@ fi
 
 # 6. Candidate worker health and readiness probe
 wait_for_worker_ready() {
-  local timeout="${WORKER_READINESS_TIMEOUT:-${1:-30}}"
+  local timeout="${WORKER_READINESS_TIMEOUT:-${1:-120}}"
   local check_cmd="${2:-${WORKER_READY_CHECK_CMD:-}}"
   local elapsed=0
   log_info "Waiting for candidate worker readiness probe (timeout: ${timeout}s)..."
@@ -392,7 +392,7 @@ wait_for_worker_ready() {
     fi
     if command -v curl >/dev/null 2>&1 && [[ -n "${WORKER_RPC_URL:-}" ]]; then
       local code
-      code="$(curl -s -o /dev/null -w "%{http_code}" -m 2 "${WORKER_RPC_URL}/readyz" 2>/dev/null || echo "000")"
+      code="$(curl -4 -s -o /dev/null -w "%{http_code}" -m 2 "${WORKER_RPC_URL}/readyz" 2>/dev/null || echo "000")"
       if [[ "$code" == "200" ]]; then
         log_info "Candidate worker passed readiness probe via HTTP /readyz."
         return 0

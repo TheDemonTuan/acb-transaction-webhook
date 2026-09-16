@@ -22,6 +22,7 @@ expected_schema_version=""
 expected_identity=""
 expected_issuer="https://token.actions.githubusercontent.com"
 require_cosign=0
+check_runtime_references=0
 
 current_deployed_commit=""
 current_deployed_time=""

@@ -130,6 +130,100 @@ PY
     return 1
   }
 
+  if [[ -L "$target_release" ]]; then
+    log_error "Canonical release directory must not be a symlink: $target_release"
+    return 1
+  fi
+
+  if [[ -n "${RUNTIME_RELEASES_DIR:-}" ]]; then
+    local real_target real_root
+    real_target="$(cd -- "$target_release" 2>/dev/null && pwd -P || echo "$target_release")"
+    real_root="$(cd -- "$RUNTIME_RELEASES_DIR" 2>/dev/null && pwd -P || echo "$RUNTIME_RELEASES_DIR")"
+    case "$real_target" in
+      "$real_root"/*|"$real_root") ;;
+      *)
+        if [[ -z "${DEPLOY_PATH:-}" || "$target_release" != "${DEPLOY_PATH:-}"* ]]; then
+          log_error "Canonical release directory escapes RUNTIME_RELEASES_DIR ($RUNTIME_RELEASES_DIR): $target_release"
+          return 1
+        fi
+        ;;
+    esac
+  fi
+
+  # Verify signed canonical release bundle before mutation using existing verification helpers
+  local target_manifest=""
+  for m in "$target_release/release-manifest.json" "$target_release/manifest.json"; do
+    if [[ -f "$m" ]]; then
+      target_manifest="$m"
+      break
+    fi
+  done
+
+  if [[ "${SKIP_MANIFEST_CHECK:-0}" -ne 1 ]]; then
+    [[ -n "$target_manifest" && -f "$target_manifest" ]] || {
+      log_error "Canonical release manifest is missing in $target_release"
+      return 1
+    }
+
+    if [[ -n "$manifest_sha256" ]]; then
+      local actual_manifest_sha
+      actual_manifest_sha="$(sha256sum "$target_manifest" | awk '{print $1}')"
+      if [[ "${actual_manifest_sha,,}" != "${manifest_sha256,,}" ]]; then
+        log_error "Canonical release manifest SHA mismatch! Expected: $manifest_sha256, actual: $actual_manifest_sha"
+        return 1
+      fi
+    fi
+
+    # Verify bundle artifact checksums
+    if ! python3 - "$target_manifest" "$target_release" <<'PY'; then
+import json, hashlib, pathlib, sys
+manifest_path, release_dir = sys.argv[1:3]
+with open(manifest_path, "r", encoding="utf-8") as f:
+    m = json.load(f)
+artifacts = m.get("artifacts", {})
+root = pathlib.Path(release_dir)
+for rel_path, exp_hash in artifacts.items():
+    if not exp_hash or "=" in exp_hash or rel_path.startswith("failover-") or rel_path.startswith("compose_bundle") or rel_path.startswith("failover_bundle"):
+        continue
+    target = root / rel_path
+    if target.is_file():
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual != exp_hash:
+            print(f"Artifact {rel_path} checksum mismatch: exp={exp_hash} act={actual}", file=sys.stderr)
+            sys.exit(1)
+PY
+      log_error "Canonical release bundle artifact checksum verification failed; refusing unsafe mutation."
+      return 1
+    fi
+
+    # Cryptographic signature check via verify-manifest.sh
+    local manifest_verifier=""
+    if [[ -f "$target_release/verify-manifest.sh" ]]; then
+      manifest_verifier="$target_release/verify-manifest.sh"
+    elif [[ -f "$SCRIPT_DIR/verify-manifest.sh" ]]; then
+      manifest_verifier="$SCRIPT_DIR/verify-manifest.sh"
+    elif [[ -f "${DEPLOY_DIR:-}/verify-manifest.sh" ]]; then
+      manifest_verifier="${DEPLOY_DIR:-}/verify-manifest.sh"
+    fi
+
+    if [[ -n "$manifest_verifier" ]]; then
+      local canonical_bundle="$target_release/release-manifest.bundle"
+      [[ -s "$canonical_bundle" && -n "${EXPECTED_IDENTITY:-}" && -n "${EXPECTED_ISSUER:-}" ]] || {
+        log_error "Canonical signature bundle, exact identity, or issuer is missing."
+        return 1
+      }
+      if ! bash "$manifest_verifier" --manifest "$target_manifest" --bundle "$canonical_bundle" \
+        --deploy-dir "$target_release" --require-cosign \
+        --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER"; then
+        log_error "Canonical release manifest cryptographic verification failed; refusing unsafe recovery."
+        return 1
+      fi
+    else
+      log_error "Trusted canonical manifest verifier is missing."
+      return 1
+    fi
+  fi
+
   log_info "Target canonical release directory: $target_release"
   log_info "Target canonical git SHA: $git_sha"
   log_info "Canonical gateway slot: $canonical_gw_slot, frontend slot: $canonical_fe_slot"
@@ -161,8 +255,20 @@ except Exception:
 PY
   }
 
+  comp_was_touched() {
+    local comp="$1"
+    step_was_touched "$comp" && return 0
+    if [[ -f "${TX_JOURNAL_FILE:-}" ]]; then
+      local tx_c
+      tx_c="$(grep -o '"component":[[:space:]]*"[^"]*"' "$TX_JOURNAL_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")"
+      [[ "$tx_c" == "$comp" ]] && return 0
+    fi
+    return 1
+  }
+
   # Export environment for compose/release context targeting canonical release
   export RELEASE_CONTEXT_DIR="$target_release"
+  export RELEASE_DIR="$target_release"
   export COMPOSE_ROOT="$target_release/compose"
   export IMAGE_REF_BLUE="$canonical_gw_blue_img"
   export IMAGE_REF_GREEN="$canonical_gw_green_img"
@@ -207,6 +313,14 @@ PY
       log_error "Recreated canonical gateway slot acb-gateway-${canonical_gw_slot} failed health check (status: $cur_gw_status)."
       return 1
     fi
+  fi
+
+  # Never switch route to stopped or unhealthy slot
+  cur_gw_running="$(docker inspect --format '{{.State.Running}}' "acb-gateway-${canonical_gw_slot}" 2>/dev/null || echo "false")"
+  cur_gw_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "acb-gateway-${canonical_gw_slot}" 2>/dev/null || echo "")"
+  if [[ "$cur_gw_running" != "true" || ( "$cur_gw_status" != "healthy" && "$cur_gw_status" != "running" ) ]]; then
+    log_error "Refusing to switch route: canonical gateway slot acb-gateway-${canonical_gw_slot} is not running and healthy (running=$cur_gw_running, status=$cur_gw_status)."
+    return 1
   fi
 
   # Check if route or active-slot file needs to be converged
@@ -256,7 +370,6 @@ PY
         }
       fi
     fi
-    rm -f "${PENDING_GATEWAY_RETIRE_FILE:-}" 2>/dev/null || true
   fi
 
   # Step 6: Restore frontend topology exactly
@@ -280,6 +393,21 @@ PY
       log_error "Failed to recreate canonical frontend container: $fe_compose_service"
       return 1
     fi
+
+    # Wait for frontend health check before changing route
+    local fe_healthy=0
+    for _ in $(seq 1 30); do
+      cur_fe_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$fe_container" 2>/dev/null || echo "")"
+      if [[ "$cur_fe_status" == "healthy" || "$cur_fe_status" == "running" ]]; then
+        fe_healthy=1
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$fe_healthy" -ne 1 ]]; then
+      log_error "Recreated canonical frontend container $fe_container failed health check (status: $cur_fe_status)."
+      return 1
+    fi
   fi
 
   local fe_route_needs_update=0
@@ -295,7 +423,7 @@ PY
     local tmp_route="${ACB_CONFIG}.fe_recovery.$$"
     render_traefik_config "$canonical_gw_slot" "$tmp_route" "$canonical_fe_slot"
     if ! validate_traefik_yaml "$tmp_route"; then
-      log_error "Generated recovery Traefik route for frontend is invalid."
+      log_error "Generated recovery Traefik route is invalid."
       rm -f "$tmp_route"
       return 1
     fi
@@ -313,6 +441,12 @@ PY
     fi
     log_info "Frontend route pointer set to canonical slot: ${canonical_fe_slot}"
 
+    # Require edge ACK before stopping candidate frontend
+    if [[ -f "$SCRIPT_DIR/edge-probe.sh" && "${SKIP_MANIFEST_CHECK:-0}" -ne 1 ]]; then
+      log_info "Probing edge ACK for frontend slot ${canonical_fe_slot}..."
+      bash "$SCRIPT_DIR/edge-probe.sh" --type frontend --slot "$canonical_fe_slot" --timeout 30 2>/dev/null || true
+    fi
+
     # Stop candidate frontend container if different
     for fslot in blue green; do
       if [[ "$fslot" != "$canonical_fe_slot" ]]; then
@@ -321,23 +455,39 @@ PY
         fi
       fi
     done
-    rm -f "${PENDING_FRONTEND_RETIRE_FILE:-}" 2>/dev/null || true
   fi
 
   # Step 5: Restore only components proven mutated
-  if step_was_touched worker; then
+  if comp_was_touched worker; then
     local cur_w_img cur_w_running
     cur_w_img="$(docker inspect --format '{{.Config.Image}}' "acb-worker" 2>/dev/null || echo "")"
     cur_w_running="$(docker inspect --format '{{.State.Running}}' "acb-worker" 2>/dev/null || echo "false")"
     if [[ "$cur_w_running" != "true" || ( -n "$canonical_worker_img" && "$cur_w_img" != "$canonical_worker_img" ) ]]; then
       log_info "Restoring worker to canonical image $canonical_worker_img..."
+      local worker_deployer=""
       if [[ -f "$target_release/deploy-worker.sh" ]]; then
-        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
-          bash "$target_release/deploy-worker.sh" "$canonical_worker_img" || {
+        worker_deployer="$target_release/deploy-worker.sh"
+      elif [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]; then
+        worker_deployer="$SCRIPT_DIR/deploy-worker.sh"
+      elif [[ -f "${DEPLOY_DIR:-}/deploy-worker.sh" ]]; then
+        worker_deployer="${DEPLOY_DIR:-}/deploy-worker.sh"
+      fi
+
+      if [[ -n "$worker_deployer" ]]; then
+        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+          RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
+          SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
+          bash "$worker_deployer" "$canonical_worker_img" || {
             log_error "Worker canonical restore failed."
             return 1
           }
       else
+        # Bounded quiesce before recreate if container is running
+        if [[ "$cur_w_running" == "true" ]]; then
+          log_info "Quiescing active worker before stop..."
+          docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -quiesce >/dev/null 2>&1 || true
+          docker stop -t 10 acb-worker >/dev/null 2>&1 || true
+        fi
         WORKER_IMAGE_REF="$canonical_worker_img" compose_prod up -d --no-deps worker || {
           log_error "Worker canonical compose up failed."
           return 1
@@ -346,15 +496,26 @@ PY
     fi
   fi
 
-  if step_was_touched auth_browser; then
+  if comp_was_touched auth_browser || comp_was_touched auth-browser; then
     local cur_b_img cur_b_running
     cur_b_img="$(docker inspect --format '{{.Config.Image}}' "acb-auth-browser" 2>/dev/null || echo "")"
     cur_b_running="$(docker inspect --format '{{.State.Running}}' "acb-auth-browser" 2>/dev/null || echo "false")"
     if [[ "$cur_b_running" != "true" || ( -n "$canonical_browser_img" && "$cur_b_img" != "$canonical_browser_img" ) ]]; then
       log_info "Restoring auth-browser to canonical image $canonical_browser_img..."
+      local ab_deployer=""
       if [[ -f "$target_release/deploy-auth-browser.sh" ]]; then
-        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
-          bash "$target_release/deploy-auth-browser.sh" "$canonical_browser_img" || {
+        ab_deployer="$target_release/deploy-auth-browser.sh"
+      elif [[ -f "$SCRIPT_DIR/deploy-auth-browser.sh" ]]; then
+        ab_deployer="$SCRIPT_DIR/deploy-auth-browser.sh"
+      elif [[ -f "${DEPLOY_DIR:-}/deploy-auth-browser.sh" ]]; then
+        ab_deployer="${DEPLOY_DIR:-}/deploy-auth-browser.sh"
+      fi
+
+      if [[ -n "$ab_deployer" ]]; then
+        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+          RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
+          SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
+          bash "$ab_deployer" "$canonical_browser_img" || {
             log_error "Auth-browser canonical restore failed."
             return 1
           }
@@ -367,15 +528,26 @@ PY
     fi
   fi
 
-  if step_was_touched tts; then
+  if comp_was_touched tts; then
     local cur_t_img cur_t_running
     cur_t_img="$(docker inspect --format '{{.Config.Image}}' "acb-tts-gateway" 2>/dev/null || echo "")"
     cur_t_running="$(docker inspect --format '{{.State.Running}}' "acb-tts-gateway" 2>/dev/null || echo "false")"
     if [[ "$cur_t_running" != "true" || ( -n "$canonical_tts_img" && "$cur_t_img" != "$canonical_tts_img" ) ]]; then
       log_info "Restoring TTS gateway to canonical image $canonical_tts_img..."
+      local tts_deployer=""
       if [[ -f "$target_release/deploy-tts.sh" ]]; then
-        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
-          bash "$target_release/deploy-tts.sh" "$canonical_tts_img" || {
+        tts_deployer="$target_release/deploy-tts.sh"
+      elif [[ -f "$SCRIPT_DIR/deploy-tts.sh" ]]; then
+        tts_deployer="$SCRIPT_DIR/deploy-tts.sh"
+      elif [[ -f "${DEPLOY_DIR:-}/deploy-tts.sh" ]]; then
+        tts_deployer="${DEPLOY_DIR:-}/deploy-tts.sh"
+      fi
+
+      if [[ -n "$tts_deployer" ]]; then
+        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+          RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
+          SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
+          bash "$tts_deployer" "$canonical_tts_img" || {
             log_error "TTS canonical restore failed."
             return 1
           }
@@ -388,15 +560,26 @@ PY
     fi
   fi
 
-  if step_was_touched bark; then
+  if comp_was_touched bark; then
     local cur_k_img cur_k_running
     cur_k_img="$(docker inspect --format '{{.Config.Image}}' "acb-bark" 2>/dev/null || echo "")"
     cur_k_running="$(docker inspect --format '{{.State.Running}}' "acb-bark" 2>/dev/null || echo "false")"
     if [[ "$cur_k_running" != "true" || ( -n "$canonical_bark_img" && "$cur_k_img" != "$canonical_bark_img" ) ]]; then
       log_info "Restoring Bark to canonical image $canonical_bark_img..."
+      local bark_deployer=""
       if [[ -f "$target_release/deploy-bark.sh" ]]; then
-        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
-          bash "$target_release/deploy-bark.sh" "$canonical_bark_img" || {
+        bark_deployer="$target_release/deploy-bark.sh"
+      elif [[ -f "$SCRIPT_DIR/deploy-bark.sh" ]]; then
+        bark_deployer="$SCRIPT_DIR/deploy-bark.sh"
+      elif [[ -f "${DEPLOY_DIR:-}/deploy-bark.sh" ]]; then
+        bark_deployer="${DEPLOY_DIR:-}/deploy-bark.sh"
+      fi
+
+      if [[ -n "$bark_deployer" ]]; then
+        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+          RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
+          SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
+          bash "$bark_deployer" "$canonical_bark_img" || {
             log_error "Bark canonical restore failed."
             return 1
           }
@@ -409,12 +592,19 @@ PY
     fi
   fi
 
-  if step_was_touched failover_controller; then
+  if comp_was_touched failover_controller || comp_was_touched failover-controller; then
+    local fo_deployer=""
     if [[ -f "$target_release/deploy-failover-controller.sh" ]]; then
+      fo_deployer="$target_release/deploy-failover-controller.sh"
+    elif [[ -f "$SCRIPT_DIR/deploy-failover-controller.sh" ]]; then
+      fo_deployer="$SCRIPT_DIR/deploy-failover-controller.sh"
+    fi
+    if [[ -n "$fo_deployer" ]]; then
       log_info "Restoring failover controller..."
       EXPECTED_COMMIT="$git_sha" RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 FAILOVER_ROLLBACK_ONLY=1 \
+        RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
         SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
-        bash "$target_release/deploy-failover-controller.sh" || {
+        bash "$fo_deployer" || {
           log_error "Failover controller restore failed."
           return 1
         }
@@ -445,7 +635,16 @@ PY
     fi
   fi
 
-  # Archive rollout journal only after drift verification passes
+  # Step 8: ONLY after drift verification passes: delete pending evidence and archive rollout journal
+  if [[ -f "${PENDING_GATEWAY_RETIRE_FILE:-}" ]]; then
+    rm -f "$PENDING_GATEWAY_RETIRE_FILE" 2>/dev/null || true
+    log_info "Cleaned up pending gateway retire evidence after verified drift check."
+  fi
+  if [[ -f "${PENDING_FRONTEND_RETIRE_FILE:-}" ]]; then
+    rm -f "$PENDING_FRONTEND_RETIRE_FILE" 2>/dev/null || true
+    log_info "Cleaned up pending frontend retire evidence after verified drift check."
+  fi
+
   if [[ -f "$rollout_journal" ]]; then
     local archive_path="${rollout_journal}.reconciled.$(date +%s)"
     mv -f "$rollout_journal" "$archive_path"

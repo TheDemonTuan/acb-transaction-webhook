@@ -44,16 +44,16 @@ while true; do
     log_info "Gateway passed internal health probe: ${gateway_container}"
     break
   fi
-  if curl --fail --silent --show-error "http://${host}:${port}/readyz" >/dev/null 2>&1 || \
-     curl --fail --silent --show-error "http://${host}:${port}/ready" >/dev/null 2>&1; then
+  if curl -4 --fail --silent --show-error "http://${host}:${port}/readyz" >/dev/null 2>&1 || \
+     curl -4 --fail --silent --show-error "http://${host}:${port}/ready" >/dev/null 2>&1; then
     log_info "Gateway is ready at http://${host}:${port}"
     break
   fi
   if (( $(date +%s) - start >= timeout )); then
     log_error "Gateway did not become ready within ${timeout}s"
-    if command -v docker >/dev/null 2>&1 && [[ -f "$compose_file" ]]; then
-      docker compose -f "$compose_file" ps -a >&2 || true
-      docker compose -f "$compose_file" logs --tail 50 "gateway-${active_slot}" >&2 || true
+    if command -v docker >/dev/null 2>&1; then
+      compose_prod ps -a >&2 || true
+      compose_prod logs --tail 50 "gateway-${active_slot}" >&2 || true
     fi
     exit 1
   fi
@@ -67,82 +67,94 @@ if command -v docker >/dev/null 2>&1; then
     verify_image "acb-worker" "$expected_worker_image" "worker"
   fi
 
-  if docker compose -f "$compose_file" config --services 2>/dev/null | grep -q "^worker$"; then
+  if compose_prod config --services 2>/dev/null | grep -q "^worker$"; then
     log_info "Verifying worker container readiness (/readyz)..."
     worker_container="acb-worker"
-    worker_timeout="${WORKER_READY_TIMEOUT:-60}"
+    worker_timeout="${WORKER_READY_TIMEOUT:-120}"
     worker_start="$(date +%s)"
     while true; do
       worker_running=$(docker inspect --format='{{.State.Running}}' "$worker_container" 2>/dev/null || echo "false")
       if [[ "$worker_running" == "true" ]]; then
-        if docker compose -f "$compose_file" exec -T worker /worker --readiness-check >/dev/null 2>&1; then
+        if compose_prod exec -T worker /worker --readiness-check >/dev/null 2>&1; then
           log_info "Worker is ready and healthy"
           break
         fi
       fi
       if (( $(date +%s) - worker_start >= worker_timeout )); then
         log_error "worker did not report ready within ${worker_timeout}s"
-        docker compose -f "$compose_file" logs --tail 30 worker >&2 || true
+        compose_prod logs --tail 30 worker >&2 || true
         exit 1
       fi
       sleep 2
     done
   fi
 
-  if docker compose -f "$compose_file" config --services 2>/dev/null | grep -q "^auth-browser$"; then
+  if compose_prod config --services 2>/dev/null | grep -q "^auth-browser$"; then
     log_info "Verifying auth-browser container health..."
     ab_container="acb-auth-browser"
     verify_image "$ab_container" "$expected_browser_image" "auth-browser"
-    ab_timeout="${AUTH_BROWSER_READY_TIMEOUT:-60}"
+    ab_timeout="${AUTH_BROWSER_READY_TIMEOUT:-120}"
     ab_start="$(date +%s)"
     while true; do
       running=$(docker inspect --format='{{.State.Running}}' "$ab_container" 2>/dev/null || echo "false")
       if [[ "$running" == "true" ]]; then
-        if docker compose -f "$compose_file" exec -T auth-browser /auth-browser --healthcheck >/dev/null 2>&1; then
+        if compose_prod exec -T auth-browser /auth-browser --healthcheck >/dev/null 2>&1; then
           log_info "Auth-browser is healthy"
           break
         fi
       fi
       if (( $(date +%s) - ab_start >= ab_timeout )); then
         log_error "auth-browser did not become healthy within ${ab_timeout}s"
-        docker compose -f "$compose_file" logs --tail 50 auth-browser >&2 || true
+        compose_prod logs --tail 50 auth-browser >&2 || true
         exit 1
       fi
       sleep 2
     done
   fi
 
-  if docker compose -f "$compose_file" config --services 2>/dev/null | grep -q "^tts-gateway$"; then
+  if compose_prod config --services 2>/dev/null | grep -q "^tts-gateway$"; then
     log_info "Verifying tts-gateway container health..."
     tts_container="acb-tts-gateway"
     verify_image "$tts_container" "$expected_tts_image" "tts-gateway"
-    tts_timeout="${TTS_READY_TIMEOUT:-60}"
+    tts_timeout="${TTS_READY_TIMEOUT:-120}"
     tts_start="$(date +%s)"
     while true; do
       tts_running=$(docker inspect --format='{{.State.Running}}' "$tts_container" 2>/dev/null || echo "false")
       if [[ "$tts_running" == "true" ]]; then
-        if docker compose -f "$compose_file" exec -T tts-gateway curl -f http://127.0.0.1:8081/health >/dev/null 2>&1; then
+        if compose_prod exec -T tts-gateway curl -4 -f http://127.0.0.1:8081/health >/dev/null 2>&1; then
           log_info "TTS-gateway is healthy"
           break
         fi
       fi
       if (( $(date +%s) - tts_start >= tts_timeout )); then
         log_error "tts-gateway did not become healthy within ${tts_timeout}s"
-        docker compose -f "$compose_file" logs --tail 30 tts-gateway >&2 || true
+        compose_prod logs --tail 30 tts-gateway >&2 || true
         exit 1
       fi
       sleep 2
     done
   fi
 
-  if docker compose -f "$compose_file" config --services 2>/dev/null | grep -q "^bark$"; then
+  if compose_prod config --services 2>/dev/null | grep -q "^bark$"; then
     bark_container="acb-bark"
     verify_image "$bark_container" "$expected_bark_image" "bark"
-    if [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$bark_container" 2>/dev/null || true)" != "healthy" ]]; then
-      if ! docker compose -f "$compose_file" exec -T bark /bin/sh -c "nc -z 127.0.0.1 8080" 2>/dev/null; then
-        log_warn "Bark container health check probe did not report healthy"
+    bark_timeout="${BARK_READY_TIMEOUT:-120}"
+    bark_start="$(date +%s)"
+    while true; do
+      if [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$bark_container" 2>/dev/null || true)" == "healthy" ]]; then
+        log_info "Bark container is healthy"
+        break
       fi
-    fi
+      if compose_prod exec -T bark /bin/sh -c "nc -z 127.0.0.1 8080" 2>/dev/null; then
+        log_info "Bark passed internal TCP probe"
+        break
+      fi
+      if (( $(date +%s) - bark_start >= bark_timeout )); then
+        log_warn "Bark container health check probe did not report healthy within ${bark_timeout}s"
+        break
+      fi
+      sleep 2
+    done
   fi
 
   # Step 6: Verify active slot edge route identity

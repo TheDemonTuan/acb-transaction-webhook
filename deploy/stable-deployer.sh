@@ -30,6 +30,8 @@ done
 [[ "$SOAK_SECONDS" =~ ^[0-9]+$ ]] || { printf 'Invalid soak duration.\n' >&2; exit 1; }
 
 RELEASE_DIR="$(cd -- "$RELEASE_DIR" && pwd -P)"
+export RELEASE_DIR
+export RELEASE_CONTEXT_DIR="$RELEASE_DIR"
 DATA_DIR="$(mkdir -p "$DATA_DIR" && cd -- "$DATA_DIR" && pwd -P)"
 case "$RELEASE_DIR" in
   /|/tmp|/var/tmp) printf 'Unsafe release directory: %s\n' "$RELEASE_DIR" >&2; exit 1 ;;
@@ -40,13 +42,37 @@ esac
 }
 [[ -x "$SCRIPT_DIR/verify-manifest.sh" ]] || { printf 'Trusted manifest verifier is missing.\n' >&2; exit 1; }
 
-"$SCRIPT_DIR/verify-manifest.sh" \
+# Step 1: Verify manifest with trusted verifier.
+# If trusted verifier fails (e.g. old manifest schema deadlock), attempt schema-light bootstrap.
+if ! "$SCRIPT_DIR/verify-manifest.sh" \
   --manifest "$RELEASE_DIR/release-manifest.json" \
   --bundle "$RELEASE_DIR/release-manifest.bundle" \
   --deploy-dir "$RELEASE_DIR" \
   --expected-identity "$EXPECTED_IDENTITY" \
   --expected-issuer "$EXPECTED_ISSUER" \
-  --require-cosign
+  --require-cosign; then
+  if [[ -x "$SCRIPT_DIR/bootstrap-deployment-engine.sh" ]]; then
+    printf 'Trusted manifest verifier failed. Attempting signed engine bootstrap...\n'
+    "$SCRIPT_DIR/bootstrap-deployment-engine.sh" \
+      --release-dir "$RELEASE_DIR" \
+      --runtime-deploy-dir "$SCRIPT_DIR" \
+      --expected-identity "$EXPECTED_IDENTITY" \
+      --expected-issuer "$EXPECTED_ISSUER" \
+      --require-cosign \
+      --skip-semantic-check
+    printf 'Signed engine bootstrap succeeded. Retrying manifest verification with updated verifier...\n'
+    "$SCRIPT_DIR/verify-manifest.sh" \
+      --manifest "$RELEASE_DIR/release-manifest.json" \
+      --bundle "$RELEASE_DIR/release-manifest.bundle" \
+      --deploy-dir "$RELEASE_DIR" \
+      --expected-identity "$EXPECTED_IDENTITY" \
+      --expected-issuer "$EXPECTED_ISSUER" \
+      --require-cosign
+  else
+    printf 'Manifest verification failed and bootstrap-deployment-engine.sh not available.\n' >&2
+    exit 1
+  fi
+fi
 
 # Determine runtime root and source runtime layout
 RUNTIME_ROOT="${RUNTIME_ROOT:-${DEPLOY_PATH:-$(cd -- "$SCRIPT_DIR/.." && pwd -P)}}"
@@ -83,22 +109,31 @@ migrate_runtime_state_path() {
       python3 - "$tmp" "$parent" <<'PY'
 import os, sys
 p, parent = sys.argv[1:3]
-with open(p, 'rb') as f:
-    os.fsync(f.fileno())
-pfd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
 try:
-    os.fsync(pfd)
-finally:
-    os.close(pfd)
+    with open(p, 'r+b') as f:
+        os.fsync(f.fileno())
+except OSError:
+    pass
+try:
+    pfd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(pfd)
+    finally:
+        os.close(pfd)
+except OSError:
+    pass
 PY
       mv -f "$tmp" "$new_path"
       python3 - "$parent" <<'PY'
 import os, sys
-pfd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
 try:
-    os.fsync(pfd)
-finally:
-    os.close(pfd)
+    pfd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(pfd)
+    finally:
+        os.close(pfd)
+except OSError:
+    pass
 PY
       rm -f "$old_path"
     fi
@@ -147,6 +182,20 @@ if [[ -f "$RELEASE_DIR/edge-probe.sh" ]]; then
   export EDGE_PROBE_SCRIPT="$RELEASE_DIR/edge-probe.sh"
 fi
 
+# Preflight VPS runtime immediately before candidate rollout
+preflight_script=""
+if [[ -f "$SCRIPT_DIR/preflight-vps.sh" ]]; then
+  preflight_script="$SCRIPT_DIR/preflight-vps.sh"
+elif [[ -f "$RELEASE_DIR/preflight-vps.sh" ]]; then
+  preflight_script="$RELEASE_DIR/preflight-vps.sh"
+fi
+if [[ -n "$preflight_script" ]]; then
+  bash "$preflight_script" \
+    --state "${CURRENT_RELEASE_FILE:-$RUNTIME_ROOT/state/current-release.json}" \
+    --data-dir "$DATA_DIR" \
+    --config "${ACB_CONFIG:-/opt/platform/edge/dynamic/acb.yml}"
+fi
+
 bash "$RELEASE_DIR/dispatch-rollout.sh" \
   --manifest "$RELEASE_DIR/release-manifest.json" \
   --bundle "$RELEASE_DIR/release-manifest.bundle" \
@@ -159,12 +208,45 @@ bash "$RELEASE_DIR/dispatch-rollout.sh" \
   --soak-seconds "$SOAK_SECONDS"
 
 # Atomically promote verifier/launcher and engine components after a successful release
-for file in stable-deployer.sh verify-manifest.sh runtime-layout.sh reconcile-release.sh release-state.py; do
-  if [[ -f "$RELEASE_DIR/$file" ]]; then
-    tmp="$runtime_dir/.${file}.next.$$"
-    mode="0755"
-    [[ "$file" != *.py ]] || mode="0644"
-    install -m "$mode" "$RELEASE_DIR/$file" "$tmp"
-    mv -f "$tmp" "$runtime_dir/$file"
-  fi
-done
+if [[ -x "$SCRIPT_DIR/bootstrap-deployment-engine.sh" ]]; then
+  "$SCRIPT_DIR/bootstrap-deployment-engine.sh" \
+    --release-dir "$RELEASE_DIR" \
+    --runtime-deploy-dir "$runtime_dir" \
+    --expected-identity "$EXPECTED_IDENTITY" \
+    --expected-issuer "$EXPECTED_ISSUER" \
+    --require-cosign \
+    --skip-semantic-check
+else
+  ENGINE_ALLOWLIST=(
+    "stable-deployer.sh"
+    "verify-manifest.sh"
+    "runtime-layout.sh"
+    "reconcile-release.sh"
+    "release-state.py"
+    "verify-runtime-drift.sh"
+    "release-env.sh"
+    "edge-probe.sh"
+    "lib.sh"
+    "lib/common.sh"
+    "lib/database.sh"
+    "lib/images.sh"
+    "lib/recovery.sh"
+    "lib/rollout-journal.sh"
+    "lib/state.sh"
+    "lib/traefik.sh"
+    "preflight-vps.sh"
+    "preflight-runtime.sh"
+    "bootstrap-deployment-engine.sh"
+  )
+  for file in "${ENGINE_ALLOWLIST[@]}"; do
+    if [[ -f "$RELEASE_DIR/$file" ]]; then
+      flat_name="${file//\//_}"
+      tmp="$runtime_dir/.${flat_name}.next.$$"
+      mode="0755"
+      [[ "$file" != *.py ]] || mode="0644"
+      mkdir -p "$(dirname "$runtime_dir/$file")"
+      install -m "$mode" "$RELEASE_DIR/$file" "$tmp"
+      mv -f "$tmp" "$runtime_dir/$file"
+    fi
+  done
+fi

@@ -8,6 +8,7 @@ output_file="$deploy_dir/release-manifest.json"
 git_sha="${GITHUB_SHA:-}"
 release_id=""
 base_sha=""
+base_generation=""
 promotion_scope_json=""
 promotion_scope_file=""
 
@@ -26,7 +27,8 @@ Usage: generate-release-manifest.sh [options]
 Options:
   --git-sha <sha>               Git commit SHA (default: HEAD or GITHUB_SHA)
   --release-id <id>             Release ID (default: rel-<sha:12>-<timestamp>)
-  --base-sha <sha>              Base commit SHA to compute promotion scope against
+  --base-sha <sha>              Canonical production commit SHA before this release
+  --base-generation <number>    Canonical production generation before this release
   --promotion-scope <json>      Explicit promotion scope JSON string
   --promotion-scope-file <path> Path to computed promotion scope JSON file
   --frontend-image <ref>        Exact frontend image digest (required)
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --base-sha)
       base_sha="$2"
+      shift 2
+      ;;
+    --base-generation)
+      base_generation="$2"
       shift 2
       ;;
     --promotion-scope)
@@ -128,6 +134,13 @@ fi
 
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 created_epoch="$(date -u +%s)"
+
+if [[ -n "$base_sha" || -n "$base_generation" ]]; then
+  [[ "$base_sha" =~ ^[0-9a-f]{40}$ && "$base_generation" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    printf 'Error: base SHA and generation must both be valid\n' >&2
+    exit 1
+  }
+fi
 
 if [[ -z "$release_id" ]]; then
   release_id="rel-${git_sha:0:12}-${created_epoch}"
@@ -259,8 +272,16 @@ bundle_files=(
   "lib/state.sh"
   "lib/traefik.sh"
   "lib/rollout-journal.sh"
+  "lib/recovery.sh"
+  "bootstrap-deployment-engine.sh"
+  "preflight-runtime.sh"
+  "verify-release-baseline.sh"
+  "stage-immutable-release.sh"
+  "verify-staged-release.sh"
+  "generate-release-manifest.sh"
   "verify-compose-runtime.sh"
   "verify-runtime-drift.sh"
+  "preflight-vps.sh"
   "cve-allowlist.json"
   "validate-cve-allowlist.sh"
   "third-party-allowlist.json"
@@ -341,10 +362,10 @@ printf 'failover_bundle_sha256=%s\n' "$failover_bundle_hash" >> "$tmp_artifacts"
 
 if command -v node >/dev/null 2>&1; then
   node - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
-    "$frontend_image" "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'JSEOF'
+    "$frontend_image" "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" "$base_sha" "$base_generation" <<'JSEOF'
 const fs = require('fs');
 
-const [,, outFile, gitSha, releaseId, createdAt, artifactsFile, scopeFile, frontend, gateway, worker, dbtool, authBrowser, tts, bark] = process.argv;
+const [,, outFile, gitSha, releaseId, createdAt, artifactsFile, scopeFile, frontend, gateway, worker, dbtool, authBrowser, tts, bark, baseSha, baseGeneration] = process.argv;
 
 const artifacts = {};
 const lines = fs.readFileSync(artifactsFile, 'utf8').split('\n');
@@ -384,6 +405,7 @@ const manifest = {
   schema_version: 1,
   release_id: releaseId,
   git_sha: gitSha,
+  ...(baseSha ? { base: { git_sha: baseSha, generation: Number(baseGeneration) } } : {}),
   created_at: createdAt,
   compatibility: {
     schema_version: 9,
@@ -415,7 +437,7 @@ fs.writeFileSync(outFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 JSEOF
 elif command -v python3 >/dev/null 2>&1; then
   python3 - "$output_file" "$git_sha" "$release_id" "$created_at" "$tmp_artifacts" "$tmp_scope_file" \
-    "$frontend_image" "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" <<'PYEOF'
+    "$frontend_image" "$gateway_image" "$worker_image" "$dbtool_image" "$auth_browser_image" "$tts_image" "$bark_image" "$base_sha" "$base_generation" <<'PYEOF'
 import sys, json
 
 out_file = sys.argv[1]
@@ -425,6 +447,7 @@ created_at = sys.argv[4]
 artifacts_file = sys.argv[5]
 scope_file = sys.argv[6]
 frontend, gateway, worker, dbtool, auth_browser, tts, bark = sys.argv[7:14]
+base_sha, base_generation = sys.argv[14:16]
 
 artifacts = {}
 with open(artifacts_file, 'r', encoding='utf-8') as f:
@@ -462,6 +485,7 @@ manifest = {
     "schema_version": 1,
     "release_id": release_id,
     "git_sha": git_sha,
+    **({"base": {"git_sha": base_sha, "generation": int(base_generation)}} if base_sha else {}),
     "created_at": created_at,
     "compatibility": {
         "schema_version": 9,

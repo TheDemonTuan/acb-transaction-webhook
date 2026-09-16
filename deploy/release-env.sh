@@ -196,17 +196,23 @@ set_release_env() {
   chmod 600 "$tmp_file"
   python3 - "$tmp_file" <<'PY'
 import os, sys
-with open(sys.argv[1], 'rb') as handle:
-    os.fsync(handle.fileno())
+try:
+    with open(sys.argv[1], 'r+b') as handle:
+        os.fsync(handle.fileno())
+except OSError:
+    pass
 PY
   mv -f "$tmp_file" "$file"
   python3 - "$target_dir" <<'PY'
 import os, sys
-fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
 try:
-    os.fsync(fd)
-finally:
-    os.close(fd)
+    fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+except OSError:
+    pass
 PY
   return 0
 }

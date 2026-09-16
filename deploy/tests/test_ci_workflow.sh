@@ -212,6 +212,12 @@ assert_contains "$deploy_content" "-o ConnectTimeout=15" "SSH execution passes e
 # 7. Promotion Dispatcher Invocation (No Compose Up/Down Shortcuts)
 printf "\n7. Testing Promotion Dispatcher Contract...\n"
 assert_contains "$deploy_content" "stable-deployer.sh" "Deploy step invokes stable-deployer.sh"
+assert_contains "$deploy_content" 'bash "$trusted_preflight"' "Production-state verifies actual VPS runtime before builds"
+assert_contains "$deploy_content" 'bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile' "Deploy-only reruns verify runtime before staging"
+assert_contains "$deploy_content" '--base-generation' "Signed manifest includes canonical baseline generation"
+assert_contains "$deploy_content" 'verify-release-baseline.sh' "Deploy checks signed baseline before mutation"
+assert_contains "$deploy_content" 'Accept exact signed staged release before SSH' "Staged bundle acceptance precedes SSH mutation"
+assert_not_contains "$deploy_content" "rm -rf '\$remote_release'" "Immutable release is never replaced on collision"
 stable_deployer_content="$(cat "$REPO_ROOT/deploy/stable-deployer.sh")"
 assert_contains "$stable_deployer_content" "dispatch-rollout.sh" "Stable deployer invokes dispatch-rollout.sh"
 assert_contains "$stable_deployer_content" "--require-cosign" "Stable deployer enforces --require-cosign"

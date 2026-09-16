@@ -131,7 +131,7 @@ fi
 # If staged compose file was provided, validate and install it atomically
 if [[ -n "$staged_compose" && -f "$staged_compose" ]]; then
   log_info "Validating staged Compose file: ${staged_compose}"
-  docker compose --env-file "$env_file" --env-file "$RELEASE_ENV_FILE" -f "$staged_compose" config --quiet
+  docker compose --project-directory "$SCRIPT_DIR" --env-file "$env_file" --env-file "$RELEASE_ENV_FILE" -f "$staged_compose" config --quiet
   [[ -f "$compose_file" ]] && cp -p "$compose_file" "$SCRIPT_DIR/.previous-compose.yaml"
   mv -f "$staged_compose" "$compose_file"
 fi
