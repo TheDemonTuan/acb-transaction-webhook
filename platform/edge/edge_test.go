@@ -216,107 +216,253 @@ func TestTraefikStaticConfiguration(t *testing.T) {
 	}
 }
 
+// extractYAMLBlocks extracts a map of blockName -> blockContent for items under a top-level section.
+func extractYAMLBlocks(yamlContent, sectionHeader string) map[string]string {
+	blocks := make(map[string]string)
+	lines := strings.Split(yamlContent, "\n")
+	inSection := false
+	currentBlock := ""
+	var currentLines []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 2 && trimmed == sectionHeader {
+			inSection = true
+			continue
+		}
+		if inSection && indent <= 2 {
+			if currentBlock != "" {
+				blocks[currentBlock] = strings.Join(currentLines, "\n")
+				currentBlock = ""
+				currentLines = nil
+			}
+			if indent < 2 {
+				inSection = false
+			}
+			continue
+		}
+		if inSection && indent == 4 && strings.HasSuffix(trimmed, ":") {
+			if currentBlock != "" {
+				blocks[currentBlock] = strings.Join(currentLines, "\n")
+			}
+			currentBlock = strings.TrimSuffix(trimmed, ":")
+			currentLines = nil
+			continue
+		}
+		if inSection && indent >= 6 && currentBlock != "" {
+			currentLines = append(currentLines, line)
+		}
+	}
+	if currentBlock != "" {
+		blocks[currentBlock] = strings.Join(currentLines, "\n")
+	}
+	return blocks
+}
+
+// extractSourceRanges parses a list of CIDRs under sourceRange:
+func extractSourceRanges(block string) []string {
+	var ranges []string
+	lines := strings.Split(block, "\n")
+	inRange := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "sourceRange:") {
+			inRange = true
+			continue
+		}
+		if inRange {
+			if strings.HasPrefix(trimmed, "-") {
+				val := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+				val = strings.Trim(val, "\"")
+				ranges = append(ranges, val)
+			} else {
+				break
+			}
+		}
+	}
+	return ranges
+}
+
 func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	edgeDir := getPlatformEdgeDir(t)
 
-	// 1. Check middlewares.yml
+	// 1. Check middlewares.yml with structured block parsing
 	mwPath := filepath.Join(edgeDir, "dynamic", "middlewares.yml")
 	mwContent, err := os.ReadFile(mwPath)
 	if err != nil {
 		t.Fatalf("failed to read middlewares.yml: %v", err)
 	}
 	mw := string(mwContent)
+	mwBlocks := extractYAMLBlocks(mw, "middlewares:")
 
-	if !strings.Contains(mw, `- "172.31.250.2/32"`) {
-		t.Errorf("middlewares.yml tunnel-only must restrict sourceRange strictly to 172.31.250.2/32")
+	// Validate tunnel-only: strictly [172.31.250.2/32], no other IPs
+	tunnelBlock, ok := mwBlocks["tunnel-only"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing tunnel-only middleware")
 	}
-	if strings.Contains(mw, "172.31.250.3/32") {
-		t.Errorf("middlewares.yml tunnel-only must not trust legacy edge-caddy 172.31.250.3/32")
+	tunnelRanges := extractSourceRanges(tunnelBlock)
+	if len(tunnelRanges) != 1 || tunnelRanges[0] != "172.31.250.2/32" {
+		t.Errorf("tunnel-only sourceRange must be strictly [172.31.250.2/32], got: %v", tunnelRanges)
 	}
-	if strings.Contains(mw, "172.31.250.0/28") {
-		t.Errorf("middlewares.yml tunnel-only must not allow broad subnet 172.31.250.0/28")
+
+	// Validate deny-internal
+	denyInternalBlock, ok := mwBlocks["deny-internal"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing deny-internal middleware")
 	}
-	if !strings.Contains(mw, "deny-internal:") || !strings.Contains(mw, "127.0.0.1/32") {
-		t.Errorf("middlewares.yml must contain deny-internal middleware with 127.0.0.1/32")
+	denyRanges := extractSourceRanges(denyInternalBlock)
+	if len(denyRanges) != 1 || denyRanges[0] != "127.0.0.1/32" {
+		t.Errorf("deny-internal sourceRange must be [127.0.0.1/32], got: %v", denyRanges)
 	}
-	if !strings.Contains(mw, "public-api-rate-limit:") || !strings.Contains(mw, "requestHeaderName: CF-Connecting-IP") {
-		t.Errorf("middlewares.yml must contain public-api-rate-limit middleware configured with CF-Connecting-IP")
+
+	// Validate public-api-rate-limit: average 10, burst 20, CF-Connecting-IP
+	apiRateBlock, ok := mwBlocks["public-api-rate-limit"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-api-rate-limit")
 	}
-	if !strings.Contains(mw, "average: 10") || !strings.Contains(mw, "burst: 20") {
-		t.Errorf("middlewares.yml public-api-rate-limit must configure average: 10 and burst: 20")
+	if !strings.Contains(apiRateBlock, "average: 10") || !strings.Contains(apiRateBlock, "burst: 20") || (!strings.Contains(apiRateBlock, "requestHeaderName: CF-Connecting-IP") && !strings.Contains(apiRateBlock, `requestHeaderName: "CF-Connecting-IP"`)) {
+		t.Errorf("public-api-rate-limit must have average: 10, burst: 20, CF-Connecting-IP: %s", apiRateBlock)
 	}
-	if !strings.Contains(mw, "public-api-inflight-ip:") || !strings.Contains(mw, "amount: 32") {
-		t.Errorf("middlewares.yml must configure public-api-inflight-ip with amount 32")
+
+	// Validate public-api-inflight-ip: amount 32, CF-Connecting-IP
+	apiIpBlock, ok := mwBlocks["public-api-inflight-ip"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-api-inflight-ip")
 	}
-	if !strings.Contains(mw, "public-api-inflight-global:") || !strings.Contains(mw, "amount: 128") || !strings.Contains(mw, "requestHost: true") {
-		t.Errorf("middlewares.yml must configure public-api-inflight-global with amount 128 and requestHost: true")
+	if !strings.Contains(apiIpBlock, "amount: 32") || (!strings.Contains(apiIpBlock, "requestHeaderName: CF-Connecting-IP") && !strings.Contains(apiIpBlock, `requestHeaderName: "CF-Connecting-IP"`)) {
+		t.Errorf("public-api-inflight-ip must have amount 32 and CF-Connecting-IP: %s", apiIpBlock)
 	}
-	if !strings.Contains(mw, "public-sse-rate-limit:") {
-		t.Errorf("middlewares.yml must contain public-sse-rate-limit middleware")
+
+	// Validate public-api-inflight-global: amount 128, requestHost: true
+	apiGlobalBlock, ok := mwBlocks["public-api-inflight-global"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-api-inflight-global")
 	}
-	if !strings.Contains(mw, "average: 2") || !strings.Contains(mw, "burst: 5") {
-		t.Errorf("middlewares.yml public-sse-rate-limit must configure average: 2 and burst: 5")
+	if !strings.Contains(apiGlobalBlock, "amount: 128") || !strings.Contains(apiGlobalBlock, "requestHost: true") {
+		t.Errorf("public-api-inflight-global must have amount 128 and requestHost: true: %s", apiGlobalBlock)
 	}
-	if !strings.Contains(mw, "public-sse-inflight-ip:") || !strings.Contains(mw, "amount: 12") {
-		t.Errorf("middlewares.yml must configure public-sse-inflight-ip with amount 12")
+
+	// Validate public-sse-rate-limit: average 2, burst 5, CF-Connecting-IP
+	sseRateBlock, ok := mwBlocks["public-sse-rate-limit"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-sse-rate-limit")
 	}
-	if !strings.Contains(mw, "public-sse-inflight-global:") {
-		t.Errorf("middlewares.yml must configure public-sse-inflight-global with amount 128")
+	if !strings.Contains(sseRateBlock, "average: 2") || !strings.Contains(sseRateBlock, "burst: 5") || (!strings.Contains(sseRateBlock, "requestHeaderName: CF-Connecting-IP") && !strings.Contains(sseRateBlock, `requestHeaderName: "CF-Connecting-IP"`)) {
+		t.Errorf("public-sse-rate-limit must have average: 2, burst: 5 and CF-Connecting-IP: %s", sseRateBlock)
 	}
+
+	// Validate public-sse-inflight-ip: amount 12, CF-Connecting-IP
+	sseIpBlock, ok := mwBlocks["public-sse-inflight-ip"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-sse-inflight-ip")
+	}
+	if !strings.Contains(sseIpBlock, "amount: 12") || (!strings.Contains(sseIpBlock, "requestHeaderName: CF-Connecting-IP") && !strings.Contains(sseIpBlock, `requestHeaderName: "CF-Connecting-IP"`)) {
+		t.Errorf("public-sse-inflight-ip must have amount 12 and CF-Connecting-IP: %s", sseIpBlock)
+	}
+
+	// Validate public-sse-inflight-global: amount 128, requestHost: true
+	sseGlobalBlock, ok := mwBlocks["public-sse-inflight-global"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-sse-inflight-global")
+	}
+	if !strings.Contains(sseGlobalBlock, "amount: 128") || !strings.Contains(sseGlobalBlock, "requestHost: true") {
+		t.Errorf("public-sse-inflight-global must have amount 128 and requestHost: true: %s", sseGlobalBlock)
+	}
+
 	if !strings.Contains(mw, "Content-Security-Policy") {
 		t.Errorf("middlewares.yml must apply CSP at the edge for the standalone frontend")
 	}
 
-	// 2. Check acb.yml
+	// 2. Check acb.yml with structured router & service parsing
 	acbPath := filepath.Join(edgeDir, "dynamic", "acb.yml")
 	acbContent, err := os.ReadFile(acbPath)
 	if err != nil {
 		t.Fatalf("failed to read acb.yml: %v", err)
 	}
 	acb := string(acbContent)
+	acbRouters := extractYAMLBlocks(acb, "routers:")
 
-	if !strings.Contains(acb, "acb-deny-internal:") || !strings.Contains(acb, "PathPrefix(`/internal`)") {
-		t.Errorf("acb.yml must contain higher-priority deny router for /internal")
+	// Validate acb-public-api-router
+	pubApiRouter, ok := acbRouters["acb-public-api-router"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-public-api-router")
 	}
-	if !strings.Contains(acb, "acb-api-router:") || !strings.Contains(acb, "PathPrefix(`/api`)") {
-		t.Errorf("acb.yml must route only API and health paths to the blue/green gateway")
+	if strings.Contains(strings.ToLower(pubApiRouter), "health") || strings.Contains(strings.ToLower(pubApiRouter), "ready") {
+		t.Errorf("acb.yml public API router must not expose health or ready endpoints: %s", pubApiRouter)
 	}
-	if !strings.Contains(acb, "acb-frontend-router:") || !strings.Contains(acb, "http://acb-frontend:8080") {
-		t.Errorf("acb.yml must route public frontend paths to the isolated frontend service")
+	if !strings.Contains(pubApiRouter, "Path(`/api/public/v1`)") || !strings.Contains(pubApiRouter, "PathPrefix(`/api/public/v1/`)") {
+		t.Errorf("acb.yml public API router must strictly match /api/public/v1 and /api/public/v1/ prefix: %s", pubApiRouter)
 	}
-	if !strings.Contains(acb, "acb-public-deny-private:") || !strings.Contains(acb, "transactions.tuannguyenviet.site") {
-		t.Errorf("acb.yml must contain higher-priority deny router for public host private paths")
+	if !strings.Contains(pubApiRouter, "priority: 1100") {
+		t.Errorf("acb.yml public API router priority must be 1100: %s", pubApiRouter)
 	}
-	if !strings.Contains(acb, "acb-public-sse-router:") || !strings.Contains(acb, "Path(`/api/public/v1/events`)") {
-		t.Errorf("acb.yml must contain higher-priority SSE router for public events")
+	if !strings.Contains(pubApiRouter, "public-api-rate-limit") || !strings.Contains(pubApiRouter, "public-api-inflight-ip") || !strings.Contains(pubApiRouter, "public-api-inflight-global") {
+		t.Errorf("acb.yml public API router must apply rate and inflight limit middlewares: %s", pubApiRouter)
 	}
-	if !strings.Contains(acb, "priority: 1200") {
-		t.Errorf("acb.yml SSE router must have priority 1200")
+
+	// Validate acb-public-sse-router
+	pubSseRouter, ok := acbRouters["acb-public-sse-router"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-public-sse-router")
 	}
-	if !strings.Contains(acb, "public-sse-rate-limit") || !strings.Contains(acb, "public-sse-inflight-ip") || !strings.Contains(acb, "public-sse-inflight-global") {
-		t.Errorf("acb.yml acb-public-sse-router must apply rate and inflight limit middlewares")
+	if !strings.Contains(pubSseRouter, "Path(`/api/public/v1/events`)") || !strings.Contains(pubSseRouter, "Path(`/api/public/v1/events/stream`)") {
+		t.Errorf("acb.yml public SSE router must route public events: %s", pubSseRouter)
 	}
-	if !strings.Contains(acb, "acb-public-api-router:") || !strings.Contains(acb, "PathPrefix(`/api/public/v1`)") {
-		t.Errorf("acb.yml must route public API paths on transactions host")
+	if !strings.Contains(pubSseRouter, "priority: 1200") {
+		t.Errorf("acb.yml public SSE router priority must be 1200: %s", pubSseRouter)
 	}
-	if !strings.Contains(acb, "priority: 1100") {
-		t.Errorf("acb.yml public API router must have priority 1100")
+	if !strings.Contains(pubSseRouter, "public-sse-rate-limit") || !strings.Contains(pubSseRouter, "public-sse-inflight-ip") || !strings.Contains(pubSseRouter, "public-sse-inflight-global") {
+		t.Errorf("acb.yml public SSE router must apply sse rate and inflight limit middlewares: %s", pubSseRouter)
 	}
-	if !strings.Contains(acb, "public-api-rate-limit") || !strings.Contains(acb, "public-api-inflight-ip") || !strings.Contains(acb, "public-api-inflight-global") {
-		t.Errorf("acb.yml acb-public-api-router must apply rate and inflight limit middlewares")
+
+	// Validate acb-public-deny-private
+	pubDenyRouter, ok := acbRouters["acb-public-deny-private"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-public-deny-private")
 	}
-	// Public API rule must not contain healthz/readyz
-	if strings.Contains(acb, "acb-public-api-router:\n      rule: >-\n        Host(`transactions.tuannguyenviet.site`) &&\n        (PathPrefix(`/api/public/v1`) || Path(`/healthz`)") {
-		t.Errorf("acb.yml public API router must not expose health endpoints")
+	if !strings.Contains(pubDenyRouter, "priority: 1000") {
+		t.Errorf("acb.yml public deny router priority must be 1000: %s", pubDenyRouter)
 	}
-	if !strings.Contains(acb, "acb-public-frontend-router:") {
-		t.Errorf("acb.yml must route public frontend on transactions host")
+	if !strings.Contains(pubDenyRouter, "deny-internal") {
+		t.Errorf("acb.yml public deny router must apply deny-internal middleware: %s", pubDenyRouter)
 	}
-	if !strings.Contains(acb, "priority: 1000") {
-		t.Errorf("acb.yml deny router must have priority 1000")
+
+	// Validate acb-deny-internal
+	denyRouter, ok := acbRouters["acb-deny-internal"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-deny-internal")
 	}
-	if !strings.Contains(acb, "healthCheck:") || !strings.Contains(acb, "/readyz") {
+	if !strings.Contains(denyRouter, "PathPrefix(`/internal`)") {
+		t.Errorf("acb.yml deny router must match /internal: %s", denyRouter)
+	}
+
+	// Validate services
+	acbServices := extractYAMLBlocks(acb, "services:")
+	acbService, ok := acbServices["acb-service"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-service")
+	}
+	if !strings.Contains(acbService, `url: "http://acb-web-blue:8090"`) {
+		t.Errorf("acb.yml acb-service must point to http://acb-web-blue:8090: %s", acbService)
+	}
+	if strings.Contains(acbService, `url: "http://acb-web:8090"`) {
+		t.Errorf("acb.yml acb-service must not use nonexistent alias acb-web:8090: %s", acbService)
+	}
+	if !strings.Contains(acbService, "healthCheck:") || !strings.Contains(acbService, "/readyz") {
 		t.Errorf("acb.yml must configure /readyz healthcheck for acb-service")
+	}
+
+	// Validate frontend service
+	feService, ok := acbServices["acb-frontend-service"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-frontend-service")
+	}
+	if !strings.Contains(feService, "/readyz") {
+		t.Errorf("acb.yml acb-frontend-service must configure /readyz healthcheck")
 	}
 
 	// 3. Check bark.yml

@@ -343,8 +343,32 @@ assert_file_contains "$rendered_file" "acb-public-frontend-router" "Contains acb
 assert_file_contains "$rendered_file" "http://acb-web-green:8090" "Contains backend URL pointing to green"
 assert_file_contains "$rendered_file" "acb-deny-internal" "Contains deny-internal security rule"
 assert_file_contains "$rendered_file" "tunnel-only" "Contains tunnel-only middleware"
-assert_file_not_contains "$rendered_file" "PathPrefix(\`/api/public/v1\`) || Path(\`/healthz\`)" "Public API rule does not contain /healthz"
-assert_file_not_contains "$rendered_file" "PathPrefix(\`/api/public/v1\`) || Path(\`/readyz\`)" "Public API rule does not contain /readyz"
+# Extract acb-public-api-router rule and assert namespace and no health/ready probes
+public_api_rule="$(awk '/acb-public-api-router:/{flag=1; next} /^[[:space:]]{4}[a-z-]+:/{flag=0} flag && /^[[:space:]]{6}rule:/{print; exit}' "$rendered_file" | sed -E 's/^[[:space:]]*rule:[[:space:]]*"?//; s/"?[[:space:]]*$//')"
+
+if [[ "$public_api_rule" == *"health"* ]]; then
+  printf 'FAIL: Public API router rule unexpectedly contains health probes: %s\n' "$public_api_rule" >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: Public API router rule does not contain health probes\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
+if [[ "$public_api_rule" == *"ready"* ]]; then
+  printf 'FAIL: Public API router rule unexpectedly contains ready probes: %s\n' "$public_api_rule" >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: Public API router rule does not contain ready probes\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
+if [[ "$public_api_rule" == *"Path(\`/api/public/v1\`)"* && "$public_api_rule" == *"PathPrefix(\`/api/public/v1/\`)"* ]]; then
+  printf 'PASS: Public API router rule strictly encloses /api/public/v1/ namespace\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: Public API router rule does not strictly enclose /api/public/v1/: %s\n' "$public_api_rule" >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
 
 # ==============================================================================
 # TEST 3: switch-slot.sh switches route and acknowledges identity
@@ -472,7 +496,13 @@ export MOCK_TRAEFIK_MOUNT_MISMATCH=0
 # 2. Stop standby fails closed when failover state dir is unwritable
 mkdir -p "$T9/unwritable_failover"
 chmod 500 "$T9/unwritable_failover"
-export FAILOVER_STATE_DIR="$T9/unwritable_failover"
+if touch "$T9/unwritable_failover/.test_write" 2>/dev/null; then
+  rm -f "$T9/unwritable_failover/.test_write"
+  touch "$T9/unwritable_file"
+  export FAILOVER_STATE_DIR="$T9/unwritable_file"
+else
+  export FAILOVER_STATE_DIR="$T9/unwritable_failover"
+fi
 
 stop_code=0
 if stop_standby_container green; then
@@ -481,7 +511,8 @@ else
   stop_code=1
 fi
 assert_eq "1" "$stop_code" "stop_standby_container returns nonzero when intentional-stop marker cannot be written"
-chmod 700 "$T9/unwritable_failover"
+chmod 700 "$T9/unwritable_failover" 2>/dev/null || true
+rm -f "$T9/unwritable_file" 2>/dev/null || true
 export FAILOVER_STATE_DIR="$T9/failover"
 
 # 3. Rollback route ACK failure preserves both slots and pending evidence

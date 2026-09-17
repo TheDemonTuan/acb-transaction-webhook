@@ -88,22 +88,24 @@ verify_traefik_prerequisites() {
 
 validate_traefik_yaml() {
   local yaml_file="$1"
+  local mode="${2:-acb}"
   if [[ ! -s "$yaml_file" ]]; then
     log_error "Traefik YAML validation failed: file '$yaml_file' is empty or missing."
     return 1
   fi
 
   # 1. Use python3 / python yaml parser if available and working
+  local py_verified=0
   if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
     if python3 -c 'import sys, yaml; yaml.safe_load(sys.stdin)' < "$yaml_file" 2>/dev/null; then
-      return 0
+      py_verified=1
     else
       log_error "Traefik YAML syntax validation failed via python3: $yaml_file"
       return 1
     fi
   elif command -v python >/dev/null 2>&1 && python -c 'import yaml' >/dev/null 2>&1; then
     if python -c 'import sys, yaml; yaml.safe_load(sys.stdin)' < "$yaml_file" 2>/dev/null; then
-      return 0
+      py_verified=1
     else
       log_error "Traefik YAML syntax validation failed via python: $yaml_file"
       return 1
@@ -111,9 +113,9 @@ validate_traefik_yaml() {
   fi
 
   # 2. Use ruby if available and working
-  if command -v ruby >/dev/null 2>&1 && ruby --version >/dev/null 2>&1; then
+  if [[ "$py_verified" -eq 0 ]] && command -v ruby >/dev/null 2>&1 && ruby --version >/dev/null 2>&1; then
     if ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$yaml_file" 2>/dev/null; then
-      return 0
+      :
     else
       log_error "Traefik YAML syntax validation failed via ruby: $yaml_file"
       return 1
@@ -139,10 +141,21 @@ validate_traefik_yaml() {
     fi
   fi
 
-  # 4. Mandatory structural checks: must contain http routers and service
-  if ! grep -q 'http:' "$yaml_file" || ! grep -q 'routers:' "$yaml_file" || ! grep -q 'services:' "$yaml_file" || ! grep -q 'acb-service:' "$yaml_file"; then
-    log_error "Traefik YAML failed structural invariant checks: missing http, routers, or acb-service definitions."
+  # 4. Mandatory structural checks
+  if ! grep -q 'http:' "$yaml_file"; then
+    log_error "Traefik YAML failed structural invariant checks: missing http definition."
     return 1
+  fi
+  if [[ "$mode" == "acb" ]]; then
+    if ! grep -q 'routers:' "$yaml_file" || ! grep -q 'services:' "$yaml_file" || ! grep -q 'acb-service:' "$yaml_file"; then
+      log_error "Traefik YAML failed structural invariant checks: missing routers, services, or acb-service definitions."
+      return 1
+    fi
+  else
+    if ! grep -E -q 'routers:|services:|middlewares:|tls:' "$yaml_file"; then
+      log_error "Traefik YAML failed structural invariant checks: missing routers, services, or middlewares definitions."
+      return 1
+    fi
   fi
   return 0
 }
@@ -199,7 +212,7 @@ http:
       service: acb-service
 
     acb-public-api-router:
-      rule: "Host(\`${public_viewer_host}\`) && PathPrefix(\`/api/public/v1\`)"
+      rule: "Host(\`${public_viewer_host}\`) && (Path(\`/api/public/v1\`) || PathPrefix(\`/api/public/v1/\`))"
       entryPoints:
         - web
       priority: 1100

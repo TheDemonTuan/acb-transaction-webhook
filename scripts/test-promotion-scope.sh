@@ -354,6 +354,24 @@ assert_eq "unicode Git diff: PROMOTION_DOC_ONLY is true" "$(printf '%s' "$unicod
 assert_eq "unicode Git diff: PROMOTION_GATEWAY is false" "$(printf '%s' "$unicode_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
 assert_eq "unicode Git diff: PROMOTION_SCOPE is empty" "$(printf '%s' "$unicode_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" ""
 
+# 25. Traefik lib only (platform only) vs database lib (orchestrator)
+printf "\n25. Testing traefik.sh (platform only) vs database.sh (orchestrator)...\n"
+printf "M\tdeploy/lib/traefik.sh\n" > "$test_tmp/traefik_lib.txt"
+traefik_out="$(run_case "$test_tmp/traefik_lib.txt" --format env)"
+assert_eq "traefik-lib: PROMOTION_PLATFORM is true" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "traefik-lib: PROMOTION_GATEWAY is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "traefik-lib: PROMOTION_WORKER is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "traefik-lib: PROMOTION_FRONTEND is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "false"
+assert_eq "traefik-lib: PROMOTION_SCHEMA is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
+assert_eq "traefik-lib: PROMOTION_AUTH_BROWSER is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_AUTH_BROWSER=' | cut -d= -f2)" "false"
+assert_eq "traefik-lib: PROMOTION_TTS is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_TTS=' | cut -d= -f2)" "false"
+assert_eq "traefik-lib: PROMOTION_BARK is false" "$(printf '%s' "$traefik_out" | grep '^PROMOTION_BARK=' | cut -d= -f2)" "false"
+
+printf "M\tdeploy/lib/database.sh\n" > "$test_tmp/database_lib.txt"
+db_lib_out="$(run_case "$test_tmp/database_lib.txt" --format env)"
+assert_eq "database-lib: PROMOTION_WORKER is true" "$(printf '%s' "$db_lib_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "database-lib: PROMOTION_GATEWAY is true" "$(printf '%s' "$db_lib_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"
