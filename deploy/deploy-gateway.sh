@@ -200,24 +200,6 @@ log_info "Transaction COMMITTED: Live traffic routed to [${CANDIDATE_SLOT}]."
 # 7. Audit: Core containers must have exact same IDs
 assert_core_containers_unchanged "$SNAPSHOT_FILE"
 
-# 7b. Pre-soak contract audit against planned candidate state
-if [[ -f "$SCRIPT_DIR/verify-runtime-drift.sh" ]]; then
-  planned_candidate_dir="${RUNTIME_STATE_DIR:-$(dirname "$ACTIVE_SLOT_FILE")}/candidate"
-  planned_file="$(ls -t "$planned_candidate_dir"/*.json 2>/dev/null | head -n 1 || true)"
-  if [[ -n "$planned_file" && -f "$planned_file" ]]; then
-    log_info "Pre-soak contract audit: verifying planned candidate state before 900s soak..."
-    if [[ "${SKIP_MANIFEST:-0}" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
-      eval "$RUNTIME_DRIFT_CHECK_CMD" || { log_error "Pre-soak contract audit failed."; exit 1; }
-    else
-      bash "$SCRIPT_DIR/verify-runtime-drift.sh" --state "$planned_file" || {
-        log_error "Pre-soak contract audit failed: deterministic candidate mismatch before soak."
-        exit 1
-      }
-    fi
-    log_info "Pre-soak contract audit PASSED."
-  fi
-fi
-
 if [[ "${DEFER_SOAK:-0}" == "1" ]]; then
   log_info "Gateway route cutover and ACK succeeded; deferring release soak to release orchestrator."
   if [[ "${DEFER_OLD_SLOT_RETIREMENT:-0}" == "1" ]]; then

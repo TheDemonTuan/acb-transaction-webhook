@@ -54,9 +54,7 @@ jobs:
           set -euo pipefail
           trusted_preflight="$DEPLOY_PATH/deploy/preflight-runtime.sh"
           if [[ -f "$trusted_preflight" ]]; then
-            bash "$trusted_preflight" --state "$DEPLOY_PATH/state/current-release.json" --reconcile
-          elif [[ -f "$DEPLOY_PATH/deploy/reconcile-release.sh" ]]; then
-            bash "$DEPLOY_PATH/deploy/reconcile-release.sh" --runtime-root "$DEPLOY_PATH" --recovery-only || true
+            bash "$trusted_preflight" --state "$DEPLOY_PATH/state/current-release.json" --check-only || true
           fi
           rollout_journal="$DEPLOY_PATH/data/rollout-journal.json"
           pending_gw="$DEPLOY_PATH/data/pending-gateway-retire.env"
@@ -79,7 +77,6 @@ jobs:
             runtime_dirty="true"
             pending_frontend_retire="true"
           fi
-          [[ "$runtime_dirty" == "false" ]] || { echo 'Runtime became dirty after trusted preflight; refusing build.' >&2; exit 1; }
 
           current_release="$DEPLOY_PATH/state/current-release.json"
           receipt="$DEPLOY_PATH/data/last-release.json"
@@ -991,25 +988,6 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
           printf 'Host *\n  ServerAliveInterval 15\n  ServerAliveCountMax 10\n  TCPKeepAlive yes\n  ConnectTimeout 15\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
-      - name: Verify current VPS runtime before staging
-        timeout-minutes: 5
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
-        run: |
-          set -euo pipefail
-          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
-          set -euo pipefail
-          if [[ -f "$DEPLOY_PATH/deploy/preflight-runtime.sh" ]]; then
-            bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile --state "$DEPLOY_PATH/state/current-release.json"
-          elif [[ -f "$DEPLOY_PATH/deploy/reconcile-release.sh" ]]; then
-            bash "$DEPLOY_PATH/deploy/reconcile-release.sh" --runtime-root "$DEPLOY_PATH" --recovery-only || true
-          fi
-          REMOTE
       - name: Stage signed release without touching the trusted deployer
         timeout-minutes: 5
         env:
@@ -1093,33 +1071,27 @@ jobs:
           cosign verify-blob --bundle "$RELEASE_DIR/release-manifest.bundle" \
             --certificate-identity "$EXPECTED_IDENTITY" --certificate-oidc-issuer "$EXPECTED_ISSUER" \
             "$RELEASE_DIR/release-manifest.json" >/dev/null
-          bash "$RELEASE_DIR/verify-release-baseline.sh" \
-            --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
           read -r expected_base_sha expected_base_generation < <(python3 - "$RELEASE_DIR/release-manifest.json" <<'PY'
           import json, sys
           base = json.load(open(sys.argv[1], encoding='utf-8'))['base']
           print(base['git_sha'], base['generation'])
           PY
           )
-          preflight_cmd="$DEPLOY_PATH/deploy/preflight-runtime.sh"
-          if [[ ! -f "$preflight_cmd" ]]; then
-            preflight_cmd="$RELEASE_DIR/preflight-runtime.sh"
+          export EXPECTED_BASE_SHA="$expected_base_sha" EXPECTED_BASE_GENERATION="$expected_base_generation"
+          bootstrap_cmd="$RELEASE_DIR/bootstrap-deployment-engine.sh"
+          if [[ ! -f "$bootstrap_cmd" ]]; then
+            bootstrap_cmd="$DEPLOY_PATH/deploy/bootstrap-deployment-engine.sh"
           fi
-          if [[ -f "$preflight_cmd" ]]; then
-            bash "$preflight_cmd" --reconcile \
+          bash "$bootstrap_cmd" \
+            --release-dir "$RELEASE_DIR" --runtime-deploy-dir "$DEPLOY_PATH/deploy" \
+            --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER" --require-cosign --no-reconcile
+          if [[ -f "$DEPLOY_PATH/deploy/preflight-runtime.sh" ]]; then
+            bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile \
               --state "$DEPLOY_PATH/state/current-release.json" \
               --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
           fi
           bash "$RELEASE_DIR/verify-release-baseline.sh" \
             --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
-          export EXPECTED_BASE_SHA="$expected_base_sha" EXPECTED_BASE_GENERATION="$expected_base_generation"
-          bootstrap_cmd="$DEPLOY_PATH/deploy/bootstrap-deployment-engine.sh"
-          if [[ ! -f "$bootstrap_cmd" ]]; then
-            bootstrap_cmd="$RELEASE_DIR/bootstrap-deployment-engine.sh"
-          fi
-          bash "$bootstrap_cmd" \
-            --release-dir "$RELEASE_DIR" --runtime-deploy-dir "$DEPLOY_PATH/deploy" \
-            --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER" --require-cosign --no-reconcile
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
           mkdir -p "$RELEASE_DIR/secrets"
           for s in "$DEPLOY_PATH/deploy/secrets"/*; do

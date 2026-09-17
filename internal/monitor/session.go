@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -60,6 +61,12 @@ func (l *SessionLoader) Persist(ctx context.Context, connectionID string, genera
 	}
 	handoff, err := snapshotter.SnapshotSession()
 	if err != nil {
+		if errors.Is(err, acb.ErrAuthenticatedFormStateUnavailable) && l.store != nil {
+			stored, storeErr := l.store.Session(ctx, connectionID, generation)
+			if storeErr == nil && stored.ConnectionID == connectionID && stored.Generation == generation && len(stored.Envelope) > 0 {
+				return nil
+			}
+		}
 		return err
 	}
 	plaintext, err := authbrowser.EncodeHandoff(handoff, []byte("refresh"))

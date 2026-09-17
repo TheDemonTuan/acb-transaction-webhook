@@ -21,6 +21,8 @@ const (
 	DefaultUserAgent     = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 )
 
+var ErrAuthenticatedFormStateUnavailable = errors.New("ACB authenticated form state is unavailable")
+
 type Client struct {
 	baseURL         *url.URL
 	bootstrap       *url.URL
@@ -130,7 +132,7 @@ func (c *Client) SnapshotSession() (authbrowser.Handoff, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
-		return authbrowser.Handoff{}, errors.New("ACB authenticated form state is unavailable")
+		return authbrowser.Handoff{}, ErrAuthenticatedFormStateUnavailable
 	}
 	cookies := c.http.Jar.Cookies(c.bootstrap)
 	snapshot := authbrowser.Handoff{
@@ -185,7 +187,7 @@ func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
-		return Response{}, errors.New("ACB authenticated form state is unavailable")
+		return Response{}, ErrAuthenticatedFormStateUnavailable
 	}
 	fields, err := PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
 	if err != nil {
