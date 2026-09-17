@@ -11,3 +11,8 @@ var HistoryJobQueueSQL string
 //
 //go:embed 009_deployment_control.sql
 var DeploymentControlSQL string
+
+// MonitorIdleCadenceSQL embeds the SQL migration for schema version 10.
+//
+//go:embed 010_monitor_idle_cadence.sql
+var MonitorIdleCadenceSQL string

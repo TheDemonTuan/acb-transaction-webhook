@@ -346,6 +346,15 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 		t.Errorf("public-api-inflight-global must have amount 128 and requestHost: true: %s", apiGlobalBlock)
 	}
 
+	// Validate public-activation-rate-limit: average 1, period 5s, burst 2, CF-Connecting-IP
+	actRateBlock, ok := mwBlocks["public-activation-rate-limit"]
+	if !ok {
+		t.Fatalf("middlewares.yml missing public-activation-rate-limit")
+	}
+	if !strings.Contains(actRateBlock, "average: 1") || !strings.Contains(actRateBlock, "period: 5s") || !strings.Contains(actRateBlock, "burst: 2") || (!strings.Contains(actRateBlock, "requestHeaderName: CF-Connecting-IP") && !strings.Contains(actRateBlock, `requestHeaderName: "CF-Connecting-IP"`)) {
+		t.Errorf("public-activation-rate-limit must have average: 1, period: 5s, burst: 2, CF-Connecting-IP: %s", actRateBlock)
+	}
+
 	// Validate public-sse-rate-limit: average 2, burst 5, CF-Connecting-IP
 	sseRateBlock, ok := mwBlocks["public-sse-rate-limit"]
 	if !ok {
@@ -402,6 +411,21 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	}
 	if !strings.Contains(pubApiRouter, "public-api-rate-limit") || !strings.Contains(pubApiRouter, "public-api-inflight-ip") || !strings.Contains(pubApiRouter, "public-api-inflight-global") {
 		t.Errorf("acb.yml public API router must apply rate and inflight limit middlewares: %s", pubApiRouter)
+	}
+
+	// Validate acb-public-activation-router
+	pubActRouter, ok := acbRouters["acb-public-activation-router"]
+	if !ok {
+		t.Fatalf("acb.yml missing acb-public-activation-router")
+	}
+	if !strings.Contains(pubActRouter, "Path(`/api/public/v1/payment-qr/activate`)") {
+		t.Errorf("acb.yml public activation router must match Path(`/api/public/v1/payment-qr/activate`): %s", pubActRouter)
+	}
+	if !strings.Contains(pubActRouter, "priority: 1150") {
+		t.Errorf("acb.yml public activation router priority must be 1150: %s", pubActRouter)
+	}
+	if !strings.Contains(pubActRouter, "public-activation-rate-limit") || !strings.Contains(pubActRouter, "tunnel-only") {
+		t.Errorf("acb.yml public activation router must apply public-activation-rate-limit and tunnel-only: %s", pubActRouter)
 	}
 
 	// Validate acb-public-sse-router

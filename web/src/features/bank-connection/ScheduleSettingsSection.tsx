@@ -16,7 +16,7 @@ import { fetchMonitorSettings, updateMonitorSettings } from '../../shared/api/qu
 import { queryKeys } from '../../shared/api/query-keys';
 import type { MonitorSettings, MonitorSettingsResponse, Window } from '../../realtime-types';
 
-export const realtimeProfile = { mode: 'REALTIME' as const, minSeconds: 3, maxSeconds: 10 };
+export const realtimeProfile = { mode: 'REALTIME' as const, minSeconds: 20, maxSeconds: 30 };
 export const keepaliveProfile = { mode: 'KEEPALIVE_ONLY' as const, minSeconds: 60, maxSeconds: 120 };
 
 export const DAYS_OF_WEEK = [
@@ -62,8 +62,8 @@ export const getMatchedPreset = (
   if (
     settings.windows.length === 0 &&
     settings.defaultProfile.mode === 'REALTIME' &&
-    settings.defaultProfile.minSeconds === 3 &&
-    settings.defaultProfile.maxSeconds === 10
+    settings.defaultProfile.minSeconds === 20 &&
+    settings.defaultProfile.maxSeconds === 30
   ) {
     return 'realtime_247';
   }
@@ -77,8 +77,8 @@ export const getMatchedPreset = (
     const w = settings.windows[0];
     const isProfileRt =
       w.profile.mode === 'REALTIME' &&
-      w.profile.minSeconds === 3 &&
-      w.profile.maxSeconds === 10;
+      w.profile.minSeconds === 20 &&
+      w.profile.maxSeconds === 30;
 
     if (
       isProfileRt &&

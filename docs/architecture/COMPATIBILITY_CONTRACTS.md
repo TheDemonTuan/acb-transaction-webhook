@@ -88,6 +88,10 @@ All inter-process communication between Gateway and Worker uses bounded HTTP/1.1
 - **Timeouts:**
   - RPC calls have a hard `30s` context deadline.
   - No 120s long-polling HTTP requests. Long operations return durable job IDs.
+- **Payment Window Activation Contract:**
+  - Route: `POST /rpc/activate-payment-window`
+  - Response: `{"phase": "GRACE" | "HOT" | "WARM" | "COOL" | "LOCKED", "nextPhaseAt": "ISO8601"}`
+  - Gateway adapts this state directly to HTTP responses; returns `429 BOOST_BUDGET_EXHAUSTED` when phase is `LOCKED`.
 
 ---
 

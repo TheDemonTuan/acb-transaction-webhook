@@ -55,6 +55,10 @@ func (q *quiesceMockHandler) Resume(ctx context.Context) error {
 	return nil
 }
 
+func (q *quiesceMockHandler) ActivatePaymentWindow(ctx context.Context) (workerrpc.PaymentWindowResponse, error) {
+	return workerrpc.PaymentWindowResponse{Phase: "GRACE"}, nil
+}
+
 func TestWorkerRPC_QuiesceAndResume(t *testing.T) {
 	coordinator := workerstate.NewCoordinator()
 	if err := coordinator.SetReady(); err != nil {
