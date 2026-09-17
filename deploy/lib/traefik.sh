@@ -185,6 +185,17 @@ http:
         - deny-internal
       service: acb-service
 
+    acb-public-sse-router:
+      rule: "Host(\`${public_viewer_host}\`) && (Path(\`/api/public/v1/events\`) || Path(\`/api/public/v1/events/stream\`))"
+      entryPoints:
+        - web
+      priority: 350
+      middlewares:
+        - tunnel-only
+        - public-sse-rate-limit
+        - security-headers
+      service: acb-service
+
     acb-public-api-router:
       rule: "Host(\`${public_viewer_host}\`) && (PathPrefix(\`/api/public/v1\`) || Path(\`/health\`) || Path(\`/healthz\`) || Path(\`/ready\`) || Path(\`/readyz\`))"
       entryPoints:
@@ -192,6 +203,7 @@ http:
       priority: 300
       middlewares:
         - tunnel-only
+        - public-api-rate-limit
         - security-headers
       service: acb-service
 
