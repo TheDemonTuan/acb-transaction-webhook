@@ -192,6 +192,7 @@ run_drift_check() {
   FAILOVER_REGISTRY_DIR="$tdir/failover/apps.d" \
   FAILOVER_SYSTEMD_DIR="$tdir/systemd" \
   ACB_CONFIG="$tdir/traefik/acb.yml" \
+  TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-$tdir/traefik}" \
   ACTIVE_SLOT_FILE="$tdir/state/gateway-active-slot" \
   FRONTEND_ACTIVE_SLOT_FILE="$tdir/state/frontend-active-slot" \
   bash "$DEPLOY_DIR/verify-runtime-drift.sh" --state "$tdir/state/current-release.json"
@@ -298,6 +299,29 @@ test_extra_failover_registry_drift() {
   assert_eq "1" "$ec" "Extra failover registry file detected as drift"
 }
 
+test_edge_dynamic_config_drift() {
+  local tdir="$TEST_TMP/edge_dynamic_drift"
+  setup_drift_env "$tdir"
+
+  mkdir -p "$tdir/edge/dynamic" "$tdir/traefik"
+  echo "content-a" > "$tdir/edge/dynamic/middlewares.yml"
+  echo "content-a" > "$tdir/traefik/middlewares.yml"
+
+  local ec=0
+  run_drift_check "$tdir" || ec=$?
+  assert_eq "0" "$ec" "Matching edge dynamic config passes drift verification"
+
+  echo "mutated" > "$tdir/traefik/middlewares.yml"
+  ec=0
+  run_drift_check "$tdir" 2>/dev/null || ec=$?
+  assert_eq "1" "$ec" "Mutated edge dynamic config detected as drift"
+
+  rm -f "$tdir/traefik/middlewares.yml"
+  ec=0
+  run_drift_check "$tdir" 2>/dev/null || ec=$?
+  assert_eq "1" "$ec" "Missing edge dynamic config detected as drift"
+}
+
 test_systemd_status_drift() {
   local tdir="$TEST_TMP/systemd_drift"
   setup_drift_env "$tdir"
@@ -323,6 +347,7 @@ test_gateway_ambiguous_route_drift
 test_tx_journal_path_drift
 test_compose_bundle_drift
 test_traefik_template_drift
+test_edge_dynamic_config_drift
 test_extra_failover_registry_drift
 test_systemd_status_drift
 

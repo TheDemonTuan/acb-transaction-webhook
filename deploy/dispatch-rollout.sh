@@ -40,6 +40,7 @@ ROLLOUT_JOURNAL_FILE="${ROLLOUT_JOURNAL_FILE:-$DATA_DIR/rollout-journal.json}"
 RELEASES_DIR="${RELEASES_DIR:-$DATA_DIR/releases}"
 PENDING_GATEWAY_RETIRE_FILE="${PENDING_GATEWAY_RETIRE_FILE:-$DATA_DIR/pending-gateway-retire.env}"
 PENDING_FRONTEND_RETIRE_FILE="${PENDING_FRONTEND_RETIRE_FILE:-$DATA_DIR/pending-frontend-retire.env}"
+PENDING_PLATFORM_ROLLBACK_FILE="${PENDING_PLATFORM_ROLLBACK_FILE:-$DATA_DIR/pending-platform-rollback.env}"
 
 EXPECTED_IDENTITY="${EXPECTED_IDENTITY:-}"
 EXPECTED_ISSUER="${EXPECTED_ISSUER:-https://token.actions.githubusercontent.com}"
@@ -211,6 +212,7 @@ ROLLOUT_JOURNAL_FILE="$DATA_DIR/rollout-journal.json"
 RELEASES_DIR="$DATA_DIR/releases"
 PENDING_GATEWAY_RETIRE_FILE="$DATA_DIR/pending-gateway-retire.env"
 PENDING_FRONTEND_RETIRE_FILE="$DATA_DIR/pending-frontend-retire.env"
+PENDING_PLATFORM_ROLLBACK_FILE="$DATA_DIR/pending-platform-rollback.env"
 
 # CI must wait for soak completion before recording a successful release.
 # Detached soak remains an explicit operator-only mode.
@@ -306,10 +308,48 @@ rollback_frontend_route() {
   return 0
 }
 
+rollback_platform_config() {
+  if [[ -f "$PENDING_PLATFORM_ROLLBACK_FILE" ]]; then
+    local b_dir=""
+    b_dir="$(sed -n 's/^backup_dir=//p' "$PENDING_PLATFORM_ROLLBACK_FILE")"
+    if [[ -n "$b_dir" && -d "$b_dir" ]]; then
+      log_warn "Reverting platform dynamic edge configs from [$b_dir] because the release did not commit."
+      local dyn_dir="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
+      if [[ -f "$b_dir/.manifest" ]]; then
+        while IFS=: read -r fname fstatus; do
+          [[ -n "$fname" ]] || continue
+          if [[ "$fstatus" == "existed" && -f "$b_dir/$fname" ]]; then
+            cp -p "$b_dir/$fname" "$dyn_dir/$fname" 2>/dev/null || true
+          elif [[ "$fstatus" == "absent" ]]; then
+            rm -f "$dyn_dir/$fname" 2>/dev/null || true
+          fi
+        done < "$b_dir/.manifest"
+      else
+        for f in middlewares.yml portfolio.yml bark.yml acb.yml; do
+          if [[ -f "$b_dir/$f" ]]; then
+            cp -p "$b_dir/$f" "$dyn_dir/$f" 2>/dev/null || true
+          fi
+        done
+      fi
+      local cur_slot
+      cur_slot="$(get_active_slot 2>/dev/null || echo blue)"
+      atomic_switch_route "$cur_slot" 2>/dev/null || true
+      ack_route_identity "$cur_slot" "" 15 2>/dev/null || true
+      rm -f "$PENDING_PLATFORM_ROLLBACK_FILE"
+      log_info "Platform dynamic edge configuration rolled back to previous backup."
+    else
+      log_warn "Platform rollback evidence directory is missing or unreadable: $b_dir"
+      rm -f "$PENDING_PLATFORM_ROLLBACK_FILE"
+    fi
+  fi
+  return 0
+}
+
 rollback_pending_routes() {
   local failures=0
   rollback_gateway_route || failures=$((failures + 1))
   rollback_frontend_route || failures=$((failures + 1))
+  rollback_platform_config || failures=$((failures + 1))
   return "$failures"
 }
 
@@ -370,6 +410,9 @@ PY
     rollback_dir="$DEPLOY_DIR"
   fi
 
+  if rollout_step_completed platform || [[ -f "${PENDING_PLATFORM_ROLLBACK_FILE:-}" ]]; then
+    rollback_platform_config || return 1
+  fi
   if rollout_step_completed failover_controller; then
     local fc_script="$rollback_dir/deploy-failover-controller.sh"
     [[ -f "$fc_script" ]] || fc_script="$DEPLOY_DIR/deploy-failover-controller.sh"
@@ -852,6 +895,7 @@ if [[ "$PREVIOUS_ROLLOUT_STATUS" == "INTERRUPTED" || "$PREVIOUS_ROLLOUT_STATUS" 
     r_failures=0
     rollback_gateway_route || r_failures=$((r_failures + 1))
     rollback_frontend_route || r_failures=$((r_failures + 1))
+    rollback_platform_config || r_failures=$((r_failures + 1))
     rollback_completed_components || r_failures=$((r_failures + 1))
     if (( r_failures != 0 )); then
       log_error "Interrupted rollout rollback could not be verified; preserving its journal."
@@ -994,11 +1038,13 @@ if [[ "${PROMOTION_FAILOVER_CONTROLLER:-false}" == "true" ]]; then
   log_info "Transaction 5: Failover Controller completed."
 fi
 
-# Step 6: Platform / Edge Config (if platform only or platform scoped)
-if [[ "${PROMOTION_PLATFORM:-false}" == "true" && "${PROMOTION_GATEWAY:-false}" != "true" ]]; then
+# Step 6: Platform / Edge Config (if platform scoped)
+if [[ "${PROMOTION_PLATFORM:-false}" == "true" ]]; then
   log_info "Executing Transaction 5: Platform / Edge Config Reload..."
   update_rollout_step "platform" "RUNNING"
-  if ! RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="$GIT_SHA" bash "$DEPLOY_DIR/deploy-platform.sh"; then
+  if ! RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="$GIT_SHA" \
+       PENDING_PLATFORM_ROLLBACK_FILE="$PENDING_PLATFORM_ROLLBACK_FILE" \
+       bash "$DEPLOY_DIR/deploy-platform.sh"; then
     log_error "Transaction 5: Platform Config Reload failed."
     update_rollout_step "platform" "STEP_FAILED"
     exit 1
@@ -1256,6 +1302,9 @@ if [[ -f "$PENDING_GATEWAY_RETIRE_FILE" ]]; then
 fi
 if [[ -f "$PENDING_FRONTEND_RETIRE_FILE" ]]; then
   cleanup_pending_frontend "$PENDING_FRONTEND_RETIRE_FILE" || true
+fi
+if [[ -f "$PENDING_PLATFORM_ROLLBACK_FILE" ]]; then
+  rm -f "$PENDING_PLATFORM_ROLLBACK_FILE"
 fi
 
 # Compatibility projection for Compose and older operator tooling. It is not authoritative.

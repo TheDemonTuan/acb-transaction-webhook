@@ -262,6 +262,8 @@ jobs:
         run: |
           bash deploy/tests/test_secrets.sh
           bash deploy/tests/test_aux_deploy.sh
+          bash deploy/tests/test_traefik_switch.sh
+          bash deploy/tests/test_deploy_platform.sh
           bash deploy/tests/test_runtime_policy.sh
           bash deploy/tests/test_runtime_layout.sh
           bash deploy/tests/test_bootstrap_recovery.sh
