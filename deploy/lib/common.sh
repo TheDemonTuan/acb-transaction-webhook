@@ -97,6 +97,18 @@ compose_prod() {
   local ctx_dir="${RELEASE_CONTEXT_DIR:-${RELEASE_DIR:-$SCRIPT_DIR}}"
   local compose_dir="${COMPOSE_DIR:-${COMPOSE_ROOT:-$ctx_dir/compose}}"
   local compose_flags=(--project-directory "$ctx_dir")
+
+  # Ensure secrets directory exists in context directory for bind mounts
+  if [[ ! -d "$ctx_dir/secrets" && -d "$SECRETS_DIR" ]]; then
+    mkdir -p "$ctx_dir/secrets"
+    for sec_file in "$SECRETS_DIR"/*; do
+      if [[ -f "$sec_file" ]]; then
+        ln -sf "$sec_file" "$ctx_dir/secrets/$(basename "$sec_file")" 2>/dev/null || \
+        cp -f "$sec_file" "$ctx_dir/secrets/$(basename "$sec_file")" 2>/dev/null || true
+      fi
+    done
+  fi
+
   if [[ -f "$ENV_FILE" ]]; then
     compose_flags+=(--env-file "$ENV_FILE")
   fi
