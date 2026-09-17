@@ -317,6 +317,23 @@ assert_eq "compose-base: PROMOTION_WORKER is true" "$(printf '%s' "$cbase_out" |
 assert_eq "compose-base: PROMOTION_GATEWAY is true" "$(printf '%s' "$cbase_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
 assert_eq "compose-base: PROMOTION_FRONTEND is true" "$(printf '%s' "$cbase_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
 
+# 23. Deploy workflow only vs orchestrator scripts
+printf "\n23. Testing deploy.yml (platform only) vs dispatch-rollout.sh (orchestrator)...\n"
+printf "M\t.github/workflows/deploy.yml\n" > "$test_tmp/deploy_workflow.txt"
+dw_out="$(run_case "$test_tmp/deploy_workflow.txt" --format env)"
+assert_eq "deploy-workflow: PROMOTION_PLATFORM is true" "$(printf '%s' "$dw_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "deploy-workflow: PROMOTION_GATEWAY is false" "$(printf '%s' "$dw_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "deploy-workflow: PROMOTION_WORKER is false" "$(printf '%s' "$dw_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "deploy-workflow: PROMOTION_FRONTEND is false" "$(printf '%s' "$dw_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "false"
+assert_eq "deploy-workflow: PROMOTION_SCHEMA is false" "$(printf '%s' "$dw_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "false"
+
+printf "M\tdeploy/dispatch-rollout.sh\n" > "$test_tmp/dispatch_rollout.txt"
+dr_out="$(run_case "$test_tmp/dispatch_rollout.txt" --format env)"
+assert_eq "dispatch-rollout: PROMOTION_GATEWAY is true" "$(printf '%s' "$dr_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "dispatch-rollout: PROMOTION_WORKER is true" "$(printf '%s' "$dr_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
+assert_eq "dispatch-rollout: PROMOTION_FRONTEND is true" "$(printf '%s' "$dr_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
+assert_eq "dispatch-rollout: PROMOTION_SCHEMA is true" "$(printf '%s' "$dr_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "true"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"
