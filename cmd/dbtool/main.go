@@ -26,8 +26,11 @@ func main() {
 	gateRenewFlag := flag.Bool("gate-renew", false, "renew deployment mutation gate lease")
 	gateCheckFlag := flag.Bool("gate-check", false, "check mutation gate is open and active auth count is 0")
 	schemaCompatFlag := flag.Bool("schema-compat", false, "verify schema compatibility with minimum version")
+	sessionCheckFlag := flag.Bool("session-check", false, "verify valid durable session exists in database")
 	readonlyFlag := flag.Bool("readonly", false, "open SQLite database in read-only mode")
 
+	connectionIDFlag := flag.String("connection-id", "", "connection ID for session check")
+	generationFlag := flag.Int64("generation", 0, "generation for session check")
 	ownerFlag := flag.String("owner", "", "lease owner identifier")
 	leaseTokenFlag := flag.String("lease-token", "", "lease token for release or renewal")
 	leaseDurationFlag := flag.Duration("lease-duration", 2*time.Minute, "duration of lease")
@@ -59,7 +62,7 @@ func main() {
 	for _, selected := range []bool{
 		*migrateFlag, *checkFlag, *backupToFlag != "", *schemaVersionFlag,
 		*activeAuthCountFlag, *gateStatusFlag, *gateAcquireFlag, *gateReleaseFlag,
-		*gateRenewFlag, *gateCheckFlag, *schemaCompatFlag,
+		*gateRenewFlag, *gateCheckFlag, *schemaCompatFlag, *sessionCheckFlag,
 	} {
 		if selected {
 			actionCount++
@@ -84,7 +87,7 @@ func main() {
 	}
 
 	// For check or backup, open runtime without auto-migration
-	isReadOnly := *readonlyFlag || *checkFlag || *schemaVersionFlag || *activeAuthCountFlag || *gateStatusFlag || *gateCheckFlag || *schemaCompatFlag
+	isReadOnly := *readonlyFlag || *checkFlag || *schemaVersionFlag || *activeAuthCountFlag || *gateStatusFlag || *gateCheckFlag || *schemaCompatFlag || *sessionCheckFlag
 	store, err := storage.OpenWithOptions(ctx, dbPath, storage.OpenOptions{
 		RunMigrations: false,
 		ReadOnly:      isReadOnly,
@@ -251,6 +254,44 @@ func main() {
 		}
 		if !compat {
 			logger.Error("schema is incompatible", "current", report.Version, "required", *minVersionFlag)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *sessionCheckFlag {
+		connID := *connectionIDFlag
+		gen := *generationFlag
+		if connID == "" || gen <= 0 {
+			conn, err := store.Connection(ctx)
+			if err != nil {
+				logger.Error("failed to get active connection for session check", "error", err)
+				os.Exit(1)
+			}
+			connID = conn.ID
+			gen = conn.Generation
+		}
+		if connID == "" || gen <= 0 {
+			logger.Error("no active connection found for session check")
+			os.Exit(1)
+		}
+		session, err := store.Session(ctx, connID, gen)
+		if err != nil {
+			logger.Error("durable session not found", "connection_id", connID, "generation", gen, "error", err)
+			os.Exit(1)
+		}
+		if len(session.Envelope) == 0 {
+			logger.Error("durable session envelope is empty", "connection_id", connID, "generation", gen)
+			os.Exit(1)
+		}
+		report := map[string]any{
+			"status":        "ok",
+			"connection_id": session.ConnectionID,
+			"generation":    session.Generation,
+			"has_envelope":  true,
+		}
+		if err := encoder.Encode(report); err != nil {
+			logger.Error("encode session check report", "error", err)
 			os.Exit(1)
 		}
 		return

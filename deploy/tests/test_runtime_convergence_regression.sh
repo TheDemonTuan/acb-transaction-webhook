@@ -73,6 +73,7 @@ setup_env() {
   cp "$DEPLOY_DIR/verify-manifest.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$tdir/deploy/"
   cp "$DEPLOY_DIR/deploy-gateway.sh" "$tdir/deploy/"
+  cp "$DEPLOY_DIR/deploy-worker.sh" "$tdir/deploy/"
   cp -r "$DEPLOY_DIR/compose/"* "$tdir/deploy/compose/"
   cp "$DEPLOY_DIR/compose.prod.yaml" "$tdir/deploy/"
 
@@ -92,6 +93,7 @@ EOF
   printf 'mock-bark-user\n' > "$tdir/secrets/bark_basic_auth_user"
   printf 'mock-bark-pass\n' > "$tdir/secrets/bark_basic_auth_password"
   chmod 600 "$tdir/secrets/"* 2>/dev/null || true
+  ln -sfn "$tdir/secrets" "$tdir/deploy/secrets"
   chmod 755 "$tdir/deploy/"*.sh
 
   cat <<'EOF' > "$tdir/deploy/.env.production"
@@ -334,6 +336,141 @@ assert_file_contains "$T2/data/trace.log" "FAILOVER_CONTROLLER_INSTALLED" "Failo
 canonical_t2="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["git_sha"])' "$T2/state/current-release.json")"
 assert_eq "$sha_t2" "$canonical_t2" "Pre-soak drift check passed and canonical state committed"
 assert_not_contains "$(cat "$DEPLOY_DIR/deploy-gateway.sh")" "verify-runtime-drift.sh" "deploy-gateway.sh has no premature full-release drift audit"
+
+# ---------------------------------------------------------------
+# TEST 3: resolve_previous_worker_image prioritizes running container over release.env
+# ---------------------------------------------------------------
+printf "\nTEST 3: resolve_previous_worker_image prioritizes running container digest\n"
+T3="$TEST_TMP/t3"
+setup_env "$T3"
+
+running_digest="ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:ad444700068584266d114f74ae3309dc5d4d729239b07036ab59a559c6e2b04b"
+release_env_digest="ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:553e3fe0adcf57c8eaeed05dfc5a8fe2614b3a1c20a4f370d87a8008aa7c4134"
+
+# Set release.env to canonical digest
+sed -i "s|^WORKER_IMAGE_REF=.*|WORKER_IMAGE_REF=$release_env_digest|" "$T3/deploy/.release.env"
+
+# Mock docker to return running container with candidate digest
+cat <<EOF > "$T3/bin/docker"
+#!/usr/bin/env bash
+if [[ "\$1" == "ps" ]]; then
+  echo "acb-worker"
+  exit 0
+fi
+if [[ "\$1" == "inspect" ]]; then
+  if [[ "\$*" == *".Config.Image"* ]]; then
+    echo "$running_digest"
+    exit 0
+  fi
+fi
+exit 0
+EOF
+chmod +x "$T3/bin/docker"
+
+resolved_prev="$(
+  source "$T3/deploy/lib.sh"
+  source <(sed -n '/^resolve_previous_worker_image()/,/^}/p' "$T3/deploy/deploy-worker.sh")
+  resolve_previous_worker_image 2>/dev/null || true
+)"
+
+assert_eq "$running_digest" "$resolved_prev" "resolve_previous_worker_image resolved running container digest instead of release.env"
+
+# ---------------------------------------------------------------
+# TEST 4: Legacy worker safe recovery during canonical recovery
+# ---------------------------------------------------------------
+printf "\nTEST 4: Legacy worker safe recovery when form state is unavailable\n"
+T4="$TEST_TMP/t4"
+setup_env "$T4"
+canonical_img="ghcr.io/test/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# Mock docker to simulate running legacy worker that returns 500 on quiesce
+cat <<'EOF' > "$T4/bin/docker"
+#!/usr/bin/env bash
+if [[ "$1" == "volume" ]]; then
+  printf 'bank-event-gateway_gateway_data\n'
+  exit 0
+fi
+if [[ "$1" == "ps" ]]; then
+  if [[ -f "/tmp/mock_worker_stopped" ]]; then
+    exit 0
+  fi
+  echo "acb-worker"
+  exit 0
+fi
+if [[ "$*" == *"-deploy-capabilities"* ]]; then
+  echo '{"protocol":2,"quiesce":true,"drain":true,"resume":true,"notificationDrain":true,"sessionCheckpoint":true,"journalCheckpoint":true}'
+  exit 0
+fi
+if [[ "$*" == *"-quiesce"* ]]; then
+  echo "500 Internal Server Error: persist session snapshot on quiesce: ACB authenticated form state is unavailable" >&2
+  exit 1
+fi
+if [[ "$*" == *"-ready"* ]]; then
+  exit 0
+fi
+if [[ "$1" == "stop" ]]; then
+  touch "/tmp/mock_worker_stopped"
+  exit 0
+fi
+if [[ "$1" == "inspect" ]]; then
+  if [[ "$*" == *".Config.Image"* ]]; then
+    echo "ghcr.io/test/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    exit 0
+  fi
+  if [[ "$*" == *".State.Running"* ]]; then
+    if [[ -f "/tmp/mock_worker_stopped" ]]; then echo "false"; else echo "true"; fi
+    exit 0
+  fi
+fi
+exit 0
+EOF
+chmod +x "$T4/bin/docker"
+
+# 4a: Canonical recovery + durable session present -> succeeds
+rm -f /tmp/mock_worker_stopped
+export GATE_ACQUIRE_CMD="printf '{\"status\":\"acquired\",\"gateState\":\"LOCKED\",\"leaseToken\":\"tok-123\"}'"
+export BARK_SECRET_PREFLIGHT_CMD="true"
+export ACTIVE_AUTH_CHECK_CMD="echo 0"
+export WORKER_HEALTH_CMD="true"
+export WORKER_UP_CMD="true"
+export WORKER_STOP_CMD="rm -f /tmp/mock_worker_running"
+export DURABLE_SESSION_CHECK_CMD="true"
+
+ec4a=0
+CANONICAL_RECOVERY=1 RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+RUNNING_WORKER_SUPPORTS_HANDOFF=1 \
+GATE_TOKEN="tok-123" \
+  bash "$T4/deploy/deploy-worker.sh" --canonical-recovery "$canonical_img" >"$T4/data/trace4a.log" 2>&1 || ec4a=$?
+
+if [[ "$ec4a" -ne 0 ]]; then
+  cat "$T4/data/trace4a.log" >&2
+fi
+
+assert_eq "0" "$ec4a" "Canonical recovery succeeds under verified durable session fallback"
+assert_file_contains "$T4/data/trace4a.log" "Verified durable session exists" "Safe fallback condition detected and executed"
+
+# 4b: Canonical recovery + durable session MISSING -> fails closed
+rm -f /tmp/mock_worker_stopped
+export DURABLE_SESSION_CHECK_CMD="false"
+ec4b=0
+CANONICAL_RECOVERY=1 RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+RUNNING_WORKER_SUPPORTS_HANDOFF=1 \
+GATE_TOKEN="tok-123" \
+  bash "$T4/deploy/deploy-worker.sh" --canonical-recovery "$canonical_img" >"$T4/data/trace4b.log" 2>&1 || ec4b=$?
+
+assert_eq "1" "$ec4b" "Canonical recovery fails closed when durable session check fails"
+assert_file_contains "$T4/data/trace4b.log" "Legacy worker recovery refused" "Recovery refused when durable session missing"
+
+# 4c: Normal deploy (NOT recovery) -> fails closed
+rm -f /tmp/mock_worker_stopped
+export DURABLE_SESSION_CHECK_CMD="true"
+ec4c=0
+CANONICAL_RECOVERY=0 RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+RUNNING_WORKER_SUPPORTS_HANDOFF=1 \
+GATE_TOKEN="tok-123" \
+  bash "$T4/deploy/deploy-worker.sh" "$canonical_img" >"$T4/data/trace4c.log" 2>&1 || ec4c=$?
+
+assert_eq "1" "$ec4c" "Normal deploy fails closed when worker quiesce fails (no unsafe restart)"
 
 printf "\n========================================================\n"
 printf "Results: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"

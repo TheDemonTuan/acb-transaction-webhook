@@ -128,6 +128,7 @@ ENGINE_ALLOWLIST=(
   "lib/traefik.sh"
   "preflight-vps.sh"
   "preflight-runtime.sh"
+  "deploy-worker.sh"
   "bootstrap-deployment-engine.sh"
 )
 
