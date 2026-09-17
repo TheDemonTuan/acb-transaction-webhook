@@ -137,7 +137,7 @@ populate_candidate_release() {
   cp "$DEPLOY_DIR/lib.sh" "$rel_dir/"
   cp -r "$DEPLOY_DIR/lib/"*.sh "$rel_dir/lib/"
 
-  local hash_deployer hash_verifier hash_layout hash_reconcile hash_state hash_drift hash_relenv hash_edge hash_lib hash_bootstrap hash_dispatch hash_component_map hash_compose
+  local hash_deployer hash_verifier hash_layout hash_reconcile hash_state hash_drift hash_relenv hash_edge hash_lib hash_bootstrap hash_dispatch hash_component_map hash_compose hash_preflight_runtime
   hash_deployer="$(sha256sum "$rel_dir/stable-deployer.sh" | awk '{print $1}')"
   hash_verifier="$(sha256sum "$rel_dir/verify-manifest.sh" | awk '{print $1}')"
   hash_layout="$(sha256sum "$rel_dir/runtime-layout.sh" | awk '{print $1}')"
@@ -151,6 +151,7 @@ populate_candidate_release() {
   hash_dispatch="$(sha256sum "$rel_dir/dispatch-rollout.sh" | awk '{print $1}')"
   hash_component_map="$(sha256sum "$rel_dir/component-map.json" | awk '{print $1}')"
   hash_compose="$(sha256sum "$rel_dir/compose.prod.yaml" | awk '{print $1}')"
+  hash_preflight_runtime="$(sha256sum "$rel_dir/preflight-runtime.sh" | awk '{print $1}')"
 
   # Compute lib/*.sh hashes
   local lib_hashes=()
@@ -197,7 +198,8 @@ populate_candidate_release() {
     "bootstrap-deployment-engine.sh": "$hash_bootstrap",
     "dispatch-rollout.sh": "$hash_dispatch",
     "component-map.json": "$hash_component_map",
-    "compose.prod.yaml": "$hash_compose"
+    "compose.prod.yaml": "$hash_compose",
+    "preflight-runtime.sh": "$hash_preflight_runtime"
   }
 }
 EOF
@@ -324,6 +326,12 @@ test_valid_v2_manifest_bootstrap() {
   assert_file_exists "$tdir/engines/rel-v2-prod/verify-manifest.sh" "Versioned verify-manifest.sh created"
   assert_file_exists "$tdir/engines/rel-v2-prod/reconcile-release.sh" "Versioned reconcile-release.sh created"
   assert_file_exists "$tdir/engines/rel-v2-prod/lib/common.sh" "Versioned lib/common.sh created"
+  assert_file_exists "$tdir/deploy/preflight-runtime.sh" "preflight-runtime.sh updated in deploy"
+  assert_file_exists "$tdir/engines/rel-v2-prod/preflight-runtime.sh" "Versioned preflight-runtime.sh created"
+  local cand_hash rt_hash
+  cand_hash="$(sha256sum "$tdir/releases/rel-v2-prod/preflight-runtime.sh" | awk '{print $1}')"
+  rt_hash="$(sha256sum "$tdir/deploy/preflight-runtime.sh" | awk '{print $1}')"
+  assert_eq "$cand_hash" "$rt_hash" "preflight-runtime.sh in runtime deploy matches candidate hash"
 }
 
 # ==============================================================================
@@ -571,6 +579,23 @@ PY
   assert_file_exists "$tdir/engines/rel-candidate/stable-deployer.sh" "Stable deployer promoted full versioned engine bundle"
 }
 
+# ==============================================================================
+# TEST 9: Workflow requires preflight-runtime.sh (fails closed if missing)
+# ==============================================================================
+test_workflow_requires_preflight_runtime_fail_closed() {
+  printf '\n--- Test 9: Workflow preflight-runtime fail-closed gate ---\n'
+  local tdir="$TEST_TMP/test9_fail_closed"
+  mkdir -p "$tdir/deploy"
+  local ec=0
+  (
+    preflight_runtime="$tdir/deploy/preflight-runtime.sh"
+    [[ -x "$preflight_runtime" ]] || {
+      exit 1
+    }
+  ) || ec=$?
+  assert_eq "1" "$ec" "Missing or non-executable preflight-runtime.sh fails closed"
+}
+
 # Run all test suites
 test_old_schema_migration_deadlock_and_fix
 test_valid_v2_manifest_bootstrap
@@ -580,6 +605,7 @@ test_missing_required_engine_artifact_fails_closed
 test_candidate_symlink_fails_closed
 test_no_unsigned_candidate_execution
 test_stable_deployer_self_healing
+test_workflow_requires_preflight_runtime_fail_closed
 
 echo ""
 echo "============================================================"
