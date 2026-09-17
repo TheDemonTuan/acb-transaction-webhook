@@ -1,9 +1,11 @@
 import React from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { ViewerHeader } from './ViewerHeader';
+import { isPublicViewerHost } from '../../app/runtime-mode';
 
 export const ViewerLayout: React.FC = () => {
   const navigate = useNavigate();
+  const isPublic = isPublicViewerHost();
 
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col font-sans antialiased">
@@ -15,83 +17,85 @@ export const ViewerLayout: React.FC = () => {
 
       {/* Discrete footer navigation */}
       <footer className="py-8 border-t border-stone-200 text-center text-xs text-stone-500 space-y-3">
-        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-[11px] text-stone-400">
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/overview')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Tổng quan
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/connection')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Kết nối ACB
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/transactions')}
-            className="text-emerald-700 font-semibold cursor-pointer"
-          >
-            Giao dịch
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/notifications')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Webhooks
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/activity?tab=polling')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Polling
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/activity?tab=deliveries')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Phân phối
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/system')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Chẩn đoán
-          </button>
-          <span>&middot;</span>
-          <button
-            type="button"
-            role="button"
-            onClick={() => navigate('/admin/activity?tab=audit')}
-            className="hover:text-stone-700 transition cursor-pointer"
-          >
-            Audit
-          </button>
-        </div>
+        {!isPublic && (
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-[11px] text-stone-400">
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/overview')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Tổng quan
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/connection')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Kết nối ACB
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/transactions')}
+              className="text-emerald-700 font-semibold cursor-pointer"
+            >
+              Giao dịch
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/notifications')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Webhooks
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/activity?tab=polling')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Polling
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/activity?tab=deliveries')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Phân phối
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/system')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Chẩn đoán
+            </button>
+            <span>&middot;</span>
+            <button
+              type="button"
+              role="button"
+              onClick={() => navigate('/admin/activity?tab=audit')}
+              className="hover:text-stone-700 transition cursor-pointer"
+            >
+              Audit
+            </button>
+          </div>
+        )}
 
-        <p className="text-[11px] text-stone-400">
-          ACB Transaction Webhook Gateway &copy; 2026. Cập nhật giao dịch tự động theo thời gian thực qua SSE.
-        </p>
+        <div className="text-[11px] text-stone-400">
+          Hệ thống theo dõi giao dịch &bull; Phiên bản tự động hoá &bull; ACB Webhook Gateway
+        </div>
       </footer>
     </div>
   );

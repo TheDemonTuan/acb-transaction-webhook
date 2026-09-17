@@ -19,6 +19,16 @@ const (
 )
 
 func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
+	s.eventsStreamFiltered(w, r, nil)
+}
+
+func (s *Server) publicEventsStream(w http.ResponseWriter, r *http.Request) {
+	s.eventsStreamFiltered(w, r, func(eventType string) bool {
+		return eventType == "bank.transaction.credit"
+	})
+}
+
+func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, allowEvent func(string) bool) {
 	if s.eventHub == nil {
 		http.Error(w, "event stream unavailable", http.StatusServiceUnavailable)
 		return
@@ -97,6 +107,10 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, entry := range entries {
+			if allowEvent != nil && !allowEvent(entry.EventType) {
+				watermark = entry.Seq
+				continue
+			}
 			if err := writeJournalEntry(rc, w, flusher, entry.Epoch, entry.Seq, entry.EventType, entry.Payload); err != nil {
 				return
 			}
@@ -128,7 +142,7 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if hint.Seq > watermark+1 {
-				if !s.drainJournal(ctx, rc, w, flusher, &watermark) {
+				if !s.drainJournal(ctx, rc, w, flusher, &watermark, allowEvent) {
 					return
 				}
 				if hint.Seq <= watermark {
@@ -137,6 +151,10 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 				if hint.Seq != watermark+1 {
 					return
 				}
+			}
+			if allowEvent != nil && !allowEvent(hint.EventType) {
+				watermark = hint.Seq
+				continue
 			}
 			start := time.Now()
 			if err := writeJournalEntry(rc, w, flusher, hint.Epoch, hint.Seq, hint.EventType, hint.Payload); err != nil {
@@ -149,7 +167,7 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, watermark *int64) bool {
+func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, watermark *int64, allowEvent func(string) bool) bool {
 	for {
 		entries, err := s.store.ReadJournalEvents(ctx, realtimeEpoch, *watermark, replayBatch)
 		if err != nil {
@@ -157,6 +175,10 @@ func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, 
 		}
 		for _, entry := range entries {
 			start := time.Now()
+			if allowEvent != nil && !allowEvent(entry.EventType) {
+				*watermark = entry.Seq
+				continue
+			}
 			if err := writeJournalEntry(rc, w, flusher, entry.Epoch, entry.Seq, entry.EventType, entry.Payload); err != nil {
 				return false
 			}

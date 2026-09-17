@@ -257,6 +257,15 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(acb, "acb-frontend-router:") || !strings.Contains(acb, "http://acb-frontend:8080") {
 		t.Errorf("acb.yml must route public frontend paths to the isolated frontend service")
 	}
+	if !strings.Contains(acb, "acb-public-deny-private:") || !strings.Contains(acb, "transactions.tuannguyenviet.site") {
+		t.Errorf("acb.yml must contain higher-priority deny router for public host private paths")
+	}
+	if !strings.Contains(acb, "acb-public-api-router:") || !strings.Contains(acb, "PathPrefix(`/api/public/v1`)") {
+		t.Errorf("acb.yml must route public API paths on transactions host")
+	}
+	if !strings.Contains(acb, "acb-public-frontend-router:") {
+		t.Errorf("acb.yml must route public frontend on transactions host")
+	}
 	if !strings.Contains(acb, "priority: 1000") {
 		t.Errorf("acb.yml deny router must have priority 1000")
 	}

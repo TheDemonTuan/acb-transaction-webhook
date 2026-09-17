@@ -4,10 +4,19 @@ import { Shield, ArrowRight, QrCode } from 'lucide-react';
 import { ViewerRealtimeStatus } from './ViewerRealtimeStatus';
 import { VoiceToggle } from '../../features/voice-announcements/components/VoiceToggle';
 import { ReceivingQRModal } from '../../features/payment-qr/ReceivingQRModal';
+import { ADMIN_ORIGIN, isPublicViewerHost } from '../../app/runtime-mode';
 
 export const ViewerHeader: React.FC = () => {
   const navigate = useNavigate();
   const [isQROpen, setIsQROpen] = useState(false);
+
+  const handleAdminClick = () => {
+    if (isPublicViewerHost()) {
+      window.location.assign(`${ADMIN_ORIGIN}/admin`);
+    } else {
+      navigate('/admin');
+    }
+  };
 
   return (
     <header className="bg-white border-b border-stone-200">
@@ -48,7 +57,7 @@ export const ViewerHeader: React.FC = () => {
           <button
             type="button"
             role="button"
-            onClick={() => navigate('/admin')}
+            onClick={handleAdminClick}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white hover:bg-stone-800 transition shadow-xs cursor-pointer"
           >
             <Shield className="w-3.5 h-3.5 text-emerald-400" />
