@@ -120,7 +120,7 @@ else
         done
       done <<< "$rest"
     fi
-  done < <(git diff --name-status --find-renames "$base_ref" "$head_ref" 2>/dev/null || true)
+  done < <(git -c core.quotepath=false diff --name-status --find-renames "$base_ref" "$head_ref" 2>/dev/null || true)
 fi
 
 # Component flags

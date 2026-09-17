@@ -334,6 +334,26 @@ assert_eq "dispatch-rollout: PROMOTION_WORKER is true" "$(printf '%s' "$dr_out" 
 assert_eq "dispatch-rollout: PROMOTION_FRONTEND is true" "$(printf '%s' "$dr_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
 assert_eq "dispatch-rollout: PROMOTION_SCHEMA is true" "$(printf '%s' "$dr_out" | grep '^PROMOTION_SCHEMA=' | cut -d= -f2)" "true"
 
+# 24. Git diff with a Unicode documentation path
+printf "\n24. Testing Git-real-diff Unicode documentation path...\n"
+unicode_repo="$test_tmp/unicode-repo"
+mkdir -p "$unicode_repo"
+git -C "$unicode_repo" init -q
+git -C "$unicode_repo" config user.name "Promotion Scope Test"
+git -C "$unicode_repo" config user.email "promotion-scope-test@example.invalid"
+printf 'base\n' > "$unicode_repo/README.md"
+git -C "$unicode_repo" add README.md
+git -C "$unicode_repo" commit -q -m base
+unicode_base="$(git -C "$unicode_repo" rev-parse HEAD)"
+printf 'documentation\n' > "$unicode_repo/Kế hoạch triển khai — thử nghiệm.md"
+git -C "$unicode_repo" add .
+git -C "$unicode_repo" commit -q -m unicode-doc
+unicode_head="$(git -C "$unicode_repo" rev-parse HEAD)"
+unicode_out="$(cd "$unicode_repo" && COMPONENT_MAP_FILE="$script_dir/../deploy/component-map.json" bash "$classifier" --base "$unicode_base" --head "$unicode_head" --format env)"
+assert_eq "unicode Git diff: PROMOTION_DOC_ONLY is true" "$(printf '%s' "$unicode_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "true"
+assert_eq "unicode Git diff: PROMOTION_GATEWAY is false" "$(printf '%s' "$unicode_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "false"
+assert_eq "unicode Git diff: PROMOTION_SCOPE is empty" "$(printf '%s' "$unicode_out" | grep '^PROMOTION_SCOPE=' | cut -d= -f2)" ""
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"
