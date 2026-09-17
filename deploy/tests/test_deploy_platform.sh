@@ -125,11 +125,7 @@ rm -f "$t4/dynamic/portfolio.yml"
 # Mock edge probe to fail on route identity ACK to trigger rollback after files are written
 cat <<'EOF' > "$t4/edge-probe.sh"
 #!/usr/bin/env bash
-if [[ "$*" == *"--expected-slot"* ]]; then
-  exit 1
-fi
-printf "HTTP Status: 200 (expected: 200)\n"
-exit 0
+exit 1
 EOF
 chmod +x "$t4/edge-probe.sh"
 code=0
@@ -163,7 +159,9 @@ fi
 
 # Simulate parent orchestrator rollback
 (
+  # shellcheck source=deploy/lib.sh
   source "$DEPLOY_DIR/lib.sh"
+  # shellcheck disable=SC1090
   source <(sed -n '/rollback_platform_config() {/,/^}/p' "$DEPLOY_DIR/dispatch-rollout.sh")
   rollback_platform_config
 )
@@ -182,12 +180,58 @@ fi
 printf "\n=== TEST 6: Gateway + Platform composition executes deploy-platform.sh ===\n"
 # Verify dispatch-rollout.sh Step 6 condition evaluates to true when PROMOTION_PLATFORM=true and PROMOTION_GATEWAY=true
 step6_run=0
-PROMOTION_PLATFORM="true"
-PROMOTION_GATEWAY="true"
+export PROMOTION_PLATFORM="true"
+export PROMOTION_GATEWAY="true"
 if [[ "${PROMOTION_PLATFORM:-false}" == "true" ]]; then
   step6_run=1
 fi
 assert_eq "1" "$step6_run" "Step 6 platform deploy executes when both gateway and platform are in scope"
+
+printf "\n=== TEST 7: Platform rollback fails closed and preserves evidence on error ===\n"
+t7="$TEST_TMP/t7"
+setup_mock_env "$t7"
+export PENDING_PLATFORM_ROLLBACK_FILE="$t7/pending-platform-rollback.env"
+RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="testcommit" bash "$DEPLOY_DIR/deploy-platform.sh"
+
+# Make dynamic dir unwritable to induce failure during rollback
+b_dir="$(sed -n 's/^backup_dir=//p' "$PENDING_PLATFORM_ROLLBACK_FILE")"
+# Corrupt backup directory path in pending file
+printf 'backup_dir=%s/nonexistent_backup\nrelease_key=testcommit\n' "$t7" > "$PENDING_PLATFORM_ROLLBACK_FILE"
+
+rb_code=0
+(
+  # shellcheck source=deploy/lib.sh
+  source "$DEPLOY_DIR/lib.sh"
+  # shellcheck disable=SC1090
+  source <(sed -n '/rollback_platform_config() {/,/^}/p' "$DEPLOY_DIR/dispatch-rollout.sh")
+  rollback_platform_config
+) || rb_code=$?
+assert_eq "0" "$rb_code" "Missing backup directory cleanly cleans up pending evidence without crashing"
+
+# Test real failure preserves evidence
+RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="testcommit" bash "$DEPLOY_DIR/deploy-platform.sh"
+b_dir="$(sed -n 's/^backup_dir=//p' "$PENDING_PLATFORM_ROLLBACK_FILE")"
+# Make dynamic dir unwritable
+chmod 500 "$t7/dynamic" 2>/dev/null || true
+if ! touch "$t7/dynamic/.test_probe" 2>/dev/null; then
+  rb_fail_code=0
+  (
+    # shellcheck source=deploy/lib.sh
+    source "$DEPLOY_DIR/lib.sh"
+    # shellcheck disable=SC1090
+    source <(sed -n '/rollback_platform_config() {/,/^}/p' "$DEPLOY_DIR/dispatch-rollout.sh")
+    rollback_platform_config
+  ) || rb_fail_code=$?
+  assert_eq "1" "$rb_fail_code" "Platform rollback returns 1 when write fails"
+  if [[ -f "$PENDING_PLATFORM_ROLLBACK_FILE" ]]; then
+    printf 'PASS: Pending evidence preserved on rollback failure\n'
+    TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  else
+    printf 'FAIL: Pending evidence removed on rollback failure\n' >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+  fi
+  chmod 700 "$t7/dynamic" 2>/dev/null || true
+fi
 
 printf "\n======================================================\n"
 printf "Platform Deploy Tests: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"
