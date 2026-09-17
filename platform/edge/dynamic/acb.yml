@@ -36,7 +36,7 @@ http:
 
     # Public API router with rate and inflight limiting
     acb-public-api-router:
-      rule: "Host(`transactions.tuannguyenviet.site`) && PathPrefix(`/api/public/v1`)"
+      rule: "Host(`transactions.tuannguyenviet.site`) && (Path(`/api/public/v1`) || PathPrefix(`/api/public/v1/`))"
       entryPoints:
         - web
       priority: 1100
@@ -98,7 +98,7 @@ http:
         responseForwarding:
           flushInterval: "100ms"
         servers:
-          - url: "http://acb-web:8090"
+          - url: "http://acb-web-blue:8090"
         healthCheck:
           path: "/readyz"
           interval: "5s"
