@@ -24,6 +24,24 @@ http:
           - "127.0.0.1/32"
         rejectStatusCode: 403
 
+    # Public API rate limiter: 10 req/s with burst of 20 per client IP via CF-Connecting-IP
+    public-api-rate-limit:
+      rateLimit:
+        average: 10
+        period: 1s
+        burst: 20
+        sourceCriterion:
+          requestHeaderName: CF-Connecting-IP
+
+    # Public SSE reconnect limiter: 2 connection attempts/s with burst of 5 per client IP
+    public-sse-rate-limit:
+      rateLimit:
+        average: 2
+        period: 1s
+        burst: 5
+        sourceCriterion:
+          requestHeaderName: CF-Connecting-IP
+
     # Fix previous Caddy bug: Allow GET, POST, PUT, DELETE, HEAD, OPTIONS
     # (Enabling voice settings PUT, notification channels PUT, and QR delete)
     acb-method-filter:

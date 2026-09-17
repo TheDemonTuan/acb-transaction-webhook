@@ -236,6 +236,18 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(mw, "deny-internal:") || !strings.Contains(mw, "127.0.0.1/32") {
 		t.Errorf("middlewares.yml must contain deny-internal middleware with 127.0.0.1/32")
 	}
+	if !strings.Contains(mw, "public-api-rate-limit:") || !strings.Contains(mw, "requestHeaderName: CF-Connecting-IP") {
+		t.Errorf("middlewares.yml must contain public-api-rate-limit middleware configured with CF-Connecting-IP")
+	}
+	if !strings.Contains(mw, "average: 10") || !strings.Contains(mw, "burst: 20") {
+		t.Errorf("middlewares.yml public-api-rate-limit must configure average: 10 and burst: 20")
+	}
+	if !strings.Contains(mw, "public-sse-rate-limit:") {
+		t.Errorf("middlewares.yml must contain public-sse-rate-limit middleware")
+	}
+	if !strings.Contains(mw, "average: 2") || !strings.Contains(mw, "burst: 5") {
+		t.Errorf("middlewares.yml public-sse-rate-limit must configure average: 2 and burst: 5")
+	}
 	if !strings.Contains(mw, "Content-Security-Policy") {
 		t.Errorf("middlewares.yml must apply CSP at the edge for the standalone frontend")
 	}
@@ -260,8 +272,20 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(acb, "acb-public-deny-private:") || !strings.Contains(acb, "transactions.tuannguyenviet.site") {
 		t.Errorf("acb.yml must contain higher-priority deny router for public host private paths")
 	}
+	if !strings.Contains(acb, "acb-public-sse-router:") || !strings.Contains(acb, "Path(`/api/public/v1/events`)") {
+		t.Errorf("acb.yml must contain higher-priority SSE router for public events")
+	}
+	if !strings.Contains(acb, "priority: 350") {
+		t.Errorf("acb.yml SSE router must have priority 350")
+	}
+	if !strings.Contains(acb, "public-sse-rate-limit") {
+		t.Errorf("acb.yml acb-public-sse-router must apply public-sse-rate-limit middleware")
+	}
 	if !strings.Contains(acb, "acb-public-api-router:") || !strings.Contains(acb, "PathPrefix(`/api/public/v1`)") {
 		t.Errorf("acb.yml must route public API paths on transactions host")
+	}
+	if !strings.Contains(acb, "public-api-rate-limit") {
+		t.Errorf("acb.yml acb-public-api-router must apply public-api-rate-limit middleware")
 	}
 	if !strings.Contains(acb, "acb-public-frontend-router:") {
 		t.Errorf("acb.yml must route public frontend on transactions host")
