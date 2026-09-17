@@ -131,13 +131,14 @@ populate_candidate_release() {
   cp "$DEPLOY_DIR/dispatch-rollout.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/verify-release-baseline.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/preflight-runtime.sh" "$rel_dir/"
+  cp "$DEPLOY_DIR/deploy-worker.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/stage-immutable-release.sh" "$rel_dir/"
   cp "$DEPLOY_DIR/component-map.json" "$rel_dir/"
   cp "$DEPLOY_DIR/compose.prod.yaml" "$rel_dir/"
   cp "$DEPLOY_DIR/lib.sh" "$rel_dir/"
   cp -r "$DEPLOY_DIR/lib/"*.sh "$rel_dir/lib/"
 
-  local hash_deployer hash_verifier hash_layout hash_reconcile hash_state hash_drift hash_relenv hash_edge hash_lib hash_bootstrap hash_dispatch hash_component_map hash_compose hash_preflight_runtime
+  local hash_deployer hash_verifier hash_layout hash_reconcile hash_state hash_drift hash_relenv hash_edge hash_lib hash_bootstrap hash_dispatch hash_component_map hash_compose hash_preflight_runtime hash_worker
   hash_deployer="$(sha256sum "$rel_dir/stable-deployer.sh" | awk '{print $1}')"
   hash_verifier="$(sha256sum "$rel_dir/verify-manifest.sh" | awk '{print $1}')"
   hash_layout="$(sha256sum "$rel_dir/runtime-layout.sh" | awk '{print $1}')"
@@ -152,6 +153,7 @@ populate_candidate_release() {
   hash_component_map="$(sha256sum "$rel_dir/component-map.json" | awk '{print $1}')"
   hash_compose="$(sha256sum "$rel_dir/compose.prod.yaml" | awk '{print $1}')"
   hash_preflight_runtime="$(sha256sum "$rel_dir/preflight-runtime.sh" | awk '{print $1}')"
+  hash_worker="$(sha256sum "$rel_dir/deploy-worker.sh" | awk '{print $1}')"
 
   # Compute lib/*.sh hashes
   local lib_hashes=()
@@ -199,7 +201,8 @@ populate_candidate_release() {
     "dispatch-rollout.sh": "$hash_dispatch",
     "component-map.json": "$hash_component_map",
     "compose.prod.yaml": "$hash_compose",
-    "preflight-runtime.sh": "$hash_preflight_runtime"
+    "preflight-runtime.sh": "$hash_preflight_runtime",
+    "deploy-worker.sh": "$hash_worker"
   }
 }
 EOF
@@ -328,6 +331,8 @@ test_valid_v2_manifest_bootstrap() {
   assert_file_exists "$tdir/engines/rel-v2-prod/lib/common.sh" "Versioned lib/common.sh created"
   assert_file_exists "$tdir/deploy/preflight-runtime.sh" "preflight-runtime.sh updated in deploy"
   assert_file_exists "$tdir/engines/rel-v2-prod/preflight-runtime.sh" "Versioned preflight-runtime.sh created"
+  assert_file_exists "$tdir/deploy/deploy-worker.sh" "deploy-worker.sh updated in deploy"
+  assert_file_exists "$tdir/engines/rel-v2-prod/deploy-worker.sh" "Versioned deploy-worker.sh created"
   local cand_hash rt_hash
   cand_hash="$(sha256sum "$tdir/releases/rel-v2-prod/preflight-runtime.sh" | awk '{print $1}')"
   rt_hash="$(sha256sum "$tdir/deploy/preflight-runtime.sh" | awk '{print $1}')"

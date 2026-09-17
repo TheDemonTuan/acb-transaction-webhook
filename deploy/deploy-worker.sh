@@ -16,14 +16,34 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 require_release_orchestrator
 
-CANDIDATE_WORKER_IMAGE="${1:-${WORKER_IMAGE_REF:-}}"
+CANONICAL_RECOVERY="${CANONICAL_RECOVERY:-0}"
+CANDIDATE_WORKER_IMAGE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --canonical-recovery)
+      CANONICAL_RECOVERY=1
+      shift
+      ;;
+    *)
+      if [[ -z "$CANDIDATE_WORKER_IMAGE" ]]; then
+        CANDIDATE_WORKER_IMAGE="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$CANDIDATE_WORKER_IMAGE" ]]; then
+  CANDIDATE_WORKER_IMAGE="${WORKER_IMAGE_REF:-}"
+fi
 
 if [[ -z "$CANDIDATE_WORKER_IMAGE" ]]; then
   CANDIDATE_WORKER_IMAGE="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
 fi
 
 if [[ -z "$CANDIDATE_WORKER_IMAGE" ]]; then
-  log_error "Usage: $0 <candidate-worker-image-digest>"
+  log_error "Usage: $0 [--canonical-recovery] <candidate-worker-image-digest>"
   exit 1
 fi
 
@@ -41,14 +61,7 @@ OLD_WORKER_STOPPED=0
 
 # Resolve previous running worker image digest
 resolve_previous_worker_image() {
-  local prev=""
-  prev="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
-  if [[ -n "$prev" ]] && validate_digest "$prev" "worker" 2>/dev/null; then
-    printf '%s\n' "$prev"
-    return 0
-  fi
-
-  # Fallback to inspecting running worker container if release.env missing or unpinned
+  # 1. Running worker container is authoritative for previous runtime image
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
     local cfg_img
     cfg_img="$(docker inspect --format '{{.Config.Image}}' acb-worker 2>/dev/null || true)"
@@ -69,6 +82,14 @@ resolve_previous_worker_image() {
         fi
       done <<< "$repo_digests"
     fi
+  fi
+
+  # 2. Fallback to release.env only if no running worker container
+  local prev=""
+  prev="$(get_release_env WORKER_IMAGE_REF 2>/dev/null || true)"
+  if [[ -n "$prev" ]] && validate_digest "$prev" "worker" 2>/dev/null; then
+    printf '%s\n' "$prev"
+    return 0
   fi
 
   return 1
@@ -264,21 +285,22 @@ quiesce_old_worker() {
   fi
 
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^acb-worker$'; then
+    local exec_resp=""
     local q_resp=""
     local exec_ok=0
-    if q_resp="$(docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -quiesce 2>&1)"; then
-      if verify_quiesced_json "$q_resp"; then
+    if exec_resp="$(docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -quiesce 2>&1)"; then
+      if verify_quiesced_json "$exec_resp"; then
         exec_ok=1
       fi
     fi
 
     if [[ "$exec_ok" -eq 1 ]]; then
       OLD_WORKER_QUIESCED=1
-      log_info "Old worker quiesced via container exec: ${q_resp}"
+      log_info "Old worker quiesced via container exec: ${exec_resp}"
       return 0
     fi
 
-    log_info "Container exec quiesce did not succeed (${q_resp}); trying candidate image RPC client..."
+    log_info "Container exec quiesce did not succeed (${exec_resp}); trying candidate image RPC client..."
 
     local rpc_port="8190"
     if [[ -n "${WORKER_PORT:-}" ]]; then
@@ -300,6 +322,35 @@ quiesce_old_worker() {
         log_error "Running worker does not support the required safe quiesce protocol."
       else
         log_error "Candidate container quiesce RPC failed: ${q_resp}"
+      fi
+    fi
+
+    # Compatibility fallback ONLY during canonical recovery:
+    # If the running worker is from a pre-fix commit and failed quiesce specifically because
+    # "ACB authenticated form state is unavailable" (i.e. candidate had not established live snapshot),
+    # verify that:
+    # 1) active customer authentication count is 0
+    # 2) mutation gate is acquired
+    # 3) durable current-generation session exists in storage
+    # If so, the durable session is safe and can be restored by the canonical worker.
+    local all_quiesce_err="${exec_resp:-} ${q_resp:-}"
+    if [[ "${CANONICAL_RECOVERY:-0}" -eq 1 || -n "${RECOVERY_CONTEXT:-}" || "${RECOVERY_ONLY:-0}" -eq 1 ]]; then
+      if [[ "$all_quiesce_err" == *"ACB authenticated form state is unavailable"* ]]; then
+        log_warn "Running worker quiesce failed with legacy live form state unavailability: ${all_quiesce_err}"
+        log_info "Evaluating legacy worker safe recovery conditions..."
+        local auth_ok=0
+        if check_active_auth_gate; then auth_ok=1; fi
+        if [[ "$auth_ok" -eq 1 ]]; then
+          if check_durable_session "$DATA_VOLUME_NAME" "${DBTOOL_IMAGE_REF:-}"; then
+            log_warn "Verified durable session exists and active auth is 0. Proceeding with controlled stop of legacy worker."
+            OLD_WORKER_QUIESCED=1
+            return 0
+          else
+            log_error "Legacy worker recovery refused: durable current-generation session not found in storage."
+          fi
+        else
+          log_error "Legacy worker recovery refused: active customer authentication in progress."
+        fi
       fi
     fi
 

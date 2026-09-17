@@ -493,16 +493,16 @@ PY
     if [[ "$cur_w_running" != "true" || ( -n "$canonical_worker_img" && "$cur_w_img" != "$canonical_worker_img" ) ]]; then
       log_info "Restoring worker to canonical image $canonical_worker_img..."
       local worker_deployer=""
-      if [[ -f "$target_release/deploy-worker.sh" ]]; then
-        worker_deployer="$target_release/deploy-worker.sh"
-      elif [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]; then
+      if [[ -f "$SCRIPT_DIR/deploy-worker.sh" ]]; then
         worker_deployer="$SCRIPT_DIR/deploy-worker.sh"
       elif [[ -f "${DEPLOY_DIR:-}/deploy-worker.sh" ]]; then
         worker_deployer="${DEPLOY_DIR:-}/deploy-worker.sh"
+      elif [[ -f "$target_release/deploy-worker.sh" ]]; then
+        worker_deployer="$target_release/deploy-worker.sh"
       fi
 
       if [[ -n "$worker_deployer" ]]; then
-        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 \
+        RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 CANONICAL_RECOVERY=1 \
           RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
           SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
           bash "$worker_deployer" "$canonical_worker_img" || {

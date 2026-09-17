@@ -100,6 +100,76 @@ check_active_auth_gate() {
   return 0
 }
 
+check_durable_session() {
+  local db_volume="${1:-$DATA_VOLUME_NAME}"
+  local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-$(get_release_env DBTOOL_IMAGE_REF 2>/dev/null || true)}}"
+
+  if [[ -n "${DURABLE_SESSION_CHECK_CMD:-}" ]]; then
+    eval "$DURABLE_SESSION_CHECK_CMD"
+    return $?
+  fi
+
+  local out=""
+  if command -v docker >/dev/null 2>&1 && docker volume inspect "$db_volume" >/dev/null 2>&1 && [[ -n "$dbtool_img" ]]; then
+    if ! validate_digest "$dbtool_img" "dbtool" 2>/dev/null; then
+      log_error "check_durable_session: invalid dbtool digest: $dbtool_img"
+      return 1
+    fi
+    if ! out="$(
+      docker run --rm \
+        --read-only \
+        --network none \
+        --user 1000:1000 \
+        -e DATABASE_PATH=/data/gateway.db \
+        -v "${db_volume}:/data:ro" \
+        "$dbtool_img" \
+        -path /data/gateway.db \
+        -readonly \
+        -session-check 2>&1
+    )"; then
+      log_error "check_durable_session: docker dbtool execution failed: ${out}"
+      return 1
+    fi
+    if [[ "$out" =~ \"status\":[[:space:]]*\"ok\" ]]; then
+      log_info "Durable session verified in database: ${out}"
+      return 0
+    fi
+    log_error "check_durable_session: dbtool did not find valid durable session: ${out}"
+    return 1
+  elif command -v dbtool >/dev/null 2>&1; then
+    local db_file="${DEFAULT_GATEWAY_DB:-${DATA_DIR:-./data}/gateway.db}"
+    if [[ -f "$db_file" ]]; then
+      if out="$(dbtool -path "$db_file" -readonly -session-check 2>&1)"; then
+        if [[ "$out" =~ \"status\":[[:space:]]*\"ok\" ]]; then
+          log_info "Durable session verified in database: ${out}"
+          return 0
+        fi
+      fi
+      log_error "check_durable_session: local dbtool failed: ${out}"
+      return 1
+    fi
+  elif command -v sqlite3 >/dev/null 2>&1; then
+    local db_file="${DEFAULT_GATEWAY_DB:-${DATA_DIR:-./data}/gateway.db}"
+    if [[ -r "$db_file" ]]; then
+      local query="SELECT count(*) FROM sessions s JOIN connections c ON s.connection_id = c.id AND s.generation = c.generation WHERE c.state = 'MONITORING' AND length(s.envelope) > 0;"
+      local sql_out
+      if sql_out="$(sqlite3 "file:${db_file}?mode=ro" "$query" 2>&1)"; then
+        local s_count
+        s_count="$(printf '%s' "$sql_out" | tr -d ' \r\n[:space:]')"
+        if [[ "$s_count" =~ ^[0-9]+$ && "$s_count" -gt 0 ]]; then
+          log_info "Durable session verified in SQLite (count=${s_count})"
+          return 0
+        fi
+      fi
+      log_error "check_durable_session: SQLite query found no durable session"
+      return 1
+    fi
+  fi
+
+  log_error "check_durable_session: unable to verify durable session. Fail closed."
+  return 1
+}
+
 acquire_mutation_gate() {
   local db_volume="${1:-$DATA_VOLUME_NAME}"
   local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-}}"
