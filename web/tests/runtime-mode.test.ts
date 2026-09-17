@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { isPublicViewerHost, PUBLIC_VIEWER_HOST, ADMIN_ORIGIN } from '../src/app/runtime-mode';
 import { publicRoutes, adminRoutes } from '../src/app/router';
 import { api, apiAudio } from '../src/api';
+import { buildSingleTransactionPhrase } from '../src/features/voice-announcements/voice-copy';
 
 describe('Runtime Mode & Public Isolation', () => {
   let prevWindow: any;
@@ -81,6 +82,12 @@ describe('Runtime Mode & Public Isolation', () => {
       const url = mockFetch.mock.calls[0][0];
       expect(url).toBe('/api/public/v1/transactions');
       expect(res.items).toEqual([]);
+    });
+
+    it('builds proper speech phrase for public viewer without calling audio replay API', () => {
+      const phrase = buildSingleTransactionPhrase('50000', 'ung ho quy', { includeDescription: true });
+      expect(phrase).toContain('năm mươi nghìn đồng');
+      expect(phrase).toContain('ung ho quy');
     });
   });
 });

@@ -96,6 +96,7 @@ services:
         ipv4_address: 172.31.250.4
       edge-management:
       edge-acb:
+      edge-portfolio:
     depends_on:
       - socket-proxy
     logging:
@@ -139,3 +140,6 @@ networks:
   edge-acb:
     external: true
     name: edge-acb
+  edge-portfolio:
+    external: true
+    name: edge-portfolio

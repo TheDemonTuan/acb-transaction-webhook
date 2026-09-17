@@ -205,6 +205,21 @@ describe('api transport and centralized CSRF', () => {
     }
   );
 
+  it('translates 429 into friendly Vietnamese message', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      return new Response(JSON.stringify({ error: 'Too Many Requests' }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await expect(api('/test-rate-limit')).rejects.toMatchObject({
+      status: 429,
+      message: 'Có quá nhiều yêu cầu cùng lúc. Vui lòng đợi một chút rồi thử lại.',
+    });
+  });
+
   it('preserves and propagates AbortSignal', async () => {
     const controller = new AbortController();
     controller.abort();

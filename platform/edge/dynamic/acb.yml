@@ -10,37 +10,41 @@ http:
         - deny-internal
       service: acb-service
 
-    # Deny private and admin routes from public hostname
+    # Deny all private/admin namespaces and health endpoints on public viewer hostname
     acb-public-deny-private:
-      rule: "Host(`transactions.tuannguyenviet.site`) && (PathPrefix(`/api/v1`) || PathPrefix(`/admin`))"
+      rule: "Host(`transactions.tuannguyenviet.site`) && (PathPrefix(`/api`) || PathPrefix(`/internal`) || PathPrefix(`/admin`) || Path(`/health`) || Path(`/healthz`) || Path(`/ready`) || Path(`/readyz`))"
       entryPoints:
         - web
-      priority: 900
+      priority: 1000
       middlewares:
         - deny-internal
       service: acb-service
 
-    # Public SSE router with reconnection rate limiting on transactions hostname
+    # Public SSE router with reconnection and inflight limiting
     acb-public-sse-router:
       rule: "Host(`transactions.tuannguyenviet.site`) && (Path(`/api/public/v1/events`) || Path(`/api/public/v1/events/stream`))"
       entryPoints:
         - web
-      priority: 350
+      priority: 1200
       middlewares:
         - tunnel-only
         - public-sse-rate-limit
+        - public-sse-inflight-ip
+        - public-sse-inflight-global
         - security-headers
       service: acb-service
 
-    # Public API router on transactions hostname
+    # Public API router with rate and inflight limiting
     acb-public-api-router:
-      rule: "Host(`transactions.tuannguyenviet.site`) && (PathPrefix(`/api/public/v1`) || Path(`/health`) || Path(`/healthz`) || Path(`/ready`) || Path(`/readyz`))"
+      rule: "Host(`transactions.tuannguyenviet.site`) && PathPrefix(`/api/public/v1`)"
       entryPoints:
         - web
-      priority: 300
+      priority: 1100
       middlewares:
         - tunnel-only
         - public-api-rate-limit
+        - public-api-inflight-ip
+        - public-api-inflight-global
         - security-headers
       service: acb-service
 
@@ -66,7 +70,7 @@ http:
         - security-headers
       service: acb-frontend-service
 
-    # Admin frontend router on bank hostname
+    # Frontend router on bank hostname
     acb-frontend-router:
       rule: "Host(`bank.tuannguyenviet.site`)"
       entryPoints:
@@ -94,7 +98,7 @@ http:
         responseForwarding:
           flushInterval: "100ms"
         servers:
-          - url: "http://acb-web-blue:8090"
+          - url: "http://acb-web:8090"
         healthCheck:
           path: "/readyz"
           interval: "5s"

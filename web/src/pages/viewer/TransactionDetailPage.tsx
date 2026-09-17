@@ -19,12 +19,13 @@ import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { useVoiceAnnouncements } from '../../features/voice-announcements/VoiceAnnouncementProvider';
 import { buildSingleTransactionPhrase } from '../../features/voice-announcements/voice-copy';
+import { isPublicViewerHost } from '../../app/runtime-mode';
 
 export const TransactionDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
-  const { replayVoice } = useVoiceAnnouncements();
+  const { replayVoice, testVoice, settings } = useVoiceAnnouncements();
 
   const { data: transaction, isLoading } = useQuery({
     queryKey: queryKeys.transactionDetail(id || ''),
@@ -83,9 +84,22 @@ export const TransactionDetailPage: React.FC = () => {
   };
 
   const handleSpeak = () => {
-    if (isCredit && transaction.id) {
-      replayVoice(transaction.id);
+    if (!isCredit || !transaction.id) return;
+
+    if (isPublicViewerHost()) {
+      const phrase = buildSingleTransactionPhrase(
+        String(transaction.credit),
+        transaction.description || '',
+        {
+          includeDescription: settings.includeDescription,
+        },
+      );
+
+      void testVoice(phrase);
+      return;
     }
+
+    void replayVoice(transaction.id);
   };
 
   return (

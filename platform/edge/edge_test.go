@@ -227,8 +227,11 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	}
 	mw := string(mwContent)
 
-	if !strings.Contains(mw, "172.31.250.2/32") {
+	if !strings.Contains(mw, `- "172.31.250.2/32"`) {
 		t.Errorf("middlewares.yml tunnel-only must restrict sourceRange strictly to 172.31.250.2/32")
+	}
+	if strings.Contains(mw, "172.31.250.3/32") {
+		t.Errorf("middlewares.yml tunnel-only must not trust legacy edge-caddy 172.31.250.3/32")
 	}
 	if strings.Contains(mw, "172.31.250.0/28") {
 		t.Errorf("middlewares.yml tunnel-only must not allow broad subnet 172.31.250.0/28")
@@ -242,11 +245,23 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(mw, "average: 10") || !strings.Contains(mw, "burst: 20") {
 		t.Errorf("middlewares.yml public-api-rate-limit must configure average: 10 and burst: 20")
 	}
+	if !strings.Contains(mw, "public-api-inflight-ip:") || !strings.Contains(mw, "amount: 32") {
+		t.Errorf("middlewares.yml must configure public-api-inflight-ip with amount 32")
+	}
+	if !strings.Contains(mw, "public-api-inflight-global:") || !strings.Contains(mw, "amount: 128") || !strings.Contains(mw, "requestHost: true") {
+		t.Errorf("middlewares.yml must configure public-api-inflight-global with amount 128 and requestHost: true")
+	}
 	if !strings.Contains(mw, "public-sse-rate-limit:") {
 		t.Errorf("middlewares.yml must contain public-sse-rate-limit middleware")
 	}
 	if !strings.Contains(mw, "average: 2") || !strings.Contains(mw, "burst: 5") {
 		t.Errorf("middlewares.yml public-sse-rate-limit must configure average: 2 and burst: 5")
+	}
+	if !strings.Contains(mw, "public-sse-inflight-ip:") || !strings.Contains(mw, "amount: 12") {
+		t.Errorf("middlewares.yml must configure public-sse-inflight-ip with amount 12")
+	}
+	if !strings.Contains(mw, "public-sse-inflight-global:") {
+		t.Errorf("middlewares.yml must configure public-sse-inflight-global with amount 128")
 	}
 	if !strings.Contains(mw, "Content-Security-Policy") {
 		t.Errorf("middlewares.yml must apply CSP at the edge for the standalone frontend")
@@ -275,17 +290,24 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	if !strings.Contains(acb, "acb-public-sse-router:") || !strings.Contains(acb, "Path(`/api/public/v1/events`)") {
 		t.Errorf("acb.yml must contain higher-priority SSE router for public events")
 	}
-	if !strings.Contains(acb, "priority: 350") {
-		t.Errorf("acb.yml SSE router must have priority 350")
+	if !strings.Contains(acb, "priority: 1200") {
+		t.Errorf("acb.yml SSE router must have priority 1200")
 	}
-	if !strings.Contains(acb, "public-sse-rate-limit") {
-		t.Errorf("acb.yml acb-public-sse-router must apply public-sse-rate-limit middleware")
+	if !strings.Contains(acb, "public-sse-rate-limit") || !strings.Contains(acb, "public-sse-inflight-ip") || !strings.Contains(acb, "public-sse-inflight-global") {
+		t.Errorf("acb.yml acb-public-sse-router must apply rate and inflight limit middlewares")
 	}
 	if !strings.Contains(acb, "acb-public-api-router:") || !strings.Contains(acb, "PathPrefix(`/api/public/v1`)") {
 		t.Errorf("acb.yml must route public API paths on transactions host")
 	}
-	if !strings.Contains(acb, "public-api-rate-limit") {
-		t.Errorf("acb.yml acb-public-api-router must apply public-api-rate-limit middleware")
+	if !strings.Contains(acb, "priority: 1100") {
+		t.Errorf("acb.yml public API router must have priority 1100")
+	}
+	if !strings.Contains(acb, "public-api-rate-limit") || !strings.Contains(acb, "public-api-inflight-ip") || !strings.Contains(acb, "public-api-inflight-global") {
+		t.Errorf("acb.yml acb-public-api-router must apply rate and inflight limit middlewares")
+	}
+	// Public API rule must not contain healthz/readyz
+	if strings.Contains(acb, "acb-public-api-router:\n      rule: >-\n        Host(`transactions.tuannguyenviet.site`) &&\n        (PathPrefix(`/api/public/v1`) || Path(`/healthz`)") {
+		t.Errorf("acb.yml public API router must not expose health endpoints")
 	}
 	if !strings.Contains(acb, "acb-public-frontend-router:") {
 		t.Errorf("acb.yml must route public frontend on transactions host")

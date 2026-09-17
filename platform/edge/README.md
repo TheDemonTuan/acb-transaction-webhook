@@ -53,7 +53,23 @@ Traefik uses the Docker Provider to discover container services, health statuses
 ### Ingress Restriction
 - Public HTTP traffic is accepted only via Cloudflare Tunnel.
 - The `web` entrypoint sets `trustedIPs: ["172.31.250.2/32"]`.
-- The `tunnel-only` middleware enforces `ipAllowList.sourceRange: ["172.31.250.2/32"]`, rejecting any other source IP with `403 Forbidden`.
+- The `tunnel-only` middleware enforces `ipAllowList.sourceRange: ["172.31.250.2/32"]`, rejecting any other source IP with `403 Forbidden`. Legacy edge proxies (such as `172.31.250.3/32`) and broad subnets are strictly disallowed.
+
+### Public Viewer Anti-Abuse & Inflight Protection
+The anonymous transaction viewer (`transactions.tuannguyenviet.site`) is hardened directly at Traefik with tiered rate and inflight concurrency limits:
+- **Public REST (`/api/public/v1/*`)**:
+  - Sustained Rate Limit: `10 req/s`, burst `20` (`CF-Connecting-IP`).
+  - Inflight Concurrency per IP: max `32` concurrent requests (`CF-Connecting-IP`).
+  - Global Inflight Cap: max `128` concurrent requests for the hostname (`requestHost: true`).
+- **Public SSE (`/api/public/v1/events*`)**:
+  - Reconnection Limiter: `2 conn/s`, burst `5` (`CF-Connecting-IP`).
+  - Active SSE per IP: max `12` concurrent connections (`CF-Connecting-IP`).
+  - Global Active SSE Cap: max `128` concurrent connections for the hostname (`requestHost: true`).
+- **Router Priorities**:
+  - `1200`: Public SSE Router (`acb-public-sse-router`)
+  - `1100`: Public REST API Router (`acb-public-api-router`)
+  - `1000`: Public Deny Router (`acb-public-deny-private`, blocking `/api`, `/internal`, `/admin`, `/healthz`, etc.)
+  - `100`: Public Frontend Router (`acb-public-frontend-router`)
 
 ### Access Log Privacy
 Configured strictly according to Traefik 3.7.13 specifications:

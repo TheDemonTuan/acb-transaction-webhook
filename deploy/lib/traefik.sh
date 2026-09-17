@@ -177,10 +177,10 @@ http:
       service: acb-service
 
     acb-public-deny-private:
-      rule: "Host(\`${public_viewer_host}\`) && (PathPrefix(\`/api/v1\`) || PathPrefix(\`/admin\`))"
+      rule: "Host(\`${public_viewer_host}\`) && (PathPrefix(\`/api\`) || PathPrefix(\`/internal\`) || PathPrefix(\`/admin\`) || Path(\`/health\`) || Path(\`/healthz\`) || Path(\`/ready\`) || Path(\`/readyz\`))"
       entryPoints:
         - web
-      priority: 900
+      priority: 1000
       middlewares:
         - deny-internal
       service: acb-service
@@ -189,21 +189,25 @@ http:
       rule: "Host(\`${public_viewer_host}\`) && (Path(\`/api/public/v1/events\`) || Path(\`/api/public/v1/events/stream\`))"
       entryPoints:
         - web
-      priority: 350
+      priority: 1200
       middlewares:
         - tunnel-only
         - public-sse-rate-limit
+        - public-sse-inflight-ip
+        - public-sse-inflight-global
         - security-headers
       service: acb-service
 
     acb-public-api-router:
-      rule: "Host(\`${public_viewer_host}\`) && (PathPrefix(\`/api/public/v1\`) || Path(\`/health\`) || Path(\`/healthz\`) || Path(\`/ready\`) || Path(\`/readyz\`))"
+      rule: "Host(\`${public_viewer_host}\`) && PathPrefix(\`/api/public/v1\`)"
       entryPoints:
         - web
-      priority: 300
+      priority: 1100
       middlewares:
         - tunnel-only
         - public-api-rate-limit
+        - public-api-inflight-ip
+        - public-api-inflight-global
         - security-headers
       service: acb-service
 
