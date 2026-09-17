@@ -87,6 +87,8 @@ jobs:
         run: bash deploy/tests/test_health_telemetry.sh
       - name: Test promotion dispatcher and rollout orchestration
         run: bash deploy/tests/test_promotion_dispatcher.sh
+      - name: Test runtime convergence regression (ordering, TTS mapping, worker quiesce)
+        run: bash deploy/tests/test_runtime_convergence_regression.sh
       - name: Run deployment failure drill tests
         run: |
           bash deploy/tests/test_secrets.sh
