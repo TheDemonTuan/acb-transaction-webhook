@@ -240,6 +240,7 @@ perform_sqlite_backup() {
   local active_slot="$3"
   local ts
   ts="$(date -u +'%Y%m%d%H%M%S')"
+  BACKUP_DIR="${BACKUP_DIR:-${RUNTIME_DATA_DIR:-${DEPLOY_PATH:-/opt/acb-transaction-webhook}/data}/backups}"
   mkdir -p "$BACKUP_DIR"
 
   local backup_file="$BACKUP_DIR/gateway-${ts}.db"
