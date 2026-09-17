@@ -9,10 +9,26 @@ if [[ -z "${SCRIPT_DIR:-}" ]]; then
   export SCRIPT_DIR
 fi
 
-ENV_FILE="${ENV_FILE:-${RUNTIME_DEPLOY_DIR:-$SCRIPT_DIR}/.env.production}"
-RELEASE_ENV_FILE="${RELEASE_ENV_FILE:-${RUNTIME_DEPLOY_DIR:-$SCRIPT_DIR}/.release.env}"
+# Locate runtime deploy directory reliably across staging and runtime execution
+_detected_runtime_deploy="${RUNTIME_DEPLOY_DIR:-}"
+if [[ -z "$_detected_runtime_deploy" ]]; then
+  if [[ -n "${DEPLOY_PATH:-}" && -d "${DEPLOY_PATH}/deploy" ]]; then
+    _detected_runtime_deploy="${DEPLOY_PATH}/deploy"
+  elif [[ -d "$SCRIPT_DIR/../deploy" ]]; then
+    _detected_runtime_deploy="$(cd -- "$SCRIPT_DIR/../deploy" && pwd)"
+  elif [[ -d "/opt/acb-transaction-webhook/deploy" ]]; then
+    _detected_runtime_deploy="/opt/acb-transaction-webhook/deploy"
+  else
+    _detected_runtime_deploy="$SCRIPT_DIR"
+  fi
+fi
+RUNTIME_DEPLOY_DIR="$_detected_runtime_deploy"
+export RUNTIME_DEPLOY_DIR
+
+ENV_FILE="${ENV_FILE:-${RUNTIME_DEPLOY_DIR}/.env.production}"
+RELEASE_ENV_FILE="${RELEASE_ENV_FILE:-${RUNTIME_DEPLOY_DIR}/.release.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/compose.prod.yaml}"
-SECRETS_DIR="${SECRETS_DIR:-${RUNTIME_DEPLOY_DIR:-$SCRIPT_DIR}/secrets}"
+SECRETS_DIR="${SECRETS_DIR:-${RUNTIME_DEPLOY_DIR}/secrets}"
 BACKUP_DIR="${BACKUP_DIR:-${RUNTIME_ROOT:-$SCRIPT_DIR}/data/backups}"
 ACTIVE_SLOT_FILE="${ACTIVE_SLOT_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/gateway-active-slot}"
 PREVIOUS_SLOT_FILE="${PREVIOUS_SLOT_FILE:-${RUNTIME_STATE_DIR:-$SCRIPT_DIR}/gateway-previous-slot}"
