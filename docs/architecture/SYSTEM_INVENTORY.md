@@ -67,6 +67,7 @@ All frontend API calls from `web/` are cataloged below:
 | `/bank-connection` | `useBankConnectionQuery` | `GET /api/v1/connection` | `VIEWER`, `OPERATOR`, `OWNER` | Bank configuration and credentials info. |
 | `/bank-connection` | `useStartAuthMutation` | `POST /api/v1/connection/auth/start` | `OWNER` | Launches sandboxed auth-browser login flow. |
 | `/bank-connection` | `useAuthScreenQuery` | `GET /api/v1/connection/auth/{id}/screen/*`| `OWNER` | Streams live browser VNC / canvas frames. |
+| `/pay` & `/pay/:identifier` | `fetchPaymentQR`, `activatePaymentPolling` | `GET /api/public/v1/payment-qr`, `POST /api/public/v1/payment-qr/activate` | Public (Anonymous, Tunnel-only) | Payer payment landing page with QR display and boost activation. |
 | `/channels` | `useChannelsQuery` | `GET /api/v1/notification-channels` | `VIEWER`, `OPERATOR`, `OWNER` | Webhook & Bark notification endpoints. |
 | Global Layout | `useEventsStream` (SSE) | `GET /api/v1/events/stream` | `VIEWER`, `OPERATOR`, `OWNER` | Realtime SSE event subscription. |
 

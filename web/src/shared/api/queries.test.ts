@@ -329,4 +329,9 @@ describe('queries and mutations with centralized CSRF', () => {
     expect(res.phase).toBe('GRACE');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('activatePaymentPolling rejects blank identifier on client before sending', async () => {
+    await expect(activatePaymentPolling('')).rejects.toThrow('identifier required');
+    await expect(activatePaymentPolling('   ')).rejects.toThrow('identifier required');
+  });
 });

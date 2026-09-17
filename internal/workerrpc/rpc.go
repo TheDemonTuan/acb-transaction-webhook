@@ -116,6 +116,11 @@ type ResumeResponse struct {
 	Resumed bool   `json:"resumed"`
 }
 
+type PaymentWindowResponse struct {
+	Phase       string `json:"phase"`
+	NextPhaseAt string `json:"nextPhaseAt,omitempty"`
+}
+
 type NotificationProviderMetadata struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -144,7 +149,7 @@ type WorkerHandler interface {
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
-	ActivatePaymentWindow(ctx context.Context) error
+	ActivatePaymentWindow(ctx context.Context) (PaymentWindowResponse, error)
 }
 
 type ServerOption func(*Server)
@@ -665,11 +670,12 @@ func (s *Server) routes() {
 			})
 			return
 		}
-		if err := s.handler.ActivatePaymentWindow(r.Context()); err != nil {
+		resp, err := s.handler.ActivatePaymentWindow(r.Context())
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, resp)
 	}))
 
 	s.mux.HandleFunc("/rpc/request-sync", s.auth(func(w http.ResponseWriter, r *http.Request) {
@@ -982,10 +988,12 @@ func (c *Client) Resume(ctx context.Context) error {
 	return c.post(callCtx, "/rpc/resume", nil, nil)
 }
 
-func (c *Client) ActivatePaymentWindow(ctx context.Context) error {
+func (c *Client) ActivatePaymentWindow(ctx context.Context) (PaymentWindowResponse, error) {
 	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return c.post(callCtx, "/rpc/activate-payment-window", nil, nil)
+	var resp PaymentWindowResponse
+	err := c.post(callCtx, "/rpc/activate-payment-window", nil, &resp)
+	return resp, err
 }
 
 func (c *Client) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {

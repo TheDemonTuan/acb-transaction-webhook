@@ -23,6 +23,20 @@ import { useRealtimeContext } from '../../realtime/RealtimeProvider';
 import type { BankTransactionCreditData, RealtimeEnvelope } from '../../realtime/realtime.types';
 import type { Transaction } from '../../realtime-types';
 import { formatVndCurrency } from '../../shared/formatters/money';
+import {
+  parseCreditAmount,
+  shouldAcceptLiveCredit,
+} from './credit-filter';
+import {
+  ACTIVATION_IDENTIFIER_TTL_MS,
+  activationURL,
+  newActivationIdentifier,
+} from './activation-qr';
+import {
+  isQRReadyToDisplay,
+  selectQRImageURL,
+} from './qr-payload';
+import QRCode from 'qrcode';
 
 interface LiveCreditAlert {
   id: string;
@@ -70,10 +84,17 @@ export const ReceivingQRModal: React.FC<{
     enabled: isOpen,
   });
 
-  const qr = qrData?.qr;
-  const isConfigured = qrData?.configured && qrData?.hasImage;
+  const [activationId, setActivationId] = useState<string>(() => newActivationIdentifier());
+  const [activationExpiresAt, setActivationExpiresAt] = useState<number>(() => Date.now() + ACTIVATION_IDENTIFIER_TTL_MS);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [showDirectVietQR, setShowDirectVietQR] = useState(false);
+  const activationCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Reset state when modal opens
+  const qr = qrData?.qr;
+  const qrImageURL = selectQRImageURL(qrData);
+  const isConfigured = isQRReadyToDisplay(qrData);
+
+  // Reset state and rotate activation identifier when modal opens
   useEffect(() => {
     if (isOpen) {
       const openTime = Date.now();
@@ -81,10 +102,40 @@ export const ReceivingQRModal: React.FC<{
       setSessionCredits([]);
       setActiveAlert(null);
       setActiveTab('qr');
+      setShowDirectVietQR(false);
       seenTxIdsRef.current.clear();
+      setActivationId(newActivationIdentifier());
+      setActivationExpiresAt(openTime + ACTIVATION_IDENTIFIER_TTL_MS);
       refetchTx();
     }
   }, [isOpen, refetchTx]);
+
+  // Periodic rotation of activation identifier every TTL while modal remains open
+  useEffect(() => {
+    if (!isOpen) return;
+    const interval = setInterval(() => {
+      setActivationId(newActivationIdentifier());
+      setActivationExpiresAt(Date.now() + ACTIVATION_IDENTIFIER_TTL_MS);
+    }, ACTIVATION_IDENTIFIER_TTL_MS);
+    return () => clearInterval(interval);
+  }, [isOpen]);
+
+  // Render activation QR to canvas whenever activationId changes or modal opens
+  useEffect(() => {
+    if (!isOpen || !activationCanvasRef.current) return;
+    const url = activationURL(activationId);
+    QRCode.toCanvas(activationCanvasRef.current, url, {
+      width: 240,
+      margin: 1,
+      color: {
+        dark: '#0f172a',
+        light: '#ffffff',
+      },
+      errorCorrectionLevel: 'M',
+    }).catch((err) => {
+      console.warn('failed to render activation QR canvas:', err);
+    });
+  }, [isOpen, activationId, activeTab, showDirectVietQR]);
 
   // Second-by-second ticker for relative time displays ("vài giây trước")
   useEffect(() => {
@@ -103,24 +154,21 @@ export const ReceivingQRModal: React.FC<{
         const d = envelope.data;
         if (!d) return;
 
-        // Strict source policy: ONLY REALTIME sources are live session credits
-        if (d.source !== 'REALTIME') return;
+        const accepted = shouldAcceptLiveCredit(d, {
+          sessionOpenedAt,
+          seenIds: seenTxIdsRef.current,
+          sources: ['REALTIME'],
+          now: Date.now(),
+        });
+        if (!accepted) return;
 
-        // Strict freshness policy: detected within last 120s and not before session opened
-        const detectedAtMs = d.detectedAt ? new Date(d.detectedAt).getTime() : Date.now();
-        if (Math.abs(Date.now() - detectedAtMs) > 120_000) return;
-        if (detectedAtMs < sessionOpenedAt - 5_000) return;
-
-        // Dedupe within this session
-        if (seenTxIdsRef.current.has(d.transactionId)) return;
-        seenTxIdsRef.current.add(d.transactionId);
-
-        const creditVal = Number(d.credit || 0);
+        const creditVal = parseCreditAmount(d.credit);
         if (creditVal > 0) {
           const now = Date.now();
+          const txId = d.transactionId || d.transactionNumber || String(now);
           const alertItem: LiveCreditAlert = {
-            id: d.transactionId,
-            transactionNumber: d.transactionNumber,
+            id: txId,
+            transactionNumber: d.transactionNumber || txId,
             amount: creditVal,
             description: d.description || 'Chuyển khoản nhận tiền',
             timestamp: now,
@@ -285,15 +333,62 @@ export const ReceivingQRModal: React.FC<{
 
               {isConfigured ? (
                 <>
-                  {/* Huge High-Contrast QR Code Card */}
+                  {/* Primary Card: Activation QR (Scan to Boost & Pay) or Direct VietQR */}
                   <div className="w-full max-w-[290px] sm:max-w-[320px] bg-white p-4 rounded-3xl border-2 border-stone-200 shadow-md">
                     <div className="aspect-square bg-white flex items-center justify-center overflow-hidden rounded-2xl">
-                      <img
-                        src={qrData.imageURL}
-                        alt="Mã QR nhận tiền ACB"
-                        className="w-full h-full object-contain"
-                      />
+                      {showDirectVietQR && qrImageURL ? (
+                        <img
+                          src={qrImageURL}
+                          alt="Mã VietQR nhận tiền ACB"
+                          className="w-full h-full object-contain"
+                        />
+                      ) : (
+                        <canvas
+                          ref={activationCanvasRef}
+                          className="w-full h-full object-contain"
+                        />
+                      )}
                     </div>
+
+                    <div className="mt-2 text-center">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                        <Sparkles className="w-3 h-3 text-indigo-600" />
+                        {showDirectVietQR ? 'VietQR tĩnh' : 'Mã kích hoạt theo dõi tự động'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Activation Link & Switcher Actions */}
+                  <div className="w-full max-w-[320px] flex items-center justify-between gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const url = activationURL(activationId);
+                        navigator.clipboard.writeText(url);
+                        setCopiedLink(true);
+                        setTimeout(() => setCopiedLink(false), 2000);
+                      }}
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium rounded-xl transition"
+                    >
+                      {copiedLink ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Đã chép link</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5 text-stone-500" />
+                          <span>Sao chép link /pay</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowDirectVietQR((prev) => !prev)}
+                      className="py-2 px-3 bg-white border border-stone-200 hover:bg-stone-50 text-stone-700 font-medium rounded-xl transition"
+                    >
+                      {showDirectVietQR ? 'Hiện QR kích hoạt' : 'Hiện VietQR gốc'}
+                    </button>
                   </div>
 
                   {/* Account Information with Copy Button */}
@@ -303,7 +398,7 @@ export const ReceivingQRModal: React.FC<{
                         <Building2 className="w-3.5 h-3.5 text-stone-400" />
                         Ngân hàng
                       </span>
-                      <span className="font-bold text-stone-800">{qr.bankName} (Á Châu)</span>
+                      <span className="font-bold text-stone-800">{qr?.bankName || 'ACB'} (Á Châu)</span>
                     </div>
 
                     <div className="flex items-center justify-between">
@@ -313,11 +408,11 @@ export const ReceivingQRModal: React.FC<{
                       </span>
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono font-black text-emerald-700 text-base">
-                          {qr.accountNumber}
+                          {qr?.accountNumber}
                         </span>
                         <button
                           type="button"
-                          onClick={() => handleCopy(qr.accountNumber)}
+                          onClick={() => handleCopy(qr?.accountNumber || '')}
                           className="p-1 text-stone-400 hover:text-stone-900 cursor-pointer hover:bg-stone-100 rounded-md transition"
                           title="Sao chép số tài khoản"
                         >
@@ -336,13 +431,13 @@ export const ReceivingQRModal: React.FC<{
                         Chủ tài khoản
                       </span>
                       <span className="font-black text-stone-900 uppercase">
-                        {qr.accountName}
+                        {qr?.accountName}
                       </span>
                     </div>
                   </div>
 
                   <p className="text-[11px] text-stone-500 leading-relaxed max-w-xs">
-                    Quét bằng ứng dụng ngân hàng bất kỳ qua VietQR. Tiền vào được ghi nhận và hiển thị ngay trên màn hình này.
+                    Khách quét mã kích hoạt bằng điện thoại để mở trang thanh toán và tự động tăng tốc nhận tiền trong 3 phút.
                   </p>
                 </>
               ) : (

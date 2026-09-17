@@ -17,11 +17,33 @@ import { queryKeys } from '../../shared/api/query-keys';
 import { useRealtimeContext } from '../../realtime/RealtimeProvider';
 import type { BankTransactionCreditData } from '../../realtime/realtime.types';
 import { formatVndCurrency } from '../../shared/formatters/money';
+import {
+  PAYMENT_PAGE_ALLOWED_SOURCES,
+  parseCreditAmount,
+  shouldAcceptLiveCredit,
+} from '../../features/payment-qr/credit-filter';
+import {
+  isQRReadyToDisplay,
+  selectQRImageURL,
+} from '../../features/payment-qr/qr-payload';
+import {
+  isSafeActivationIdentifier,
+  newActivationIdentifier,
+} from '../../features/payment-qr/activation-qr';
+import { acbDeeplink as buildAcbDeeplink } from '../../features/payment-qr/acb-deeplink';
 
 export const PaymentPage: React.FC = () => {
-  const { identifier } = useParams<{ identifier?: string }>();
+  const { identifier: paramIdentifier } = useParams<{ identifier?: string }>();
+  const effectiveIdentifierRef = useRef<string>(
+    isSafeActivationIdentifier(paramIdentifier)
+      ? (paramIdentifier as string)
+      : newActivationIdentifier(),
+  );
   const activatedRef = useRef(false);
+  const sessionOpenedAtRef = useRef<number>(Date.now());
+  const seenTxIdsRef = useRef<Set<string>>(new Set());
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [activationWarning, setActivationWarning] = useState<string | null>(null);
 
   const [receivedCredit, setReceivedCredit] = useState<{
     amount: number;
@@ -34,11 +56,15 @@ export const PaymentPage: React.FC = () => {
   useEffect(() => {
     if (activatedRef.current) return;
     activatedRef.current = true;
-    activatePaymentPolling(identifier).catch((err) => {
+    const token = effectiveIdentifierRef.current;
+    activatePaymentPolling(token).catch((err) => {
       // Degraded: client can still view QR and complete payment normally
       console.warn('payment tracking activation fallback:', err);
+      setActivationWarning(
+        'Không thể kích hoạt chế độ theo dõi tăng tốc. Giao dịch vẫn được ghi nhận bình thường nhưng có thể trễ hơn đôi chút.',
+      );
     });
-  }, [identifier]);
+  }, []);
 
   // Load payment QR configuration
   const { data: qrData, isLoading } = useQuery({
@@ -55,7 +81,16 @@ export const PaymentPage: React.FC = () => {
       (envelope) => {
         const d = envelope.data;
         if (!d) return;
-        const parsedAmount = parseFloat(d.credit.replace(/[^\d.-]/g, '')) || 0;
+
+        const accepted = shouldAcceptLiveCredit(d, {
+          sessionOpenedAt: sessionOpenedAtRef.current,
+          seenIds: seenTxIdsRef.current,
+          sources: PAYMENT_PAGE_ALLOWED_SOURCES,
+          now: Date.now(),
+        });
+        if (!accepted) return;
+
+        const parsedAmount = parseCreditAmount(d.credit);
         setReceivedCredit({
           amount: parsedAmount,
           description: d.description,
@@ -74,7 +109,8 @@ export const PaymentPage: React.FC = () => {
   }, [subscribe]);
 
   const qr = qrData?.qr;
-  const isConfigured = qrData?.configured && qrData?.hasImage;
+  const qrImageURL = selectQRImageURL(qrData);
+  const isReady = isQRReadyToDisplay(qrData);
 
   const copyToClipboard = (text: string, field: string) => {
     navigator.clipboard.writeText(text);
@@ -82,9 +118,7 @@ export const PaymentPage: React.FC = () => {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const acbDeeplink = qr?.accountNumber
-    ? `https://dl.vietqr.io/pay?ba=970416${encodeURIComponent(qr.accountNumber)}&bn=ACB`
-    : 'acbone://';
+  const directDeeplink = buildAcbDeeplink(qr?.accountNumber, qr?.accountName);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-4 selection:bg-indigo-500 selection:text-white">
@@ -105,6 +139,12 @@ export const PaymentPage: React.FC = () => {
 
         {/* Content */}
         <div className="p-5 space-y-5">
+          {activationWarning && (
+            <div className="bg-amber-950/50 border border-amber-500/30 rounded-xl p-3 text-amber-200 text-xs leading-relaxed">
+              {activationWarning}
+            </div>
+          )}
+
           {/* Payment Success View */}
           {receivedCredit ? (
             <div className="bg-emerald-950/60 border border-emerald-500/30 rounded-xl p-5 text-center space-y-3 animate-in fade-in zoom-in-95 duration-300">
@@ -113,11 +153,14 @@ export const PaymentPage: React.FC = () => {
               </div>
               <div>
                 <span className="text-xs uppercase tracking-wider font-semibold text-emerald-400">
-                  Thanh toán thành công
+                  Phát hiện giao dịch nhận tiền mới
                 </span>
-                <div className="text-2xl font-black text-emerald-300 mt-1">
+                <div className="text-2xl font-bold text-emerald-300 mt-1">
                   +{formatVndCurrency(receivedCredit.amount)}
                 </div>
+                <p className="text-[11px] text-slate-400 mt-1.5 max-w-xs mx-auto">
+                  Hệ thống vừa ghi nhận một khoản tiền vào tài khoản. Vui lòng chờ người bán xác nhận giao dịch của bạn.
+                </p>
               </div>
               <div className="text-xs text-slate-400 space-y-1 pt-2 border-t border-emerald-900/50">
                 {receivedCredit.description && (
@@ -132,7 +175,7 @@ export const PaymentPage: React.FC = () => {
               {/* Deeplink Direct Bank App Button */}
               <div>
                 <a
-                  href={acbDeeplink}
+                  href={directDeeplink}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-sm rounded-xl shadow-lg shadow-blue-500/20 active:scale-[0.98] transition-all"
@@ -157,9 +200,9 @@ export const PaymentPage: React.FC = () => {
                     <div className="w-56 h-56 flex items-center justify-center text-slate-400 text-xs">
                       Đang tải mã VietQR...
                     </div>
-                  ) : isConfigured && qr?.imageURL ? (
+                  ) : isReady && qrImageURL ? (
                     <img
-                      src={qr.imageURL}
+                      src={qrImageURL}
                       alt="VietQR Code"
                       className="w-full h-full object-contain rounded-lg"
                     />

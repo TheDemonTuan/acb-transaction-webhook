@@ -1733,4 +1733,14 @@ Chỉ thêm:
 một ít anti-abuse + telemetry
 ```
 
-Đó là đủ.
+## 43. Bản sửa đổi Correctness & Anti-Abuse (2026-09-17)
+
+Bổ sung 8 điểm sửa đổi chất lượng cao theo review thực tế:
+1. **Lọc SSE Realtime Phía Client:** `credit-filter.ts` chuẩn hoá lọc `source` (REALTIME/CATCH_UP), `detectedAt` trong vòng 120s, và giới hạn sau thời điểm mở phiên.
+2. **Thông Báo Trung Tính Cho QR Tĩnh:** Thay thế nhãn khẳng định "Thanh toán thành công" bằng "Phát hiện giao dịch nhận tiền mới" để tránh nhầm lẫn giữa các khách hàng khi chưa có V2 dynamic session.
+3. **Mã QR Kích Hoạt Client-Side:** `ReceivingQRModal` tạo mã QR chứa link `/pay/:identifier` bằng canvas (`qrcode` npm module) và tự động làm mới mã định danh mỗi 10 phút.
+4. **Cập Nhật Chu Kỳ Idle Thực Tế 20–30s:** Điều chỉnh `DefaultMonitorSettings` và áp dụng Migration 10 tự động cập nhật bản ghi mặc định cho SQLite.
+5. **Chuẩn Hoá Deeplink ACB ONE:** Áp dụng cú pháp VietQR chính thống `app=acb&ba=<ACC>@acb&bn=<NAME>`.
+6. **Ngân Sách Tăng Tốc Toàn Cục & Khóa Chống Lạm Dụng:** Giới hạn thời gian HOT liên tục tối đa 5 phút và COOL tối đa 30 phút, áp dụng khóa tạm thời (Lockout) 10 phút khi vượt hạn mức để bảo vệ upstream ACB.
+7. **Phản Hồi Trạng Thái Bật Tăng Tốc Trung Thực:** API Gateway phản hồi chính xác kết quả từ Worker RPC, không giả lập trạng thái `trackingActive: true` khi RPC gặp sự cố.
+8. **Kiểm Thử Cadence Bằng Đồng Hồ Giả Lập:** Bổ sung bộ test tất định xác minh chu kỳ chuyển tiếp GRACE (5s) -> HOT (2-4s) -> WARM (3-6s) -> COOL (6-10s) -> IDLE (20-30s).

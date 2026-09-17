@@ -130,7 +130,7 @@ func TestPollBoostActivationDuringHotExtendsWithoutGrace(t *testing.T) {
 	}
 }
 
-func TestPollBoostActivationDuringWarmReturnsToHot(t *testing.T) {
+func TestPollBoostActivationDuringWarmPromotesToHot(t *testing.T) {
 	var state PollBoostState
 	start := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 
@@ -153,5 +153,66 @@ func TestPollBoostActivationDuringWarmReturnsToHot(t *testing.T) {
 	}
 	if !pAfter.NextPhaseAt.Equal(t70.Add(60 * time.Second)) {
 		t.Fatalf("expected HOT until T+130s, got %v", pAfter.NextPhaseAt)
+	}
+}
+
+func TestPollBoostAntiAbuseBudgetClampsHotWindow(t *testing.T) {
+	var state PollBoostState
+	start := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	state.Activate(start)
+
+	// Simulate attacker sending activation every 30s for 10 minutes
+	for step := 1; step <= 20; step++ {
+		cur := start.Add(time.Duration(step*30) * time.Second)
+		state.Activate(cur)
+	}
+
+	// HOT budget is capped at BoostStartedAt + 5m (T+300s)
+	maxHotTime := start.Add(paymentHotBudget)
+	if state.HotUntil.After(maxHotTime) {
+		t.Fatalf("HotUntil exceeded budget: got %v, want <= %v", state.HotUntil, maxHotTime)
+	}
+
+	// At T+301s, phase MUST have degraded to WARM or COOL, never HOT
+	pAfterHot := state.Resolve(start.Add(301 * time.Second))
+	if pAfterHot.Phase == PollBoostHot {
+		t.Fatalf("expected degradation past 5m budget, still HOT: %+v", pAfterHot)
+	}
+}
+
+func TestPollBoostLockoutTriggersAfterExhaustion(t *testing.T) {
+	var state PollBoostState
+	start := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	// Keep activating every 2m from T+0 to T+30m to stay active continuously
+	for m := 0; m <= 30; m += 2 {
+		state.Activate(start.Add(time.Duration(m) * time.Minute))
+	}
+
+	// At T+30m, lockout must be engaged
+	at30m := start.Add(30 * time.Minute)
+	if !state.InLockout(at30m) {
+		t.Fatalf("expected lockout to be engaged after reaching max cool budget, lockoutUntil=%v", state.LockoutUntil)
+	}
+
+	pLocked := state.Resolve(start.Add(30 * time.Minute))
+	if pLocked.Phase != PollBoostLocked || pLocked.Active {
+		t.Fatalf("expected LOCKED phase, got %+v", pLocked)
+	}
+
+	// Further activations during lockout must be ignored
+	state.Activate(start.Add(35 * time.Minute))
+	pStillLocked := state.Resolve(start.Add(35 * time.Minute))
+	if pStillLocked.Phase != PollBoostLocked {
+		t.Fatalf("activation during lockout must not revive boost, got %+v", pStillLocked)
+	}
+
+	// After lockout window expires, fresh activation succeeds
+	postLockout := start.Add(30*time.Minute + paymentBoostLockout + 1*time.Second)
+	state.Activate(postLockout)
+	pFresh := state.Resolve(postLockout)
+	if pFresh.Phase != PollBoostGrace || !pFresh.Active {
+		t.Fatalf("expected fresh GRACE post-lockout, got %+v", pFresh)
 	}
 }

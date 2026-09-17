@@ -70,9 +70,16 @@ func (h *integrationWorkerHandler) Quiesce(ctx context.Context) (workerrpc.Quies
 	return workerrpc.QuiesceResponse{Status: "quiesced"}, nil
 }
 func (h *integrationWorkerHandler) Resume(ctx context.Context) error { return nil }
-func (h *integrationWorkerHandler) ActivatePaymentWindow(ctx context.Context) error {
-	h.mon.ActivatePaymentWindow()
-	return nil
+func (h *integrationWorkerHandler) ActivatePaymentWindow(ctx context.Context) (workerrpc.PaymentWindowResponse, error) {
+	profile := h.mon.ActivatePaymentWindow()
+	var nextPhaseStr string
+	if !profile.NextPhaseAt.IsZero() {
+		nextPhaseStr = profile.NextPhaseAt.UTC().Format(time.RFC3339)
+	}
+	return workerrpc.PaymentWindowResponse{
+		Phase:       string(profile.Phase),
+		NextPhaseAt: nextPhaseStr,
+	}, nil
 }
 
 func TestAdaptivePolling_EndToEndPipeline(t *testing.T) {
@@ -116,12 +123,26 @@ func TestAdaptivePolling_EndToEndPipeline(t *testing.T) {
 	rpcTS := httptest.NewServer(rpcServer.Handler())
 	defer rpcTS.Close()
 
-	// Setup Gateway with worker RPC client
+	// Setup Gateway with worker RPC client adapter
 	workerClient := workerrpc.NewClient(rpcTS.URL, "worker-token-test-123")
 	cfg := config.Config{Production: false}
 	gwServer := httpapi.New(cfg, store).
 		WithEventHub(hub).
-		WithPaymentActivator(workerClient)
+		WithPaymentActivator(httpapi.PaymentWindowActivatorFunc(func(ctx context.Context) (httpapi.PaymentActivationState, error) {
+			resp, err := workerClient.ActivatePaymentWindow(ctx)
+			if err != nil {
+				return httpapi.PaymentActivationState{}, err
+			}
+			var nextPhase time.Time
+			if resp.NextPhaseAt != "" {
+				nextPhase, _ = time.Parse(time.RFC3339, resp.NextPhaseAt)
+			}
+			return httpapi.PaymentActivationState{
+				TrackingActive: resp.Phase == "GRACE" || resp.Phase == "HOT" || resp.Phase == "WARM" || resp.Phase == "COOL",
+				Phase:          resp.Phase,
+				NextPhaseAt:    nextPhase,
+			}, nil
+		}))
 
 	gwTS := httptest.NewServer(gwServer.Handler())
 	defer gwTS.Close()

@@ -341,7 +341,22 @@ func main() {
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient).
-			WithPaymentActivator(workerClient)
+			WithPaymentActivator(httpapi.PaymentWindowActivatorFunc(func(ctx context.Context) (httpapi.PaymentActivationState, error) {
+				resp, err := workerClient.ActivatePaymentWindow(ctx)
+				if err != nil {
+					return httpapi.PaymentActivationState{}, err
+				}
+				var nextPhase time.Time
+				if resp.NextPhaseAt != "" {
+					nextPhase, _ = time.Parse(time.RFC3339, resp.NextPhaseAt)
+				}
+				trackingActive := resp.Phase == "GRACE" || resp.Phase == "HOT" || resp.Phase == "WARM" || resp.Phase == "COOL"
+				return httpapi.PaymentActivationState{
+					TrackingActive: trackingActive,
+					Phase:          resp.Phase,
+					NextPhaseAt:    nextPhase,
+				}, nil
+			}))
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
 			server.WithRealtimeSubmit(coordinator.Submit)
@@ -457,9 +472,13 @@ func main() {
 				dispatcher.Wake()
 				return nil
 			}).
-			WithPaymentActivator(httpapi.PaymentWindowActivatorFunc(func(ctx context.Context) error {
-				bankMonitor.ActivatePaymentWindow()
-				return nil
+			WithPaymentActivator(httpapi.PaymentWindowActivatorFunc(func(ctx context.Context) (httpapi.PaymentActivationState, error) {
+				profile := bankMonitor.ActivatePaymentWindow()
+				return httpapi.PaymentActivationState{
+					TrackingActive: profile.Active,
+					Phase:          string(profile.Phase),
+					NextPhaseAt:    profile.NextPhaseAt,
+				}, nil
 			}))
 
 		if keyring != nil {

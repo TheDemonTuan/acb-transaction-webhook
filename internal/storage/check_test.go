@@ -59,13 +59,13 @@ func TestSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema version failed: %v", err)
 	}
-	if rep.Version != 9 {
-		t.Errorf("expected schema version 9, got %d", rep.Version)
+	if rep.Version != 10 {
+		t.Errorf("expected schema version 10, got %d", rep.Version)
 	}
-	if rep.AppliedCount != 9 {
-		t.Errorf("expected 9 migrations applied, got %d", rep.AppliedCount)
+	if rep.AppliedCount != 10 {
+		t.Errorf("expected 10 migrations applied, got %d", rep.AppliedCount)
 	}
-	if rep.Checksum != "2026-09-14-v9-deployment-control" {
-		t.Errorf("expected checksum '2026-09-14-v9-deployment-control', got %q", rep.Checksum)
+	if rep.Checksum != "2026-09-17-v10-monitor-idle-cadence" {
+		t.Errorf("expected checksum '2026-09-17-v10-monitor-idle-cadence', got %q", rep.Checksum)
 	}
 }

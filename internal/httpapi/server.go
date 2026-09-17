@@ -75,13 +75,19 @@ type NotificationProviderReader interface {
 	NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error)
 }
 
-type PaymentWindowActivator interface {
-	ActivatePaymentWindow(ctx context.Context) error
+type PaymentActivationState struct {
+	TrackingActive bool
+	Phase          string
+	NextPhaseAt    time.Time
 }
 
-type PaymentWindowActivatorFunc func(ctx context.Context) error
+type PaymentWindowActivator interface {
+	ActivatePaymentWindow(ctx context.Context) (PaymentActivationState, error)
+}
 
-func (f PaymentWindowActivatorFunc) ActivatePaymentWindow(ctx context.Context) error {
+type PaymentWindowActivatorFunc func(ctx context.Context) (PaymentActivationState, error)
+
+func (f PaymentWindowActivatorFunc) ActivatePaymentWindow(ctx context.Context) (PaymentActivationState, error) {
 	return f(ctx)
 }
 
@@ -147,7 +153,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		instanceNonce:      instanceNonce,
 		started:            time.Now().UTC(),
 		activationLimit:    newActivationLimiter(),
-		activationDebounce: &activationDebouncer{},
+		activationDebounce: newActivationDebouncer(),
 	}
 	r := chi.NewRouter()
 	r.Use(requestID, s.platformHeaders, securityHeaders, recoverer)

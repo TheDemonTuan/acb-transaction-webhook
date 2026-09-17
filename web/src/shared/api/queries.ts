@@ -173,10 +173,16 @@ export const fetchPaymentQR = async (): Promise<any> => {
   return api('/payment-qr');
 };
 
-export const activatePaymentPolling = async (identifier?: string): Promise<{ trackingActive: boolean; phase?: string }> => {
+export const activatePaymentPolling = async (
+  identifier: string,
+): Promise<{ trackingActive: boolean; phase?: string; nextPhaseAt?: string }> => {
+  const cleanId = (identifier || '').trim();
+  if (!cleanId) {
+    throw new Error('identifier required');
+  }
   return publicApi('/payment-qr/activate', {
     method: 'POST',
-    body: identifier ? JSON.stringify({ identifier }) : JSON.stringify({}),
+    body: JSON.stringify({ identifier: cleanId }),
   });
 };
 

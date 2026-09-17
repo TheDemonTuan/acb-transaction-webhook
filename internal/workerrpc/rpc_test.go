@@ -141,9 +141,12 @@ func (m *mockWorkerHandler) Resume(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockWorkerHandler) ActivatePaymentWindow(ctx context.Context) error {
+func (m *mockWorkerHandler) ActivatePaymentWindow(ctx context.Context) (workerrpc.PaymentWindowResponse, error) {
 	m.activateCalled = true
-	return m.activateErr
+	if m.activateErr != nil {
+		return workerrpc.PaymentWindowResponse{}, m.activateErr
+	}
+	return workerrpc.PaymentWindowResponse{Phase: "GRACE"}, nil
 }
 
 func TestWorkerRPC_ActivatePaymentWindow(t *testing.T) {
@@ -160,15 +163,19 @@ func TestWorkerRPC_ActivatePaymentWindow(t *testing.T) {
 	client := workerrpc.NewClient(ts.URL, token)
 	ctx := context.Background()
 
-	if err := client.ActivatePaymentWindow(ctx); err != nil {
+	resp, err := client.ActivatePaymentWindow(ctx)
+	if err != nil {
 		t.Fatalf("ActivatePaymentWindow unexpected error: %v", err)
+	}
+	if resp.Phase != "GRACE" {
+		t.Fatalf("expected phase GRACE, got %q", resp.Phase)
 	}
 	if !mock.activateCalled {
 		t.Fatal("expected handler.ActivatePaymentWindow to be called")
 	}
 
 	mock.activateErr = errors.New("monitor not ready")
-	if err := client.ActivatePaymentWindow(ctx); err == nil {
+	if _, err := client.ActivatePaymentWindow(ctx); err == nil {
 		t.Fatal("expected error from ActivatePaymentWindow when handler errors")
 	}
 }
