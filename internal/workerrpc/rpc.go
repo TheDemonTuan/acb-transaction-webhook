@@ -144,6 +144,7 @@ type WorkerHandler interface {
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
+	ActivatePaymentWindow(ctx context.Context) error
 }
 
 type ServerOption func(*Server)
@@ -650,6 +651,27 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, ResumeResponse{Status: "ok", Resumed: true})
 	}))
 
+	s.mux.HandleFunc("/rpc/activate-payment-window", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.checkWorkAllowed(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     err.Error(),
+				"code":      "WORKER_DRAINING",
+				"requestId": reqID,
+			})
+			return
+		}
+		if err := s.handler.ActivatePaymentWindow(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
 	s.mux.HandleFunc("/rpc/request-sync", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
@@ -958,6 +980,12 @@ func (c *Client) Resume(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return c.post(callCtx, "/rpc/resume", nil, nil)
+}
+
+func (c *Client) ActivatePaymentWindow(ctx context.Context) error {
+	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return c.post(callCtx, "/rpc/activate-payment-window", nil, nil)
 }
 
 func (c *Client) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
