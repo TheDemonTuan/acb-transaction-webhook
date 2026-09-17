@@ -30,6 +30,8 @@ type mockWorkerHandler struct {
 	cancelJobErr error
 	settingsErr  error
 	wakeErr      error
+	activateCalled bool
+	activateErr    error
 	syncBlock    chan struct{}
 	jobs         map[string]storage.HistorySyncJob
 	mu           sync.Mutex
@@ -137,6 +139,38 @@ func (m *mockWorkerHandler) Quiesce(ctx context.Context) (workerrpc.QuiesceRespo
 
 func (m *mockWorkerHandler) Resume(ctx context.Context) error {
 	return nil
+}
+
+func (m *mockWorkerHandler) ActivatePaymentWindow(ctx context.Context) error {
+	m.activateCalled = true
+	return m.activateErr
+}
+
+func TestWorkerRPC_ActivatePaymentWindow(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "secret-test-token-123"
+	server, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	client := workerrpc.NewClient(ts.URL, token)
+	ctx := context.Background()
+
+	if err := client.ActivatePaymentWindow(ctx); err != nil {
+		t.Fatalf("ActivatePaymentWindow unexpected error: %v", err)
+	}
+	if !mock.activateCalled {
+		t.Fatal("expected handler.ActivatePaymentWindow to be called")
+	}
+
+	mock.activateErr = errors.New("monitor not ready")
+	if err := client.ActivatePaymentWindow(ctx); err == nil {
+		t.Fatal("expected error from ActivatePaymentWindow when handler errors")
+	}
 }
 
 func TestWorkerRPC_ConstructorValidation(t *testing.T) {

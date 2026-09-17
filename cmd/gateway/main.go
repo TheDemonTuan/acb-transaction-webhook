@@ -340,7 +340,8 @@ func main() {
 			WithProviderReader(workerClient).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithAuthVerifier(workerClient).
-			WithWorkerProber(workerClient)
+			WithWorkerProber(workerClient).
+			WithPaymentActivator(workerClient)
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
 			server.WithRealtimeSubmit(coordinator.Submit)
@@ -455,7 +456,11 @@ func main() {
 			WithWakeDispatcher(func(ctx context.Context) error {
 				dispatcher.Wake()
 				return nil
-			})
+			}).
+			WithPaymentActivator(httpapi.PaymentWindowActivatorFunc(func(ctx context.Context) error {
+				bankMonitor.ActivatePaymentWindow()
+				return nil
+			}))
 
 		if keyring != nil {
 			verifierClient, verifierErr := acb.NewClient("https://online.acb.com.vn", nil)

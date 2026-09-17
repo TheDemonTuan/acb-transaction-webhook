@@ -407,6 +407,14 @@ func (w *workerService) Resume(ctx context.Context) error {
 	return nil
 }
 
+func (w *workerService) ActivatePaymentWindow(ctx context.Context) error {
+	if w.bankMonitor == nil {
+		return errors.New("bank monitor not initialized")
+	}
+	w.bankMonitor.ActivatePaymentWindow()
+	return nil
+}
+
 func newWorkerPollNotifier(store *storage.Store, waker interface{ Wake() }, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
 	if logger == nil {
 		logger = slog.Default()

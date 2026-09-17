@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api, publicApi } from '../../api';
 import type {
   AuditLog,
   BarkConfig,
@@ -171,6 +171,13 @@ export const updateMonitorSettings = async (settings: any): Promise<any> => {
 
 export const fetchPaymentQR = async (): Promise<any> => {
   return api('/payment-qr');
+};
+
+export const activatePaymentPolling = async (identifier?: string): Promise<{ trackingActive: boolean; phase?: string }> => {
+  return publicApi('/payment-qr/activate', {
+    method: 'POST',
+    body: identifier ? JSON.stringify({ identifier }) : JSON.stringify({}),
+  });
 };
 
 export const uploadPaymentQR = async (formData: FormData): Promise<any> => {
