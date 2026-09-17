@@ -141,6 +141,14 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	r.Get("/readyz", s.ready)
 	r.Get("/ready", s.ready)
 	r.Get("/internal/deployz", s.deployReady)
+	r.Route("/api/public/v1", func(api chi.Router) {
+		api.Get("/transactions", s.publicTransactions)
+		api.Get("/transactions/{id}", s.publicTransactionDetail)
+		api.Get("/payment-qr", s.publicPaymentQR)
+		api.Get("/payment-qr/image", s.getPaymentQRImage)
+		api.Get("/events", s.publicEventsStream)
+		api.Get("/events/stream", s.publicEventsStream)
+	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
 		api.Get("/status", s.status)

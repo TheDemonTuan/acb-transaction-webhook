@@ -22,6 +22,21 @@ get_route_host() {
   printf '%s' "$host"
 }
 
+get_public_viewer_host() {
+  local origin="${PUBLIC_VIEWER_ORIGIN:-${PUBLIC_VIEWER_HOST:-transactions.tuannguyenviet.site}}"
+  local host="${origin#*://}"
+  host="${host%%/*}"
+  host="${host%%\?*}"
+  if [[ "$host" =~ ^([a-zA-Z0-9.-]+):[0-9]+$ ]]; then
+    host="${BASH_REMATCH[1]}"
+  fi
+  if [[ ! "$host" =~ ^[a-zA-Z0-9.-]+$ ]] || [[ "$host" == *"/"* ]] || [[ "$host" == *" "* ]]; then
+    log_error "Invalid derived public viewer route hostname: '${host}'. Hostname must not contain path, scheme, or special characters."
+    return 1
+  fi
+  printf '%s' "$host"
+}
+
 verify_traefik_prerequisites() {
   local dynamic_dir
   dynamic_dir="$(dirname "$ACB_CONFIG")"
@@ -145,18 +160,39 @@ render_traefik_config() {
   esac
   local route_host
   route_host="$(get_route_host)"
+  local public_viewer_host
+  public_viewer_host="$(get_public_viewer_host)"
 
   mkdir -p "$(dirname "$output_path")"
   cat <<EOF > "$output_path"
 http:
   routers:
     acb-deny-internal:
-      rule: "Host(\`${route_host}\`) && PathPrefix(\`/internal\`)"
+      rule: "(Host(\`${route_host}\`) || Host(\`${public_viewer_host}\`)) && PathPrefix(\`/internal\`)"
       entryPoints:
         - web
       priority: 1000
       middlewares:
         - deny-internal
+      service: acb-service
+
+    acb-public-deny-private:
+      rule: "Host(\`${public_viewer_host}\`) && (PathPrefix(\`/api/v1\`) || PathPrefix(\`/admin\`))"
+      entryPoints:
+        - web
+      priority: 900
+      middlewares:
+        - deny-internal
+      service: acb-service
+
+    acb-public-api-router:
+      rule: "Host(\`${public_viewer_host}\`) && (PathPrefix(\`/api/public/v1\`) || Path(\`/health\`) || Path(\`/healthz\`) || Path(\`/ready\`) || Path(\`/readyz\`))"
+      entryPoints:
+        - web
+      priority: 300
+      middlewares:
+        - tunnel-only
+        - security-headers
       service: acb-service
 
     acb-api-router:
@@ -168,6 +204,16 @@ http:
         - tunnel-only
         - security-headers
       service: acb-service
+
+    acb-public-frontend-router:
+      rule: "Host(\`${public_viewer_host}\`)"
+      entryPoints:
+        - web
+      priority: 100
+      middlewares:
+        - tunnel-only
+        - security-headers
+      service: acb-frontend-service
 
     acb-frontend-router:
       rule: "Host(\`${route_host}\`)"

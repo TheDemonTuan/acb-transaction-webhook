@@ -9,8 +9,28 @@ import { ActivityPage } from '../pages/admin/ActivityPage';
 import { SystemPage } from '../pages/admin/SystemPage';
 import { TransactionsPage } from '../pages/viewer/TransactionsPage';
 import { TransactionDetailPage } from '../pages/viewer/TransactionDetailPage';
+import { isPublicViewerHost } from './runtime-mode';
 
-export const router = createBrowserRouter([
+export const publicRoutes = [
+  {
+    path: '/',
+    element: <Navigate to="/transactions" replace />,
+  },
+  {
+    path: '/transactions',
+    element: <ViewerLayout />,
+    children: [
+      { index: true, element: <TransactionsPage /> },
+      { path: ':id', element: <TransactionDetailPage /> },
+    ],
+  },
+  {
+    path: '*',
+    element: <Navigate to="/transactions" replace />,
+  },
+];
+
+export const adminRoutes = [
   {
     path: '/',
     element: <AdminLayout />,
@@ -36,4 +56,12 @@ export const router = createBrowserRouter([
     path: '*',
     element: <Navigate to="/" replace />,
   },
-]);
+];
+
+export function createRouter(isPublic = isPublicViewerHost()) {
+  return createBrowserRouter(isPublic ? publicRoutes : adminRoutes);
+}
+
+export const router = typeof document !== 'undefined'
+  ? createRouter()
+  : (null as any);

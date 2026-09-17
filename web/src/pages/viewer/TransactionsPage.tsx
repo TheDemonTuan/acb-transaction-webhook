@@ -22,6 +22,7 @@ import {
   fetchLatestHistorySyncJob,
   cancelHistorySyncJob,
 } from '../../shared/api/queries';
+import { isPublicViewerHost } from '../../app/runtime-mode';
 import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import type { Transaction, HistorySyncJob } from '../../realtime-types';
@@ -148,7 +149,9 @@ export const TransactionsPage: React.FC = () => {
   };
 
   // Active durable history sync job tracking (persisted across tab reloads)
+  const isPublic = isPublicViewerHost();
   const [activeJobId, setActiveJobId] = useState<string | null>(() => {
+    if (isPublic) return null;
     try {
       return localStorage.getItem('acb_active_history_sync_job_id') || null;
     } catch {
@@ -160,6 +163,7 @@ export const TransactionsPage: React.FC = () => {
 
   // Restore latest running job on mount if local storage is empty
   useEffect(() => {
+    if (isPublic) return;
     if (!activeJobId) {
       fetchLatestHistorySyncJob().then((latest) => {
         if (latest && (latest.status === 'QUEUED' || latest.status === 'RUNNING')) {
@@ -170,13 +174,13 @@ export const TransactionsPage: React.FC = () => {
         }
       });
     }
-  }, [activeJobId]);
+  }, [activeJobId, isPublic]);
 
   // Polling via TanStack Query: only while status is QUEUED or RUNNING
   const { data: activeJob } = useQuery({
     queryKey: queryKeys.historySyncJob(activeJobId ?? ''),
     queryFn: () => fetchHistorySyncJob(activeJobId!),
-    enabled: Boolean(activeJobId),
+    enabled: !isPublic && Boolean(activeJobId),
     refetchInterval: (query) => {
       const job = query.state.data;
       if (!job) return 1000;
@@ -189,7 +193,7 @@ export const TransactionsPage: React.FC = () => {
   });
 
   const isJobActive = Boolean(
-    submittingSync || (activeJob && (activeJob.status === 'QUEUED' || activeJob.status === 'RUNNING'))
+    !isPublic && (submittingSync || (activeJob && (activeJob.status === 'QUEUED' || activeJob.status === 'RUNNING')))
   );
 
   const terminalJobNotifiedRef = React.useRef<string | null>(null);
@@ -300,16 +304,18 @@ export const TransactionsPage: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          <button
-            type="button"
-            onClick={handleSyncHistory}
-            disabled={isJobActive || isLoading || isRefetching || !queryParams.from || !queryParams.to}
-            title={dateRange === 'all' ? 'Chọn Hôm nay, 7 ngày hoặc một khoảng ngày để đồng bộ từ ACB' : undefined}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white shadow-2xs hover:bg-stone-800 transition disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isJobActive ? 'animate-spin' : ''}`} />
-            {isJobActive ? 'Đang đồng bộ ACB...' : 'Đồng bộ từ ACB'}
-          </button>
+          {!isPublic && (
+            <button
+              type="button"
+              onClick={handleSyncHistory}
+              disabled={isJobActive || isLoading || isRefetching || !queryParams.from || !queryParams.to}
+              title={dateRange === 'all' ? 'Chọn Hôm nay, 7 ngày hoặc một khoảng ngày để đồng bộ từ ACB' : undefined}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white shadow-2xs hover:bg-stone-800 transition disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isJobActive ? 'animate-spin' : ''}`} />
+              {isJobActive ? 'Đang đồng bộ ACB...' : 'Đồng bộ từ ACB'}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => refetch()}

@@ -1,3 +1,5 @@
+import { isPublicViewerHost } from './app/runtime-mode';
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -92,9 +94,18 @@ export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const method = init?.method?.toUpperCase() ?? 'GET';
   const mutating = isMutation(method);
 
+  if (isPublicViewerHost() && mutating) {
+    throw new ApiError(
+      'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
+      405,
+      'PUBLIC_READ_ONLY',
+    );
+  }
+
+  const basePath = isPublicViewerHost() ? '/api/public/v1' : '/api/v1';
   const headers = new Headers(init?.headers);
 
-  if (mutating) {
+  if (mutating && !isPublicViewerHost()) {
     const token = await getCsrfToken();
     if (!headers.has('X-CSRF-Token')) {
       headers.set('X-CSRF-Token', token);
@@ -103,7 +114,7 @@ export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 
   let response: Response;
   try {
-    response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init, headers });
+    response = await fetch(`${basePath}${path}`, { credentials: 'same-origin', ...init, headers });
   } catch (err: any) {
     if ((err instanceof DOMException && err.name === 'AbortError') || err?.name === 'AbortError') {
       throw err;
@@ -113,11 +124,11 @@ export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 
   if (!response.ok) {
     const error = await parseApiError(response);
-    if (mutating && error.code === CSRF_CODE_TOKEN_INVALID) {
+    if (mutating && !isPublicViewerHost() && error.code === CSRF_CODE_TOKEN_INVALID) {
       const newToken = await getCsrfToken(true);
       headers.set('X-CSRF-Token', newToken);
       try {
-        response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init, headers });
+        response = await fetch(`${basePath}${path}`, { credentials: 'same-origin', ...init, headers });
       } catch (err: any) {
         if ((err instanceof DOMException && err.name === 'AbortError') || err?.name === 'AbortError') {
           throw err;
@@ -148,6 +159,14 @@ export interface AudioResponseResult {
 }
 
 export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioResponseResult> => {
+  if (isPublicViewerHost()) {
+    throw new ApiError(
+      'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
+      405,
+      'PUBLIC_READ_ONLY',
+    );
+  }
+
   const method = init?.method?.toUpperCase() ?? 'GET';
   const isMutating = isMutation(method);
   let token: string | null = null;
