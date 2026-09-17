@@ -1121,6 +1121,13 @@ jobs:
             --release-dir "$RELEASE_DIR" --runtime-deploy-dir "$DEPLOY_PATH/deploy" \
             --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER" --require-cosign --no-reconcile
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"
+          mkdir -p "$RELEASE_DIR/secrets"
+          for s in "$DEPLOY_PATH/deploy/secrets"/*; do
+            if [[ -f "$s" ]]; then
+              ln -sf "$s" "$RELEASE_DIR/secrets/$(basename "$s")" 2>/dev/null || \
+              cp -f "$s" "$RELEASE_DIR/secrets/$(basename "$s")" 2>/dev/null || true
+            fi
+          done
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
           export PATH="$DEPLOY_PATH/deploy:$PATH"
