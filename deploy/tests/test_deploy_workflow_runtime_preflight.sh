@@ -292,6 +292,70 @@ bash "$tdir/deploy/preflight-runtime.sh" --check-only \
 
 assert_eq "1" "$ec" "Marker-free drift (run #249 condition) detected as dirty by preflight --check-only"
 
+# Invariant: --check-only must not mutate runtime state or containers
+assert_eq "green" "$(cat "$tdir/state/gateway-active-slot")" "Preflight --check-only did not mutate gateway active slot"
+assert_eq "running" "$(cat "$DOCKER_STATE_DIR/acb-gateway-green.status")" "Preflight --check-only did not mutate running container state"
+if grep -q "acb-web-green" "$tdir/traefik/acb.yml"; then
+  printf 'PASS: Preflight --check-only did not mutate Traefik route\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: Preflight --check-only unexpectedly modified Traefik route\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+# Invariant: Normal deploy pipeline halts on dirty runtime before stable-deployer runs
+deployer_marker="$tdir/stable_deployer_ran.marker"
+rm -f "$deployer_marker"
+cat <<EOF > "$tdir/mock_bin/stable-deployer.sh"
+#!/usr/bin/env bash
+touch "$deployer_marker"
+exit 0
+EOF
+chmod +x "$tdir/mock_bin/stable-deployer.sh"
+
+pipeline_ec=0
+PATH="$tdir/mock_bin:$PATH" \
+DOCKER_STATE_DIR="$DOCKER_STATE_DIR" \
+RUNTIME_ROOT="$tdir" RUNTIME_RELEASES_DIR="$tdir/releases" DEPLOY_PATH="$tdir" \
+TRAEFIK_DYNAMIC_DIR="$tdir/traefik" ACB_CONFIG="$tdir/traefik/acb.yml" \
+ACTIVE_SLOT_FILE="$tdir/state/gateway-active-slot" FRONTEND_ACTIVE_SLOT_FILE="$tdir/state/frontend-active-slot" \
+CURRENT_RELEASE_FILE="$tdir/state/current-release.json" SKIP_MANIFEST_CHECK=1 \
+EDGE_PROBE_SCRIPT="$tdir/mock_bin/edge-probe" \
+bash -c '
+  set -euo pipefail
+  bash "$1/deploy/preflight-runtime.sh" --check-only \
+    --state "$1/state/current-release.json" \
+    --data-dir "$1/data" \
+    --config "$1/traefik/acb.yml"
+  bash "$1/mock_bin/stable-deployer.sh"
+' _ "$tdir" || pipeline_ec=$?
+
+assert_eq "1" "$pipeline_ec" "Deploy pipeline halts on dirty runtime preflight failure"
+if [[ ! -f "$deployer_marker" ]]; then
+  printf 'PASS: stable-deployer never executed when runtime is dirty\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: stable-deployer executed despite dirty runtime preflight check\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+# Invariant: .github/workflows/deploy.yml invokes preflight with --check-only, never --reconcile
+workflow_deploy_yml="$DEPLOY_DIR/../.github/workflows/deploy.yml"
+if grep -q 'deploy/preflight-runtime\.sh.*--reconcile' "$workflow_deploy_yml"; then
+  printf 'FAIL: deploy.yml still calls preflight-runtime.sh with --reconcile\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: deploy.yml does not call preflight-runtime.sh with --reconcile\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+if grep -q 'deploy/preflight-runtime\.sh.*--check-only' "$workflow_deploy_yml"; then
+  printf 'PASS: deploy.yml calls preflight-runtime.sh with --check-only\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: deploy.yml missing --check-only invocation for preflight-runtime.sh\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
 # Step 2: Run preflight in --reconcile mode
 # Must converge runtime to canonical release (A), recreate blue gateway, update route, and return 0
 ec=0

@@ -211,9 +211,13 @@ assert_contains "$deploy_content" "-o ConnectTimeout=15" "SSH execution passes e
 
 # 7. Promotion Dispatcher Invocation (No Compose Up/Down Shortcuts)
 printf "\n7. Testing Promotion Dispatcher Contract...\n"
+assert_contains "$deploy_content" "branches: [main]" "Deploy workflow triggers on main push"
+assert_contains "$deploy_content" "github.event_name == 'push' && github.ref == 'refs/heads/main'" "Deploy job permits auto-deploy on main push"
+assert_contains "$deploy_content" "github.event_name == 'workflow_dispatch' && inputs.deploy == true" "Deploy job permits manual dispatch deploy"
 assert_contains "$deploy_content" "stable-deployer.sh" "Deploy step invokes stable-deployer.sh"
-assert_contains "$deploy_content" 'bash "$trusted_preflight"' "Production-state verifies actual VPS runtime before builds"
-assert_contains "$deploy_content" 'bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile' "Deploy-only reruns verify runtime before staging"
+assert_not_contains "$deploy_content" 'bash "$trusted_preflight"' "Production-state is read-only and does not invoke preflight"
+assert_contains "$deploy_content" 'bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --check-only' "Deploy-only reruns verify runtime with --check-only before staging"
+assert_not_contains "$deploy_content" 'bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile' "Normal deploy does not auto-reconcile production runtime"
 assert_contains "$deploy_content" '--base-generation' "Signed manifest includes canonical baseline generation"
 assert_contains "$deploy_content" 'verify-release-baseline.sh' "Deploy checks signed baseline before mutation"
 assert_contains "$deploy_content" 'Accept exact signed staged release before SSH' "Staged bundle acceptance precedes SSH mutation"

@@ -52,10 +52,6 @@ jobs:
           state="$(ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
             "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
-          trusted_preflight="$DEPLOY_PATH/deploy/preflight-runtime.sh"
-          if [[ -f "$trusted_preflight" ]]; then
-            bash "$trusted_preflight" --state "$DEPLOY_PATH/state/current-release.json" --check-only || true
-          fi
           rollout_journal="$DEPLOY_PATH/data/rollout-journal.json"
           pending_gw="$DEPLOY_PATH/data/pending-gateway-retire.env"
           pending_fe="$DEPLOY_PATH/data/pending-frontend-retire.env"
@@ -1090,7 +1086,7 @@ jobs:
             echo "Bootstrapped preflight-runtime.sh is missing or not executable" >&2
             exit 1
           }
-          bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile \
+          bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --check-only \
             --state "$DEPLOY_PATH/state/current-release.json" \
             --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
           bash "$RELEASE_DIR/verify-release-baseline.sh" \
