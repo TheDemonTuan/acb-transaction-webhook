@@ -51,7 +51,17 @@ func NewClient(base string, transport http.RoundTripper) (*Client, error) {
 		return nil, err
 	}
 	if transport == nil {
-		transport = http.DefaultTransport
+		if defaultTr, ok := http.DefaultTransport.(*http.Transport); ok {
+			cloned := defaultTr.Clone()
+			cloned.IdleConnTimeout = 30 * time.Second
+			cloned.MaxIdleConns = 16
+			cloned.MaxIdleConnsPerHost = 4
+			cloned.ResponseHeaderTimeout = 25 * time.Second
+			cloned.TLSHandshakeTimeout = 10 * time.Second
+			transport = cloned
+		} else {
+			transport = http.DefaultTransport
+		}
 	}
 	location := time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60)
 	return &Client{baseURL: parsed, now: time.Now, location: location, http: &http.Client{Jar: jar, Timeout: DefaultClientTimeout, Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -187,7 +197,13 @@ func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
-		return Response{}, ErrAuthenticatedFormStateUnavailable
+		refreshResp, err := c.getLocked(ctx, "/acbib/Request")
+		if err != nil {
+			return Response{}, ErrAuthenticatedFormStateUnavailable
+		}
+		if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
+			return refreshResp, nil
+		}
 	}
 	fields, err := PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
 	if err != nil {
@@ -204,7 +220,18 @@ func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return c.do(req)
+	resp, err := c.do(req)
+	if err != nil {
+		return Response{}, err
+	}
+	if resp.Kind == LoginPage {
+		refreshResp, refreshErr := c.getLocked(ctx, "/acbib/Request")
+		if refreshErr == nil && (refreshResp.Kind == AccountDetailPage || refreshResp.Kind == HistoryPage) {
+			slog.Info("ACB session state resynchronized after conversational token rejected", "classifier_reason", refreshResp.ClassifierReason)
+			return refreshResp, nil
+		}
+	}
+	return resp, nil
 }
 
 func (c *Client) History(ctx context.Context, endpoint string, fields map[string]string) (Response, error) {
@@ -232,9 +259,25 @@ func (c *Client) History(ctx context.Context, endpoint string, fields map[string
 	return c.do(req)
 }
 
+func (c *Client) CloseIdleConnections() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeIdleConnectionsLocked()
+}
+
+func (c *Client) closeIdleConnectionsLocked() {
+	if tr, ok := c.http.Transport.(interface{ CloseIdleConnections() }); ok {
+		tr.CloseIdleConnections()
+	}
+}
+
 func (c *Client) Get(ctx context.Context, endpoint string) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.getLocked(ctx, endpoint)
+}
+
+func (c *Client) getLocked(ctx context.Context, endpoint string) (Response, error) {
 	var requestURL *url.URL
 	if endpoint == "" && c.bootstrap != nil {
 		copy := *c.bootstrap
@@ -311,11 +354,13 @@ func (c *Client) do(req *http.Request) (Response, error) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		c.closeIdleConnectionsLocked()
 		return Response{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
+		c.closeIdleConnectionsLocked()
 		return Response{}, err
 	}
 	kind, reason := ClassifyPageWithReason(resp.Request.URL.String(), string(body))

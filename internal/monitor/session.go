@@ -33,6 +33,17 @@ func NewSessionLoader(store *storage.Store, keyring *security.Keyring, restorer 
 	return &SessionLoader{store: store, keyring: keyring, restorer: restorer}
 }
 
+// InvalidateCache clears in-memory generation caching so the next restore re-reads from storage.
+func (l *SessionLoader) InvalidateCache() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.loadedID = ""
+	l.loadedGeneration = 0
+}
+
 // Restore loads only the encrypted session for the current connection
 // generation. It rejects stale, malformed or cross-connection browser state.
 func (l *SessionLoader) Restore(ctx context.Context, connectionID string, generation int64) error {

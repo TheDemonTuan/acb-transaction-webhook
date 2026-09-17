@@ -201,6 +201,9 @@ func (m *Monitor) RecordNetworkFailure(err error) time.Time {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return m.BackoffUntil()
 	}
+	if closer, ok := m.client.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 	m.backoffMu.Lock()
 	m.consecutiveNetworkErrors++
 	shift := min(m.consecutiveNetworkErrors-1, 4)

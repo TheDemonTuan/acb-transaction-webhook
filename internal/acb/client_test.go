@@ -251,3 +251,102 @@ func TestCheckRedirectStripsPort443(t *testing.T) {
 		t.Fatalf("expected host to be stripped of port 443, got %q", requestedHost)
 	}
 }
+
+func TestBootstrapResynchronizesWhenStaleFormRejected(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		if r.Method == http.MethodPost {
+			// Simulates WebSphere DSE rejecting stale conversational token
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		}
+		// Subsequent GET /acbib/Request succeeds with active session returning fresh form
+		freshAccountBody := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh_token_123"><input name="dse_sessionId" value="fresh_sess_456"><input name="AccountNbr" value="12345678"><input name="dse_nextEventName" value="byDate"></form>`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(freshAccountBody)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore session with an old token
+	if err := client.RestoreSession(authbrowser.Handoff{
+		Version: 1,
+		URL:     "https://online.acb.com.vn/acbib/Request",
+		Action:  "https://online.acb.com.vn/acbib/Request",
+		Fields: map[string]string{
+			"dse_operationName":  "ibkacctDetailProc",
+			"dse_processorState": "stale_token_old",
+			"dse_sessionId":      "sess_old",
+		},
+		Cookies: []authbrowser.Cookie{{Name: "JSESSIONID", Value: "valid_session", Domain: "online.acb.com.vn", Path: "/", Secure: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := client.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Kind != AccountDetailPage {
+		t.Fatalf("expected resynchronization to AccountDetailPage, got %v", resp.Kind)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests (POST followed by GET fallback), got %d", len(requests))
+	}
+	if requests[0].Method != http.MethodPost || requests[1].Method != http.MethodGet {
+		t.Fatalf("expected POST then GET, got %s then %s", requests[0].Method, requests[1].Method)
+	}
+
+	snapshot, err := client.SnapshotSession()
+	if err != nil {
+		t.Fatalf("SnapshotSession: %v", err)
+	}
+	if snapshot.Fields["dse_processorState"] != "fresh_token_123" {
+		t.Fatalf("expected fresh token in snapshot, got %q", snapshot.Fields["dse_processorState"])
+	}
+}
+
+func TestBootstrapReturnsLoginPageWhenSessionTrulyExpired(t *testing.T) {
+	var reqCount int
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		reqCount++
+		loginBody := `<input name="username"><input type="password" name="password">`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RestoreSession(authbrowser.Handoff{
+		Version: 1,
+		URL:     "https://online.acb.com.vn/acbib/Request",
+		Action:  "https://online.acb.com.vn/acbib/Request",
+		Fields: map[string]string{
+			"dse_operationName":  "ibkacctDetailProc",
+			"dse_processorState": "token",
+			"dse_sessionId":      "sess",
+		},
+		Cookies: []authbrowser.Cookie{{Name: "JSESSIONID", Value: "expired", Domain: "online.acb.com.vn", Path: "/", Secure: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Kind != LoginPage {
+		t.Fatalf("expected LoginPage for truly expired session, got %v", resp.Kind)
+	}
+	if reqCount != 2 {
+		t.Fatalf("expected 2 requests (POST then GET confirmation), got %d", reqCount)
+	}
+}
+
+func TestClientCloseIdleConnections(t *testing.T) {
+	client, err := NewClient("https://online.acb.com.vn", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify CloseIdleConnections executes cleanly without panic
+	client.CloseIdleConnections()
+}
