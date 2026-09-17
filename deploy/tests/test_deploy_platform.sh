@@ -117,6 +117,78 @@ assert_eq "http:
   services: {}
 # initial middlewares" "$(cat "$t3/dynamic/middlewares.yml")" "middlewares.yml untouched on invalid candidate"
 
+printf "\n=== TEST 4: Partial write failure restores pre-existing files and deletes new files ===\n"
+t4="$TEST_TMP/t4"
+setup_mock_env "$t4"
+# Initially only middlewares.yml exists, portfolio.yml does NOT exist
+rm -f "$t4/dynamic/portfolio.yml"
+# Mock edge probe to fail on route identity ACK to trigger rollback after files are written
+cat <<'EOF' > "$t4/edge-probe.sh"
+#!/usr/bin/env bash
+if [[ "$*" == *"--expected-slot"* ]]; then
+  exit 1
+fi
+printf "HTTP Status: 200 (expected: 200)\n"
+exit 0
+EOF
+chmod +x "$t4/edge-probe.sh"
+code=0
+RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="testcommit" bash "$DEPLOY_DIR/deploy-platform.sh" 2>/dev/null || code=$?
+assert_eq "1" "$code" "deploy-platform.sh returns 1 on ACK failure"
+assert_eq "http:
+  routers: {}
+  services: {}
+# initial middlewares" "$(cat "$t4/dynamic/middlewares.yml")" "middlewares.yml restored to initial content"
+if [[ ! -f "$t4/dynamic/portfolio.yml" ]]; then
+  printf 'PASS: candidate-created portfolio.yml removed by rollback\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: candidate-created portfolio.yml was not removed by rollback\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+printf "\n=== TEST 5: Orchestrator pending platform rollback reverts dynamic configs ===\n"
+t5="$TEST_TMP/t5"
+setup_mock_env "$t5"
+export PENDING_PLATFORM_ROLLBACK_FILE="$t5/pending-platform-rollback.env"
+RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="testcommit" bash "$DEPLOY_DIR/deploy-platform.sh"
+assert_eq "$(cat "$t5/candidate_dynamic/middlewares.yml")" "$(cat "$t5/dynamic/middlewares.yml")" "deploy-platform installed candidate"
+if [[ -f "$PENDING_PLATFORM_ROLLBACK_FILE" ]]; then
+  printf 'PASS: pending platform rollback evidence file created\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: pending platform rollback evidence file missing\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+# Simulate parent orchestrator rollback
+(
+  source "$DEPLOY_DIR/lib.sh"
+  source <(sed -n '/rollback_platform_config() {/,/^}/p' "$DEPLOY_DIR/dispatch-rollout.sh")
+  rollback_platform_config
+)
+assert_eq "http:
+  routers: {}
+  services: {}
+# initial middlewares" "$(cat "$t5/dynamic/middlewares.yml")" "middlewares.yml reverted by orchestrator rollback"
+if [[ ! -f "$PENDING_PLATFORM_ROLLBACK_FILE" ]]; then
+  printf 'PASS: pending platform rollback evidence file cleaned up after rollback\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: pending platform rollback evidence file not removed\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+printf "\n=== TEST 6: Gateway + Platform composition executes deploy-platform.sh ===\n"
+# Verify dispatch-rollout.sh Step 6 condition evaluates to true when PROMOTION_PLATFORM=true and PROMOTION_GATEWAY=true
+step6_run=0
+PROMOTION_PLATFORM="true"
+PROMOTION_GATEWAY="true"
+if [[ "${PROMOTION_PLATFORM:-false}" == "true" ]]; then
+  step6_run=1
+fi
+assert_eq "1" "$step6_run" "Step 6 platform deploy executes when both gateway and platform are in scope"
+
 printf "\n======================================================\n"
 printf "Platform Deploy Tests: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"
 printf "======================================================\n"

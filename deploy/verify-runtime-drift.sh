@@ -272,6 +272,28 @@ if [[ -n "$expected_frontend_slot" ]]; then
   fi
 fi
 
+# Edge dynamic configuration drift verification
+if [[ -n "${release_dir:-}" && -d "$release_dir/edge/dynamic" ]]; then
+  dynamic_dir="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
+  for df in middlewares.yml portfolio.yml bark.yml; do
+    expected_file="$release_dir/edge/dynamic/$df"
+    actual_file="$dynamic_dir/$df"
+    if [[ -f "$expected_file" ]]; then
+      if [[ ! -f "$actual_file" ]]; then
+        log_error "PRODUCTION_DRIFT component=edge_dynamic_config file=$df expected=present actual=missing"
+        failures=$((failures + 1))
+      else
+        expected_h="$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$expected_file")"
+        actual_h="$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$actual_file")"
+        if [[ "$expected_h" != "$actual_h" ]]; then
+          log_error "PRODUCTION_DRIFT component=edge_dynamic_config file=$df expected=$expected_h actual=$actual_h"
+          failures=$((failures + 1))
+        fi
+      fi
+    fi
+  done
+fi
+
 # Journal path identity check
 canonical_journal="${RUNTIME_DATA_DIR:-${DEPLOY_PATH:-/opt/acb-transaction-webhook}/data}/deploy-journal.json"
 if [[ -n "${TX_JOURNAL_FILE:-}" ]]; then
