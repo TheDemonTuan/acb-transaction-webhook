@@ -151,7 +151,7 @@ check_durable_session() {
   elif command -v sqlite3 >/dev/null 2>&1; then
     local db_file="${DEFAULT_GATEWAY_DB:-${DATA_DIR:-./data}/gateway.db}"
     if [[ -r "$db_file" ]]; then
-      local query="SELECT count(*) FROM sessions s JOIN connections c ON s.connection_id = c.id AND s.generation = c.generation WHERE length(s.envelope) > 0;"
+      local query="SELECT count(*) FROM sessions s JOIN connections c ON s.connection_id = c.id AND s.generation = c.generation WHERE c.state = 'MONITORING' AND length(s.envelope) > 0;"
       local sql_out
       if sql_out="$(sqlite3 "file:${db_file}?mode=ro" "$query" 2>&1)"; then
         local s_count

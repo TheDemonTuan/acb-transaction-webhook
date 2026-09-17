@@ -505,7 +505,7 @@ PY
         RELEASE_ORCHESTRATED=1 DEFER_RELEASE_STATE=1 CANONICAL_RECOVERY=1 \
           RELEASE_DIR="$target_release" RELEASE_CONTEXT_DIR="$target_release" COMPOSE_ROOT="$target_release/compose" \
           SCRIPT_DIR="$target_release" DEPLOY_DIR="$target_release" \
-          bash "$worker_deployer" --canonical-recovery "$canonical_worker_img" || {
+          bash "$worker_deployer" "$canonical_worker_img" || {
             log_error "Worker canonical restore failed."
             return 1
           }

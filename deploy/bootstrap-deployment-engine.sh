@@ -107,6 +107,7 @@ REQUIRED_ENGINE_ARTIFACTS=(
   "reconcile-release.sh"
   "release-state.py"
   "preflight-runtime.sh"
+  "deploy-worker.sh"
 )
 
 ENGINE_ALLOWLIST=(

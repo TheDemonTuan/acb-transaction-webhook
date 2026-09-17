@@ -262,26 +262,19 @@ func main() {
 	if *sessionCheckFlag {
 		connID := *connectionIDFlag
 		gen := *generationFlag
-		if connID == "" || gen <= 0 {
-			conn, err := store.Connection(ctx)
-			if err != nil {
-				logger.Error("failed to get active connection for session check", "error", err)
-				os.Exit(1)
-			}
-			connID = conn.ID
-			gen = conn.Generation
+		var session storage.StoredSession
+		var err error
+		if connID != "" && gen > 0 {
+			session, err = store.Session(ctx, connID, gen)
+		} else {
+			session, err = store.CurrentMonitoringSession(ctx)
 		}
-		if connID == "" || gen <= 0 {
-			logger.Error("no active connection found for session check")
-			os.Exit(1)
-		}
-		session, err := store.Session(ctx, connID, gen)
 		if err != nil {
-			logger.Error("durable session not found", "connection_id", connID, "generation", gen, "error", err)
+			logger.Error("durable session not found for monitoring connection", "connection_id", connID, "generation", gen, "error", err)
 			os.Exit(1)
 		}
 		if len(session.Envelope) == 0 {
-			logger.Error("durable session envelope is empty", "connection_id", connID, "generation", gen)
+			logger.Error("durable session envelope is empty", "connection_id", session.ConnectionID, "generation", session.Generation)
 			os.Exit(1)
 		}
 		report := map[string]any{
