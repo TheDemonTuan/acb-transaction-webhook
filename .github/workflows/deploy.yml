@@ -1085,11 +1085,14 @@ jobs:
           bash "$bootstrap_cmd" \
             --release-dir "$RELEASE_DIR" --runtime-deploy-dir "$DEPLOY_PATH/deploy" \
             --expected-identity "$EXPECTED_IDENTITY" --expected-issuer "$EXPECTED_ISSUER" --require-cosign --no-reconcile
-          if [[ -f "$DEPLOY_PATH/deploy/preflight-runtime.sh" ]]; then
-            bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile \
-              --state "$DEPLOY_PATH/state/current-release.json" \
-              --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
-          fi
+          preflight_runtime="$DEPLOY_PATH/deploy/preflight-runtime.sh"
+          [[ -x "$preflight_runtime" ]] || {
+            echo "Bootstrapped preflight-runtime.sh is missing or not executable" >&2
+            exit 1
+          }
+          bash "$DEPLOY_PATH/deploy/preflight-runtime.sh" --reconcile \
+            --state "$DEPLOY_PATH/state/current-release.json" \
+            --expected-base-sha "$expected_base_sha" --expected-base-generation "$expected_base_generation"
           bash "$RELEASE_DIR/verify-release-baseline.sh" \
             --manifest "$RELEASE_DIR/release-manifest.json" --state "$DEPLOY_PATH/state/current-release.json"
           chmod 600 "$DEPLOY_PATH/deploy/.release.env"

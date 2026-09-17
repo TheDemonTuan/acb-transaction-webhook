@@ -106,6 +106,7 @@ REQUIRED_ENGINE_ARTIFACTS=(
   "runtime-layout.sh"
   "reconcile-release.sh"
   "release-state.py"
+  "preflight-runtime.sh"
 )
 
 ENGINE_ALLOWLIST=(
@@ -126,6 +127,7 @@ ENGINE_ALLOWLIST=(
   "lib/state.sh"
   "lib/traefik.sh"
   "preflight-vps.sh"
+  "preflight-runtime.sh"
   "bootstrap-deployment-engine.sh"
 )
 
