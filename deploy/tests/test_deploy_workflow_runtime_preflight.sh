@@ -27,6 +27,19 @@ assert_eq() {
   return 0
 }
 
+assert_file_exists() {
+  local file="$1"
+  local msg="$2"
+  if [[ ! -f "$file" ]]; then
+    printf 'FAIL: %s (file %s does not exist)\n' "$msg" "$file" >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+    return 1
+  fi
+  printf 'PASS: %s\n' "$msg"
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  return 0
+}
+
 printf "========================================================\n"
 printf "Running Runtime Preflight Drift Regression Tests\n"
 printf "========================================================\n\n"
@@ -327,6 +340,48 @@ if grep -q "acb-web-blue" "$tdir/traefik/acb.yml"; then
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
 else
   printf 'FAIL: Traefik route not pointing to acb-web-blue\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+fi
+
+# Step 3: Regression test - uncompleted/interrupted journal is archived upon successful reconcile
+printf "\nTesting uncompleted rollout journal is archived upon successful reconcile...\n"
+echo '{"status": "INTERRUPTED", "release_id": "rel-dirty"}' > "$tdir/data/rollout-journal.json"
+assert_file_exists "$tdir/data/rollout-journal.json" "Interrupted rollout journal created"
+
+ec=0
+PATH="$tdir/mock_bin:$PATH" \
+DOCKER_STATE_DIR="$DOCKER_STATE_DIR" \
+RUNTIME_ROOT="$tdir" \
+RUNTIME_RELEASES_DIR="$tdir/releases" \
+DEPLOY_PATH="$tdir" \
+TRAEFIK_DYNAMIC_DIR="$tdir/traefik" \
+ACB_CONFIG="$tdir/traefik/acb.yml" \
+ACTIVE_SLOT_FILE="$tdir/state/gateway-active-slot" \
+FRONTEND_ACTIVE_SLOT_FILE="$tdir/state/frontend-active-slot" \
+CURRENT_RELEASE_FILE="$tdir/state/current-release.json" \
+SKIP_MANIFEST_CHECK=1 \
+EDGE_PROBE_SCRIPT="$tdir/mock_bin/edge-probe" \
+bash "$tdir/deploy/preflight-runtime.sh" --reconcile \
+  --state "$tdir/state/current-release.json" \
+  --data-dir "$tdir/data" \
+  --config "$tdir/traefik/acb.yml" || ec=$?
+
+assert_eq "0" "$ec" "Preflight --reconcile passes and clears dirty interrupted journal"
+
+if [[ -f "$tdir/data/rollout-journal.json" ]]; then
+  printf 'FAIL: Active rollout-journal.json still present after reconcile\n' >&2
+  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+else
+  printf 'PASS: Active rollout-journal.json was archived away\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+fi
+
+archived_count="$(ls "$tdir/data"/rollout-journal.json.reconciled.* 2>/dev/null | wc -l)"
+if [[ "$archived_count" -ge 1 ]]; then
+  printf 'PASS: Archived rollout journal file exists with timestamp\n'
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+else
+  printf 'FAIL: Archived rollout journal file was not created\n' >&2
   TESTS_FAILED=$(( TESTS_FAILED + 1 ))
 fi
 

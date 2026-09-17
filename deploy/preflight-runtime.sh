@@ -138,7 +138,8 @@ if ! check_runtime_drift; then
     exit 1
   fi
   log_warn "Reconciling dirty runtime back to canonical release..."
-  reconcile_runtime_to_canonical "$STATE_FILE" "${ROLLOUT_JOURNAL_FILE:-$DATA_DIR/rollout-journal.json}" || {
+  ARCHIVE_ROLLOUT_JOURNAL=1 \
+    reconcile_runtime_to_canonical "$STATE_FILE" "${ROLLOUT_JOURNAL_FILE:-$DATA_DIR/rollout-journal.json}" || {
     log_error "Reconciliation failed to restore canonical runtime."
     exit 1
   }
