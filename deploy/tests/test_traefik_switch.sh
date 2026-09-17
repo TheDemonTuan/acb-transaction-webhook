@@ -54,6 +54,20 @@ assert_file_contains() {
   return 0
 }
 
+assert_file_not_contains() {
+  local file="$1"
+  local pattern="$2"
+  local msg="$3"
+  if grep -q "$pattern" "$file" 2>/dev/null; then
+    printf 'FAIL: %s (file %s unexpectedly matched "%s")\n' "$msg" "$file" "$pattern" >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+    return 1
+  fi
+  printf 'PASS: %s\n' "$msg"
+  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  return 0
+}
+
 setup_traefik_mock_env() {
   local test_dir="$1"
   export MOCK_STATE_DIR="$test_dir"
@@ -317,13 +331,20 @@ assert_file_contains "$rendered_file" "Host(\`transactions.tuannguyenviet.site\`
 assert_file_contains "$rendered_file" "acb-public-api-router" "Contains acb-public-api-router"
 assert_file_contains "$rendered_file" "acb-public-sse-router" "Contains acb-public-sse-router"
 assert_file_contains "$rendered_file" "public-api-rate-limit" "Contains public-api-rate-limit"
+assert_file_contains "$rendered_file" "public-api-inflight-ip" "Contains public-api-inflight-ip"
+assert_file_contains "$rendered_file" "public-api-inflight-global" "Contains public-api-inflight-global"
 assert_file_contains "$rendered_file" "public-sse-rate-limit" "Contains public-sse-rate-limit"
-assert_file_contains "$rendered_file" "priority: 350" "Contains SSE router priority 350"
+assert_file_contains "$rendered_file" "public-sse-inflight-ip" "Contains public-sse-inflight-ip"
+assert_file_contains "$rendered_file" "public-sse-inflight-global" "Contains public-sse-inflight-global"
+assert_file_contains "$rendered_file" "priority: 1200" "Contains SSE router priority 1200"
+assert_file_contains "$rendered_file" "priority: 1100" "Contains Public API router priority 1100"
 assert_file_contains "$rendered_file" "acb-public-deny-private" "Contains acb-public-deny-private"
 assert_file_contains "$rendered_file" "acb-public-frontend-router" "Contains acb-public-frontend-router"
 assert_file_contains "$rendered_file" "http://acb-web-green:8090" "Contains backend URL pointing to green"
 assert_file_contains "$rendered_file" "acb-deny-internal" "Contains deny-internal security rule"
 assert_file_contains "$rendered_file" "tunnel-only" "Contains tunnel-only middleware"
+assert_file_not_contains "$rendered_file" "PathPrefix(\`/api/public/v1\`) || Path(\`/healthz\`)" "Public API rule does not contain /healthz"
+assert_file_not_contains "$rendered_file" "PathPrefix(\`/api/public/v1\`) || Path(\`/readyz\`)" "Public API rule does not contain /readyz"
 
 # ==============================================================================
 # TEST 3: switch-slot.sh switches route and acknowledges identity

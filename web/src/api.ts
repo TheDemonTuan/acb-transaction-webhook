@@ -46,7 +46,9 @@ export const parseApiError = async (response: Response): Promise<ApiError> => {
     }
   }
 
-  if (code === CSRF_CODE_ORIGIN_MISMATCH) {
+  if (response.status === 429) {
+    message = 'Có quá nhiều yêu cầu cùng lúc. Vui lòng đợi một chút rồi thử lại.';
+  } else if (code === CSRF_CODE_ORIGIN_MISMATCH) {
     message = 'Xác thực bảo mật Origin không khớp với cấu hình máy chủ. Vui lòng kiểm tra PUBLIC_ORIGIN.';
   } else if (code === CSRF_CODE_TOKEN_INVALID) {
     message = 'Phiên bảo mật (CSRF) không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.';
