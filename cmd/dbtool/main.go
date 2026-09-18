@@ -270,6 +270,21 @@ func main() {
 			session, err = store.CurrentMonitoringSession(ctx)
 		}
 		if err != nil {
+			if conn, cErr := store.Connection(ctx); cErr == nil && (conn.State == "AUTH_REQUIRED" || conn.State == "UNCONFIGURED" || conn.State == "DISCONNECTED") {
+				report := map[string]any{
+					"status":          "ok",
+					"connection_id":  conn.ID,
+					"generation":     conn.Generation,
+					"state":          conn.State,
+					"unauthenticated": true,
+					"has_envelope":   false,
+				}
+				if err := encoder.Encode(report); err != nil {
+					logger.Error("encode session check report", "error", err)
+					os.Exit(1)
+				}
+				return
+			}
 			logger.Error("durable session not found for monitoring connection", "connection_id", connID, "generation", gen, "error", err)
 			os.Exit(1)
 		}
