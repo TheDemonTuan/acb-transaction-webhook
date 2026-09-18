@@ -639,6 +639,29 @@ PY
     fi
   fi
 
+  # Restore platform dynamic edge configurations if present in canonical release
+  if [[ -d "$target_release/edge/dynamic" ]]; then
+    local dynamic_dir="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
+    local dyn_drift=0
+    for df in middlewares.yml portfolio.yml bark.yml; do
+      if [[ -f "$target_release/edge/dynamic/$df" ]]; then
+        if [[ ! -f "$dynamic_dir/$df" ]] || ! cmp -s "$target_release/edge/dynamic/$df" "$dynamic_dir/$df"; then
+          dyn_drift=1
+          break
+        fi
+      fi
+    done
+    if [[ "$dyn_drift" -eq 1 ]] || comp_was_touched platform; then
+      log_info "Restoring platform dynamic edge configurations to canonical release..."
+      mkdir -p "$dynamic_dir"
+      for df in middlewares.yml portfolio.yml bark.yml; do
+        if [[ -f "$target_release/edge/dynamic/$df" ]]; then
+          cp -p "$target_release/edge/dynamic/$df" "$dynamic_dir/$df"
+        fi
+      done
+    fi
+  fi
+
   # Step 7: Verify full drift before deleting or archiving evidence
   log_info "Verifying full runtime drift against canonical state..."
   if [[ "${SKIP_MANIFEST_CHECK:-0}" -eq 1 && -n "${RUNTIME_DRIFT_CHECK_CMD:-}" ]]; then
@@ -676,7 +699,8 @@ PY
   # Rollout journal is preserved and marked ROLLED_BACK by dispatcher on candidate failure,
   # or archived with .reconciled suffix when explicitly requested.
   if [[ "${ARCHIVE_ROLLOUT_JOURNAL:-0}" == "1" && -f "$rollout_journal" ]]; then
-    local archive_path="${rollout_journal}.reconciled.$(date +%s)"
+    local archive_path
+    archive_path="${rollout_journal}.reconciled.$(date +%s)"
     mv -f "$rollout_journal" "$archive_path"
     log_info "Archived reconciled rollout journal to: $archive_path"
   fi

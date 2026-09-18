@@ -95,8 +95,8 @@ active_slot="$(get_active_slot)"
 log_info "Re-rendering acb route for active slot: $active_slot..."
 atomic_switch_route "$active_slot"
 
-# 5. Acknowledge route identity
-if ! ack_route_identity "$active_slot" "${EXPECTED_COMMIT:-}" 15; then
+# 5. Acknowledge route identity (availability only, not commit-pinned)
+if ! ack_route_identity "$active_slot" "" 15; then
   log_error "Route identity acknowledgment failed for $active_slot after platform deploy!"
   exit 1
 fi

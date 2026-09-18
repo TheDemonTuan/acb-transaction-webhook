@@ -185,6 +185,11 @@ printf 'green' > "$tdir/state/gateway-active-slot"
 printf 'blue' > "$tdir/state/frontend-active-slot"
 printf 'old_slot=blue\ncandidate_slot=green\n' > "$tdir/data/pending-gateway-retire.env"
 
+# Setup canonical dynamic edge config in rel-A and drifted version in runtime
+mkdir -p "$tdir/releases/rel-A/edge/dynamic" "$tdir/traefik"
+printf 'canonical-middlewares' > "$tdir/releases/rel-A/edge/dynamic/middlewares.yml"
+printf 'drifted-middlewares' > "$tdir/traefik/middlewares.yml"
+
 # Mock docker state tracking
 DOCKER_STATE_DIR="$tdir/docker_state"
 mkdir -p "$DOCKER_STATE_DIR"
@@ -383,6 +388,10 @@ else
   printf 'FAIL: pending-gateway-retire.env still present\n' >&2
   TESTS_FAILED=$(( TESTS_FAILED + 1 ))
 fi
+
+# Check platform dynamic edge config was restored to canonical rel-A
+restored_mw="$(cat "$tdir/traefik/middlewares.yml" 2>/dev/null || echo "")"
+assert_eq "canonical-middlewares" "$restored_mw" "Platform dynamic edge middlewares.yml restored to canonical release"
 
 printf "\n========================================================\n"
 printf "Results: %d Passed, %d Failed\n" "$TESTS_PASSED" "$TESTS_FAILED"

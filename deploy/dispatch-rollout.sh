@@ -315,26 +315,33 @@ rollback_platform_config() {
     if [[ -n "$b_dir" && -d "$b_dir" ]]; then
       log_warn "Reverting platform dynamic edge configs from [$b_dir] because the release did not commit."
       local dyn_dir="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
+      local failures=0
       if [[ -f "$b_dir/.manifest" ]]; then
         while IFS=: read -r fname fstatus; do
           [[ -n "$fname" ]] || continue
           if [[ "$fstatus" == "existed" && -f "$b_dir/$fname" ]]; then
-            cp -p "$b_dir/$fname" "$dyn_dir/$fname" 2>/dev/null || true
+            cp -p "$b_dir/$fname" "$dyn_dir/$fname" 2>/dev/null || failures=$((failures + 1))
           elif [[ "$fstatus" == "absent" ]]; then
-            rm -f "$dyn_dir/$fname" 2>/dev/null || true
+            rm -f "$dyn_dir/$fname" 2>/dev/null || failures=$((failures + 1))
           fi
         done < "$b_dir/.manifest"
       else
         for f in middlewares.yml portfolio.yml bark.yml acb.yml; do
           if [[ -f "$b_dir/$f" ]]; then
-            cp -p "$b_dir/$f" "$dyn_dir/$f" 2>/dev/null || true
+            cp -p "$b_dir/$f" "$dyn_dir/$f" 2>/dev/null || failures=$((failures + 1))
           fi
         done
       fi
       local cur_slot
       cur_slot="$(get_active_slot 2>/dev/null || echo blue)"
-      atomic_switch_route "$cur_slot" 2>/dev/null || true
-      ack_route_identity "$cur_slot" "" 15 2>/dev/null || true
+      atomic_switch_route "$cur_slot" 2>/dev/null || failures=$((failures + 1))
+      ack_route_identity "$cur_slot" "" 15 2>/dev/null || failures=$((failures + 1))
+
+      if (( failures > 0 )); then
+        log_error "Platform rollback incomplete ($failures failure(s)); preserving evidence."
+        return 1
+      fi
+
       rm -f "$PENDING_PLATFORM_ROLLBACK_FILE"
       log_info "Platform dynamic edge configuration rolled back to previous backup."
     else
