@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -291,4 +293,142 @@ func TestGatewayPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
 			t.Fatalf("timed out waiting for hub event %d", i)
 		}
 	}
+}
+
+func TestGatewayLivePreviewAndCanaryEntrypoint(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "gateway_test.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open storage: %v", err)
+	}
+	defer store.Close()
+
+	cfg := config.Config{
+		Timezone:           time.UTC,
+		DevelopmentSubject: "owner",
+		DatabasePath:       dbPath,
+	}
+	srv := httpapi.New(cfg, store)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := ts.Client()
+
+	// 1. Fetch CSRF token
+	csrfResp, err := client.Get(ts.URL + "/api/v1/csrf")
+	if err != nil {
+		t.Fatalf("GET /csrf failed: %v", err)
+	}
+	defer csrfResp.Body.Close()
+	var csrfData struct{ Token string }
+	if err := json.NewDecoder(csrfResp.Body).Decode(&csrfData); err != nil {
+		t.Fatalf("decode csrf failed: %v", err)
+	}
+
+	modes := []string{"standard", "reference", "hybrid"}
+	testToken := "LIVE_CANARY_TEST_99"
+
+	for _, mode := range modes {
+		previewReqBody, _ := json.Marshal(map[string]string{
+			"accountNumber": "97041612345678",
+			"accountName":   "NGUYEN VAN LIVE",
+			"mode":          mode,
+			"testId":        testToken,
+			"host":          "gateway.live.test",
+		})
+
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/payment-qr/preview", bytes.NewReader(previewReqBody))
+		if err != nil {
+			t.Fatalf("NewRequest preview failed: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", ts.URL)
+		req.Header.Set("X-CSRF-Token", csrfData.Token)
+		for _, c := range csrfResp.Cookies() {
+			req.AddCookie(c)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /preview failed for mode %s: %v", mode, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 for preview mode %s, got %d", mode, resp.StatusCode)
+		}
+
+		var previewRes map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&previewRes); err != nil {
+			t.Fatalf("decode preview response failed: %v", err)
+		}
+		resp.Body.Close()
+
+		payload, _ := previewRes["payload"].(string)
+		img, _ := previewRes["image"].(string)
+		crcValid, _ := previewRes["crcValid"].(bool)
+
+		if payload == "" {
+			t.Fatalf("mode %s: empty payload", mode)
+		}
+		if !strings.HasPrefix(img, "data:image/png;base64,") {
+			t.Fatalf("mode %s: invalid image format", mode)
+		}
+		if !crcValid {
+			t.Fatalf("mode %s: invalid CRC", mode)
+		}
+
+		t.Logf("Live preview mode=%s success: payload_len=%d crcValid=%v", mode, len(payload), crcValid)
+	}
+
+	// 2. Hit public canary endpoint
+	canaryReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/public/v1/payment-qr/canary/"+testToken, nil)
+	if err != nil {
+		t.Fatalf("NewRequest canary failed: %v", err)
+	}
+	canaryReq.Header.Set("User-Agent", "ACB_ONE_MobileApp/2026.09 (iOS 18; iPhone)")
+	canaryResp, err := client.Do(canaryReq)
+	if err != nil {
+		t.Fatalf("GET canary failed: %v", err)
+	}
+	defer canaryResp.Body.Close()
+	if canaryResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from canary hit, got %d", canaryResp.StatusCode)
+	}
+	var canaryRes map[string]any
+	_ = json.NewDecoder(canaryResp.Body).Decode(&canaryRes)
+	if canaryRes["status"] != "recorded" {
+		t.Fatalf("expected status 'recorded', got %v", canaryRes["status"])
+	}
+	t.Logf("Canary hit recorded: token=%s status=%v", testToken, canaryRes["status"])
+
+	// 3. Inspect canary status via admin endpoint
+	statusReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/payment-qr/canary/"+testToken, nil)
+	if err != nil {
+		t.Fatalf("NewRequest canary status failed: %v", err)
+	}
+	for _, c := range csrfResp.Cookies() {
+		statusReq.AddCookie(c)
+	}
+	statusResp, err := client.Do(statusReq)
+	if err != nil {
+		t.Fatalf("GET canary status failed: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from canary status inspection, got %d", statusResp.StatusCode)
+	}
+	var statusData map[string]any
+	_ = json.NewDecoder(statusResp.Body).Decode(&statusData)
+	hitCount, _ := statusData["hitCount"].(float64)
+	if int(hitCount) != 1 {
+		t.Fatalf("expected hitCount 1, got %v", hitCount)
+	}
+	lastUA, _ := statusData["lastUserAgent"].(string)
+	if !strings.Contains(lastUA, "ACB_ONE_MobileApp") {
+		t.Fatalf("expected lastUserAgent to contain ACB_ONE_MobileApp, got %s", lastUA)
+	}
+	t.Logf("Canary inspection verified: token=%s hitCount=%d lastUA=%s", testToken, int(hitCount), lastUA)
 }

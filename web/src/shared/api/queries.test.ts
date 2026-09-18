@@ -13,6 +13,10 @@ import {
   activatePaymentPolling,
   fetchPaymentQR,
   fetchPublicPaymentQR,
+  previewPaymentQR,
+  fetchCanaryStatus,
+  resetCanaryStatus,
+  generatePaymentQR,
 } from './queries';
 import { invalidateCsrfToken } from '../../api';
 
@@ -377,5 +381,119 @@ describe('queries and mutations with centralized CSRF', () => {
 
     const res = await fetchPaymentQR();
     expect(res.configured).toBe(true);
+  });
+
+  it('previewPaymentQR sends POST to /api/v1/payment-qr/preview with expected params', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/csrf') {
+        return new Response(JSON.stringify({ token: 'test-csrf-token' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/v1/payment-qr/preview') {
+        expect(init?.method).toBe('POST');
+        const body = JSON.parse(init?.body as string);
+        expect(body.accountNumber).toBe('123456789');
+        expect(body.mode).toBe('hybrid');
+        return new Response(
+          JSON.stringify({
+            mode: 'hybrid',
+            payload: '000201...',
+            image: 'data:image/png;base64,...',
+            crcValid: true,
+            parsed: { bin: '970416', accountNumber: '123456789' },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await previewPaymentQR({
+      accountNumber: '123456789',
+      mode: 'hybrid',
+      testId: 'QRTEST01',
+    });
+    expect(res.mode).toBe('hybrid');
+    expect(res.crcValid).toBe(true);
+    expect(res.parsed.bin).toBe('970416');
+  });
+
+  it('fetchCanaryStatus sends GET to /api/v1/payment-qr/canary/:token', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === '/api/v1/payment-qr/canary/QRTEST01') {
+        return new Response(
+          JSON.stringify({
+            token: 'QRTEST01',
+            hitCount: 2,
+            lastUserAgent: 'ACB_ONE',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await fetchCanaryStatus('QRTEST01');
+    expect(res.token).toBe('QRTEST01');
+    expect(res.hitCount).toBe(2);
+    expect(res.lastUserAgent).toBe('ACB_ONE');
+  });
+
+  it('resetCanaryStatus sends DELETE to /api/v1/payment-qr/canary/:token', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/csrf') {
+        return new Response(JSON.stringify({ token: 'test-csrf-token' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/v1/payment-qr/canary/QRTEST01') {
+        expect(init?.method).toBe('DELETE');
+        return new Response(JSON.stringify({ status: 'reset', token: 'QRTEST01' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await resetCanaryStatus('QRTEST01');
+    expect(res.status).toBe('reset');
+  });
+
+  it('generatePaymentQR sends mode in body when provided', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/csrf') {
+        return new Response(JSON.stringify({ token: 'test-csrf-token' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/v1/payment-qr/generate') {
+        expect(init?.method).toBe('POST');
+        const body = JSON.parse(init?.body as string);
+        expect(body.accountNumber).toBe('123456');
+        expect(body.accountName).toBe('NGUYEN VAN A');
+        expect(body.mode).toBe('local_standard');
+        return new Response(JSON.stringify({ status: 'OK' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await generatePaymentQR({
+      accountNumber: '123456',
+      accountName: 'NGUYEN VAN A',
+      mode: 'local_standard',
+    });
+    expect(res.status).toBe('OK');
   });
 });
