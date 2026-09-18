@@ -105,14 +105,11 @@ export class RealtimeClient {
 
   private isHeartbeatStale(): boolean {
     const threshold = this.options.staleThresholdMs ?? 12000;
-    const now = Date.now();
-    if (this.lastHeartbeatAt !== null) {
-      return now - this.lastHeartbeatAt > threshold;
-    }
-    if (this.connectedAt !== null) {
-      return now - this.connectedAt > threshold;
-    }
-    return false;
+    const baseline = Math.max(
+      this.lastHeartbeatAt ?? 0,
+      this.connectedAt ?? 0,
+    );
+    return baseline > 0 && Date.now() - baseline > threshold;
   }
 
   public connect(): void {
@@ -170,9 +167,7 @@ export class RealtimeClient {
           this.connectedAt = Date.now();
           this.reconnectDelay = this.options.minReconnectDelayMs ?? 1000;
           this.serverReachable = true;
-          if (this.lastHeartbeatAt === null) {
-            this.lastHeartbeatAt = Date.now();
-          }
+          this.lastError = null;
           this.notifyDiagnostics();
         }
       };
@@ -279,6 +274,7 @@ export class RealtimeClient {
 
   public hardReconnect(): void {
     if (this.disposed) return;
+    this.lastVisibleTick = Date.now();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

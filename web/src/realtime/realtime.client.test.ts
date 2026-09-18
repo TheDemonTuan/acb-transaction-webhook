@@ -233,4 +233,42 @@ describe('RealtimeClient lifecycle', () => {
 
     client.disconnect();
   });
+
+  it('does not re-trigger reconnect during grace period when old heartbeat exists after reconnect', () => {
+    const client = new RealtimeClient({
+      url: '/api/v1/events',
+      staleThresholdMs: 12000,
+      heartbeatCheckIntervalMs: 2500,
+    });
+
+    client.connect();
+    const source1 = FakeEventSource.instances[0];
+    source1.onopen?.();
+
+    // Receive first heartbeat
+    source1.emit('stream.heartbeat', {
+      serverTime: new Date().toISOString(),
+      epoch: 'ep1',
+    });
+    expect(client.getLastHeartbeatAt()).not.toBeNull();
+
+    // Advance system time by 60s (laptop sleep, timers frozen)
+    vi.setSystemTime(Date.now() + 60000);
+
+    // Wake / hard reconnect
+    client.hardReconnect();
+    expect(source1.closed).toBe(true);
+    const source2 = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    source2.onopen?.();
+    expect(client.getStatus()).toBe('CONNECTED');
+
+    // Run watchdog after 3s (interval is 2500ms)
+    vi.advanceTimersByTime(3000);
+
+    // Source 2 must NOT be closed because it's within grace period of connectedAt
+    expect(source2.closed).toBe(false);
+    expect(client.getStatus()).toBe('CONNECTED');
+
+    client.disconnect();
+  });
 });

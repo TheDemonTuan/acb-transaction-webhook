@@ -79,14 +79,6 @@ export interface AuditCreatedData {
   role: string;
 }
 
-export interface PaymentActivatedData {
-  id?: string;
-  source?: string;
-  timestamp?: number | string;
-  mode?: string;
-  rate?: string | number;
-}
-
 export interface StreamHeartbeatData {
   serverTime: string;
   epoch: string;
@@ -122,7 +114,6 @@ export interface RealtimeEventMap {
   'delivery.changed': DeliveryChangedData;
   'poll.completed': PollCompletedData;
   'audit.created': AuditCreatedData;
-  'payment.activated': PaymentActivatedData;
   'stream.heartbeat': StreamHeartbeatData;
   'stream_error': StreamErrorData;
 }

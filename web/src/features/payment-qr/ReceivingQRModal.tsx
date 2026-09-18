@@ -21,20 +21,19 @@ import {
   ChevronDown,
   ChevronUp,
   WifiOff,
-  Zap,
 } from 'lucide-react';
-import { fetchPaymentQR, fetchTransactions } from '../../shared/api/queries';
+import { fetchPaymentQR, fetchStatus, fetchTransactions } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { useRealtimeContext } from '../../realtime/RealtimeProvider';
 import type {
   AuthChangedData,
   BankTransactionCreditData,
   ConnectionChangedData,
-  PaymentActivatedData,
   PollCompletedData,
   RealtimeEnvelope,
 } from '../../realtime/realtime.types';
 import { formatVndCurrency } from '../../shared/formatters/money';
+import { isPublicViewerHost } from '../../app/runtime-mode';
 
 interface LiveCreditAlert {
   id: string;
@@ -58,6 +57,8 @@ export const ReceivingQRModal: React.FC<{
   const [nowTick, setNowTick] = useState<number>(Date.now());
   const seenTxIdsRef = useRef<Set<string>>(new Set());
 
+  const isPublic = isPublicViewerHost();
+
   // Realtime health & status states
   const {
     status: sseStatus,
@@ -68,10 +69,9 @@ export const ReceivingQRModal: React.FC<{
     forceReconnect,
   } = useRealtimeContext();
 
-  const [acbSessionExpired, setAcbSessionExpired] = useState(false);
+  const [acbState, setAcbState] = useState<string>('UNKNOWN');
   const [pollError, setPollError] = useState<{ type: 'warning' | 'critical'; message: string } | null>(null);
   const [lastPollSuccessAt, setLastPollSuccessAt] = useState<number | null>(null);
-  const [isBoostActive, setIsBoostActive] = useState(false);
   const [showHealthDetails, setShowHealthDetails] = useState(false);
 
   const todayStr = useMemo(() => {
@@ -83,6 +83,13 @@ export const ReceivingQRModal: React.FC<{
     queryKey: queryKeys.paymentQR,
     queryFn: fetchPaymentQR,
     enabled: isOpen,
+  });
+
+  // Authoritative system status (admin only; public viewer does not expose /status)
+  const { data: systemStatus } = useQuery({
+    queryKey: queryKeys.status,
+    queryFn: fetchStatus,
+    enabled: isOpen && !isPublic,
   });
 
   // Load recent credit transactions for today
@@ -99,6 +106,20 @@ export const ReceivingQRModal: React.FC<{
   const qr = qrData?.qr;
   const isConfigured = qrData?.configured && qrData?.hasImage;
 
+  // Hydrate from authoritative snapshot
+  useEffect(() => {
+    if (!isOpen || !systemStatus?.acb) return;
+    if (systemStatus.acb.state) {
+      setAcbState(systemStatus.acb.state);
+    }
+    if (systemStatus.acb.lastSuccessfulPollAt) {
+      const parsed = new Date(systemStatus.acb.lastSuccessfulPollAt).getTime();
+      if (!isNaN(parsed)) {
+        setLastPollSuccessAt(parsed);
+      }
+    }
+  }, [isOpen, systemStatus]);
+
   // Reset state when modal opens
   useEffect(() => {
     if (isOpen) {
@@ -108,14 +129,21 @@ export const ReceivingQRModal: React.FC<{
       setActiveAlert(null);
       setActiveTab('qr');
       seenTxIdsRef.current.clear();
-      setAcbSessionExpired(false);
       setPollError(null);
-      setLastPollSuccessAt(Date.now());
-      setIsBoostActive(false);
       setShowHealthDetails(false);
+
+      if (systemStatus?.acb?.state) {
+        setAcbState(systemStatus.acb.state);
+      }
+      if (systemStatus?.acb?.lastSuccessfulPollAt) {
+        const parsed = new Date(systemStatus.acb.lastSuccessfulPollAt).getTime();
+        if (!isNaN(parsed)) {
+          setLastPollSuccessAt(parsed);
+        }
+      }
       refetchTx();
     }
-  }, [isOpen, refetchTx]);
+  }, [isOpen, refetchTx, systemStatus]);
 
   // Second-by-second ticker for relative time displays ("vài giây trước")
   useEffect(() => {
@@ -179,8 +207,10 @@ export const ReceivingQRModal: React.FC<{
         if (!d) return;
 
         if (d.status === 'AUTH_REQUIRED' || d.error === 'SESSION_EXPIRED') {
-          setAcbSessionExpired(true);
+          setAcbState('AUTH_REQUIRED');
           setPollError({ type: 'critical', message: 'Phiên đăng nhập ACB đã hết hạn' });
+        } else if (d.status === 'PARTIAL') {
+          setPollError({ type: 'warning', message: 'ACB phản hồi một phần dữ liệu' });
         } else if (d.status === 'FAILED') {
           const errCode = d.classifier || d.error || 'ACB_FAILED';
           let message = 'Lỗi kết nối kiểm tra ACB';
@@ -191,9 +221,9 @@ export const ReceivingQRModal: React.FC<{
 
           setPollError({ type: 'warning', message });
         } else if (d.status === 'SUCCEEDED') {
-          setAcbSessionExpired(false);
           setPollError(null);
           setLastPollSuccessAt(Date.now());
+          setAcbState('MONITORING');
         }
       }
     );
@@ -207,12 +237,8 @@ export const ReceivingQRModal: React.FC<{
       'connection.changed',
       (envelope: RealtimeEnvelope<ConnectionChangedData>) => {
         const d = envelope.data;
-        if (!d) return;
-        if (d.state === 'AUTH_REQUIRED' || d.state === 'DISCONNECTED') {
-          setAcbSessionExpired(true);
-        } else if (d.state === 'CONNECTED') {
-          setAcbSessionExpired(false);
-        }
+        if (!d?.state) return;
+        setAcbState(d.state);
       }
     );
 
@@ -220,24 +246,20 @@ export const ReceivingQRModal: React.FC<{
       'auth.changed',
       (envelope: RealtimeEnvelope<AuthChangedData>) => {
         const d = envelope.data;
-        if (!d) return;
-        if (d.status === 'FAILED') {
-          setAcbSessionExpired(true);
-        } else if (d.status === 'SUCCEEDED') {
-          setAcbSessionExpired(false);
+        if (!d?.status) return;
+        if (d.status === 'MONITORING' || d.status === 'VERIFIED' || d.status === 'SUCCESS') {
+          setAcbState('MONITORING');
+        } else if (d.status === 'IN_PROGRESS' || d.status === 'AUTH_STARTING') {
+          setAcbState('AUTH_STARTING');
+        } else if (d.status === 'FAILED' || d.status === 'EXPIRED' || d.status === 'AUTH_REQUIRED') {
+          setAcbState('AUTH_REQUIRED');
         }
       }
     );
 
-    const unsubBoost = subscribe<PaymentActivatedData>('payment.activated', () => {
-      setIsBoostActive(true);
-      setTimeout(() => setIsBoostActive(false), 30000);
-    });
-
     return () => {
       unsubConn();
       unsubAuth();
-      unsubBoost();
     };
   }, [isOpen, subscribe]);
 
@@ -279,8 +301,23 @@ export const ReceivingQRModal: React.FC<{
   const isSseBroken = sseStatus === 'DISCONNECTED';
   const isSseStale = sseStatus === 'STALE' || sseStatus === 'RECONNECTING';
 
-  const hasCritical = isInternetDown || isGatewayDown || acbSessionExpired || isSseBroken;
-  const hasWarning = !hasCritical && (isSseStale || !!pollError);
+  const isAcbCritical =
+    acbState === 'AUTH_REQUIRED' ||
+    acbState === 'DISCONNECTED' ||
+    acbState === 'UNCONFIGURED' ||
+    acbState === 'FAILED' ||
+    acbState === 'EXPIRED' ||
+    pollError?.type === 'critical';
+
+  const isAcbWarning =
+    !isAcbCritical &&
+    (acbState === 'AUTH_STARTING' ||
+      acbState === 'PAUSED' ||
+      acbState === 'IN_PROGRESS' ||
+      pollError?.type === 'warning');
+
+  const hasCritical = isInternetDown || isGatewayDown || isAcbCritical || isSseBroken;
+  const hasWarning = !hasCritical && (isSseStale || isAcbWarning);
 
   const heartbeatSec = lastHeartbeatAt
     ? Math.max(0, Math.floor((nowTick - lastHeartbeatAt.getTime()) / 1000))
@@ -377,12 +414,12 @@ export const ReceivingQRModal: React.FC<{
           </div>
         )}
 
-        {!isInternetDown && !isGatewayDown && acbSessionExpired && (
+        {!isInternetDown && !isGatewayDown && isAcbCritical && (
           <div className="px-5 py-3 bg-rose-600 text-white text-xs flex items-center justify-between gap-3 shrink-0">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <div>
-                <strong className="font-bold uppercase tracking-wider">Phiên đăng nhập ACB đã hết hạn</strong>
+                <strong className="font-bold uppercase tracking-wider">Phiên đăng nhập ACB đã hết hạn / gián đoạn</strong>
                 <p className="text-rose-100 text-[11px] mt-0.5">
                   Hệ thống không thể tự động kiểm tra giao dịch mới từ ACB. Cần đăng nhập lại ACB để tiếp tục.
                 </p>
@@ -412,12 +449,16 @@ export const ReceivingQRModal: React.FC<{
           </div>
         )}
 
-        {!hasCritical && !isSseStale && pollError && (
+        {!hasCritical && !isSseStale && isAcbWarning && (
           <div className="px-5 py-2.5 bg-amber-500 text-white text-xs flex items-center justify-between gap-3 shrink-0">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <div>
-                <strong className="font-bold">Cảnh báo ACB: {pollError.message}</strong>
+                <strong className="font-bold">
+                  {acbState === 'AUTH_STARTING'
+                    ? 'Đang khởi động phiên ACB...'
+                    : pollError?.message || 'Cảnh báo kết nối ACB'}
+                </strong>
                 <span className="text-amber-100 text-[11px] ml-2">
                   Hệ thống đang tiếp tục chu kỳ kiểm tra tự động.
                 </span>
@@ -572,10 +613,16 @@ export const ReceivingQRModal: React.FC<{
                       <span className="text-stone-500">Phiên ACB</span>
                       <span className="font-medium flex items-center gap-1">
                         <span
-                          className={`w-1.5 h-1.5 rounded-full ${!acbSessionExpired ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                          className={`w-1.5 h-1.5 rounded-full ${!isAcbCritical ? 'bg-emerald-500' : 'bg-rose-500'}`}
                         />
-                        <span className={!acbSessionExpired ? 'text-stone-800' : 'text-rose-600 font-bold'}>
-                          {!acbSessionExpired ? 'Đang hoạt động' : 'Hết hạn phiên'}
+                        <span className={!isAcbCritical ? 'text-stone-800' : 'text-rose-600 font-bold'}>
+                          {acbState === 'MONITORING'
+                            ? 'Đang hoạt động'
+                            : isAcbWarning
+                              ? 'Đang kết nối...'
+                              : isAcbCritical
+                                ? 'Cần đăng nhập lại'
+                                : 'Sẵn sàng'}
                         </span>
                       </span>
                     </div>
@@ -603,16 +650,15 @@ export const ReceivingQRModal: React.FC<{
                     </div>
 
                     <div className="flex items-center justify-between">
-                      <span className="text-stone-500">Tần suất quét QR</span>
-                      <span className="font-medium flex items-center gap-1">
-                        {isBoostActive ? (
-                          <span className="text-purple-700 font-bold flex items-center gap-1">
-                            <Zap className="w-3 h-3 text-purple-600 fill-purple-600 animate-pulse" />
-                            HOT · 1.5s/lần
-                          </span>
-                        ) : (
-                          <span className="text-stone-500">Tiêu chuẩn</span>
-                        )}
+                      <span className="text-stone-500">Chế độ kiểm tra ACB</span>
+                      <span className="font-medium flex items-center gap-1 text-stone-800">
+                        {systemStatus?.acb?.scheduleMode
+                          ? `${systemStatus.acb.scheduleMode === 'REALTIME' ? 'Realtime' : 'Tiêu chuẩn'}${
+                              systemStatus.acb.scheduleMinSeconds && systemStatus.acb.scheduleMaxSeconds
+                                ? ` · ${systemStatus.acb.scheduleMinSeconds}–${systemStatus.acb.scheduleMaxSeconds}s`
+                                : ''
+                            }`
+                          : 'Tự động định kỳ'}
                       </span>
                     </div>
                   </div>
@@ -863,7 +909,7 @@ export const ReceivingQRModal: React.FC<{
                               </div>
                             </div>
                             <span className="font-bold text-stone-600 text-sm whitespace-nowrap">
-                              +{formatVndCurrency(Number(tx.amount || 0))}
+                              +{formatVndCurrency(Number(tx.credit || 0))}
                             </span>
                           </div>
                         ))}
