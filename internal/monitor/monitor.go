@@ -48,10 +48,6 @@ type Monitor struct {
 	sessions       *SessionLoader
 	scheduler      *scheduler.Scheduler
 
-	boostMu sync.RWMutex
-	boost   PollBoostState
-	boostCh chan struct{}
-
 	backoffMu                sync.RWMutex
 	backoffUntil             time.Time
 	consecutiveNetworkErrors int
@@ -131,7 +127,6 @@ func New(store *storage.Store, client BankClient, minInterval, maxInterval time.
 			return minimum + time.Duration(rand.Int64N(int64(maximum-minimum)+1))
 		},
 		settingsCh:     make(chan struct{}, 1),
-		boostCh:        make(chan struct{}, 1),
 		cachedSettings: storage.DefaultMonitorSettings,
 		scheduler:      scheduler.New(&scheduler.Options{Metrics: telemetry.NewSchedulerAdapter(telemetry.Default)}),
 		now:            time.Now,
@@ -142,93 +137,6 @@ func (m *Monitor) NotifySettingsChanged() {
 	select {
 	case m.settingsCh <- struct{}{}:
 	default:
-	}
-}
-
-func (m *Monitor) ActivatePaymentWindow() PollBoostProfile {
-	if m == nil {
-		return PollBoostProfile{}
-	}
-	now := m.now()
-
-	m.boostMu.Lock()
-	m.boost.Activate(now)
-	profile := m.boost.Resolve(now)
-	m.boostMu.Unlock()
-
-	slog.Info("payment window activated", "phase", profile.Phase, "next_phase_at", profile.NextPhaseAt)
-
-	select {
-	case m.boostCh <- struct{}{}:
-	default:
-	}
-	return profile
-}
-
-func (m *Monitor) ResolvePollBoost(now time.Time) PollBoostProfile {
-	if m == nil {
-		return PollBoostProfile{}
-	}
-	m.boostMu.RLock()
-	defer m.boostMu.RUnlock()
-	return m.boost.Resolve(now)
-}
-
-type effectiveSchedule struct {
-	mode        storage.PollMode
-	phase       PollBoostPhase
-	minInterval time.Duration
-	maxInterval time.Duration
-	graceWait   time.Duration
-	isBoosted   bool
-}
-
-func (m *Monitor) resolveEffective(now time.Time, base storage.ResolvedSchedule, boost PollBoostProfile) effectiveSchedule {
-	if base.Mode == storage.ModePaused {
-		return effectiveSchedule{
-			mode:  storage.ModePaused,
-			phase: PollBoostIdle,
-		}
-	}
-
-	if boost.Active {
-		if boost.Phase == PollBoostGrace {
-			graceWait := boost.NextPhaseAt.Sub(now)
-			if graceWait < 0 {
-				graceWait = 0
-			}
-			return effectiveSchedule{
-				mode:        storage.ModeRealtime,
-				phase:       PollBoostGrace,
-				minInterval: paymentHotMin,
-				maxInterval: paymentHotMax,
-				graceWait:   graceWait,
-				isBoosted:   true,
-			}
-		}
-		return effectiveSchedule{
-			mode:        storage.ModeRealtime,
-			phase:       boost.Phase,
-			minInterval: boost.MinInterval,
-			maxInterval: boost.MaxInterval,
-			isBoosted:   true,
-		}
-	}
-
-	return effectiveSchedule{
-		mode:        base.Mode,
-		phase:       PollBoostIdle,
-		minInterval: base.MinInterval,
-		maxInterval: base.MaxInterval,
-	}
-}
-
-func stopAndDrainTimer(t *time.Timer) {
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
 	}
 }
 
@@ -507,57 +415,28 @@ func (m *Monitor) Run(ctx context.Context) {
 	defer timer.Stop()
 
 	for {
-		now := m.now()
-		schedule := storage.ResolveSchedule(now, &m.cachedSettings)
-		boost := m.ResolvePollBoost(now)
-		effective := m.resolveEffective(now, schedule, boost)
+		schedule := storage.ResolveSchedule(time.Now(), &m.cachedSettings)
 
-		// Transition check: transitioning into REALTIME triggers catch-up and immediate realtime poll,
-		// UNLESS we are in PollBoostGrace (in which case we wait for grace period before first poll).
-		if effective.phase != PollBoostGrace {
-			if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && effective.mode == storage.ModeRealtime {
-				conn, err := m.store.Connection(ctx)
-				if err == nil && conn.State == "MONITORING" {
-					if s := m.Scheduler(); s != nil {
-						_ = s.Enqueue(NewCatchUpTask(m, conn.ID, conn.Generation))
-						_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
-					}
+		// Transition check: transitioning into REALTIME triggers catch-up and immediate realtime poll
+		if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && schedule.Mode == storage.ModeRealtime {
+			conn, err := m.store.Connection(ctx)
+			if err == nil && conn.State == "MONITORING" {
+				if s := m.Scheduler(); s != nil {
+					_ = s.Enqueue(NewCatchUpTask(m, conn.ID, conn.Generation))
+					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
 				}
 			}
-			m.lastMode = effective.mode
 		}
+		m.lastMode = schedule.Mode
 
-		var wait time.Duration
-		if effective.phase == PollBoostGrace {
-			wait = effective.graceWait
-			if wait <= 0 {
-				wait = m.nextInterval(effective.minInterval, effective.maxInterval)
-			}
-		} else if effective.mode == storage.ModePaused {
+		wait := m.nextInterval(schedule.MinInterval, schedule.MaxInterval)
+		if schedule.Mode == storage.ModePaused {
 			wait = 10 * time.Minute
-		} else {
-			wait = m.nextInterval(effective.minInterval, effective.maxInterval)
 		}
-
-		if effective.mode == schedule.Mode && !effective.isBoosted {
-			untilTrans := schedule.NextTransition.Sub(now)
-			if untilTrans > 0 && untilTrans < wait {
-				wait = untilTrans
-			}
-		} else if effective.isBoosted && !boost.NextPhaseAt.IsZero() {
-			untilPhase := boost.NextPhaseAt.Sub(now)
-			if untilPhase > 0 && untilPhase < wait {
-				wait = untilPhase
-			}
+		untilTrans := time.Until(schedule.NextTransition)
+		if untilTrans > 0 && untilTrans < wait {
+			wait = untilTrans
 		}
-
-		if backoffUntil := m.BackoffUntil(); now.Before(backoffUntil) {
-			backoffWait := backoffUntil.Sub(now)
-			if backoffWait > wait {
-				wait = backoffWait
-			}
-		}
-
 		timer.Reset(wait)
 
 		select {
@@ -566,43 +445,27 @@ func (m *Monitor) Run(ctx context.Context) {
 
 		case <-m.settingsCh:
 			// Hot reload settings
-			stopAndDrainTimer(timer)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			if s, err := m.store.GetMonitorSettings(ctx); err == nil {
 				m.cachedSettings = s
 				slog.Info("monitor schedule hot-reloaded", "revision", s.Revision, "enabled", s.Enabled)
 			}
 			continue
 
-		case <-m.boostCh:
-			stopAndDrainTimer(timer)
-			continue
-
 		case <-timer.C:
-			if m.IsBackoffActive() {
-				continue
-			}
-
 			conn, err := m.store.Connection(ctx)
 			if err != nil || conn.State != "MONITORING" {
 				continue
 			}
 
-			fireNow := m.now()
-			fireSched := storage.ResolveSchedule(fireNow, &m.cachedSettings)
-			fireBoost := m.ResolvePollBoost(fireNow)
-			fireEff := m.resolveEffective(fireNow, fireSched, fireBoost)
-
-			if fireEff.phase == PollBoostGrace {
-				continue
-			}
-
 			if s := m.Scheduler(); s != nil {
-				switch fireEff.mode {
+				switch schedule.Mode {
 				case storage.ModeRealtime:
-					if m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "" {
-						_ = s.Enqueue(NewCatchUpTask(m, conn.ID, conn.Generation))
-						m.lastMode = storage.ModeRealtime
-					}
 					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
 				case storage.ModeKeepaliveOnly:
 					_ = s.Enqueue(NewKeepaliveTask(m, conn.ID, conn.Generation))

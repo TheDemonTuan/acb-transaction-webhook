@@ -9,21 +9,12 @@ import { ActivityPage } from '../pages/admin/ActivityPage';
 import { SystemPage } from '../pages/admin/SystemPage';
 import { TransactionsPage } from '../pages/viewer/TransactionsPage';
 import { TransactionDetailPage } from '../pages/viewer/TransactionDetailPage';
-import { PaymentPage } from '../pages/viewer/PaymentPage';
 import { isPublicViewerHost } from './runtime-mode';
 
 export const publicRoutes = [
   {
     path: '/',
     element: <Navigate to="/transactions" replace />,
-  },
-  {
-    path: '/pay/:identifier?',
-    element: <PaymentPage />,
-  },
-  {
-    path: '/pay',
-    element: <PaymentPage />,
   },
   {
     path: '/transactions',
@@ -52,14 +43,6 @@ export const adminRoutes = [
       { path: 'admin/activity', element: <ActivityPage /> },
       { path: 'admin/system', element: <SystemPage /> },
     ],
-  },
-  {
-    path: '/pay/:identifier?',
-    element: <PaymentPage />,
-  },
-  {
-    path: '/pay',
-    element: <PaymentPage />,
   },
   {
     path: '/transactions',

@@ -75,22 +75,6 @@ type NotificationProviderReader interface {
 	NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error)
 }
 
-type PaymentActivationState struct {
-	TrackingActive bool
-	Phase          string
-	NextPhaseAt    time.Time
-}
-
-type PaymentWindowActivator interface {
-	ActivatePaymentWindow(ctx context.Context) (PaymentActivationState, error)
-}
-
-type PaymentWindowActivatorFunc func(ctx context.Context) (PaymentActivationState, error)
-
-func (f PaymentWindowActivatorFunc) ActivatePaymentWindow(ctx context.Context) (PaymentActivationState, error) {
-	return f(ctx)
-}
-
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
@@ -102,9 +86,6 @@ type Server struct {
 	workerProber      WorkerProber
 	channelTester     NotificationChannelTester
 	providerReader    NotificationProviderReader
-	paymentActivator  PaymentWindowActivator
-	activationLimit   *activationLimiter
-	activationDebounce *activationDebouncer
 	cfg               config.Config
 	store             *storage.Store
 	auth              *auth.Middleware
@@ -149,11 +130,9 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		browserVNCURL: cfg.AuthBrowserVNCURL,
 		keyring:       keyring,
 		eventHub:      eventhub.New(),
-		ttsClient:          ttsClientInstance,
-		instanceNonce:      instanceNonce,
-		started:            time.Now().UTC(),
-		activationLimit:    newActivationLimiter(),
-		activationDebounce: newActivationDebouncer(),
+		ttsClient:     ttsClientInstance,
+		instanceNonce: instanceNonce,
+		started:       time.Now().UTC(),
 	}
 	r := chi.NewRouter()
 	r.Use(requestID, s.platformHeaders, securityHeaders, recoverer)
@@ -167,7 +146,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/transactions/{id}", s.publicTransactionDetail)
 		api.Get("/payment-qr", s.publicPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
-		api.Post("/payment-qr/activate", s.activatePaymentQR)
 		api.Get("/events", s.publicEventsStream)
 		api.Get("/events/stream", s.publicEventsStream)
 	})
@@ -306,11 +284,6 @@ func (s *Server) WithWorkerProber(wp WorkerProber) *Server {
 
 func (s *Server) WithMonitorNotifier(notifier MonitorNotifier) *Server {
 	s.monitorNotifier = notifier
-	return s
-}
-
-func (s *Server) WithPaymentActivator(activator PaymentWindowActivator) *Server {
-	s.paymentActivator = activator
 	return s
 }
 

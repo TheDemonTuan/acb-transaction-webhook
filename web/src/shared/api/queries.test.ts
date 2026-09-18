@@ -10,7 +10,6 @@ import {
   cancelAuthSession,
   fetchCurrentAuthSession,
   toggleWebhookEndpoint,
-  activatePaymentPolling,
 } from './queries';
 import { invalidateCsrfToken } from '../../api';
 
@@ -301,37 +300,5 @@ describe('queries and mutations with centralized CSRF', () => {
     expect(res.attempt).not.toBeNull();
     expect(res.attempt?.attemptId).toBe('att-ready-1');
     expect(res.attempt?.browserUnavailable).toBeUndefined();
-  });
-
-  it('activatePaymentPolling sends POST to /api/public/v1/payment-qr/activate without CSRF requirement', async () => {
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      if (url === '/api/public/v1/payment-qr/activate') {
-        expect(init?.method).toBe('POST');
-        const headers = new Headers(init?.headers);
-        expect(headers.get('Content-Type')).toBe('application/json');
-        expect(headers.get('X-CSRF-Token')).toBeNull();
-        expect(init?.body).toBe(JSON.stringify({ identifier: 'test-qr-id-123' }));
-
-        return new Response(
-          JSON.stringify({
-            trackingActive: true,
-            phase: 'GRACE',
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-      throw new Error(`Unexpected url: ${url}`);
-    });
-    globalThis.fetch = fetchMock;
-
-    const res = await activatePaymentPolling('test-qr-id-123');
-    expect(res.trackingActive).toBe(true);
-    expect(res.phase).toBe('GRACE');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('activatePaymentPolling rejects blank identifier on client before sending', async () => {
-    await expect(activatePaymentPolling('')).rejects.toThrow('identifier required');
-    await expect(activatePaymentPolling('   ')).rejects.toThrow('identifier required');
   });
 });
