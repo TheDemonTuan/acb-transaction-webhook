@@ -305,6 +305,112 @@ assert_contains "$ci_content" "if: always()" "Production Contract uses if: alway
 assert_contains "$ci_content" "needs: [verify, docker-smoke-gateway, docker-smoke-auth-browser, docker-smoke-tts-gateway]" "Production Contract requires all mandatory upstream jobs"
 assert_contains "$ci_content" '[[ "$result" == "success" ]]' "Production Contract fails closed on any non-success (rejects skipped/failed)"
 
+# 11. Candidate Pre-Pull Promotion Contract Invariants
+printf "\n11. Testing Candidate Pre-Pull Promotion Contract Invariants...\n"
+prepull_test_output="$(python3 - "$deploy_yml" <<'PY'
+import json, os, re, subprocess, sys, tempfile, textwrap
+
+deploy_file = sys.argv[1]
+with open(deploy_file, "r", encoding="utf-8") as f:
+    deploy_content = f.read()
+
+pattern = r"read -r candidate_images < <\(python3 - \"\$RELEASE_DIR/release-manifest\.json\" <<'PY'\n(.*?)\n\s*PY\n"
+m = re.search(pattern, deploy_content, re.DOTALL)
+if not m:
+    print("FAILED_TO_EXTRACT")
+    sys.exit(1)
+
+code = textwrap.dedent(m.group(1))
+
+def run_candidate(manifest_dict):
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
+        json.dump(manifest_dict, tf)
+        tf_name = tf.name
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, tf_name],
+            capture_output=True,
+            text=True
+        )
+        return proc.returncode, proc.stdout.strip()
+    finally:
+        if os.path.exists(tf_name):
+            os.remove(tf_name)
+
+code_exit, stdout = run_candidate({
+    "promotion": {"schema": True, "worker": True, "gateway": True, "frontend": True},
+    "promotion_scope": ["frontend", "gateway", "worker", "schema"],
+    "images": {
+        "dbtool": "ghcr.io/repo/dbtool:canonical",
+        "worker": "ghcr.io/repo/worker:canonical",
+        "gateway": "ghcr.io/repo/gateway:canonical",
+        "frontend": "ghcr.io/repo/frontend:canonical"
+    }
+})
+expected_canonical = "ghcr.io/repo/dbtool:canonical ghcr.io/repo/worker:canonical ghcr.io/repo/gateway:canonical ghcr.io/repo/frontend:canonical"
+if code_exit != 0 or stdout != expected_canonical:
+    print(f"FAIL canonical: exit={code_exit} stdout={stdout}")
+    sys.exit(1)
+
+code_exit, stdout = run_candidate({
+    "promotion": {"bark": True},
+    "promotion_scope": ["bark"],
+    "images": {"bark": "ghcr.io/repo/bark:canonical"}
+})
+if code_exit != 0 or stdout != "ghcr.io/repo/bark:canonical":
+    print(f"FAIL bark-only: exit={code_exit} stdout={stdout}")
+    sys.exit(1)
+
+code_exit, stdout = run_candidate({
+    "promotion": {"platform": True},
+    "promotion_scope": ["platform"],
+    "images": {}
+})
+if code_exit != 0 or stdout != "":
+    print(f"FAIL platform-only: exit={code_exit} stdout={stdout}")
+    sys.exit(1)
+
+code_exit, _ = run_candidate({
+    "promotion": {"schema": True},
+    "promotion_scope": {"schema": True},
+    "images": {"dbtool": "ghcr.io/repo/dbtool:canonical"}
+})
+if code_exit == 0:
+    print("FAIL list-as-dict-regression")
+    sys.exit(1)
+
+code_exit, _ = run_candidate({
+    "promotion": {"schema": True},
+    "promotion_scope": ["worker"],
+    "images": {"dbtool": "ghcr.io/repo/dbtool:canonical", "worker": "ghcr.io/repo/worker:canonical"}
+})
+if code_exit == 0:
+    print("FAIL disagree")
+    sys.exit(1)
+
+code_exit, _ = run_candidate({
+    "promotion": {"schema": True},
+    "promotion_scope": ["schema", "schema"],
+    "images": {"dbtool": "ghcr.io/repo/dbtool:canonical"}
+})
+if code_exit == 0:
+    print("FAIL duplicate")
+    sys.exit(1)
+
+code_exit, _ = run_candidate({
+    "promotion": {"unsupported_component": True},
+    "promotion_scope": ["unsupported_component"],
+    "images": {}
+})
+if code_exit == 0:
+    print("FAIL unknown")
+    sys.exit(1)
+
+print("SUCCESS")
+PY
+)"
+assert_eq "SUCCESS" "$prepull_test_output" "Candidate pre-pull follows signed manifest contract, accepts list promotion_scope, includes Bark, and fails closed on malformed scope"
+
 printf "\n========================================================\n"
 printf "Results: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"
 printf "========================================================\n"
