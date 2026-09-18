@@ -78,8 +78,17 @@ export interface StreamErrorData {
   message?: string;
 }
 
+export interface PaymentActivationData {
+  identifier: string;
+  phase?: string;
+  trackingActive?: boolean;
+  nextPhaseAt?: string;
+  activatedAt?: string;
+}
+
 export interface RealtimeEventMap {
   'bank.transaction.credit': BankTransactionCreditData;
+  'payment.activated': PaymentActivationData;
   'connection.changed': ConnectionChangedData;
   'auth.changed': AuthChangedData;
   'webhook.changed': WebhookChangedData;

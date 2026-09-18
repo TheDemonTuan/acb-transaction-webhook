@@ -16,11 +16,12 @@ import {
   RefreshCw,
   Radio,
   Receipt,
+  Smartphone,
 } from 'lucide-react';
 import { fetchPaymentQR, fetchTransactions } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { useRealtimeContext } from '../../realtime/RealtimeProvider';
-import type { BankTransactionCreditData, RealtimeEnvelope } from '../../realtime/realtime.types';
+import type { BankTransactionCreditData, PaymentActivationData, RealtimeEnvelope } from '../../realtime/realtime.types';
 import type { Transaction } from '../../realtime-types';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import {
@@ -47,6 +48,13 @@ interface LiveCreditAlert {
   timeStr: string;
 }
 
+interface CustomerScanAlert {
+  identifier: string;
+  timestamp: number;
+  timeStr: string;
+  phase?: string;
+}
+
 export const ReceivingQRModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -57,6 +65,7 @@ export const ReceivingQRModal: React.FC<{
   const [sessionOpenedAt, setSessionOpenedAt] = useState<number>(Date.now());
   const [sessionCredits, setSessionCredits] = useState<LiveCreditAlert[]>([]);
   const [activeAlert, setActiveAlert] = useState<LiveCreditAlert | null>(null);
+  const [customerScanned, setCustomerScanned] = useState<CustomerScanAlert | null>(null);
   const [nowTick, setNowTick] = useState<number>(Date.now());
   const seenTxIdsRef = useRef<Set<string>>(new Set());
 
@@ -101,6 +110,7 @@ export const ReceivingQRModal: React.FC<{
       setSessionOpenedAt(openTime);
       setSessionCredits([]);
       setActiveAlert(null);
+      setCustomerScanned(null);
       setActiveTab('qr');
       setShowDirectVietQR(false);
       seenTxIdsRef.current.clear();
@@ -186,7 +196,30 @@ export const ReceivingQRModal: React.FC<{
       }
     );
 
-    return () => unsub();
+    const unsubActivation = subscribe<PaymentActivationData>(
+      'payment.activated',
+      (envelope: RealtimeEnvelope<PaymentActivationData>) => {
+        const d = envelope.data;
+        if (!d) return;
+
+        const now = Date.now();
+        setCustomerScanned({
+          identifier: d.identifier,
+          timestamp: now,
+          timeStr: new Date(now).toLocaleTimeString('vi-VN', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          }),
+          phase: d.phase || 'HOT',
+        });
+      }
+    );
+
+    return () => {
+      unsub();
+      unsubActivation();
+    };
   }, [isOpen, subscribe, queryClient, sessionOpenedAt]);
 
   // ESC key listener
@@ -246,8 +279,20 @@ export const ReceivingQRModal: React.FC<{
                 </span>
               </div>
               <p className="text-[11px] text-stone-500 flex items-center gap-1.5 mt-0.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                Đang trực tiếp theo dõi biến động số dư tài khoản
+                {customerScanned && !activeAlert ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+                    <span className="font-semibold text-indigo-700">
+                      Khách vừa quét mã ({formatRelativeTime(customerScanned.timestamp)})
+                    </span>
+                    <span className="text-stone-400">• Đang chờ tiền vào</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>Đang trực tiếp theo dõi biến động số dư tài khoản</span>
+                  </>
+                )}
               </p>
             </div>
           </div>
@@ -275,6 +320,9 @@ export const ReceivingQRModal: React.FC<{
           >
             <QrCode className="w-3.5 h-3.5" />
             Mã QR nhận tiền
+            {customerScanned && !activeAlert && (
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+            )}
           </button>
           <button
             type="button"
@@ -303,7 +351,7 @@ export const ReceivingQRModal: React.FC<{
               }`}
             >
               {/* Mobile Realtime Alert Banner on QR screen */}
-              {activeAlert && (
+              {activeAlert ? (
                 <div className="w-full md:hidden bg-emerald-500 text-white rounded-2xl p-3.5 shadow-md border border-emerald-400 text-left animate-in slide-in-from-top-2 duration-200">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2.5">
@@ -329,13 +377,50 @@ export const ReceivingQRModal: React.FC<{
                     </button>
                   </div>
                 </div>
-              )}
+              ) : customerScanned ? (
+                <div className="w-full md:hidden bg-gradient-to-r from-indigo-600 to-blue-600 text-white rounded-2xl p-3.5 shadow-md border border-indigo-400 text-left animate-in slide-in-from-top-2 duration-200">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2.5">
+                      <Smartphone className="w-5 h-5 text-white shrink-0 mt-0.5 animate-pulse" />
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-black uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded text-white">
+                            ĐÃ QUÉT MÃ
+                          </span>
+                          <span className="text-[11px] text-blue-100 font-mono">
+                            {formatRelativeTime(customerScanned.timestamp)}
+                          </span>
+                        </div>
+                        <p className="text-xs font-bold text-white mt-1">
+                          Khách đang mở ACB ONE / trang thanh toán
+                        </p>
+                        <p className="text-[10px] text-blue-100 mt-0.5">
+                          Hệ thống đã kích hoạt chế độ siêu tốc BURST...
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCustomerScanned(null)}
+                      className="text-white/80 hover:text-white p-1"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {isConfigured ? (
                 <>
                   {/* Primary Card: Activation QR (Scan to Boost & Pay) or Direct VietQR */}
-                  <div className="w-full max-w-[290px] sm:max-w-[320px] bg-white p-4 rounded-3xl border-2 border-stone-200 shadow-md">
-                    <div className="aspect-square bg-white flex items-center justify-center overflow-hidden rounded-2xl">
+                  <div
+                    className={`w-full max-w-[290px] sm:max-w-[320px] bg-white p-4 rounded-3xl border-2 transition-all duration-300 shadow-md ${
+                      customerScanned && !showDirectVietQR && !activeAlert
+                        ? 'border-indigo-500 ring-4 ring-indigo-500/20 shadow-indigo-100'
+                        : 'border-stone-200'
+                    }`}
+                  >
+                    <div className="aspect-square bg-white flex items-center justify-center overflow-hidden rounded-2xl relative">
                       {showDirectVietQR && qrImageURL ? (
                         <img
                           src={qrImageURL}
@@ -343,18 +428,33 @@ export const ReceivingQRModal: React.FC<{
                           className="w-full h-full object-contain"
                         />
                       ) : (
-                        <canvas
-                          ref={activationCanvasRef}
-                          className="w-full h-full object-contain"
-                        />
+                        <>
+                          <canvas
+                            ref={activationCanvasRef}
+                            className="w-full h-full object-contain"
+                          />
+                          {customerScanned && !activeAlert && (
+                            <div className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-indigo-600 text-white text-[10px] font-bold shadow-md flex items-center gap-1 animate-pulse">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-ping" />
+                              ĐÃ QUÉT
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
 
                     <div className="mt-2 text-center">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
-                        <Sparkles className="w-3 h-3 text-indigo-600" />
-                        {showDirectVietQR ? 'VietQR tĩnh' : 'Mã kích hoạt theo dõi tự động'}
-                      </span>
+                      {customerScanned && !showDirectVietQR && !activeAlert ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 animate-pulse">
+                          <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+                          Đã nhận diện thiết bị khách quét mã!
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                          <Sparkles className="w-3 h-3 text-indigo-600" />
+                          {showDirectVietQR ? 'VietQR tĩnh' : 'Mã kích hoạt theo dõi tự động'}
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -498,6 +598,56 @@ export const ReceivingQRModal: React.FC<{
                         type="button"
                         onClick={() => setActiveAlert(null)}
                         className="p-1.5 text-white/70 hover:text-white rounded-lg hover:bg-white/10 transition cursor-pointer"
+                        title="Ẩn thông báo"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ) : customerScanned ? (
+                  /* Live Customer Scan Detection Banner */
+                  <div className="bg-gradient-to-br from-indigo-600 via-blue-600 to-indigo-700 text-white rounded-2xl p-4 sm:p-5 shadow-lg border-2 border-indigo-400 text-left animate-in slide-in-from-top-3 fade-in duration-200 relative overflow-hidden">
+                    <div className="absolute -right-6 -bottom-6 w-36 h-36 bg-white/10 rounded-full blur-2xl pointer-events-none" />
+                    <div className="flex items-start justify-between gap-3 relative z-10">
+                      <div className="flex items-start gap-3.5">
+                        <div className="w-12 h-12 rounded-2xl bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 shadow-xs ring-2 ring-white/30">
+                          <Smartphone className="w-6 h-6 text-white animate-pulse" />
+                        </div>
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-black bg-white text-indigo-900 uppercase tracking-wide shadow-xs">
+                              <Sparkles className="w-3 h-3 text-amber-500 fill-amber-500" />
+                              ĐÃ PHÁT HIỆN KHÁCH QUÉT MÃ
+                            </span>
+                            <span className="text-xs text-indigo-100 font-semibold font-mono">
+                              ({formatRelativeTime(customerScanned.timestamp)})
+                            </span>
+                          </div>
+
+                          <p className="text-base sm:text-lg font-black tracking-tight text-white mt-1.5">
+                            Khách đang mở ACB ONE / trang thanh toán
+                          </p>
+
+                          <p className="text-xs text-indigo-100/90 leading-relaxed mt-1">
+                            Hệ thống đã nhận diện thiết bị và tự động kích hoạt chế độ siêu tốc <strong className="text-white font-bold">BURST ({customerScanned.phase || 'HOT'})</strong>. Số dư sẽ tự động cập nhật ngay khi khách xác nhận chuyển tiền.
+                          </p>
+
+                          <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/15 text-white font-medium backdrop-blur-xs">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                              Polling siêu tốc: 1.5s/lần
+                            </span>
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/15 text-indigo-100 font-medium">
+                              Mã kích hoạt: <span className="font-mono text-white font-bold">{customerScanned.identifier}</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setCustomerScanned(null)}
+                        className="p-1.5 text-white/70 hover:text-white rounded-lg hover:bg-white/10 transition cursor-pointer shrink-0"
                         title="Ẩn thông báo"
                       >
                         <X className="w-4 h-4" />

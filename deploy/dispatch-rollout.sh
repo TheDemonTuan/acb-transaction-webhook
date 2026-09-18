@@ -1260,6 +1260,20 @@ else
 fi
 log_info "Pre-soak runtime contract check PASSED."
 
+if [[ "${PROMOTION_GATEWAY:-false}" == "true" || "${PROMOTION_FRONTEND:-false}" == "true" ]]; then
+  if [[ "${SKIP_SMOKE_CHECKS:-0}" != "1" && -f "$DEPLOY_DIR/smoke-public-payment-qr.sh" ]]; then
+    log_info "Executing Post-Cutover Public Payment QR Edge Smoke Verification..."
+    smoke_qr_args=()
+    if [[ "$SKIP_MANIFEST_CHECK" -eq 1 ]]; then
+      smoke_qr_args+=(--dry-run)
+    fi
+    bash "$DEPLOY_DIR/smoke-public-payment-qr.sh" "${smoke_qr_args[@]}" || {
+      log_error "Post-cutover public payment QR smoke check FAILED!"
+      exit 1
+    }
+  fi
+fi
+
 if [[ "${PROMOTION_GATEWAY:-false}" == "true" && "${SOAK_SECONDS:-0}" -gt 0 ]]; then
   log_info "Beginning release soak observation (${SOAK_SECONDS}s)..."
   old_gw_slot="$(sed -n 's/^old_slot=//p' "$PENDING_GATEWAY_RETIRE_FILE" 2>/dev/null || true)"
