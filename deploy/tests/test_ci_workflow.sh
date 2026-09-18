@@ -163,6 +163,12 @@ check_job_timeout "$ci_yml" "docker-smoke-tts-gateway"
 scan_checkout_context="$(grep -A 25 '^  scan-and-attest:' "$deploy_yml" || true)"
 assert_contains "$scan_checkout_context" "fetch-depth: 0" "Scan and attest job fetches full history for promotion scope"
 
+ci_checkout_context="$(grep -A 25 '^  verify:' "$ci_yml" || true)"
+assert_contains "$ci_checkout_context" "fetch-depth: 0" "CI verify job fetches full history for PR promotion scope diff"
+assert_contains "$ci_content" "Validate pull request promotion scope diff" "CI workflow includes PR promotion scope validation step"
+assert_contains "$ci_content" "compute-promotion-scope.sh" "CI workflow executes promotion scope classifier on PR diff"
+assert_contains "$ci_content" "github.event_name == 'pull_request'" "CI workflow runs promotion scope validation only on pull requests"
+
 # 5. Step-Level Timeouts on Deploy Job
 printf "\n5. Testing Step-Level Timeouts on Critical Steps...\n"
 assert_contains "$deploy_content" "name: Stage signed release without touching the trusted deployer" "Stage release step exists"

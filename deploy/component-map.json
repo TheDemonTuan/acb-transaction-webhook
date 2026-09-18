@@ -13,6 +13,7 @@
     "\\.txt$"
   ],
   "rules": [
+    {"pattern": "^deploy/smoke-public-payment-qr\\.sh$", "components": ["platform"]},
     {"pattern": "^deploy/lib/traefik\\.sh$", "components": ["platform"]},
     {"pattern": "^deploy/(dispatch-rollout\\.sh|stable-deployer\\.sh|preflight-vps\\.sh|preflight-runtime\\.sh|stage-immutable-release\\.sh|verify-release-baseline\\.sh|verify-staged-release\\.sh|runtime-layout\\.sh|reconcile-release\\.sh|release-state\\.py|rollback-release\\.sh|bootstrap-deployment-engine\\.sh|generate-release-manifest\\.sh|verify-manifest\\.sh|verify-runtime-drift\\.sh|release-env\\.sh|edge-probe\\.sh|lib(\\.sh|/.*)|component-map\\.json)$|^scripts/(compute-promotion-scope|test-promotion-scope)\\.sh$", "components": ["orchestrator"]},
     {"pattern": "^cmd/dbtool/|^Dockerfile\\.dbtool$|^internal/storage/migrations/|^deploy/deploy-schema\\.sh$|^deploy/compose/dbtool\\.yaml$", "components": ["schema", "gateway", "worker"]},
