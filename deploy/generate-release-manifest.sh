@@ -251,7 +251,6 @@ bundle_files=(
   "rollback-warm.sh"
   "switch-slot.sh"
   "smoke-slot.sh"
-  "smoke-public-payment-qr.sh"
   "check-host.sh"
   "seccomp-auth-browser.json"
   "deploy.sh"

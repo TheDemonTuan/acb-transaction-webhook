@@ -288,7 +288,7 @@ func (s *Server) activatePaymentQR(w http.ResponseWriter, r *http.Request) {
 		if cachedState, cachedErr, ok := s.activationDebounce.Cached(); ok {
 			state = cachedState
 			rpcErr = cachedErr
-			s.writeActivationResponse(w, identifier, state, rpcErr)
+			writeActivationResponse(w, identifier, state, rpcErr)
 			return
 		}
 	}
@@ -298,10 +298,10 @@ func (s *Server) activatePaymentQR(w http.ResponseWriter, r *http.Request) {
 		s.activationDebounce.Commit(state, rpcErr)
 	}
 
-	s.writeActivationResponse(w, identifier, state, rpcErr)
+	writeActivationResponse(w, identifier, state, rpcErr)
 }
 
-func (s *Server) writeActivationResponse(w http.ResponseWriter, identifier string, state PaymentActivationState, err error) {
+func writeActivationResponse(w http.ResponseWriter, identifier string, state PaymentActivationState, err error) {
 	if err != nil {
 		slog.Warn("payment activation failed", "identifier", identifier, "error", err)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -332,13 +332,6 @@ func (s *Server) writeActivationResponse(w http.ResponseWriter, identifier strin
 	}
 
 	slog.Info("payment activation accepted", "identifier", identifier, "phase", state.Phase)
-	s.publishStateEvent("payment.activated", identifier, map[string]any{
-		"identifier":     identifier,
-		"phase":          state.Phase,
-		"trackingActive": state.TrackingActive,
-		"nextPhaseAt":    nextPhaseStr,
-		"activatedAt":    time.Now().UTC().Format(time.RFC3339),
-	})
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(PaymentActivationResponse{
 		TrackingActive: state.TrackingActive,

@@ -173,10 +173,6 @@ export const fetchPaymentQR = async (): Promise<any> => {
   return api('/payment-qr');
 };
 
-export const fetchPublicPaymentQR = async (): Promise<any> => {
-  return publicApi('/payment-qr');
-};
-
 export const activatePaymentPolling = async (
   identifier: string,
 ): Promise<{ trackingActive: boolean; phase?: string; nextPhaseAt?: string }> => {
