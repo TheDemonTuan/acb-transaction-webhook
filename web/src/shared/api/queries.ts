@@ -197,74 +197,9 @@ export const uploadPaymentQR = async (formData: FormData): Promise<any> => {
   });
 };
 
-export interface VietQRPreviewResponse {
-  mode: 'standard' | 'reference' | 'hybrid';
-  payload: string;
-  image: string;
-  parsed: {
-    bin?: string;
-    accountNumber?: string;
-    service?: string;
-    reference?: string;
-    customHost?: string;
-    customType?: string;
-    customToken?: string;
-    customTemplate?: boolean;
-    formatIndicator?: string;
-    initiationMethod?: string;
-    currency?: string;
-    countryCode?: string;
-  };
-  crc: string;
-  crcValid: boolean;
-  expectedCrc: string;
-  testId: string;
-}
-
-export interface CanaryStatusResponse {
-  token: string;
-  createdAt: string;
-  hitCount: number;
-  firstHitAt?: string;
-  lastHitAt?: string;
-  lastUserAgent?: string;
-  lastSourceIp?: string;
-  recentHits?: Array<{
-    timestamp: string;
-    sourceIp: string;
-    userAgent: string;
-    referer?: string;
-  }>;
-}
-
-export const previewPaymentQR = async (params: {
-  accountNumber: string;
-  accountName?: string;
-  mode: 'standard' | 'reference' | 'hybrid';
-  testId?: string;
-  host?: string;
-}): Promise<VietQRPreviewResponse> => {
-  return api('/payment-qr/preview', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-};
-
-export const fetchCanaryStatus = async (token: string): Promise<CanaryStatusResponse> => {
-  return api(`/payment-qr/canary/${encodeURIComponent(token)}`);
-};
-
-export const resetCanaryStatus = async (token: string): Promise<any> => {
-  return api(`/payment-qr/canary/${encodeURIComponent(token)}`, {
-    method: 'DELETE',
-  });
-};
-
 export const generatePaymentQR = async (params: {
   accountNumber: string;
   accountName: string;
-  mode?: string;
 }): Promise<any> => {
   return api('/payment-qr/generate', {
     method: 'POST',

@@ -33,7 +33,6 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/ttsclient"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/vietqr"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
@@ -122,7 +121,6 @@ type Server struct {
 	testCooldownMu    sync.Mutex
 	lastTestPerCh     map[string]time.Time
 	started           time.Time
-	canaryTracker     *CanaryTracker
 	handler           http.Handler
 }
 
@@ -156,7 +154,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		started:            time.Now().UTC(),
 		activationLimit:    newActivationLimiter(),
 		activationDebounce: newActivationDebouncer(),
-		canaryTracker:      newCanaryTracker(),
 	}
 	r := chi.NewRouter()
 	r.Use(requestID, s.platformHeaders, securityHeaders, recoverer)
@@ -171,7 +168,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/payment-qr", s.publicPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
 		api.Post("/payment-qr/activate", s.activatePaymentQR)
-		api.Get("/payment-qr/canary/{token}", s.handlePaymentQRCanary)
 		api.Get("/events", s.publicEventsStream)
 		api.Get("/events/stream", s.publicEventsStream)
 	})
@@ -203,9 +199,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Put("/monitor/settings", s.updateMonitorSettings)
 		api.Get("/payment-qr", s.getPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
-		api.Post("/payment-qr/preview", s.previewPaymentQR)
-		api.Get("/payment-qr/canary/{token}", s.getCanaryStatus)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/payment-qr/canary/{token}", s.resetCanaryStatus)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr", s.savePaymentQR)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr/upload", s.uploadPaymentQR)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr/generate", s.generatePaymentQR)
@@ -1771,7 +1764,6 @@ func (s *Server) generatePaymentQR(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		AccountNumber string `json:"accountNumber"`
 		AccountName   string `json:"accountName"`
-		Mode          string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1784,64 +1776,37 @@ func (s *Server) generatePaymentQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mode := strings.ToLower(strings.TrimSpace(input.Mode))
-	var imgBytes []byte
-	var contentType string
-	var provider string
+	// Generate VietQR using VietQR standard quick link (ACB BIN: 970416)
+	vietQRURL := fmt.Sprintf("https://img.vietqr.io/image/970416-%s-compact.png?accountName=%s",
+		url.PathEscape(input.AccountNumber), url.QueryEscape(input.AccountName))
 
-	if mode == "local_standard" || mode == "standard" || mode == "local" {
-		payload, err := vietqr.BuildPayload(vietqr.BuilderConfig{
-			Mode:          vietqr.ModeStandard,
-			BIN:           vietqr.DefaultAcbBIN,
-			AccountNumber: input.AccountNumber,
-			AccountName:   input.AccountName,
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to build local VietQR: "+err.Error())
-			return
-		}
-		imgBytes, err = vietqr.GeneratePNG(payload, 512)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to render local QR image: "+err.Error())
-			return
-		}
-		contentType = "image/png"
-		provider = "LOCAL_VIETQR"
-	} else {
-		// Generate VietQR using VietQR standard quick link (ACB BIN: 970416)
-		vietQRURL := fmt.Sprintf("https://img.vietqr.io/image/970416-%s-compact.png?accountName=%s",
-			url.PathEscape(input.AccountNumber), url.QueryEscape(input.AccountName))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, vietQRURL, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create request")
+		return
+	}
 
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, vietQRURL, nil)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create request")
-			return
-		}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		writeError(w, http.StatusBadGateway, "failed to generate QR from VietQR provider")
+		return
+	}
+	defer resp.Body.Close()
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			writeError(w, http.StatusBadGateway, "failed to generate QR from VietQR provider")
-			return
-		}
-		defer resp.Body.Close()
+	imgBytes, err := io.ReadAll(http.MaxBytesReader(w, resp.Body, 2*1024*1024))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to read generated QR data")
+		return
+	}
 
-		var readErr error
-		imgBytes, readErr = io.ReadAll(http.MaxBytesReader(w, resp.Body, 2*1024*1024))
-		if readErr != nil {
-			writeError(w, http.StatusBadGateway, "failed to read generated QR data")
-			return
-		}
-
-		// Validate content type
-		contentType = http.DetectContentType(imgBytes)
-		if !strings.HasPrefix(contentType, "image/png") &&
-			!strings.HasPrefix(contentType, "image/jpeg") &&
-			!strings.HasPrefix(contentType, "image/webp") {
-			writeError(w, http.StatusBadGateway, "invalid image received from VietQR provider")
-			return
-		}
-		provider = "VIETQR"
+	// Validate content type
+	contentType := http.DetectContentType(imgBytes)
+	if !strings.HasPrefix(contentType, "image/png") &&
+		!strings.HasPrefix(contentType, "image/jpeg") &&
+		!strings.HasPrefix(contentType, "image/webp") {
+		writeError(w, http.StatusBadGateway, "invalid image received from VietQR provider")
+		return
 	}
 
 	dataDir := filepath.Dir(s.cfg.DatabasePath)
@@ -1867,7 +1832,7 @@ func (s *Server) generatePaymentQR(w http.ResponseWriter, r *http.Request) {
 		ImagePath:        filePath,
 		ImageHash:        imgHash,
 		ImageContentType: contentType,
-		Provider:         provider,
+		Provider:         "VIETQR",
 	}
 	saved, err := s.store.SavePaymentQR(r.Context(), qr)
 	if err != nil {
