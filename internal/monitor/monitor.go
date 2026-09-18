@@ -267,6 +267,9 @@ func (m *Monitor) PersistSession(ctx context.Context) error {
 	if conn.ID == "" || conn.Generation <= 0 {
 		return nil
 	}
+	if conn.State == "AUTH_REQUIRED" || conn.State == "UNCONFIGURED" || conn.State == "DISCONNECTED" {
+		return nil
+	}
 	if err := sessions.Persist(ctx, conn.ID, conn.Generation); err != nil {
 		if storage.IsSessionNotRefreshable(err) {
 			return nil

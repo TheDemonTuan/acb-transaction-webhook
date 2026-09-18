@@ -73,6 +73,10 @@ func (l *SessionLoader) Persist(ctx context.Context, connectionID string, genera
 	handoff, err := snapshotter.SnapshotSession()
 	if err != nil {
 		if errors.Is(err, acb.ErrAuthenticatedFormStateUnavailable) && l.store != nil {
+			conn, cErr := l.store.Connection(ctx)
+			if cErr == nil && (conn.State == "AUTH_REQUIRED" || conn.State == "UNCONFIGURED" || conn.State == "DISCONNECTED") {
+				return nil
+			}
 			stored, storeErr := l.store.Session(ctx, connectionID, generation)
 			if storeErr == nil && stored.ConnectionID == connectionID && stored.Generation == generation && len(stored.Envelope) > 0 {
 				return nil

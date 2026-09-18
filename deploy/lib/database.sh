@@ -5,6 +5,7 @@ set -euo pipefail
 
 DEFAULT_GATEWAY_DB="${GATEWAY_DB_FILE:-${RUNTIME_DATA_DIR:-$SCRIPT_DIR/data}/gateway.db}"
 
+# shellcheck disable=SC2120
 check_active_auth_gate() {
   log_info "Evaluating active-auth gate before migration / core modification..."
   local active_count=""
@@ -160,6 +161,12 @@ check_durable_session() {
           log_info "Durable session verified in SQLite (count=${s_count})"
           return 0
         fi
+      fi
+      local c_state
+      c_state="$(sqlite3 "file:${db_file}?mode=ro" "SELECT state FROM connections ORDER BY created_at LIMIT 1;" 2>/dev/null || true)"
+      if [[ "$c_state" == "AUTH_REQUIRED" || "$c_state" == "UNCONFIGURED" || "$c_state" == "DISCONNECTED" ]]; then
+        log_info "Connection is in unauthenticated state ($c_state); no durable session required."
+        return 0
       fi
       log_error "check_durable_session: SQLite query found no durable session"
       return 1
