@@ -29,6 +29,14 @@ export function useRealtimeStatus(): RealtimeStatusInfo {
         isOnline: false,
         lastEventAt,
       };
+    case 'STALE':
+      return {
+        status,
+        label: 'Tín hiệu gián đoạn',
+        tooltip: 'Không nhận được nhịp tim từ máy chủ. Đang tự phục hồi kết nối.',
+        isOnline: false,
+        lastEventAt,
+      };
     case 'RECONNECTING':
       return {
         status,

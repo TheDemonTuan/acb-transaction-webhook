@@ -7,6 +7,7 @@ export const REALTIME_EVENT_TYPES = [
   'delivery.changed',
   'poll.completed',
   'audit.created',
+  'stream.heartbeat',
   'stream_error',
 ] as const;
 

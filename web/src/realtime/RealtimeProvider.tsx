@@ -1,11 +1,24 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { RealtimeClient } from './realtime.client';
-import type { RealtimeEnvelope, RealtimeEventType, RealtimeListener, RealtimeStatus } from './realtime.types';
+import type {
+  RealtimeDiagnostics,
+  RealtimeEnvelope,
+  RealtimeEventType,
+  RealtimeListener,
+  RealtimeStatus,
+} from './realtime.types';
 
 export interface RealtimeContextValue {
   status: RealtimeStatus;
+  lastHeartbeatAt: Date | null;
   lastEventAt: Date | null;
   watermark: number | null;
+  lastEventId: string | null;
+  reconnectCount: number;
+  networkOnline: boolean;
+  serverReachable: boolean;
+  lastError: unknown | null;
+  forceReconnect: () => void;
   subscribe: <T = unknown>(type: RealtimeEventType, listener: RealtimeListener<T>) => () => void;
   onAny: (listener: RealtimeListener<any>) => () => void;
   client: RealtimeClient | null;
@@ -29,6 +42,21 @@ export const RealtimeProvider: React.FC<RealtimeProviderProps> = ({
   const [status, setStatus] = useState<RealtimeStatus>('CONNECTING');
   const [lastEventAt, setLastEventAt] = useState<Date | null>(null);
   const [watermark, setWatermark] = useState<number | null>(null);
+  const [diagnostics, setDiagnostics] = useState<RealtimeDiagnostics>(() => ({
+    status: 'CONNECTING',
+    lastHeartbeatAt: null,
+    lastMessageAt: null,
+    lastEventId: null,
+    connectedAt: null,
+    disconnectedAt: null,
+    reconnectCount: 0,
+    lastError: null,
+    networkOnline:
+      typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean'
+        ? navigator.onLine
+        : true,
+    serverReachable: true,
+  }));
 
   const callbacksRef = useRef({ onInitialState, onResetState });
   callbacksRef.current = { onInitialState, onResetState };
@@ -38,6 +66,9 @@ export const RealtimeProvider: React.FC<RealtimeProviderProps> = ({
       url,
       onStatusChange: (nextStatus) => {
         setStatus(nextStatus);
+      },
+      onDiagnosticsChange: (nextDiag) => {
+        setDiagnostics(nextDiag);
       },
       onInitialState: (wm) => {
         setWatermark(wm);
@@ -52,15 +83,17 @@ export const RealtimeProvider: React.FC<RealtimeProviderProps> = ({
 
   useEffect(() => {
     client.connect();
-
     const unsub = client.onAny(() => {
       setLastEventAt(new Date());
     });
-
     return () => {
       unsub();
       client.disconnect();
     };
+  }, [client]);
+
+  const forceReconnect = useCallback(() => {
+    client.hardReconnect();
   }, [client]);
 
   const subscribe = useCallback(
@@ -80,13 +113,34 @@ export const RealtimeProvider: React.FC<RealtimeProviderProps> = ({
   const value: RealtimeContextValue = useMemo(() => {
     return {
       status,
+      lastHeartbeatAt: diagnostics.lastHeartbeatAt ? new Date(diagnostics.lastHeartbeatAt) : null,
       lastEventAt,
       watermark,
+      lastEventId: diagnostics.lastEventId,
+      reconnectCount: diagnostics.reconnectCount,
+      networkOnline: diagnostics.networkOnline,
+      serverReachable: diagnostics.serverReachable,
+      lastError: diagnostics.lastError,
+      forceReconnect,
       subscribe,
       onAny,
       client,
     };
-  }, [status, lastEventAt, watermark, client, subscribe, onAny]);
+  }, [
+    status,
+    diagnostics.lastHeartbeatAt,
+    lastEventAt,
+    watermark,
+    diagnostics.lastEventId,
+    diagnostics.reconnectCount,
+    diagnostics.networkOnline,
+    diagnostics.serverReachable,
+    diagnostics.lastError,
+    forceReconnect,
+    subscribe,
+    onAny,
+    client,
+  ]);
 
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;
 };
