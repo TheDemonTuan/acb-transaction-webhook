@@ -340,7 +340,7 @@ jobs:
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-frontend" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: frontend
@@ -384,7 +384,7 @@ jobs:
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: gateway
@@ -428,7 +428,7 @@ jobs:
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-worker" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: worker
@@ -472,7 +472,7 @@ jobs:
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-dbtool" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: dbtool
@@ -516,7 +516,7 @@ jobs:
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-auth-browser" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.auth-browser
@@ -564,7 +564,7 @@ jobs:
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-tts-gateway" >> "$GITHUB_OUTPUT"
       - id: build
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./tts-gateway
           push: true
