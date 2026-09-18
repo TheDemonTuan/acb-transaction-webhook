@@ -44,6 +44,71 @@ interface LiveCreditAlert {
   timeStr: string;
 }
 
+export interface QRHealthParams {
+  isPublic: boolean;
+  networkOnline: boolean;
+  serverReachable: boolean;
+  sseStatus: string;
+  acbState: string;
+  pollError: { type: 'warning' | 'critical'; message: string } | null;
+}
+
+export interface QRHealthResult {
+  isInternetDown: boolean;
+  isGatewayDown: boolean;
+  isSseBroken: boolean;
+  isSseStale: boolean;
+  isAcbCritical: boolean;
+  isAcbWarning: boolean;
+  hasCritical: boolean;
+  hasWarning: boolean;
+}
+
+export function computeQRHealthState({
+  isPublic,
+  networkOnline,
+  serverReachable,
+  sseStatus,
+  acbState,
+  pollError,
+}: QRHealthParams): QRHealthResult {
+  const isInternetDown = !networkOnline;
+  const isGatewayDown = networkOnline && !serverReachable;
+  const isSseBroken = sseStatus === 'DISCONNECTED';
+  const isSseStale = sseStatus === 'STALE' || sseStatus === 'RECONNECTING';
+
+  const isAcbCritical =
+    !isPublic &&
+    (acbState === 'AUTH_REQUIRED' ||
+      acbState === 'DISCONNECTED' ||
+      acbState === 'UNCONFIGURED' ||
+      acbState === 'FAILED' ||
+      acbState === 'EXPIRED' ||
+      pollError?.type === 'critical');
+
+  const isAcbWarning =
+    !isPublic &&
+    !isAcbCritical &&
+    (acbState === 'AUTH_STARTING' ||
+      acbState === 'PAUSED' ||
+      acbState === 'IN_PROGRESS' ||
+      pollError?.type === 'warning');
+
+  const hasCritical = isInternetDown || isGatewayDown || isAcbCritical || isSseBroken;
+  const hasWarning = !hasCritical && (isSseStale || isAcbWarning);
+
+  return {
+    isInternetDown,
+    isGatewayDown,
+    isSseBroken,
+    isSseStale,
+    isAcbCritical,
+    isAcbWarning,
+    hasCritical,
+    hasWarning,
+  };
+}
+
 export const ReceivingQRModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -122,28 +187,16 @@ export const ReceivingQRModal: React.FC<{
 
   // Reset state when modal opens
   useEffect(() => {
-    if (isOpen) {
-      const openTime = Date.now();
-      setSessionOpenedAt(openTime);
-      setSessionCredits([]);
-      setActiveAlert(null);
-      setActiveTab('qr');
-      seenTxIdsRef.current.clear();
-      setPollError(null);
-      setShowHealthDetails(false);
-
-      if (systemStatus?.acb?.state) {
-        setAcbState(systemStatus.acb.state);
-      }
-      if (systemStatus?.acb?.lastSuccessfulPollAt) {
-        const parsed = new Date(systemStatus.acb.lastSuccessfulPollAt).getTime();
-        if (!isNaN(parsed)) {
-          setLastPollSuccessAt(parsed);
-        }
-      }
-      refetchTx();
-    }
-  }, [isOpen, refetchTx, systemStatus]);
+    if (!isOpen) return;
+    setSessionOpenedAt(Date.now());
+    setSessionCredits([]);
+    setActiveAlert(null);
+    setActiveTab('qr');
+    seenTxIdsRef.current.clear();
+    setPollError(null);
+    setShowHealthDetails(false);
+    void refetchTx();
+  }, [isOpen, refetchTx]);
 
   // Second-by-second ticker for relative time displays ("vài giây trước")
   useEffect(() => {
@@ -197,9 +250,9 @@ export const ReceivingQRModal: React.FC<{
     return () => unsub();
   }, [isOpen, subscribe, queryClient, sessionOpenedAt]);
 
-  // Subscribe to poll.completed events for health diagnostics
+  // Subscribe to poll.completed events for health diagnostics (admin only)
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || isPublic) return;
     const unsub = subscribe<PollCompletedData>(
       'poll.completed',
       (envelope: RealtimeEnvelope<PollCompletedData>) => {
@@ -228,11 +281,11 @@ export const ReceivingQRModal: React.FC<{
       }
     );
     return () => unsub();
-  }, [isOpen, subscribe]);
+  }, [isOpen, isPublic, subscribe]);
 
-  // Subscribe to connection and auth changes
+  // Subscribe to connection and auth changes (admin only)
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || isPublic) return;
     const unsubConn = subscribe<ConnectionChangedData>(
       'connection.changed',
       (envelope: RealtimeEnvelope<ConnectionChangedData>) => {
@@ -261,7 +314,7 @@ export const ReceivingQRModal: React.FC<{
       unsubConn();
       unsubAuth();
     };
-  }, [isOpen, subscribe]);
+  }, [isOpen, isPublic, subscribe]);
 
   // ESC key listener
   useEffect(() => {
@@ -296,28 +349,23 @@ export const ReceivingQRModal: React.FC<{
   };
 
   // Compute layered health state
-  const isInternetDown = !networkOnline;
-  const isGatewayDown = networkOnline && !serverReachable;
-  const isSseBroken = sseStatus === 'DISCONNECTED';
-  const isSseStale = sseStatus === 'STALE' || sseStatus === 'RECONNECTING';
-
-  const isAcbCritical =
-    acbState === 'AUTH_REQUIRED' ||
-    acbState === 'DISCONNECTED' ||
-    acbState === 'UNCONFIGURED' ||
-    acbState === 'FAILED' ||
-    acbState === 'EXPIRED' ||
-    pollError?.type === 'critical';
-
-  const isAcbWarning =
-    !isAcbCritical &&
-    (acbState === 'AUTH_STARTING' ||
-      acbState === 'PAUSED' ||
-      acbState === 'IN_PROGRESS' ||
-      pollError?.type === 'warning');
-
-  const hasCritical = isInternetDown || isGatewayDown || isAcbCritical || isSseBroken;
-  const hasWarning = !hasCritical && (isSseStale || isAcbWarning);
+  const {
+    isInternetDown,
+    isGatewayDown,
+    isSseBroken,
+    isSseStale,
+    isAcbCritical,
+    isAcbWarning,
+    hasCritical,
+    hasWarning,
+  } = computeQRHealthState({
+    isPublic,
+    networkOnline,
+    serverReachable,
+    sseStatus,
+    acbState,
+    pollError,
+  });
 
   const heartbeatSec = lastHeartbeatAt
     ? Math.max(0, Math.floor((nowTick - lastHeartbeatAt.getTime()) / 1000))
@@ -609,58 +657,62 @@ export const ReceivingQRModal: React.FC<{
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-stone-500">Phiên ACB</span>
-                      <span className="font-medium flex items-center gap-1">
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${!isAcbCritical ? 'bg-emerald-500' : 'bg-rose-500'}`}
-                        />
-                        <span className={!isAcbCritical ? 'text-stone-800' : 'text-rose-600 font-bold'}>
-                          {acbState === 'MONITORING'
-                            ? 'Đang hoạt động'
-                            : isAcbWarning
-                              ? 'Đang kết nối...'
-                              : isAcbCritical
-                                ? 'Cần đăng nhập lại'
-                                : 'Sẵn sàng'}
-                        </span>
-                      </span>
-                    </div>
+                    {!isPublic && (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="text-stone-500">Phiên ACB</span>
+                          <span className="font-medium flex items-center gap-1">
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${!isAcbCritical ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                            />
+                            <span className={!isAcbCritical ? 'text-stone-800' : 'text-rose-600 font-bold'}>
+                              {acbState === 'MONITORING'
+                                ? 'Đang hoạt động'
+                                : isAcbWarning
+                                  ? 'Đang kết nối...'
+                                  : isAcbCritical
+                                    ? 'Cần đăng nhập lại'
+                                    : 'Sẵn sàng'}
+                            </span>
+                          </span>
+                        </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-stone-500">Kiểm tra giao dịch</span>
-                      <span className="font-medium flex items-center gap-1">
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            pollError
-                              ? pollError.type === 'critical'
-                                ? 'bg-rose-500'
-                                : 'bg-amber-500'
-                              : 'bg-emerald-500'
-                          }`}
-                        />
-                        <span className="text-stone-800 truncate max-w-[160px]">
-                          {pollError
-                            ? pollError.message
-                            : pollSec !== null
-                              ? `OK · ${pollSec}s trước`
-                              : 'Sẵn sàng'}
-                        </span>
-                      </span>
-                    </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-stone-500">Kiểm tra giao dịch</span>
+                          <span className="font-medium flex items-center gap-1">
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                pollError
+                                  ? pollError.type === 'critical'
+                                    ? 'bg-rose-500'
+                                    : 'bg-amber-500'
+                                  : 'bg-emerald-500'
+                              }`}
+                            />
+                            <span className="text-stone-800 truncate max-w-[160px]">
+                              {pollError
+                                ? pollError.message
+                                : pollSec !== null
+                                  ? `OK · ${pollSec}s trước`
+                                  : 'Sẵn sàng'}
+                            </span>
+                          </span>
+                        </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-stone-500">Chế độ kiểm tra ACB</span>
-                      <span className="font-medium flex items-center gap-1 text-stone-800">
-                        {systemStatus?.acb?.scheduleMode
-                          ? `${systemStatus.acb.scheduleMode === 'REALTIME' ? 'Realtime' : 'Tiêu chuẩn'}${
-                              systemStatus.acb.scheduleMinSeconds && systemStatus.acb.scheduleMaxSeconds
-                                ? ` · ${systemStatus.acb.scheduleMinSeconds}–${systemStatus.acb.scheduleMaxSeconds}s`
-                                : ''
-                            }`
-                          : 'Tự động định kỳ'}
-                      </span>
-                    </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-stone-500">Chế độ kiểm tra ACB</span>
+                          <span className="font-medium flex items-center gap-1 text-stone-800">
+                            {systemStatus?.acb?.scheduleMode
+                              ? `${systemStatus.acb.scheduleMode === 'REALTIME' ? 'Realtime' : 'Tiêu chuẩn'}${
+                                  systemStatus.acb.scheduleMinSeconds && systemStatus.acb.scheduleMaxSeconds
+                                    ? ` · ${systemStatus.acb.scheduleMinSeconds}–${systemStatus.acb.scheduleMaxSeconds}s`
+                                    : ''
+                                }`
+                              : 'Tự động định kỳ'}
+                          </span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>

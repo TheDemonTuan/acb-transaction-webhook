@@ -439,13 +439,28 @@ func readPublicSSE(ctx context.Context, t *testing.T, url string, frames chan<- 
 		line := scanner.Text()
 		if line == "" {
 			if frame.Len() > 0 {
+				str := frame.String()
+				frame.Reset()
+				hasEvent := false
+				for _, l := range strings.Split(str, "\n") {
+					trimmed := strings.TrimSpace(l)
+					if strings.HasPrefix(trimmed, "event:") || strings.HasPrefix(trimmed, "data:") || strings.HasPrefix(trimmed, "id:") {
+						hasEvent = true
+						break
+					}
+				}
+				if !hasEvent {
+					continue
+				}
 				select {
-				case frames <- frame.String():
+				case frames <- str:
 				case <-ctx.Done():
 					return
 				}
-				frame.Reset()
 			}
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), ":") {
 			continue
 		}
 		frame.WriteString(line)
