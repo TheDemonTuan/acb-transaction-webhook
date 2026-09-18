@@ -49,6 +49,9 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprintf(w, "retry: 1000\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	ctx := r.Context()
@@ -121,7 +124,7 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 		}
 	}
 
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	for {
 		select {
@@ -129,7 +132,16 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 			return
 		case <-heartbeat.C:
 			_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+			heartbeatPayload, err := json.Marshal(map[string]string{
+				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
+				"epoch":      realtimeEpoch,
+				"release":    s.cfg.ReleaseCommit,
+				"slot":       s.cfg.Slot,
+			})
+			if err != nil {
+				heartbeatPayload = []byte(`{}`)
+			}
+			if _, err := fmt.Fprintf(w, "event: stream.heartbeat\ndata: %s\n\n", heartbeatPayload); err != nil {
 				return
 			}
 			flusher.Flush()
