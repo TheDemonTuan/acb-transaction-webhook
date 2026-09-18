@@ -186,6 +186,7 @@ if [[ "${PROMOTION_PLATFORM:-false}" == "true" ]]; then
   step6_run=1
 fi
 assert_eq "1" "$step6_run" "Step 6 platform deploy executes when both gateway and platform are in scope"
+assert_eq "true" "$PROMOTION_GATEWAY" "PROMOTION_GATEWAY is in scope for dual promotion"
 
 printf "\n=== TEST 7: Platform rollback fails closed and preserves evidence on error ===\n"
 t7="$TEST_TMP/t7"
@@ -211,6 +212,7 @@ assert_eq "0" "$rb_code" "Missing backup directory cleanly cleans up pending evi
 # Test real failure preserves evidence
 RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="testcommit" bash "$DEPLOY_DIR/deploy-platform.sh"
 b_dir="$(sed -n 's/^backup_dir=//p' "$PENDING_PLATFORM_ROLLBACK_FILE")"
+assert_eq "true" "$([[ -d "$b_dir" ]] && echo true || echo false)" "Platform backup directory is recorded and exists"
 # Make dynamic dir unwritable
 chmod 500 "$t7/dynamic" 2>/dev/null || true
 if ! touch "$t7/dynamic/.test_probe" 2>/dev/null; then
