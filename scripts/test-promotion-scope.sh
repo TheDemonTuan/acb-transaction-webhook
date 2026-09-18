@@ -372,6 +372,89 @@ db_lib_out="$(run_case "$test_tmp/database_lib.txt" --format env)"
 assert_eq "database-lib: PROMOTION_WORKER is true" "$(printf '%s' "$db_lib_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "true"
 assert_eq "database-lib: PROMOTION_GATEWAY is true" "$(printf '%s' "$db_lib_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
 
+# 26. Simultaneous file and ownership rule deletion in Git diff (PR #49 regression)
+printf "\n26. Testing simultaneous file and rule deletion in Git diff...\n"
+simul_repo="$test_tmp/simul-repo"
+mkdir -p "$simul_repo/deploy"
+git -C "$simul_repo" init -q
+git -C "$simul_repo" config user.name "Promotion Test"
+git -C "$simul_repo" config user.email "test@example.invalid"
+
+cat <<'EOF' > "$simul_repo/deploy/component-map.json"
+{
+  "version": 1,
+  "documentation": ["\\.md$"],
+  "rules": [
+    {"pattern": "^deploy/legacy-helper\\.sh$", "components": ["platform"]},
+    {"pattern": "^deploy/component-map\\.json$", "components": ["orchestrator"]}
+  ]
+}
+EOF
+echo "echo legacy" > "$simul_repo/deploy/legacy-helper.sh"
+git -C "$simul_repo" add deploy/
+git -C "$simul_repo" commit -q -m "base with legacy script and rule"
+simul_base="$(git -C "$simul_repo" rev-parse HEAD)"
+
+# Head commit: delete the script AND remove the rule in the same commit
+cat <<'EOF' > "$simul_repo/deploy/component-map.json"
+{
+  "version": 1,
+  "documentation": ["\\.md$"],
+  "rules": [
+    {"pattern": "^deploy/component-map\\.json$", "components": ["orchestrator"]}
+  ]
+}
+EOF
+rm -f "$simul_repo/deploy/legacy-helper.sh"
+git -C "$simul_repo" add -u
+git -C "$simul_repo" commit -q -m "head deleting legacy script and its rule"
+simul_head="$(git -C "$simul_repo" rev-parse HEAD)"
+
+simul_out="$(cd "$simul_repo" && bash "$classifier" --base "$simul_base" --head "$simul_head" --format env)"
+assert_eq "simultaneous deletion: PROMOTION_PLATFORM is true" "$(printf '%s' "$simul_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "simultaneous deletion: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$simul_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+# 27. Cross-component rename (gateway -> frontend)
+printf "\n27. Testing cross-component rename...\n"
+cat <<'EOF' > "$test_tmp/rename_cross.txt"
+R100	cmd/gateway/feature.go	web/src/feature.tsx
+EOF
+rename_out="$(run_case "$test_tmp/rename_cross.txt" --format env)"
+assert_eq "cross-rename: PROMOTION_GATEWAY is true" "$(printf '%s' "$rename_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "cross-rename: PROMOTION_FRONTEND is true" "$(printf '%s' "$rename_out" | grep '^PROMOTION_FRONTEND=' | cut -d= -f2)" "true"
+assert_eq "cross-rename: PROMOTION_WORKER is false" "$(printf '%s' "$rename_out" | grep '^PROMOTION_WORKER=' | cut -d= -f2)" "false"
+assert_eq "cross-rename: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$rename_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+# 28. Runtime to documentation and documentation to runtime renames
+printf "\n28. Testing runtime <-> documentation renames...\n"
+cat <<'EOF' > "$test_tmp/rename_runtime_to_doc.txt"
+R100	deploy/lib/traefik.sh	docs/traefik-notes.md
+EOF
+r2d_out="$(run_case "$test_tmp/rename_runtime_to_doc.txt" --format env)"
+assert_eq "runtime->doc: PROMOTION_PLATFORM is true" "$(printf '%s' "$r2d_out" | grep '^PROMOTION_PLATFORM=' | cut -d= -f2)" "true"
+assert_eq "runtime->doc: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$r2d_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+cat <<'EOF' > "$test_tmp/rename_doc_to_runtime.txt"
+R100	docs/notes.md	cmd/gateway/notes_handler.go
+EOF
+d2r_out="$(run_case "$test_tmp/rename_doc_to_runtime.txt" --format env)"
+assert_eq "doc->runtime: PROMOTION_GATEWAY is true" "$(printf '%s' "$d2r_out" | grep '^PROMOTION_GATEWAY=' | cut -d= -f2)" "true"
+assert_eq "doc->runtime: PROMOTION_DOC_ONLY is false" "$(printf '%s' "$d2r_out" | grep '^PROMOTION_DOC_ONLY=' | cut -d= -f2)" "false"
+
+# 29. Fail closed on genuinely unmapped paths
+printf "\n29. Testing fail-closed behavior on unmapped paths...\n"
+unmapped_fail_code=0
+run_case <(printf 'M\tunmapped/unowned/service.xyz\n') --format env >/dev/null 2>&1 || unmapped_fail_code=$?
+assert_eq "unmapped modified path fails with code 1" "$unmapped_fail_code" "1"
+
+unmapped_del_code=0
+run_case <(printf 'D\tunmapped/deleted/asset.xyz\n') --format env >/dev/null 2>&1 || unmapped_del_code=$?
+assert_eq "unmapped deleted path fails with code 1" "$unmapped_del_code" "1"
+
+unmapped_add_code=0
+run_case <(printf 'A\tunmapped/added/binary.xyz\n') --format env >/dev/null 2>&1 || unmapped_add_code=$?
+assert_eq "unmapped added path fails with code 1" "$unmapped_add_code" "1"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"
