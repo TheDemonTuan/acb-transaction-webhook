@@ -29,7 +29,7 @@
     {"pattern": "^platform/failover/|^deploy/failover/|^deploy/(deploy-failover-controller|stage-platform-assets)\\.sh$", "components": ["failover_controller"]},
     {"pattern": "^deploy/compose/base\\.yaml$", "components": ["frontend", "gateway", "worker", "schema", "auth_browser", "tts", "bark", "failover_controller", "platform"]},
     {"pattern": "^Dockerfile$|^deploy/compose\\.prod\\.yaml$", "components": ["frontend", "gateway", "worker", "schema", "auth_browser", "tts", "bark", "platform"]},
-    {"pattern": "^\\.github/workflows/(deploy|ci|codacy)\\.yml$|^scripts/|^deploy/tests/|^platform/edge/|^deploy/edge/|^compose\\.yaml$|^deploy/(backup.*|restore.*|provision.*|check-host|init-fresh-data|deploy-warm|rollback-warm|switch-slot|smoke-slot|smoke-public-payment-qr|deploy-platform|deploy|rollback|verify-deployment|verify-compose-runtime|validate-cve-allowlist|cve-allowlist|release-env|render-traefik-route|test-supply-chain)\\.(sh|json)$", "components": ["platform"]}
+    {"pattern": "^\\.github/workflows/(deploy|ci|codacy)\\.yml$|^scripts/|^deploy/tests/|^platform/edge/|^deploy/edge/|^compose\\.yaml$|^deploy/(backup.*|restore.*|provision.*|check-host|init-fresh-data|deploy-warm|rollback-warm|switch-slot|smoke-slot|deploy-platform|deploy|rollback|verify-deployment|verify-compose-runtime|validate-cve-allowlist|cve-allowlist|release-env|render-traefik-route|test-supply-chain)\\.(sh|json)$", "components": ["platform"]}
   ],
   "unknown": []
 }

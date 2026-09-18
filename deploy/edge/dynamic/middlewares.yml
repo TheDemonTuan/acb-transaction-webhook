@@ -40,15 +40,6 @@ http:
         sourceCriterion:
           requestHeaderName: CF-Connecting-IP
 
-    # Public Payment QR activation rate limiter: average 1 req / 5s with burst 2 per client IP via CF-Connecting-IP
-    public-activation-rate-limit:
-      rateLimit:
-        average: 1
-        period: 5s
-        burst: 2
-        sourceCriterion:
-          requestHeaderName: CF-Connecting-IP
-
     # Public REST global concurrent limiter: max 128 concurrent requests for hostname
     public-api-inflight-global:
       inFlightReq:

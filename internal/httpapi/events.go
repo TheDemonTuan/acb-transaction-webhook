@@ -13,12 +13,6 @@ func (s *Server) publishStateEvent(eventType, aggregateID string, data any) {
 	if err != nil {
 		return
 	}
-	if s.store == nil {
-		if s.eventHub != nil {
-			s.Publish(eventhub.Event{Epoch: realtimeEpoch, EventType: eventType, AggregateID: aggregateID, Payload: payload, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
-		}
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	seq, err := s.store.AppendJournalEvent(ctx, realtimeEpoch, eventType, aggregateID, payload)

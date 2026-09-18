@@ -19,7 +19,6 @@ import {
   deletePaymentQR,
 } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
-import { VietQRTestLab } from './VietQRTestLab';
 
 export const PaymentQRSettingsSection: React.FC = () => {
   const queryClient = useQueryClient();
@@ -288,13 +287,6 @@ export const PaymentQRSettingsSection: React.FC = () => {
             )}
           </div>
         </div>
-
-        {/* VietQR Experimental Test Lab */}
-        <VietQRTestLab
-          defaultAccountNumber={accountNumber.trim() || qr?.accountNumber || ''}
-          defaultAccountName={accountName.trim() || qr?.accountName || ''}
-          onPromoted={() => refetch()}
-        />
       </div>
     </div>
   );

@@ -167,7 +167,7 @@ func TestDefaultMonitorSettingsIntervals(t *testing.T) {
 	if len(DefaultMonitorSettings.Windows) != 1 {
 		t.Fatalf("expected one default window, got %d", len(DefaultMonitorSettings.Windows))
 	}
-	if got := DefaultMonitorSettings.Windows[0].Profile; got.Mode != ModeRealtime || got.MinSeconds != 20 || got.MaxSeconds != 30 {
+	if got := DefaultMonitorSettings.Windows[0].Profile; got.Mode != ModeRealtime || got.MinSeconds != 3 || got.MaxSeconds != 10 {
 		t.Fatalf("unexpected default realtime profile: %+v", got)
 	}
 }

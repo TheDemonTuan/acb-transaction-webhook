@@ -24,7 +24,7 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) publicEventsStream(w http.ResponseWriter, r *http.Request) {
 	s.eventsStreamFiltered(w, r, func(eventType string) bool {
-		return eventType == "bank.transaction.credit" || eventType == "payment.activated"
+		return eventType == "bank.transaction.credit"
 	})
 }
 

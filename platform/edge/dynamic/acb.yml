@@ -34,20 +34,6 @@ http:
         - security-headers
       service: acb-service
 
-    # Public Payment QR activation router with strict rate limiting
-    acb-public-activation-router:
-      rule: "Host(`transactions.tuannguyenviet.site`) && Path(`/api/public/v1/payment-qr/activate`)"
-      entryPoints:
-        - web
-      priority: 1150
-      middlewares:
-        - tunnel-only
-        - public-activation-rate-limit
-        - public-api-inflight-ip
-        - public-api-inflight-global
-        - security-headers
-      service: acb-service
-
     # Public API router with rate and inflight limiting
     acb-public-api-router:
       rule: "Host(`transactions.tuannguyenviet.site`) && (Path(`/api/public/v1`) || PathPrefix(`/api/public/v1/`))"

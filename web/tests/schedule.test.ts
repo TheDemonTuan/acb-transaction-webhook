@@ -15,8 +15,8 @@ describe('Schedule Settings Section Helpers', () => {
     expect(keepaliveProfile.minSeconds).toBe(60);
     expect(keepaliveProfile.maxSeconds).toBe(120);
     expect(realtimeProfile.mode).toBe('REALTIME');
-    expect(realtimeProfile.minSeconds).toBe(20);
-    expect(realtimeProfile.maxSeconds).toBe(30);
+    expect(realtimeProfile.minSeconds).toBe(3);
+    expect(realtimeProfile.maxSeconds).toBe(10);
   });
 
   it('contains correct days of week definitions', () => {
@@ -107,7 +107,7 @@ describe('Schedule Settings Section Helpers', () => {
           daysOfWeek: [1, 2, 3, 4, 5],
           startTime: '08:00',
           endTime: '17:00',
-          profile: { mode: 'REALTIME', minSeconds: 20, maxSeconds: 30 },
+          profile: { mode: 'REALTIME', minSeconds: 3, maxSeconds: 10 },
         },
       ],
     };

@@ -89,7 +89,7 @@ func TestMonitorSettingsAPIAndHotReloadWake(t *testing.T) {
 	if getResp.Settings.DefaultProfile.MinSeconds != 60 || getResp.Settings.DefaultProfile.MaxSeconds != 120 {
 		t.Fatalf("unexpected default keepalive interval: %+v", getResp.Settings.DefaultProfile)
 	}
-	if got := updatePayload.Windows[0].Profile; got.MinSeconds != 20 || got.MaxSeconds != 30 {
+	if got := updatePayload.Windows[0].Profile; got.MinSeconds != 3 || got.MaxSeconds != 10 {
 		t.Fatalf("unexpected default realtime interval: %+v", got)
 	}
 

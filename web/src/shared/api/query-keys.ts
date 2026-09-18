@@ -16,8 +16,6 @@ export const queryKeys = {
   adminOverview: ['admin-overview'] as const,
   monitorSettings: ['monitor-settings'] as const,
   paymentQR: ['payment-qr'] as const,
-  publicPaymentQR: ['public-payment-qr'] as const,
-  canaryStatus: (token: string) => ['canary-status', token] as const,
   historySyncJob: (id: string) => ['history-sync-job', id] as const,
   latestHistorySyncJob: () => ['history-sync-job', 'latest'] as const,
 };

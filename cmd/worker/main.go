@@ -407,21 +407,6 @@ func (w *workerService) Resume(ctx context.Context) error {
 	return nil
 }
 
-func (w *workerService) ActivatePaymentWindow(ctx context.Context) (workerrpc.PaymentWindowResponse, error) {
-	if w.bankMonitor == nil {
-		return workerrpc.PaymentWindowResponse{}, errors.New("bank monitor not initialized")
-	}
-	profile := w.bankMonitor.ActivatePaymentWindow()
-	var nextPhaseStr string
-	if !profile.NextPhaseAt.IsZero() {
-		nextPhaseStr = profile.NextPhaseAt.UTC().Format(time.RFC3339)
-	}
-	return workerrpc.PaymentWindowResponse{
-		Phase:       string(profile.Phase),
-		NextPhaseAt: nextPhaseStr,
-	}, nil
-}
-
 func newWorkerPollNotifier(store *storage.Store, waker interface{ Wake() }, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
 	if logger == nil {
 		logger = slog.Default()

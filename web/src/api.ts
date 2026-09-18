@@ -92,22 +92,6 @@ export const getCsrfToken = async (forceRefresh = false): Promise<string> => {
   return csrfPromise;
 };
 
-export const publicApi = async <T = any>(path: string, init?: RequestInit): Promise<T> => {
-  const headers = new Headers(init?.headers);
-  if (init?.body && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
-  const response = await fetch(`/api/public/v1${path}`, {
-    credentials: 'same-origin',
-    ...init,
-    headers,
-  });
-  if (!response.ok) {
-    throw await parseApiError(response);
-  }
-  return response.json();
-};
-
 export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const method = init?.method?.toUpperCase() ?? 'GET';
   const mutating = isMutation(method);
