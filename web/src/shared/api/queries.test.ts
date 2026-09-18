@@ -11,6 +11,8 @@ import {
   fetchCurrentAuthSession,
   toggleWebhookEndpoint,
   activatePaymentPolling,
+  fetchPaymentQR,
+  fetchPublicPaymentQR,
 } from './queries';
 import { invalidateCsrfToken } from '../../api';
 
@@ -333,5 +335,47 @@ describe('queries and mutations with centralized CSRF', () => {
   it('activatePaymentPolling rejects blank identifier on client before sending', async () => {
     await expect(activatePaymentPolling('')).rejects.toThrow('identifier required');
     await expect(activatePaymentPolling('   ')).rejects.toThrow('identifier required');
+  });
+
+  it('fetchPublicPaymentQR sends GET directly to /api/public/v1/payment-qr', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === '/api/public/v1/payment-qr') {
+        return new Response(
+          JSON.stringify({
+            configured: true,
+            hasImage: true,
+            imageURL: '/api/public/v1/payment-qr/image?v=1',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await fetchPublicPaymentQR();
+    expect(res.configured).toBe(true);
+    expect(res.hasImage).toBe(true);
+    expect(res.imageURL).toBe('/api/public/v1/payment-qr/image?v=1');
+  });
+
+  it('fetchPaymentQR sends GET to /api/v1/payment-qr', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === '/api/v1/payment-qr') {
+        return new Response(
+          JSON.stringify({
+            configured: true,
+            hasImage: true,
+            imageURL: '/api/v1/payment-qr/image?v=1',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await fetchPaymentQR();
+    expect(res.configured).toBe(true);
   });
 });

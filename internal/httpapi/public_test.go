@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,6 +60,18 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 	}
 	seededTxID := res.NewEvents[0].TransactionID
 
+	// Setup physical test image in qr directory
+	qrDir := filepath.Join(dbDir, "qr")
+	if err := os.MkdirAll(qrDir, 0o750); err != nil {
+		t.Fatalf("mkdir qr: %v", err)
+	}
+	qrFile := filepath.Join(qrDir, "qr_test.png")
+	qrBytes := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82")
+	if err := os.WriteFile(qrFile, qrBytes, 0o644); err != nil {
+		t.Fatalf("write qr file: %v", err)
+	}
+	qrHash := storage.HashBytes(qrBytes)
+
 	// Insert payment QR with internal metadata
 	if _, err := store.SavePaymentQR(ctx, storage.PaymentQR{
 		ConnectionID:     connID,
@@ -64,8 +79,8 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		AccountName:      "NGUYEN VIET TUAN",
 		Bin:              "970416",
 		BankName:         "ACB",
-		ImagePath:        "internal/secret/path.png",
-		ImageHash:        "secret_hash_123",
+		ImagePath:        qrFile,
+		ImageHash:        qrHash,
 		ImageContentType: "image/png",
 	}); err != nil {
 		t.Fatalf("save payment qr: %v", err)
@@ -178,10 +193,10 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		}
 		rawJSON, _ := json.Marshal(qrResp)
 		rawStr := string(rawJSON)
-		if strings.Contains(rawStr, "internal/secret/path.png") || strings.Contains(rawStr, "imagePath") {
+		if strings.Contains(rawStr, qrFile) || strings.Contains(rawStr, "imagePath") {
 			t.Errorf("SECURITY LEAK: imagePath leaked in public QR: %s", rawStr)
 		}
-		if strings.Contains(rawStr, "secret_hash_123") || strings.Contains(rawStr, "imageHash") {
+		if strings.Contains(rawStr, qrHash) || strings.Contains(rawStr, "imageHash") {
 			t.Errorf("SECURITY LEAK: imageHash leaked in public QR: %s", rawStr)
 		}
 		if strings.Contains(rawStr, "conn_public_test") || strings.Contains(rawStr, "connectionId") {
@@ -193,6 +208,38 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		}
 		if qrObj["accountName"] != "NGUYEN VIET TUAN" || qrObj["accountNumber"] != "1234567890" || qrObj["bankName"] != "ACB" {
 			t.Errorf("unexpected qr object content: %v", qrObj)
+		}
+	})
+
+	t.Run("GET /api/public/v1/payment-qr/image serves valid image content and headers", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/public/v1/payment-qr/image", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+			t.Errorf("expected Content-Type image/png, got %q", ct)
+		}
+		expectedETag := fmt.Sprintf(`"%s"`, qrHash)
+		if etag := resp.Header.Get("ETag"); etag != expectedETag {
+			t.Errorf("expected ETag %q, got %q", expectedETag, etag)
+		}
+		if cc := resp.Header.Get("Cache-Control"); cc != "private, max-age=3600" {
+			t.Errorf("expected Cache-Control private, max-age=3600, got %q", cc)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if len(body) == 0 {
+			t.Fatal("expected non-empty image body")
+		}
+		if !bytes.Equal(body, qrBytes) {
+			t.Errorf("body bytes mismatch with stored PNG: expected %d bytes, got %d bytes", len(qrBytes), len(body))
 		}
 	})
 
@@ -211,16 +258,17 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("Public SSE stream filters out non-credit events", func(t *testing.T) {
-		// Insert journal events directly: one audit, one credit, one connection
+	t.Run("Public SSE stream delivers credit and activation events while filtering private events", func(t *testing.T) {
+		// Insert journal events directly: one audit, one credit, one activation, one connection
 		nowTime := time.Now().UTC().Format(time.RFC3339Nano)
 		_, err := store.DB().ExecContext(ctx, `
 			INSERT INTO event_journal(epoch, event_type, aggregate_id, payload_json, created_at)
 			VALUES
 				('ep1', 'audit.created', 'aud_1', '{"action":"login"}', ?),
 				('ep1', 'bank.transaction.credit', 'txn_1', '{"credit":"50000","transactionId":"t1"}', ?),
+				('ep1', 'payment.activated', 'act_1', '{"identifier":"act_1","phase":"HOT"}', ?),
 				('ep1', 'connection.changed', 'conn_1', '{"state":"MONITORING"}', ?)
-		`, nowTime, nowTime, nowTime)
+		`, nowTime, nowTime, nowTime, nowTime)
 		if err != nil {
 			t.Fatalf("insert journal: %v", err)
 		}
@@ -252,7 +300,7 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 				if strings.HasPrefix(line, "event: ") {
 					evt := strings.TrimPrefix(line, "event: ")
 					receivedEvents = append(receivedEvents, evt)
-					if evt == "bank.transaction.credit" {
+					if len(receivedEvents) >= 3 {
 						return
 					}
 				}
@@ -270,13 +318,20 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 			}
 		}
 		foundCredit := false
+		foundActivation := false
 		for _, evt := range receivedEvents {
 			if evt == "bank.transaction.credit" {
 				foundCredit = true
 			}
+			if evt == "payment.activated" {
+				foundActivation = true
+			}
 		}
 		if !foundCredit {
 			t.Errorf("expected bank.transaction.credit in public SSE, received: %v", receivedEvents)
+		}
+		if !foundActivation {
+			t.Errorf("expected payment.activated in public SSE, received: %v", receivedEvents)
 		}
 	})
 }

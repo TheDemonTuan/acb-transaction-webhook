@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
+  AlertCircle,
   Building2,
   Check,
   CheckCircle2,
@@ -9,10 +10,11 @@ import {
   CreditCard,
   ExternalLink,
   Radio,
+  RefreshCw,
   Sparkles,
   User,
 } from 'lucide-react';
-import { activatePaymentPolling, fetchPaymentQR } from '../../shared/api/queries';
+import { activatePaymentPolling, fetchPublicPaymentQR } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { useRealtimeContext } from '../../realtime/RealtimeProvider';
 import type { BankTransactionCreditData } from '../../realtime/realtime.types';
@@ -66,11 +68,42 @@ export const PaymentPage: React.FC = () => {
     });
   }, []);
 
-  // Load payment QR configuration
-  const { data: qrData, isLoading } = useQuery({
-    queryKey: queryKeys.paymentQR,
-    queryFn: fetchPaymentQR,
+  // Load public payment QR configuration
+  const {
+    data: qrData,
+    isLoading,
+    isError,
+    error,
+    refetch: refetchQR,
+  } = useQuery({
+    queryKey: queryKeys.publicPaymentQR,
+    queryFn: fetchPublicPaymentQR,
   });
+
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+
+  // Reset image failure if imageURL changes
+  const qrImageURL = selectQRImageURL(qrData);
+  useEffect(() => {
+    setImageLoadFailed(false);
+  }, [qrImageURL]);
+
+  // Telemetry log on metadata load failure
+  useEffect(() => {
+    if (isError) {
+      console.error('[PaymentQR] QR_METADATA_LOAD_FAILED', {
+        error,
+        status: (error as any)?.status,
+      });
+    }
+  }, [isError, error]);
+
+  const handleImageError = () => {
+    console.error('[PaymentQR] QR_IMAGE_LOAD_FAILED', {
+      imageURL: qrImageURL,
+    });
+    setImageLoadFailed(true);
+  };
 
   const { subscribe } = useRealtimeContext();
 
@@ -109,8 +142,12 @@ export const PaymentPage: React.FC = () => {
   }, [subscribe]);
 
   const qr = qrData?.qr;
-  const qrImageURL = selectQRImageURL(qrData);
   const isReady = isQRReadyToDisplay(qrData);
+
+  const isConfigured = Boolean(qrData?.configured && qrData?.hasImage);
+  const isMetadataFailed = isError;
+  const isImageFailed = imageLoadFailed;
+  const isNotConfigured = !isLoading && !isError && (!isConfigured || !qrImageURL);
 
   const copyToClipboard = (text: string, field: string) => {
     navigator.clipboard.writeText(text);
@@ -197,19 +234,51 @@ export const PaymentPage: React.FC = () => {
               <div className="flex flex-col items-center">
                 <div className="bg-white p-3 rounded-2xl shadow-md border border-slate-700/50 max-w-[260px] aspect-square flex items-center justify-center">
                   {isLoading ? (
-                    <div className="w-56 h-56 flex items-center justify-center text-slate-400 text-xs">
-                      Đang tải mã VietQR...
+                    <div className="w-56 h-56 flex flex-col items-center justify-center text-slate-400 text-xs space-y-2">
+                      <RefreshCw className="w-6 h-6 animate-spin text-indigo-500" />
+                      <span>Đang tải mã VietQR...</span>
                     </div>
-                  ) : isReady && qrImageURL ? (
+                  ) : isMetadataFailed ? (
+                    <div className="w-56 h-56 flex flex-col items-center justify-center p-4 text-center text-slate-600 text-xs space-y-2">
+                      <AlertCircle className="w-8 h-8 text-amber-500 opacity-90" />
+                      <p className="font-semibold text-slate-800">Không tải được mã QR</p>
+                      <p className="text-[11px] text-slate-500">Vui lòng dùng thông tin tài khoản bên dưới</p>
+                      <button
+                        type="button"
+                        onClick={() => refetchQR()}
+                        className="mt-1 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
+                      >
+                        Thử lại
+                      </button>
+                    </div>
+                  ) : isNotConfigured ? (
+                    <div className="w-56 h-56 flex flex-col items-center justify-center p-4 text-center text-slate-500 text-xs space-y-2">
+                      <CreditCard className="w-8 h-8 opacity-40 text-slate-500" />
+                      <p className="font-semibold text-slate-700">Mã QR chưa được cài đặt</p>
+                      <p className="text-[11px] text-slate-500">Vui lòng dùng thông tin tài khoản bên dưới</p>
+                    </div>
+                  ) : isReady && qrImageURL && !isImageFailed ? (
                     <img
                       src={qrImageURL}
                       alt="VietQR Code"
                       className="w-full h-full object-contain rounded-lg"
+                      onError={handleImageError}
                     />
                   ) : (
-                    <div className="w-56 h-56 flex flex-col items-center justify-center p-4 text-center text-slate-500 text-xs">
-                      <CreditCard className="w-8 h-8 mb-2 opacity-50 text-slate-600" />
-                      Mã QR chưa được cài đặt trên hệ thống
+                    <div className="w-56 h-56 flex flex-col items-center justify-center p-4 text-center text-slate-600 text-xs space-y-2">
+                      <AlertCircle className="w-8 h-8 text-amber-500 opacity-90" />
+                      <p className="font-semibold text-slate-800">Không tải được hình ảnh mã QR</p>
+                      <p className="text-[11px] text-slate-500">Vui lòng dùng thông tin tài khoản bên dưới</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImageLoadFailed(false);
+                          refetchQR();
+                        }}
+                        className="mt-1 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
+                      >
+                        Thử lại
+                      </button>
                     </div>
                   )}
                 </div>
