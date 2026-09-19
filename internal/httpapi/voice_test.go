@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -722,5 +724,137 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	server.Handler().ServeHTTP(badW, badReq)
 	if badW.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for missing transaction, got %d", badW.Code)
+	}
+}
+
+func TestVoiceRateAndPitchClamping(t *testing.T) {
+	// Rate clamping: -50% to +100%
+	if r := formatTTSRate("+300%"); r != "+100%" {
+		t.Errorf("expected +100%%, got %q", r)
+	}
+	if r := formatTTSRate("-90%"); r != "-50%" {
+		t.Errorf("expected -50%%, got %q", r)
+	}
+	if r := formatTTSRate(3.0); r != "+100%" {
+		t.Errorf("expected +100%%, got %q", r)
+	}
+	if r := formatTTSRate(0.2); r != "-50%" {
+		t.Errorf("expected -50%%, got %q", r)
+	}
+	if r := formatTTSRate(1.25); r != "+25%" {
+		t.Errorf("expected +25%%, got %q", r)
+	}
+
+	// Pitch clamping: -50Hz/50% to +50Hz/50%
+	if p := formatTTSPitch("+100Hz"); p != "+50Hz" {
+		t.Errorf("expected +50Hz, got %q", p)
+	}
+	if p := formatTTSPitch("-90Hz"); p != "-50Hz" {
+		t.Errorf("expected -50Hz, got %q", p)
+	}
+	if p := formatTTSPitch("+100%"); p != "+50%" {
+		t.Errorf("expected +50%%, got %q", p)
+	}
+	if p := formatTTSPitch("-80%"); p != "-50%" {
+		t.Errorf("expected -50%%, got %q", p)
+	}
+	if p := formatTTSPitch(2.5); p != "+50Hz" {
+		t.Errorf("expected +50Hz, got %q", p)
+	}
+}
+
+func TestVoiceSummaryStreamGETWithQueryParams(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "test_summary_stream.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	var lastTTSReq ttsclient.SynthesizeRequest
+	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("summary_audio_stream"))
+	}))
+	defer mockTTS.Close()
+
+	cfg := config.Config{
+		DevelopmentSubject: "test-owner",
+		Roles: config.RoleSubjects{
+			Owners: map[string]struct{}{"test-owner": {}},
+		},
+	}
+	server := New(cfg, store).WithTTSClient(ttsclient.New(mockTTS.URL, ""))
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(csrfRec, csrfReq)
+	cookie := csrfRec.Result().Cookies()[0]
+	var tokenResp struct{ Token string }
+	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&tokenResp)
+	token := tokenResp.Token
+
+	connID := "conn_summary_test"
+	_, _ = store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID)
+
+	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+		{Number: "TXN_SUM_1", Credit: 100000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Order 1"},
+		{Number: "TXN_SUM_2", Credit: 200000, Debit: 0, TransactionAt: "12/09/2026 10:01:00", EffectiveAt: "12/09/2026", Description: "Order 2"},
+	}, false, "REALTIME")
+	if err != nil || len(rtRes.NewEvents) < 2 {
+		t.Fatalf("ingest: %v", err)
+	}
+	txID1 := rtRes.NewEvents[0].TransactionID
+	txID2 := rtRes.NewEvents[1].TransactionID
+
+	// GET /voice/transactions/summary/stream with query parameters
+	q := url.Values{}
+	q.Set("transactionIds", fmt.Sprintf("%s,%s", txID1, txID2))
+	q.Set("rate", "+200%")
+	q.Set("pitch", "+80Hz")
+	summaryURL := "http://example.test/api/v1/voice/transactions/summary/stream?" + q.Encode()
+	req := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodGet, summaryURL, nil),
+		cookie,
+		token,
+	)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from summary stream, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Content-Type") != "audio/mpeg" {
+		t.Errorf("expected Content-Type audio/mpeg, got %s", w.Header().Get("Content-Type"))
+	}
+	// Verify rate and pitch clamped
+	if lastTTSReq.Rate != "+100%" {
+		t.Errorf("expected clamped rate +100%%, got %q", lastTTSReq.Rate)
+	}
+	if lastTTSReq.Pitch != "+50Hz" {
+		t.Errorf("expected clamped pitch +50Hz, got %q", lastTTSReq.Pitch)
+	}
+
+	// GET with txIds alias
+	summaryURL2 := fmt.Sprintf("http://example.test/api/v1/voice/transactions/summary/stream?txIds=%s,%s", txID1, txID2)
+	req2 := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodGet, summaryURL2, nil),
+		cookie,
+		token,
+	)
+	w2 := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 from txIds summary stream, got %d: %s", w2.Code, w2.Body.String())
 	}
 }

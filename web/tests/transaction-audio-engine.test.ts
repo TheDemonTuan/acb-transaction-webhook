@@ -345,4 +345,227 @@ describe('TransactionAudioEngine public fallback & template propagation', () => 
     expect(startedTelemetry).not.toBeNull();
     expect(startedTelemetry.speechStartedAt).toBeGreaterThan(0);
   });
+
+  it('duplicate playing events invoke onStart and telemetry exactly once', async () => {
+    let playingListener: any = null;
+    let endedListener: any = null;
+
+    class MockAudio {
+      src: string;
+      volume = 1;
+      constructor(src: string) {
+        this.src = src;
+      }
+      addEventListener(event: string, cb: any) {
+        if (event === 'playing') playingListener = cb;
+        if (event === 'ended') endedListener = cb;
+      }
+      removeEventListener() {}
+      play() {
+        setTimeout(() => {
+          playingListener?.();
+          // Duplicate playing event
+          playingListener?.();
+          setTimeout(() => {
+            endedListener?.();
+          }, 10);
+        }, 10);
+        return Promise.resolve();
+      }
+      pause() {}
+      removeAttribute() {}
+      load() {}
+    }
+
+    (globalThis as any).window = {
+      Audio: MockAudio,
+      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
+      SpeechSynthesisUtterance: class {},
+    };
+
+    const onStartSpy = vi.fn();
+    const engine = new TransactionAudioEngine({ isPublic: true });
+
+    await engine.speak({
+      text: 'Thử nghiệm duplicate playing',
+      transactionId: 'tx_duplicate_playing',
+      onStart: onStartSpy,
+    });
+
+    expect(onStartSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('initial failure prior to playing event falls back to buffered audio', async () => {
+    let errorListener: any = null;
+
+    class FailingAudio {
+      src: string;
+      volume = 1;
+      constructor(src: string) {
+        this.src = src;
+      }
+      addEventListener(event: string, cb: any) {
+        if (event === 'error') errorListener = cb;
+      }
+      removeEventListener() {}
+      play() {
+        setTimeout(() => {
+          errorListener?.();
+        }, 10);
+        return Promise.resolve();
+      }
+      pause() {}
+      removeAttribute() {}
+      load() {}
+    }
+
+    class MockAudioContext {
+      state = 'running';
+      destination = {};
+      createGain() {
+        return { connect: vi.fn(), gain: { setValueAtTime: vi.fn() } };
+      }
+      createBufferSource() {
+        return {
+          buffer: null,
+          connect: vi.fn(),
+          start: vi.fn(function (this: any) {
+            setTimeout(() => this.onended?.(), 10);
+          }),
+        };
+      }
+      decodeAudioData() {
+        return Promise.resolve({ duration: 1.0 });
+      }
+      resume = vi.fn().mockResolvedValue(undefined);
+    }
+
+    (globalThis as any).window = {
+      Audio: FailingAudio,
+      AudioContext: MockAudioContext,
+      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
+      SpeechSynthesisUtterance: class {},
+    };
+
+    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio').mockResolvedValue({
+      data: new ArrayBuffer(8),
+      provider: 'edge',
+      voice: 'vi-VN-HoaiMyNeural',
+      fallback: false,
+      cached: true,
+    });
+
+    const engine = new TransactionAudioEngine({ isPublic: false });
+
+    await engine.speak({
+      text: 'Test fallback on initial error',
+      transactionId: 'tx_initial_fail',
+    });
+
+    // Failing prior to playback starts must invoke buffered fallback
+    expect(apiAudioSpy).toHaveBeenCalledTimes(1);
+    expect(apiAudioSpy).toHaveBeenCalledWith(
+      '/voice/transactions/tx_initial_fail',
+      expect.anything()
+    );
+  });
+
+  it('mid-stream failure after playing event terminates without falling back to buffered replay', async () => {
+    let playingListener: any = null;
+    let errorListener: any = null;
+
+    class MidstreamFailingAudio {
+      src: string;
+      volume = 1;
+      constructor(src: string) {
+        this.src = src;
+      }
+      addEventListener(event: string, cb: any) {
+        if (event === 'playing') playingListener = cb;
+        if (event === 'error') errorListener = cb;
+      }
+      removeEventListener() {}
+      play() {
+        setTimeout(() => {
+          // First starts playing
+          playingListener?.();
+          setTimeout(() => {
+            // Then mid-stream error occurs
+            errorListener?.();
+          }, 10);
+        }, 10);
+        return Promise.resolve();
+      }
+      pause() {}
+      removeAttribute() {}
+      load() {}
+    }
+
+    (globalThis as any).window = {
+      Audio: MidstreamFailingAudio,
+      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
+      SpeechSynthesisUtterance: class {},
+    };
+
+    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
+    const engine = new TransactionAudioEngine({ isPublic: false });
+
+    await engine.speak({
+      text: 'Test no duplicate on midstream error',
+      transactionId: 'tx_midstream_fail',
+    });
+
+    // Mid-stream failure must NOT fall back to buffered replay (prevents hearing audio twice)
+    expect(apiAudioSpy).not.toHaveBeenCalled();
+  });
+
+  it('summary audio requests populate streamUrl with query parameters', async () => {
+    let capturedStreamUrl = '';
+    let playingListener: any = null;
+    let endedListener: any = null;
+
+    class MockAudio {
+      src: string;
+      volume = 1;
+      constructor(src: string) {
+        this.src = src;
+        capturedStreamUrl = src;
+      }
+      addEventListener(event: string, cb: any) {
+        if (event === 'playing') playingListener = cb;
+        if (event === 'ended') endedListener = cb;
+      }
+      removeEventListener() {}
+      play() {
+        setTimeout(() => {
+          playingListener?.();
+          setTimeout(() => endedListener?.(), 10);
+        }, 10);
+        return Promise.resolve();
+      }
+      pause() {}
+      removeAttribute() {}
+      load() {}
+    }
+
+    (globalThis as any).window = {
+      Audio: MockAudio,
+      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
+      SpeechSynthesisUtterance: class {},
+    };
+
+    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
+    const engine = new TransactionAudioEngine({ isPublic: false });
+
+    await engine.speak({
+      text: 'Phát tổng hợp 2 giao dịch',
+      summaryTransactionIds: ['tx_sum_1', 'tx_sum_2'],
+      rate: 1.2,
+      pitch: 1.0,
+    });
+
+    expect(capturedStreamUrl).toContain('/api/v1/voice/transactions/summary/stream');
+    expect(capturedStreamUrl).toContain('transactionIds=tx_sum_1%2Ctx_sum_2');
+    expect(apiAudioSpy).not.toHaveBeenCalled();
+  });
 });

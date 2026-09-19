@@ -102,6 +102,9 @@ export class TransactionAudioEngine implements VoiceEngine {
           ) {
             throw new Error('VOICE_CANCELLED');
           }
+          if (onlineErr?.playbackStarted || onlineErr?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
+            return;
+          }
           await this.browserFallback.speak(message);
           return;
         }
@@ -132,6 +135,9 @@ export class TransactionAudioEngine implements VoiceEngine {
             ) {
               throw new Error('VOICE_CANCELLED');
             }
+            if (onlineError?.playbackStarted || onlineError?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
+              return;
+            }
             throw browserError;
           }
         }
@@ -150,6 +156,9 @@ export class TransactionAudioEngine implements VoiceEngine {
         onlineError?.message === 'VOICE_CANCELLED'
       ) {
         throw new Error('VOICE_CANCELLED');
+      }
+      if (onlineError?.playbackStarted || onlineError?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
+        return;
       }
       // Fallback to BrowserSpeechEngine with strict Vietnamese voice ONLY if not cancelled
       try {
@@ -202,6 +211,9 @@ export class TransactionAudioEngine implements VoiceEngine {
       message.summaryTransactionIds.length >= 2
     ) {
       path = '/voice/transactions/summary';
+      const summaryParams = new URLSearchParams(searchParams);
+      summaryParams.set('transactionIds', message.summaryTransactionIds.join(','));
+      streamUrl = `${basePath}/voice/transactions/summary/stream?${summaryParams.toString()}`;
       body = {
         transactionIds: message.summaryTransactionIds,
         includeDescription: false,
@@ -237,7 +249,10 @@ export class TransactionAudioEngine implements VoiceEngine {
         ) {
           throw new Error('VOICE_CANCELLED');
         }
-        // Fallback to arrayBuffer decoding if stream playback fails
+        if (streamErr?.playbackStarted || streamErr?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
+          throw streamErr;
+        }
+        // Fallback to arrayBuffer decoding if stream playback fails before playback starts
       }
     }
 
@@ -274,6 +289,14 @@ export class TransactionAudioEngine implements VoiceEngine {
       audio.volume = Math.max(0, Math.min(1, volume));
 
       let settled = false;
+      let playbackStarted = false;
+      let startedOnce = false;
+
+      const createError = (baseMsg: string) => {
+        const err: any = new Error(baseMsg);
+        err.playbackStarted = playbackStarted;
+        return err;
+      };
 
       const cleanup = () => {
         if (this.currentAudioElement === audio) {
@@ -302,6 +325,10 @@ export class TransactionAudioEngine implements VoiceEngine {
       signal?.addEventListener('abort', onAbort);
 
       audio.addEventListener?.('playing', () => {
+        playbackStarted = true;
+        if (startedOnce) return;
+        startedOnce = true;
+
         if (message?.telemetry) {
           message.telemetry.speechStartedAt = Date.now();
           const sseAt = message.telemetry.sseReceivedAt || message.telemetry.queuedAt;
@@ -333,25 +360,34 @@ export class TransactionAudioEngine implements VoiceEngine {
         if (!settled) {
           settled = true;
           cleanup();
-          reject(new Error(`AUDIO_PLAYBACK_ERROR: ${audio.error?.message || 'unknown'}`));
+          const msg = playbackStarted
+            ? `AUDIO_STREAM_INTERRUPTED: ${audio.error?.message || 'unknown'}`
+            : `AUDIO_PLAYBACK_ERROR: ${audio.error?.message || 'unknown'}`;
+          reject(createError(msg));
         }
       });
 
       try {
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.then === 'function') {
-          playPromise.catch((err) => {
+          playPromise.catch((err: any) => {
             if (!settled) {
               settled = true;
               cleanup();
+              if (err && typeof err === 'object') {
+                err.playbackStarted = playbackStarted;
+              }
               reject(err);
             }
           });
         }
-      } catch (err) {
+      } catch (err: any) {
         if (!settled) {
           settled = true;
           cleanup();
+          if (err && typeof err === 'object') {
+            err.playbackStarted = playbackStarted;
+          }
           reject(err);
         }
       }
