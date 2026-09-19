@@ -207,6 +207,19 @@ export interface PaymentBoostStatus {
   maxSeconds: number;
 }
 
+export interface PaymentReadiness {
+  ready: boolean;
+  status: string;
+}
+
+export const fetchPaymentReadiness = async (): Promise<PaymentReadiness> => {
+  const res = await fetch('/api/public/v1/payment-readiness');
+  if (!res.ok) {
+    throw new Error(`HTTP error ${res.status}`);
+  }
+  return res.json();
+};
+
 export const startPaymentActivity = async (payload: { amountVnd: number }): Promise<PaymentBoostStatus> => {
   const res = await fetch('/api/public/v1/payment-activity', {
     method: 'POST',
@@ -215,11 +228,16 @@ export const startPaymentActivity = async (payload: { amountVnd: number }): Prom
   });
   if (!res.ok) {
     let msg = `HTTP error ${res.status}`;
+    let code: string | undefined;
     try {
       const data = await res.json();
       if (data?.error) msg = data.error;
+      if (data?.code) code = data.code;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    err.code = code;
+    throw err;
   }
   return res.json();
 };
