@@ -192,6 +192,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       voiceURI: settings.voiceURI,
       transactionId: dedupeOpts.transactionId || undefined,
       includeDescription: settings.includeDescription,
+      template: settings.announcementTemplate,
       telemetry,
       onStart: (t) => {
         if (t) setLastTelemetry({ ...t });
@@ -221,6 +222,8 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         rate: settings.rate,
         pitch: settings.pitch,
         voiceURI: settings.voiceURI,
+        template: settings.announcementTemplate,
+        includeDescription: settings.includeDescription,
         isTest: true,
         onSuccess: () => resolve(),
         onError: (err) => reject(err),
@@ -240,6 +243,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         transactionId,
         isReplay: true,
         includeDescription: settings.includeDescription,
+        template: settings.announcementTemplate,
         onSuccess: () => resolve(),
         onError: (err) => reject(err),
       });

@@ -147,6 +147,56 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
     expect(engine.getStatus()).toBe('ready');
   });
 
+  it('fails closed when autoplay is blocked and lifecycle events do not fire', async () => {
+    vi.useFakeTimers();
+    try {
+      class MockUtterance {
+        text: string;
+        volume = 1;
+        rate = 1;
+        onend: any = null;
+        onerror: any = null;
+        constructor(text: string) {
+          this.text = text;
+        }
+      }
+
+      const mockSynth = {
+        paused: false,
+        speaking: false,
+        getVoices: () => [
+          {
+            default: true,
+            lang: 'vi-VN',
+            name: 'Microsoft Hoai My',
+            voiceURI: 'vi-vn-hoaimy',
+          },
+        ],
+        speak: vi.fn(() => {
+          // Autoplay blocked: no event fired
+        }),
+        cancel: vi.fn(),
+        resume: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      };
+
+      (globalThis as any).window = {
+        speechSynthesis: mockSynth,
+        SpeechSynthesisUtterance: MockUtterance,
+      };
+
+      const engine = new BrowserSpeechEngine();
+      const primePromise = engine.prime();
+      await vi.advanceTimersByTimeAsync(1600);
+      const result = await primePromise;
+      expect(result).toBe(false);
+      expect(engine.getStatus()).toBe('error');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('speaks successfully with custom rate when Vietnamese voice is available', async () => {
     let capturedRate = 0;
     class MockUtterance {

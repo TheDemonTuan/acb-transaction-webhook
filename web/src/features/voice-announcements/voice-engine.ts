@@ -29,6 +29,7 @@ export interface VoiceMessage {
   isTest?: boolean;
   isReplay?: boolean;
   includeDescription?: boolean;
+  template?: string;
   telemetry?: VoiceTelemetry;
   onStart?: (telemetry?: VoiceTelemetry) => void;
   onSuccess?: () => void;

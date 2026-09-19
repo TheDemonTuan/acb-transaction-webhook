@@ -62,12 +62,22 @@ describe('Runtime Mode & Public Isolation', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('blocks apiAudio on public host', async () => {
+    it('blocks arbitrary apiAudio on public host and allows transaction-scoped audio', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
-      await expect(apiAudio('/voice/transactions/1')).rejects.toThrow(
+      await expect(apiAudio('/voice/test')).rejects.toThrow(
         'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
       );
       expect(fetchSpy).not.toHaveBeenCalled();
+
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ 'content-type': 'audio/mpeg', 'x-tts-provider': 'edge' }),
+        arrayBuffer: async () => new ArrayBuffer(4),
+      } as Response);
+
+      await apiAudio('/voice/transactions/1');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch.mock.calls[0][0]).toBe('/api/public/v1/voice/transactions/1');
     });
 
     it('routes GET requests to /api/public/v1 namespace', async () => {

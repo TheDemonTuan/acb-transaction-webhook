@@ -331,8 +331,8 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	if lastTTSReq.Pitch != "+5Hz" {
 		t.Errorf("expected pitch +5Hz, got %q", lastTTSReq.Pitch)
 	}
-	if lastTTSReq.Cacheable {
-		t.Errorf("expected Cacheable=false when rate/pitch specified")
+	if !lastTTSReq.Cacheable {
+		t.Errorf("expected Cacheable=true when rate/pitch specified")
 	}
 
 	// 2. Synthesize transaction audio with string rate "+30%"
@@ -370,6 +370,9 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	if lastTTSReq.Pitch != "+0Hz" {
 		t.Errorf("expected pitch +0Hz, got %q", lastTTSReq.Pitch)
 	}
+	if !lastTTSReq.Cacheable {
+		t.Errorf("expected transaction audio Cacheable=true when rate/pitch specified")
+	}
 
 	// 3. Synthesize transaction audio with slowed rate 0.8 -> "-20%"
 	txBodySlow, _ := json.Marshal(map[string]any{
@@ -387,5 +390,225 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	}
 	if lastTTSReq.Rate != "-20%" {
 		t.Errorf("expected rate -20%%, got %q", lastTTSReq.Rate)
+	}
+	if !lastTTSReq.Cacheable {
+		t.Errorf("expected transaction audio Cacheable=true when slowed rate specified")
+	}
+}
+
+func TestVoiceTemplateCustomization(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "test_template.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	var lastTTSReq ttsclient.SynthesizeRequest
+	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
+		w.Header().Set("X-TTS-Fallback", "false")
+		w.Header().Set("X-TTS-Cached", "false")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mock_mp3_data"))
+	}))
+	defer mockTTS.Close()
+
+	cfg := config.Config{
+		DevelopmentSubject: "test-owner",
+		Roles: config.RoleSubjects{
+			Owners: map[string]struct{}{"test-owner": {}},
+		},
+	}
+	server := New(cfg, store).WithTTSClient(ttsclient.New(mockTTS.URL, ""))
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(csrfRec, csrfReq)
+	cookie := csrfRec.Result().Cookies()[0]
+	var tokenResp struct{ Token string }
+	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&tokenResp)
+	token := tokenResp.Token
+
+	// 1. /voice/test with custom template
+	testBody, _ := json.Marshal(map[string]any{
+		"template": "Cảm ơn quý khách đã gửi {amount}.",
+	})
+	testReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader(testBody)),
+		cookie,
+		token,
+	)
+	testW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(testW, testReq)
+	if testW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", testW.Code, testW.Body.String())
+	}
+	expectedTest := "Cảm ơn quý khách đã gửi năm trăm nghìn đồng."
+	if lastTTSReq.Text != expectedTest {
+		t.Errorf("expected test text %q, got %q", expectedTest, lastTTSReq.Text)
+	}
+
+	// 2. /voice/transactions/{id} with custom template
+	connID := "conn_tpl_test"
+	_, _ = store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID)
+
+	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+		{Number: "TXN_TPL_1", Credit: 1000000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Shop Pay"},
+	}, false, "REALTIME")
+	if err != nil || len(rtRes.NewEvents) == 0 {
+		t.Fatalf("ingest: %v", err)
+	}
+	txnID := rtRes.NewEvents[0].TransactionID
+
+	txBody, _ := json.Marshal(map[string]any{
+		"template": "Đã nhận {amount_raw} VND ({amount}).",
+	})
+	txReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader(txBody)),
+		cookie,
+		token,
+	)
+	txW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(txW, txReq)
+	if txW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", txW.Code, txW.Body.String())
+	}
+	expectedTx := "Đã nhận 1000000 VND (một triệu đồng)."
+	if lastTTSReq.Text != expectedTx {
+		t.Errorf("expected transaction text %q, got %q", expectedTx, lastTTSReq.Text)
+	}
+
+	// 3. /voice/transactions/{id}/replay with custom template
+	replayBody, _ := json.Marshal(map[string]any{
+		"template": "Phát lại: nhận {amount}.",
+	})
+	replayReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID+"/replay", bytes.NewReader(replayBody)),
+		cookie,
+		token,
+	)
+	replayW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(replayW, replayReq)
+	if replayW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", replayW.Code, replayW.Body.String())
+	}
+	expectedReplay := "Phát lại: nhận một triệu đồng."
+	if lastTTSReq.Text != expectedReplay {
+		t.Errorf("expected replay text %q, got %q", expectedReplay, lastTTSReq.Text)
+	}
+}
+
+func TestPublicVoiceSynthesisFallback(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "test_public_voice.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	var lastTTSReq ttsclient.SynthesizeRequest
+	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
+		w.Header().Set("X-TTS-Fallback", "false")
+		w.Header().Set("X-TTS-Cached", "false")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mock_mp3_data"))
+	}))
+	defer mockTTS.Close()
+
+	cfg := config.Config{
+		DevelopmentSubject: "test-owner",
+	}
+	server := New(cfg, store).WithTTSClient(ttsclient.New(mockTTS.URL, ""))
+
+	connID := "conn_pub_voice"
+	_, _ = store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID)
+
+	// 1. Fresh REALTIME transaction
+	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+		{Number: "TXN_PUB_1", Credit: 250000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Tip"},
+	}, false, "REALTIME")
+	if err != nil || len(rtRes.NewEvents) == 0 {
+		t.Fatalf("ingest: %v", err)
+	}
+	freshTxnID := rtRes.NewEvents[0].TransactionID
+
+	// Call unauthenticated public endpoint
+	pubBody, _ := json.Marshal(map[string]any{
+		"rate": 1.25,
+	})
+	pubReq := httptest.NewRequest(http.MethodPost, "/api/public/v1/voice/transactions/"+freshTxnID, bytes.NewReader(pubBody))
+	pubW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(pubW, pubReq)
+
+	if pubW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from public voice endpoint, got %d: %s", pubW.Code, pubW.Body.String())
+	}
+	if pubW.Header().Get("Content-Type") != "audio/mpeg" {
+		t.Errorf("expected Content-Type audio/mpeg, got %s", pubW.Header().Get("Content-Type"))
+	}
+	expectedDefault := "Đa tạ quý khách vì hai trăm năm mươi nghìn đồng."
+	if lastTTSReq.Text != expectedDefault {
+		t.Errorf("expected default text %q, got %q", expectedDefault, lastTTSReq.Text)
+	}
+	if !lastTTSReq.Cacheable {
+		t.Errorf("expected Cacheable=true on public voice synthesis")
+	}
+
+	// 2. Anti-abuse: arbitrary template without amount placeholder safely falls back to default template
+	abuseBody, _ := json.Marshal(map[string]any{
+		"template": "Hacker text with no amount token",
+	})
+	abuseReq := httptest.NewRequest(http.MethodPost, "/api/public/v1/voice/transactions/"+freshTxnID, bytes.NewReader(abuseBody))
+	abuseW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(abuseW, abuseReq)
+	if abuseW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", abuseW.Code)
+	}
+	if lastTTSReq.Text != expectedDefault {
+		t.Errorf("unsafe template must fallback to default template, got %q", lastTTSReq.Text)
+	}
+
+	// 3. Non-realtime source rejected with 422
+	cuRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+		{Number: "TXN_PUB_CU", Credit: 500000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Historical"},
+	}, false, "CATCH_UP")
+	if err != nil || len(cuRes.NewEvents) == 0 {
+		t.Fatalf("ingest catchup: %v", err)
+	}
+	cuTxnID := cuRes.NewEvents[0].TransactionID
+
+	cuReq := httptest.NewRequest(http.MethodPost, "/api/public/v1/voice/transactions/"+cuTxnID, nil)
+	cuW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(cuW, cuReq)
+	if cuW.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 for non-realtime, got %d", cuW.Code)
+	}
+
+	// 4. Nonexistent transaction -> 404
+	badReq := httptest.NewRequest(http.MethodPost, "/api/public/v1/voice/transactions/nonexistent", nil)
+	badW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badW, badReq)
+	if badW.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for missing transaction, got %d", badW.Code)
 	}
 }
