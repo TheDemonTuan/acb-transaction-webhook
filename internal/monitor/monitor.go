@@ -163,10 +163,17 @@ func (m *Monitor) StartPaymentBoost(amount int64) PaymentBoostStatus {
 	}
 	now := m.now()
 	m.boostMu.Lock()
-	m.boost = &PaymentBoost{
-		StartedAt:      now,
-		ExpiresAt:      now.Add(180 * time.Second),
-		ExpectedAmount: amount,
+	if m.boost != nil && now.Before(m.boost.ExpiresAt) {
+		// Enforce hard cap: active boost cannot reset or extend 180s expiration.
+		if amount > 0 {
+			m.boost.ExpectedAmount = amount
+		}
+	} else {
+		m.boost = &PaymentBoost{
+			StartedAt:      now,
+			ExpiresAt:      now.Add(180 * time.Second),
+			ExpectedAmount: amount,
+		}
 	}
 	status := m.boostStatusLocked(now)
 	m.boostMu.Unlock()
@@ -201,10 +208,12 @@ func (m *Monitor) PaymentBoostStatus() PaymentBoostStatus {
 
 func (m *Monitor) boostStatusLocked(now time.Time) PaymentBoostStatus {
 	if m.boost == nil || !now.Before(m.boost.ExpiresAt) {
-		m.boost = nil
 		return PaymentBoostStatus{Active: false}
 	}
 	elapsed := now.Sub(m.boost.StartedAt)
+	if elapsed >= 180*time.Second {
+		return PaymentBoostStatus{Active: false}
+	}
 	expiresIn := int(m.boost.ExpiresAt.Sub(now).Seconds())
 	if expiresIn < 0 {
 		expiresIn = 0
@@ -225,7 +234,6 @@ func (m *Monitor) boostStatusLocked(now time.Time) PaymentBoostStatus {
 		minSec = 6
 		maxSec = 10
 	default:
-		m.boost = nil
 		return PaymentBoostStatus{Active: false}
 	}
 
