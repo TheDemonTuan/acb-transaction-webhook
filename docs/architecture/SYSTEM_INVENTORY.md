@@ -81,7 +81,7 @@ Production requires pinned, immutable container image digests. Floating tags (`:
 | `gateway` | Multi-stage Go 1.27.1 + Distroless `nonroot` | Signed first-party digest via GHCR | Read-only rootfs, `no-new-privileges`, UID 1000, drop all capabilities. |
 | `worker` | Multi-stage Go 1.27.1 + Distroless `nonroot` | Signed first-party digest via GHCR | Read-only rootfs, `no-new-privileges`, UID 1000, access to `/data` volume. |
 | `auth-browser`| Chromium on Debian slim | Signed first-party digest via GHCR | Custom seccomp profile (`deploy/seccomp-auth-browser.json`), `IPC_LOCK`, isolated tmpfs. |
-| `tts-gateway` | Python 3.12 slim (`tts-gateway/`) | Signed first-party digest via GHCR | Read-only rootfs, no outbound internet access except to Microsoft Edge TTS. |
+| `tts-gateway` | Python 3.13 on Alpine 3.24 (`tts-gateway/`) | Signed first-party digest via GHCR | Read-only rootfs, no outbound internet access except to Microsoft Edge TTS. |
 | `bark` | `finab/bark-server` (Third-party) | Approved immutable SHA256 digest | Listed in `deploy/third-party-allowlist.json`. Isolated volume for APNs tokens. |
 | `dbtool` | Ephemeral one-shot Go binary | Signed first-party digest via GHCR | Runs with `network_mode: none`. Mounts `/data` volume for migrations and backups. |
 

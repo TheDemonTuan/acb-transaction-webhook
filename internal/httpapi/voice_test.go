@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
@@ -124,6 +125,117 @@ func TestVoiceTestEndpoint(t *testing.T) {
 	}
 	if w.Body.String() != "mock_mp3_data" {
 		t.Errorf("unexpected audio body: %q", w.Body.String())
+	}
+}
+
+func TestPublicVoiceTestEndpoint(t *testing.T) {
+	server, store, mockTTS, _, _ := setupTestVoiceServer(t)
+	defer store.Close()
+	defer mockTTS.Close()
+
+	// Public endpoint requires NO cookie and NO CSRF token
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/public/v1/voice/test",
+		bytes.NewReader([]byte(`{"voiceId":"vi-VN-NamMinhNeural","rate":1.25,"pitch":1.1}`)),
+	)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Content-Type") != "audio/mpeg" {
+		t.Errorf("expected Content-Type audio/mpeg, got %s", w.Header().Get("Content-Type"))
+	}
+	if w.Body.String() != "mock_mp3_data" {
+		t.Errorf("unexpected audio body: %q", w.Body.String())
+	}
+}
+
+func TestVoiceStreamingAndTelemetry(t *testing.T) {
+	ctx := context.Background()
+	server, store, mockTTS, cookie, token := setupTestVoiceServer(t)
+	defer store.Close()
+	defer mockTTS.Close()
+
+	connID := "conn_stream_test"
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID); err != nil {
+		t.Fatalf("insert connection: %v", err)
+	}
+
+	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+		{
+			Number:        "TXN_STREAM_1",
+			Credit:        500000,
+			Debit:         0,
+			TransactionAt: "12/09/2026 10:00:00",
+			EffectiveAt:   "12/09/2026",
+			Description:   "Payment 500k",
+		},
+	}, false, "REALTIME")
+	if err != nil || len(rtRes.NewEvents) == 0 {
+		t.Fatalf("ingest realtime: %v", err)
+	}
+	rtTxnID := rtRes.NewEvents[0].TransactionID
+
+	// 1. GET /api/v1/voice/transactions/{id}/stream
+	reqGet := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/voice/transactions/"+rtTxnID+"/stream?rate=1.25&voiceId=vi-VN-NamMinhNeural", nil),
+		cookie,
+		token,
+	)
+	wGet := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 for GET stream, got %d: %s", wGet.Code, wGet.Body.String())
+	}
+	if wGet.Header().Get("Content-Type") != "audio/mpeg" {
+		t.Errorf("expected Content-Type audio/mpeg, got %s", wGet.Header().Get("Content-Type"))
+	}
+	firstByteHeader := wGet.Header().Get("X-TTS-First-Byte-Ms")
+	if firstByteHeader == "" {
+		t.Errorf("expected X-TTS-First-Byte-Ms header to be present")
+	}
+	serverTiming := wGet.Header().Get("Server-Timing")
+	if !strings.Contains(serverTiming, "tts_fb;dur=") {
+		t.Errorf("expected Server-Timing header to contain tts_fb;dur=, got %q", serverTiming)
+	}
+	if wGet.Body.String() != "mock_mp3_data" {
+		t.Errorf("unexpected body: %q", wGet.Body.String())
+	}
+
+	// 2. GET /api/public/v1/voice/transactions/{id}/stream
+	pubReq := httptest.NewRequest(
+		http.MethodGet,
+		"/api/public/v1/voice/transactions/"+rtTxnID+"/stream",
+		nil,
+	)
+	pubW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(pubW, pubReq)
+	if pubW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for public GET stream, got %d: %s", pubW.Code, pubW.Body.String())
+	}
+	if pubW.Header().Get("X-TTS-First-Byte-Ms") == "" {
+		t.Errorf("expected public stream X-TTS-First-Byte-Ms header")
+	}
+
+	// 3. GET /api/public/v1/voice/test/stream
+	testReq := httptest.NewRequest(
+		http.MethodGet,
+		"/api/public/v1/voice/test/stream",
+		nil,
+	)
+	testW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(testW, testReq)
+	if testW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for public test stream, got %d: %s", testW.Code, testW.Body.String())
+	}
+	if testW.Header().Get("X-TTS-First-Byte-Ms") == "" {
+		t.Errorf("expected public test stream X-TTS-First-Byte-Ms header")
 	}
 }
 

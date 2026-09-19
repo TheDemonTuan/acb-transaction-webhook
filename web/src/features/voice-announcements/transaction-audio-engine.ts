@@ -11,6 +11,7 @@ export class TransactionAudioEngine implements VoiceEngine {
   private audioContext: AudioContext | null = null;
   private gainNode: GainNode | null = null;
   private currentSource: AudioBufferSourceNode | null = null;
+  private currentAudioElement: HTMLAudioElement | null = null;
   private browserFallback = new BrowserSpeechEngine();
   private abortController: AbortController | null = null;
   private isPublic: boolean;
@@ -87,9 +88,9 @@ export class TransactionAudioEngine implements VoiceEngine {
     this.cancel();
 
     if (this.isPublic) {
-      // Public hybrid strategy: local Vietnamese voice first, fallback to safe transaction-scoped online TTS
+      // Public hybrid strategy: local Vietnamese voice first, fallback to safe transaction-scoped or test online TTS
       const isOnlineVoiceChosen = Boolean(message.voiceURI?.startsWith('vi-VN-'));
-      if (isOnlineVoiceChosen && message.transactionId) {
+      if (isOnlineVoiceChosen && (message.transactionId || message.isTest)) {
         try {
           await this.speakOnline(message);
           return;
@@ -118,8 +119,8 @@ export class TransactionAudioEngine implements VoiceEngine {
         ) {
           throw new Error('VOICE_CANCELLED');
         }
-        // Fallback to online transaction TTS if transactionId present
-        if (message.transactionId) {
+        // Fallback to online transaction or test TTS if transactionId present or isTest
+        if (message.transactionId || message.isTest) {
           try {
             await this.speakOnline(message);
             return;
@@ -165,16 +166,22 @@ export class TransactionAudioEngine implements VoiceEngine {
 
     let path = '';
     let body: any = null;
+    let streamUrl: string | null = null;
+    const basePath = this.isPublic ? '/api/public/v1' : '/api/v1';
 
-    if (message.voiceURI && !message.voiceURI.startsWith('vi-VN-')) {
-      // Local browser voice selected directly
-      throw new Error('BROWSER_VOICE_SELECTED');
-    }
+    const searchParams = new URLSearchParams();
+    if (message.voiceURI) searchParams.set('voiceId', message.voiceURI);
+    if (message.rate !== undefined) searchParams.set('rate', String(message.rate));
+    if (message.pitch !== undefined) searchParams.set('pitch', String(message.pitch));
+    if (message.template) searchParams.set('template', message.template);
+    if (message.includeDescription) searchParams.set('includeDescription', 'true');
+    const querySuffix = searchParams.toString() ? `?${searchParams.toString()}` : '';
 
     if (message.isTest) {
       path = '/voice/test';
+      streamUrl = `${basePath}/voice/test/stream${querySuffix}`;
       body = {
-        voiceId: message.voiceURI || 'vi-VN-HoaiMyNeural',
+        voiceId: message.voiceURI?.startsWith('vi-VN-') ? message.voiceURI : 'vi-VN-HoaiMyNeural',
         rate: message.rate,
         pitch: message.pitch,
         template: message.template,
@@ -182,6 +189,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       };
     } else if (message.isReplay && message.transactionId) {
       path = `/voice/transactions/${encodeURIComponent(message.transactionId)}/replay`;
+      streamUrl = `${basePath}/voice/transactions/${encodeURIComponent(message.transactionId)}/replay/stream${querySuffix}`;
       body = {
         includeDescription: Boolean(message.includeDescription),
         template: message.template,
@@ -203,6 +211,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       };
     } else if (message.transactionId) {
       path = `/voice/transactions/${encodeURIComponent(message.transactionId)}`;
+      streamUrl = `${basePath}/voice/transactions/${encodeURIComponent(message.transactionId)}/stream${querySuffix}`;
       body = {
         includeDescription: Boolean(message.includeDescription),
         template: message.template,
@@ -213,6 +222,23 @@ export class TransactionAudioEngine implements VoiceEngine {
     } else {
       // If no transaction ID, fall back directly to browser speech
       throw new Error('NO_ONLINE_ROUTE');
+    }
+
+    const AudioCtor = (typeof window !== 'undefined' && (window as any).Audio) || (typeof Audio !== 'undefined' ? Audio : null);
+    if (streamUrl && AudioCtor) {
+      try {
+        await this.playAudioStream(streamUrl, message.volume ?? 1, message, signal, AudioCtor);
+        return;
+      } catch (streamErr: any) {
+        if (
+          (streamErr instanceof DOMException && streamErr.name === 'AbortError') ||
+          streamErr?.name === 'AbortError' ||
+          streamErr?.message === 'VOICE_CANCELLED'
+        ) {
+          throw new Error('VOICE_CANCELLED');
+        }
+        // Fallback to arrayBuffer decoding if stream playback fails
+      }
     }
 
     const { data: audioData } = await apiAudio(path, {
@@ -227,6 +253,109 @@ export class TransactionAudioEngine implements VoiceEngine {
     }
 
     await this.playAudioBuffer(audioData, message.volume ?? 1, message);
+  }
+
+  private playAudioStream(
+    streamUrl: string,
+    volume: number,
+    message: VoiceMessage | undefined,
+    signal: AbortSignal | undefined,
+    AudioCtor: any
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let audio: HTMLAudioElement;
+      try {
+        audio = new AudioCtor(streamUrl);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      this.currentAudioElement = audio;
+      audio.volume = Math.max(0, Math.min(1, volume));
+
+      let settled = false;
+
+      const cleanup = () => {
+        if (this.currentAudioElement === audio) {
+          this.currentAudioElement = null;
+        }
+        signal?.removeEventListener('abort', onAbort);
+      };
+
+      const onAbort = () => {
+        if (!settled) {
+          settled = true;
+          try {
+            audio.pause();
+            audio.removeAttribute('src');
+            audio.load?.();
+          } catch {}
+          cleanup();
+          reject(new Error('VOICE_CANCELLED'));
+        }
+      };
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort);
+
+      audio.addEventListener?.('playing', () => {
+        if (message?.telemetry) {
+          message.telemetry.speechStartedAt = Date.now();
+          const sseAt = message.telemetry.sseReceivedAt || message.telemetry.queuedAt;
+          if (sseAt) {
+            message.telemetry.sseToSpeakMs = message.telemetry.speechStartedAt - sseAt;
+          }
+          if (message.telemetry.queuedAt) {
+            message.telemetry.queueToSpeakMs = message.telemetry.speechStartedAt - message.telemetry.queuedAt;
+          }
+          if (message.telemetry.detectedAt) {
+            const d = new Date(message.telemetry.detectedAt).getTime();
+            if (!isNaN(d)) {
+              message.telemetry.totalLatencyMs = message.telemetry.speechStartedAt - d;
+            }
+          }
+        }
+        message?.onStart?.(message.telemetry);
+      });
+
+      audio.addEventListener?.('ended', () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve();
+        }
+      });
+
+      audio.addEventListener?.('error', () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`AUDIO_PLAYBACK_ERROR: ${audio.error?.message || 'unknown'}`));
+        }
+      });
+
+      try {
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+          playPromise.catch((err) => {
+            if (!settled) {
+              settled = true;
+              cleanup();
+              reject(err);
+            }
+          });
+        }
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
+      }
+    });
   }
 
   private async playAudioBuffer(
@@ -300,6 +429,14 @@ export class TransactionAudioEngine implements VoiceEngine {
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
+    }
+    if (this.currentAudioElement) {
+      try {
+        this.currentAudioElement.pause();
+        this.currentAudioElement.removeAttribute('src');
+        this.currentAudioElement.load?.();
+      } catch {}
+      this.currentAudioElement = null;
     }
     if (this.currentSource) {
       try {

@@ -70,6 +70,51 @@ async def test_synthesize_fallback_to_gtts(monkeypatch):
         assert resp.content == b"fake_gtts_audio"
 
 @pytest.mark.asyncio
+async def test_synthesize_stream_edge_success(monkeypatch):
+    async def mock_edge_stream(*args, **kwargs):
+        yield b"chunk_1_"
+        yield b"chunk_2"
+
+    monkeypatch.setattr(edge_provider, "stream", mock_edge_stream)
+    edge_circuit.record_success()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/synthesize/stream",
+            json={"text": "Bạn vừa nhận được 999k stream", "voice": "vi-VN-HoaiMyNeural", "cacheable": True},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "audio/mpeg"
+        assert resp.headers["x-tts-provider"] == "edge"
+        assert resp.headers["x-tts-fallback"] == "false"
+        assert resp.content == b"chunk_1_chunk_2"
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_fallback_to_gtts(monkeypatch):
+    async def mock_edge_stream_fail(*args, **kwargs):
+        raise ConnectionError("Edge stream connection timed out")
+        yield b""
+
+    async def mock_gtts_success(*args, **kwargs):
+        return b"gtts_stream_audio"
+
+    monkeypatch.setattr(edge_provider, "stream", mock_edge_stream_fail)
+    monkeypatch.setattr(gtts_provider, "synthesize", mock_gtts_success)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/synthesize/stream",
+            json={"text": "Bạn vừa nhận được 888k fallback stream", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "audio/mpeg"
+        assert resp.headers["x-tts-provider"] == "gtts"
+        assert resp.headers["x-tts-fallback"] == "true"
+        assert resp.content == b"gtts_stream_audio"
+
+@pytest.mark.asyncio
 async def test_cache_max_bytes_configured():
     from app.main import cache
     from app.config import config
