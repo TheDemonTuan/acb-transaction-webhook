@@ -82,7 +82,7 @@ async def test_synthesize_stream_edge_success(monkeypatch):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.post(
             "/synthesize/stream",
-            json={"text": "Bạn vừa nhận được 500k", "voice": "vi-VN-HoaiMyNeural", "cacheable": True},
+            json={"text": "Bạn vừa nhận được 999k stream", "voice": "vi-VN-HoaiMyNeural", "cacheable": True},
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "audio/mpeg"
@@ -106,7 +106,7 @@ async def test_synthesize_stream_fallback_to_gtts(monkeypatch):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.post(
             "/synthesize/stream",
-            json={"text": "Bạn vừa nhận được 200k", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
+            json={"text": "Bạn vừa nhận được 888k fallback stream", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
         )
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "audio/mpeg"
