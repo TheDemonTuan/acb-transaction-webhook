@@ -3,6 +3,7 @@ import {
   parseAmountThousandsToVnd,
   computeBoostPhase,
   isCreditMatch,
+  evaluateCanStartPayment,
 } from '../src/features/payment-qr/ReceivingQRModal';
 import { getDynamicPaymentQRURL } from '../src/shared/api/queries';
 
@@ -244,6 +245,119 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
       expect(outcome.state).toBe('active');
       expect(outcome.boostDegraded).toBe(true);
       expect(outcome.invalidatedReadiness).toBe(false);
+    });
+  });
+
+  describe('evaluateCanStartPayment', () => {
+    it('blocks payment activation when readiness is loading (undefined or null) in public mode', () => {
+      expect(evaluateCanStartPayment(true, undefined)).toBe(false);
+      expect(evaluateCanStartPayment(true, null)).toBe(false);
+    });
+
+    it('blocks payment activation for warning states in public mode (AUTH_STARTING, IN_PROGRESS, PAUSED)', () => {
+      expect(evaluateCanStartPayment(true, { ready: false, status: 'AUTH_STARTING' })).toBe(false);
+      expect(evaluateCanStartPayment(true, { ready: false, status: 'IN_PROGRESS' })).toBe(false);
+      expect(evaluateCanStartPayment(true, { ready: false, status: 'PAUSED' })).toBe(false);
+    });
+
+    it('blocks payment activation for critical and unconfigured states in public mode', () => {
+      expect(evaluateCanStartPayment(true, { ready: false, status: 'AUTH_REQUIRED' })).toBe(false);
+      expect(evaluateCanStartPayment(true, { ready: false, status: 'UNCONFIGURED' })).toBe(false);
+      expect(evaluateCanStartPayment(true, { ready: false, status: 'FAILED' })).toBe(false);
+    });
+
+    it('allows payment activation only when readiness reports ready: true in public mode', () => {
+      expect(evaluateCanStartPayment(true, { ready: true, status: 'READY' })).toBe(true);
+    });
+
+    it('allows payment activation in non-public operator mode', () => {
+      expect(evaluateCanStartPayment(false, undefined)).toBe(true);
+      expect(evaluateCanStartPayment(false, { ready: false, status: 'AUTH_REQUIRED' })).toBe(true);
+    });
+  });
+
+  describe('Public payment readiness button and Enter key guard regression', () => {
+    function simulateModalTrigger({
+      isPublic,
+      paymentReadiness,
+      isStartingBoost = false,
+    }: {
+      isPublic: boolean;
+      paymentReadiness?: { ready: boolean; status?: string } | null;
+      isStartingBoost?: boolean;
+    }) {
+      const canStartPayment = evaluateCanStartPayment(isPublic, paymentReadiness);
+      const isButtonDisabled = isStartingBoost || !canStartPayment;
+
+      let boostInitiated = false;
+      const handleStartBoost = () => {
+        if (isStartingBoost || !canStartPayment) return;
+        boostInitiated = true;
+      };
+
+      const handleKeyDown = (key: string) => {
+        if (key === 'Enter') {
+          if (isStartingBoost || !canStartPayment) return;
+          handleStartBoost();
+        }
+      };
+
+      return {
+        canStartPayment,
+        isButtonDisabled,
+        triggerClick: () => handleStartBoost(),
+        triggerEnter: () => handleKeyDown('Enter'),
+        wasBoostInitiated: () => boostInitiated,
+      };
+    }
+
+    it('disables button and ignores Enter key during initial loading (readiness undefined)', () => {
+      const sim = simulateModalTrigger({ isPublic: true, paymentReadiness: undefined });
+      expect(sim.canStartPayment).toBe(false);
+      expect(sim.isButtonDisabled).toBe(true);
+
+      sim.triggerClick();
+      expect(sim.wasBoostInitiated()).toBe(false);
+
+      sim.triggerEnter();
+      expect(sim.wasBoostInitiated()).toBe(false);
+    });
+
+    it('disables button and ignores Enter key for warning states (AUTH_STARTING, IN_PROGRESS, PAUSED)', () => {
+      for (const status of ['AUTH_STARTING', 'IN_PROGRESS', 'PAUSED']) {
+        const sim = simulateModalTrigger({ isPublic: true, paymentReadiness: { ready: false, status } });
+        expect(sim.canStartPayment).toBe(false);
+        expect(sim.isButtonDisabled).toBe(true);
+
+        sim.triggerClick();
+        expect(sim.wasBoostInitiated()).toBe(false);
+
+        sim.triggerEnter();
+        expect(sim.wasBoostInitiated()).toBe(false);
+      }
+    });
+
+    it('disables button and ignores Enter key for critical states (AUTH_REQUIRED, UNCONFIGURED)', () => {
+      for (const status of ['AUTH_REQUIRED', 'UNCONFIGURED', 'FAILED']) {
+        const sim = simulateModalTrigger({ isPublic: true, paymentReadiness: { ready: false, status } });
+        expect(sim.canStartPayment).toBe(false);
+        expect(sim.isButtonDisabled).toBe(true);
+
+        sim.triggerClick();
+        expect(sim.wasBoostInitiated()).toBe(false);
+
+        sim.triggerEnter();
+        expect(sim.wasBoostInitiated()).toBe(false);
+      }
+    });
+
+    it('enables button and triggers boost on click and Enter when ready: true', () => {
+      const sim = simulateModalTrigger({ isPublic: true, paymentReadiness: { ready: true, status: 'READY' } });
+      expect(sim.canStartPayment).toBe(true);
+      expect(sim.isButtonDisabled).toBe(false);
+
+      sim.triggerEnter();
+      expect(sim.wasBoostInitiated()).toBe(true);
     });
   });
 });

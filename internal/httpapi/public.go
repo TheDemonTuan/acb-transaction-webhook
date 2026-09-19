@@ -235,16 +235,38 @@ func (s *Server) startPaymentActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store != nil {
-		conn, err := s.store.Connection(r.Context())
-		if err == nil && conn.State != "MONITORING" {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":  "bank connection is not in MONITORING state",
-				"code":   "PAYMENT_NOT_READY",
-				"status": conn.State,
-			})
-			return
-		}
+	if s.store == nil {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  "bank connection is not configured",
+			"code":   "PAYMENT_NOT_READY",
+			"status": "UNCONFIGURED",
+		})
+		return
+	}
+
+	conn, err := s.store.Connection(r.Context())
+	if errors.Is(err, storage.ErrNotFound) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  "bank connection is not configured",
+			"code":   "PAYMENT_NOT_READY",
+			"status": "UNCONFIGURED",
+		})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "bank connection lookup failed",
+			"code":  "PAYMENT_UNAVAILABLE",
+		})
+		return
+	}
+	if conn.State != "MONITORING" {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  "bank connection is not in MONITORING state",
+			"code":   "PAYMENT_NOT_READY",
+			"status": conn.State,
+		})
+		return
 	}
 
 	if s.paymentBooster == nil {
