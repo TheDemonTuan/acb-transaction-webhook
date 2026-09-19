@@ -268,3 +268,124 @@ func TestSynthesizeSummaryAudio(t *testing.T) {
 		t.Errorf("expected Content-Type audio/mpeg, got %s", w.Header().Get("Content-Type"))
 	}
 }
+
+func TestVoiceRateAndPitchPropagation(t *testing.T) {
+	ctx := context.Background()
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "test_rate_pitch.db")
+
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	var lastTTSReq ttsclient.SynthesizeRequest
+	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
+		w.Header().Set("X-TTS-Fallback", "false")
+		w.Header().Set("X-TTS-Cached", "false")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mock_mp3_data"))
+	}))
+	defer mockTTS.Close()
+
+	cfg := config.Config{
+		DevelopmentSubject: "test-owner",
+		Roles: config.RoleSubjects{
+			Owners: map[string]struct{}{"test-owner": {}},
+		},
+	}
+	server := New(cfg, store).WithTTSClient(ttsclient.New(mockTTS.URL, ""))
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(csrfRec, csrfReq)
+	cookie := csrfRec.Result().Cookies()[0]
+	var tokenResp struct{ Token string }
+	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&tokenResp)
+	token := tokenResp.Token
+
+	// 1. Test endpoint with numeric rate 1.25 -> "+25%"
+	reqBody, _ := json.Marshal(map[string]any{
+		"voiceId": "vi-VN-HoaiMyNeural",
+		"rate":    1.25,
+		"pitch":   1.1,
+	})
+	testReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader(reqBody)),
+		cookie,
+		token,
+	)
+	testW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(testW, testReq)
+	if testW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", testW.Code, testW.Body.String())
+	}
+	if lastTTSReq.Rate != "+25%" {
+		t.Errorf("expected rate +25%%, got %q", lastTTSReq.Rate)
+	}
+	if lastTTSReq.Pitch != "+5Hz" {
+		t.Errorf("expected pitch +5Hz, got %q", lastTTSReq.Pitch)
+	}
+	if lastTTSReq.Cacheable {
+		t.Errorf("expected Cacheable=false when rate/pitch specified")
+	}
+
+	// 2. Synthesize transaction audio with string rate "+30%"
+	connID := "conn_rate_pitch_test"
+	_, _ = store.DB().ExecContext(ctx, `
+		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
+		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
+	`, connID)
+
+	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+		{Number: "TXN_RATE_1", Credit: 200000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Rate test"},
+	}, false, "REALTIME")
+	if err != nil || len(rtRes.NewEvents) == 0 {
+		t.Fatalf("ingest: %v", err)
+	}
+	txnID := rtRes.NewEvents[0].TransactionID
+
+	txBody, _ := json.Marshal(map[string]any{
+		"rate":  "+30%",
+		"pitch": "+0Hz",
+	})
+	txReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader(txBody)),
+		cookie,
+		token,
+	)
+	txW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(txW, txReq)
+	if txW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", txW.Code, txW.Body.String())
+	}
+	if lastTTSReq.Rate != "+30%" {
+		t.Errorf("expected rate +30%%, got %q", lastTTSReq.Rate)
+	}
+	if lastTTSReq.Pitch != "+0Hz" {
+		t.Errorf("expected pitch +0Hz, got %q", lastTTSReq.Pitch)
+	}
+
+	// 3. Synthesize transaction audio with slowed rate 0.8 -> "-20%"
+	txBodySlow, _ := json.Marshal(map[string]any{
+		"rate": 0.8,
+	})
+	txReqSlow := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader(txBodySlow)),
+		cookie,
+		token,
+	)
+	txWSlow := httptest.NewRecorder()
+	server.Handler().ServeHTTP(txWSlow, txReqSlow)
+	if txWSlow.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", txWSlow.Code, txWSlow.Body.String())
+	}
+	if lastTTSReq.Rate != "-20%" {
+		t.Errorf("expected rate -20%%, got %q", lastTTSReq.Rate)
+	}
+}

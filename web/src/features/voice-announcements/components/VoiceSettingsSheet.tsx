@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Volume2, VolumeX, X } from 'lucide-react';
 import { useVoiceAnnouncements } from '../VoiceAnnouncementProvider';
 import { VoiceTestButton } from './VoiceTestButton';
+import { DEFAULT_ANNOUNCEMENT_TEMPLATE, formatAnnouncementTemplate } from '../voice-copy';
 
 export interface VoiceSettingsSheetProps {
   isOpen: boolean;
@@ -10,6 +11,7 @@ export interface VoiceSettingsSheetProps {
 
 export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, onClose }) => {
   const { settings, updateSettings, unlockAudio, isSupported, voices } = useVoiceAnnouncements();
+  const [toggleError, setToggleError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -17,6 +19,28 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
     const l = v.lang.toLowerCase().replace('_', '-');
     return l === 'vi' || l.startsWith('vi-');
   });
+
+  const handleToggle = async () => {
+    setToggleError(null);
+    if (!settings.enabled) {
+      if (vietnameseVoices.length === 0 && voices.length > 0) {
+        setToggleError('Thiết bị chưa có giọng Tiếng Việt. Vui lòng cài đặt giọng tiếng Việt trong hệ thống.');
+        return;
+      }
+      try {
+        const unlocked = await unlockAudio();
+        if (!unlocked) {
+          setToggleError('Trình duyệt chặn phát âm thanh tự động. Hãy bấm Nghe thử hoặc tương tác để mở khóa.');
+          return;
+        }
+        updateSettings({ enabled: true });
+      } catch (err: any) {
+        setToggleError(err?.message || 'Không thể kích hoạt âm thanh');
+      }
+    } else {
+      updateSettings({ enabled: false });
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -51,64 +75,102 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
           ) : (
             <>
               {/* Enable Toggle */}
-              <div className="flex items-center justify-between p-3 rounded-xl bg-stone-50 border border-stone-200/70">
-                <div>
-                  <span className="text-sm font-medium text-stone-900 block">
-                    Đọc giao dịch mới
-                  </span>
-                  <span className="text-xs text-stone-500">
-                    Tự động đọc số tiền ngay khi giao dịch được ghi nhận
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={settings.enabled}
-                  aria-label="Bật đọc giao dịch"
-                  onClick={async () => {
-                    if (!settings.enabled) {
-                      await unlockAudio();
-                      updateSettings({ enabled: true });
-                    } else {
-                      updateSettings({ enabled: false });
-                    }
-                  }}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
-                    settings.enabled ? 'bg-emerald-600' : 'bg-stone-300'
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${
-                      settings.enabled ? 'translate-x-5' : 'translate-x-0'
+              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/70 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm font-medium text-stone-900 block">
+                      Đọc giao dịch mới
+                    </span>
+                    <span className="text-xs text-stone-500">
+                      Tự động đọc số tiền ngay khi giao dịch được ghi nhận
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.enabled}
+                    aria-label="Bật đọc giao dịch"
+                    onClick={handleToggle}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+                      settings.enabled ? 'bg-emerald-600' : 'bg-stone-300'
                     }`}
-                  />
-                </button>
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${
+                        settings.enabled ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+                {toggleError && (
+                  <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium" role="alert">
+                    {toggleError}
+                  </div>
+                )}
               </div>
 
-              {/* Voice selection */}
+              {/* Voice selection (Strict Vietnamese Only) */}
               <div>
                 <label className="block text-xs font-medium text-stone-700 mb-1.5">
                   Giọng đọc (Tiếng Việt)
                 </label>
-                <select
-                  value={settings.voiceURI || ''}
-                  onChange={(e) => updateSettings({ voiceURI: e.target.value || undefined })}
-                  disabled={!settings.enabled}
-                  className="w-full text-sm rounded-lg border border-stone-300 px-3 py-2 bg-white text-stone-800 disabled:bg-stone-100 disabled:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                >
-                  <option value="">Tự động chọn giọng tiếng Việt phù hợp nhất</option>
-                  {vietnameseVoices.map((v) => (
-                    <option key={v.uri} value={v.uri}>
-                      {v.name} ({v.lang})
-                    </option>
-                  ))}
-                  {vietnameseVoices.length === 0 &&
-                    voices.map((v) => (
+                {vietnameseVoices.length > 0 ? (
+                  <select
+                    value={settings.voiceURI || ''}
+                    onChange={(e) => updateSettings({ voiceURI: e.target.value || undefined })}
+                    disabled={!settings.enabled}
+                    className="w-full text-sm rounded-lg border border-stone-300 px-3 py-2 bg-white text-stone-800 disabled:bg-stone-100 disabled:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="">Tự động chọn giọng tiếng Việt phù hợp nhất</option>
+                    {vietnameseVoices.map((v) => (
                       <option key={v.uri} value={v.uri}>
                         {v.name} ({v.lang})
                       </option>
                     ))}
-                </select>
+                  </select>
+                ) : (
+                  <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                    Thiết bị chưa có giọng Tiếng Việt. Trình duyệt không tìm thấy giọng đọc tiếng Việt được cài đặt trên máy.
+                  </div>
+                )}
+              </div>
+
+              {/* Template Editor */}
+              <div>
+                <div className="flex justify-between items-center text-xs font-medium text-stone-700 mb-1.5">
+                  <span>Mẫu câu thông báo</span>
+                  <button
+                    type="button"
+                    onClick={() => updateSettings({ announcementTemplate: DEFAULT_ANNOUNCEMENT_TEMPLATE })}
+                    className="text-stone-400 hover:text-stone-600 text-[11px] underline cursor-pointer"
+                  >
+                    Khôi phục mặc định
+                  </button>
+                </div>
+                <textarea
+                  rows={2}
+                  value={settings.announcementTemplate || DEFAULT_ANNOUNCEMENT_TEMPLATE}
+                  onChange={(e) => updateSettings({ announcementTemplate: e.target.value })}
+                  disabled={!settings.enabled}
+                  placeholder="Ví dụ: Đa tạ quý khách vì {amount}."
+                  className="w-full text-sm rounded-lg border border-stone-300 p-2.5 bg-white text-stone-800 disabled:bg-stone-100 disabled:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-1.5 text-[11px] text-stone-500">
+                  <span>Thẻ hỗ trợ:</span>
+                  <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{amount}'}</code>
+                  <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{amount_raw}'}</code>
+                  <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{description}'}</code>
+                </div>
+                <div className="mt-2 p-2.5 rounded-lg bg-stone-50 border border-stone-200/80 text-xs text-stone-600">
+                  <span className="font-medium text-stone-700 block mb-0.5">Xem trước câu đọc:</span>
+                  <span className="italic text-emerald-800 font-medium">
+                    &ldquo;{formatAnnouncementTemplate(settings.announcementTemplate, {
+                      amount: 500000,
+                      description: 'ung ho quy',
+                      includeDescription: settings.includeDescription,
+                    })}&rdquo;
+                  </span>
+                </div>
               </div>
 
               {/* Volume Slider */}
@@ -129,7 +191,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                 />
               </div>
 
-              {/* Speech Rate Slider */}
+              {/* Speech Rate Slider (0.75x to 2.0x) */}
               <div>
                 <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
                   <span>Tốc độ đọc</span>
@@ -138,7 +200,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                 <input
                   type="range"
                   min="0.75"
-                  max="1.5"
+                  max="2"
                   step="0.05"
                   value={settings.rate}
                   disabled={!settings.enabled}

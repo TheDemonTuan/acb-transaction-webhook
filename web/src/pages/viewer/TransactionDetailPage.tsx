@@ -92,6 +92,7 @@ export const TransactionDetailPage: React.FC = () => {
         transaction.description || '',
         {
           includeDescription: settings.includeDescription,
+          template: settings.announcementTemplate,
         },
       );
 

@@ -14,8 +14,16 @@ export const VoiceToggle: React.FC<{ className?: string }> = ({ className = '' }
           type="button"
           onClick={async () => {
             if (!settings.enabled) {
-              await unlockAudio();
-              updateSettings({ enabled: true });
+              try {
+                const unlocked = await unlockAudio();
+                if (!unlocked) {
+                  setSheetOpen(true);
+                  return;
+                }
+                updateSettings({ enabled: true });
+              } catch {
+                setSheetOpen(true);
+              }
             } else {
               updateSettings({ enabled: false });
             }
