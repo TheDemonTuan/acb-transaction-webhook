@@ -1042,6 +1042,8 @@ jobs:
           VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
           DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           [[ -n "$DASHBOARD_OWNER_EMAIL" ]] || { printf 'DASHBOARD_OWNER_EMAIL is required.\n' >&2; exit 1; }
@@ -1049,9 +1051,14 @@ jobs:
           expected_identity="https://github.com/${{ github.repository }}/.github/workflows/deploy.yml@refs/heads/main"
           expected_issuer="https://token.actions.githubusercontent.com"
           [[ -n "${REMOTE_RELEASE_DIR:-}" ]] || { printf 'REMOTE_RELEASE_DIR is missing.\n' >&2; exit 1; }
+          remote_docker_config="$DEPLOY_PATH/releases/.docker-auth-${{ github.run_id }}-${{ github.run_attempt }}"
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "set -euo pipefail; mkdir -m 0700 -p '$remote_docker_config'; DOCKER_CONFIG='$remote_docker_config' docker login ghcr.io --username '$GHCR_USER' --password-stdin >/dev/null"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
-            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_DIR='$REMOTE_RELEASE_DIR' OWNER='$owner' EXPECTED_IDENTITY='$expected_identity' EXPECTED_ISSUER='$expected_issuer' bash -s" <<'REMOTE'
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_DIR='$REMOTE_RELEASE_DIR' OWNER='$owner' EXPECTED_IDENTITY='$expected_identity' EXPECTED_ISSUER='$expected_issuer' DOCKER_CONFIG='$remote_docker_config' bash -s" <<'REMOTE'
           set -Eeuo pipefail
+          export DOCKER_CONFIG
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT INT TERM
           export PATH="$DEPLOY_PATH/deploy:$PATH"
           env_file="$DEPLOY_PATH/deploy/.env.production"
           [[ -f "$env_file" ]] || { printf 'Missing canonical production env file: %s\n' "$env_file" >&2; exit 1; }
@@ -1101,6 +1108,96 @@ jobs:
               cp -f "$s" "$RELEASE_DIR/secrets/$(basename "$s")" 2>/dev/null || true
             fi
           done
+          read -r candidate_images < <(python3 - "$RELEASE_DIR/release-manifest.json" <<'PY'
+          import json, sys
+
+          manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+          promotion = manifest.get('promotion')
+          scope = manifest.get('promotion_scope')
+          images = manifest.get('images')
+
+          if not isinstance(promotion, dict) or not all(
+              isinstance(v, bool) for v in promotion.values()
+          ):
+              raise SystemExit(
+                  'release manifest promotion must be an object of booleans'
+              )
+
+          if not isinstance(scope, list) or not all(
+              isinstance(v, str) for v in scope
+          ):
+              raise SystemExit(
+                  'release manifest promotion_scope must be an array of strings'
+              )
+
+          if not isinstance(images, dict):
+              raise SystemExit(
+                  'release manifest images must be an object'
+              )
+
+          enabled = {
+              component
+              for component, is_enabled in promotion.items()
+              if is_enabled
+          }
+
+          scope_set = set(scope)
+
+          if len(scope_set) != len(scope):
+              raise SystemExit(
+                  'release manifest promotion_scope contains duplicate components'
+              )
+
+          if enabled != scope_set:
+              raise SystemExit(
+                  'release manifest promotion and promotion_scope disagree'
+              )
+
+          image_keys = {
+              'schema': 'dbtool',
+              'worker': 'worker',
+              'gateway': 'gateway',
+              'frontend': 'frontend',
+              'auth_browser': 'auth_browser',
+              'tts': 'tts',
+              'bark': 'bark',
+          }
+
+          non_image_components = {
+              'failover_controller',
+              'platform',
+          }
+
+          unknown = scope_set - set(image_keys) - non_image_components
+
+          if unknown:
+              raise SystemExit(
+                  'release manifest contains unsupported promoted component(s): '
+                  + ','.join(sorted(unknown))
+              )
+
+          pulls = []
+
+          for component, image_key in image_keys.items():
+              if component in scope_set:
+                  image = images.get(image_key)
+
+                  if not image:
+                      raise SystemExit(
+                          f'missing image for promoted component '
+                          f'{component}: {image_key}'
+                      )
+
+                  pulls.append(image)
+
+          print(' '.join(pulls))
+          PY
+          )
+          for img in $candidate_images; do
+            [[ -n "$img" ]] || continue
+            printf '[INFO] Pre-pulling candidate image: %s\n' "$img"
+            docker pull "$img"
+          done
           export DEPLOY_PATH
           export DASHBOARD_OWNER_EMAIL="$OWNER"
           export PATH="$DEPLOY_PATH/deploy:$PATH"
@@ -1115,3 +1212,14 @@ jobs:
             --expected-issuer "$EXPECTED_ISSUER" \
             --soak-seconds 900
           REMOTE
+      - name: Cleanup temporary registry auth on VPS
+        if: always()
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "rm -rf '$DEPLOY_PATH/releases/.docker-auth-${{ github.run_id }}-${{ github.run_attempt }}'" || true

@@ -483,3 +483,32 @@ func TestRetentionBoundaryExpiredCursor(t *testing.T) {
 		t.Fatalf("expected explicit retention_expired reset event, got: %s", body)
 	}
 }
+
+func TestSSEStreamRetryHeader(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway_sse_retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.Config{Production: false, DevelopmentSubject: "dev@example.com"}
+	server := New(cfg, store).WithEventHub(eventhub.New())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		server.Handler().ServeHTTP(w, req)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-doneCh
+
+	body := w.Body.String()
+	if !strings.HasPrefix(body, "retry: 1000\n\n") {
+		t.Fatalf("expected SSE stream to start with retry: 1000, got: %q", body)
+	}
+}
