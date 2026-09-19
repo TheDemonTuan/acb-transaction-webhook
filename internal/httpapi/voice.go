@@ -18,6 +18,7 @@ import (
 
 type voiceAudioRequest struct {
 	IncludeDescription bool   `json:"includeDescription"`
+	Template           string `json:"template,omitempty"`
 	VoiceID            string `json:"voiceId,omitempty"`
 	Rate               any    `json:"rate,omitempty"`
 	Pitch              any    `json:"pitch,omitempty"`
@@ -32,9 +33,27 @@ type voiceSummaryRequest struct {
 }
 
 type voiceTestRequest struct {
-	VoiceID string `json:"voiceId,omitempty"`
-	Rate    any    `json:"rate,omitempty"`
-	Pitch   any    `json:"pitch,omitempty"`
+	IncludeDescription bool   `json:"includeDescription,omitempty"`
+	Template           string `json:"template,omitempty"`
+	VoiceID            string `json:"voiceId,omitempty"`
+	Rate               any    `json:"rate,omitempty"`
+	Pitch              any    `json:"pitch,omitempty"`
+}
+
+func sanitizeAnnouncementTemplate(raw string) string {
+	tpl := strings.TrimSpace(raw)
+	if tpl == "" {
+		return voicecopy.DefaultAnnouncementTemplate
+	}
+	runes := []rune(tpl)
+	if len(runes) > 120 {
+		runes = runes[:120]
+		tpl = strings.TrimSpace(string(runes))
+	}
+	if !strings.Contains(tpl, "{amount}") && !strings.Contains(tpl, "{amount_raw}") {
+		return voicecopy.DefaultAnnouncementTemplate
+	}
+	return tpl
 }
 
 func formatTTSRate(val any) string {
@@ -179,7 +198,8 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	}
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
-	phrase := "Đã bật đọc giao dịch mới. Bạn vừa nhận được năm trăm nghìn đồng."
+	template := sanitizeAnnouncementTemplate(req.Template)
+	phrase := voicecopy.FormatAnnouncementTemplate(template, 500000, "Ung ho quy", req.IncludeDescription)
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
@@ -187,7 +207,7 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 		Voice:         voice,
 		Rate:          ttsRate,
 		Pitch:         ttsPitch,
-		Cacheable:     ttsRate == "" && ttsPitch == "",
+		Cacheable:     true,
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
@@ -207,7 +227,15 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(res.Audio)
 }
 
+func (s *Server) synthesizePublicTransactionAudio(w http.ResponseWriter, r *http.Request) {
+	s.synthesizeTransactionAudioInternal(w, r, true)
+}
+
 func (s *Server) synthesizeTransactionAudio(w http.ResponseWriter, r *http.Request) {
+	s.synthesizeTransactionAudioInternal(w, r, false)
+}
+
+func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *http.Request, isPublic bool) {
 	if s.ttsClient == nil {
 		writeError(w, http.StatusServiceUnavailable, "tts_client_not_configured")
 		return
@@ -251,6 +279,9 @@ func (s *Server) synthesizeTransactionAudio(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		}
+	} else if isPublic {
+		writeError(w, http.StatusUnprocessableEntity, "voice_event_expired")
+		return
 	}
 
 	settings, _ := s.store.GetVoiceSettings(r.Context())
@@ -264,7 +295,8 @@ func (s *Server) synthesizeTransactionAudio(w http.ResponseWriter, r *http.Reque
 	}
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
-	phrase := voicecopy.BuildCreditAnnouncement(item.Credit, item.Description, req.IncludeDescription)
+	template := sanitizeAnnouncementTemplate(req.Template)
+	phrase := voicecopy.FormatAnnouncementTemplate(template, item.Credit, item.Description, req.IncludeDescription)
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
@@ -273,7 +305,7 @@ func (s *Server) synthesizeTransactionAudio(w http.ResponseWriter, r *http.Reque
 		Voice:         voice,
 		Rate:          ttsRate,
 		Pitch:         ttsPitch,
-		Cacheable:     !req.IncludeDescription && ttsRate == "" && ttsPitch == "",
+		Cacheable:     !req.IncludeDescription,
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
@@ -349,7 +381,7 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 		Voice:         voice,
 		Rate:          ttsRate,
 		Pitch:         ttsPitch,
-		Cacheable:     ttsRate == "" && ttsPitch == "",
+		Cacheable:     true,
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
@@ -407,7 +439,8 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 	}
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
-	phrase := voicecopy.BuildCreditAnnouncement(item.Credit, item.Description, req.IncludeDescription)
+	template := sanitizeAnnouncementTemplate(req.Template)
+	phrase := voicecopy.FormatAnnouncementTemplate(template, item.Credit, item.Description, req.IncludeDescription)
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
@@ -416,7 +449,7 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 		Voice:         voice,
 		Rate:          ttsRate,
 		Pitch:         ttsPitch,
-		Cacheable:     !req.IncludeDescription && ttsRate == "" && ttsPitch == "",
+		Cacheable:     !req.IncludeDescription,
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})

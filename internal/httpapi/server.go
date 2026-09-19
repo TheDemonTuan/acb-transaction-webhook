@@ -194,6 +194,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Post("/payment-activity/stop", s.stopPaymentActivity)
 		api.Get("/events", s.publicEventsStream)
 		api.Get("/events/stream", s.publicEventsStream)
+		api.Post("/voice/transactions/{id}", s.synthesizePublicTransactionAudio)
 	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))

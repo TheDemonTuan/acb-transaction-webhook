@@ -161,7 +161,8 @@ export interface AudioResponseResult {
 }
 
 export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioResponseResult> => {
-  if (isPublicViewerHost()) {
+  const isPublic = isPublicViewerHost();
+  if (isPublic && !path.startsWith('/voice/transactions/')) {
     throw new ApiError(
       'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
       405,
@@ -169,10 +170,11 @@ export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioR
     );
   }
 
+  const basePath = isPublic ? '/api/public/v1' : '/api/v1';
   const method = init?.method?.toUpperCase() ?? 'GET';
   const isMutating = isMutation(method);
   let token: string | null = null;
-  if (isMutating) {
+  if (isMutating && !isPublic) {
     try {
       token = await getCsrfToken();
     } catch {}
@@ -185,7 +187,7 @@ export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioR
 
   let response: Response;
   try {
-    response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init, headers });
+    response = await fetch(`${basePath}${path}`, { credentials: 'same-origin', ...init, headers });
   } catch (err: any) {
     if ((err instanceof DOMException && err.name === 'AbortError') || err?.name === 'AbortError') {
       throw err;
@@ -193,7 +195,7 @@ export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioR
     throw new Error('Không thể kết nối máy chủ. Vui lòng kiểm tra kết nối và thử lại.');
   }
 
-  if (!response.ok && isMutating) {
+  if (!response.ok && isMutating && !isPublic) {
     let code: string | undefined;
     try {
       const cloned = response.clone();
@@ -204,7 +206,7 @@ export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioR
     if (code === CSRF_CODE_TOKEN_INVALID) {
       token = await getCsrfToken(true);
       headers.set('X-CSRF-Token', token);
-      response = await fetch(`/api/v1${path}`, { credentials: 'same-origin', ...init, headers });
+      response = await fetch(`${basePath}${path}`, { credentials: 'same-origin', ...init, headers });
     }
   }
 

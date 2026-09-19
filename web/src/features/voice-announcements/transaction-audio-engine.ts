@@ -1,6 +1,11 @@
 import { apiAudio } from '../../api';
+import { isPublicViewerHost } from '../../app/runtime-mode';
 import { BrowserSpeechEngine } from './browser-speech-engine';
 import type { VoiceEngine, VoiceInfo, VoiceMessage } from './voice-engine';
+
+export interface TransactionAudioEngineOptions {
+  isPublic?: boolean;
+}
 
 export class TransactionAudioEngine implements VoiceEngine {
   private audioContext: AudioContext | null = null;
@@ -8,6 +13,11 @@ export class TransactionAudioEngine implements VoiceEngine {
   private currentSource: AudioBufferSourceNode | null = null;
   private browserFallback = new BrowserSpeechEngine();
   private abortController: AbortController | null = null;
+  private isPublic: boolean;
+
+  constructor(options?: TransactionAudioEngineOptions) {
+    this.isPublic = options?.isPublic ?? (typeof window !== 'undefined' && isPublicViewerHost());
+  }
 
   public isSupported(): boolean {
     return (
@@ -76,7 +86,59 @@ export class TransactionAudioEngine implements VoiceEngine {
   public async speak(message: VoiceMessage): Promise<void> {
     this.cancel();
 
-    // 1. Try online transaction audio synthesis
+    if (this.isPublic) {
+      // Public hybrid strategy: local Vietnamese voice first, fallback to safe transaction-scoped online TTS
+      const isOnlineVoiceChosen = Boolean(message.voiceURI?.startsWith('vi-VN-'));
+      if (isOnlineVoiceChosen && message.transactionId) {
+        try {
+          await this.speakOnline(message);
+          return;
+        } catch (onlineErr: any) {
+          if (
+            (onlineErr instanceof DOMException && onlineErr.name === 'AbortError') ||
+            onlineErr?.name === 'AbortError' ||
+            onlineErr?.message === 'VOICE_CANCELLED'
+          ) {
+            throw new Error('VOICE_CANCELLED');
+          }
+          await this.browserFallback.speak(message);
+          return;
+        }
+      }
+
+      // Try local browser voice first
+      try {
+        await this.browserFallback.speak(message);
+        return;
+      } catch (browserError: any) {
+        if (
+          (browserError instanceof DOMException && browserError.name === 'AbortError') ||
+          browserError?.name === 'AbortError' ||
+          browserError?.message === 'VOICE_CANCELLED'
+        ) {
+          throw new Error('VOICE_CANCELLED');
+        }
+        // Fallback to online transaction TTS if transactionId present
+        if (message.transactionId) {
+          try {
+            await this.speakOnline(message);
+            return;
+          } catch (onlineError: any) {
+            if (
+              (onlineError instanceof DOMException && onlineError.name === 'AbortError') ||
+              onlineError?.name === 'AbortError' ||
+              onlineError?.message === 'VOICE_CANCELLED'
+            ) {
+              throw new Error('VOICE_CANCELLED');
+            }
+            throw browserError;
+          }
+        }
+        throw browserError;
+      }
+    }
+
+    // Admin strategy: Try online transaction audio synthesis first
     try {
       await this.speakOnline(message);
       return;
@@ -88,7 +150,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       ) {
         throw new Error('VOICE_CANCELLED');
       }
-      // 2. Fallback to BrowserSpeechEngine with strict Vietnamese voice ONLY if not cancelled
+      // Fallback to BrowserSpeechEngine with strict Vietnamese voice ONLY if not cancelled
       try {
         await this.browserFallback.speak(message);
       } catch (browserError) {
@@ -115,11 +177,14 @@ export class TransactionAudioEngine implements VoiceEngine {
         voiceId: message.voiceURI || 'vi-VN-HoaiMyNeural',
         rate: message.rate,
         pitch: message.pitch,
+        template: message.template,
+        includeDescription: message.includeDescription,
       };
     } else if (message.isReplay && message.transactionId) {
       path = `/voice/transactions/${encodeURIComponent(message.transactionId)}/replay`;
       body = {
         includeDescription: Boolean(message.includeDescription),
+        template: message.template,
         voiceId: message.voiceURI,
         rate: message.rate,
         pitch: message.pitch,
@@ -140,6 +205,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       path = `/voice/transactions/${encodeURIComponent(message.transactionId)}`;
       body = {
         includeDescription: Boolean(message.includeDescription),
+        template: message.template,
         voiceId: message.voiceURI,
         rate: message.rate,
         pitch: message.pitch,

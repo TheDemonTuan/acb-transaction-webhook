@@ -10,7 +10,7 @@ export interface VoiceSettingsSheetProps {
 }
 
 export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, onClose }) => {
-  const { settings, updateSettings, unlockAudio, isSupported, voices } = useVoiceAnnouncements();
+  const { settings, updateSettings, unlockAudio, isSupported, voices, lastTelemetry } = useVoiceAnnouncements();
   const [toggleError, setToggleError] = useState<string | null>(null);
 
   if (!isOpen) return null;
@@ -249,6 +249,33 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                   </span>
                 </div>
               </label>
+
+              {/* Latency Telemetry Breakdown */}
+              {lastTelemetry && (
+                <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-200/80 text-xs text-stone-600 space-y-1">
+                  <span className="font-semibold text-stone-700 block">Độ trễ phát âm gần nhất:</span>
+                  <div className="grid grid-cols-3 gap-2 text-stone-500 pt-1">
+                    <div>
+                      <span className="block text-[10px] uppercase text-stone-400">Ngân hàng → SSE</span>
+                      <span className="font-mono text-stone-700 font-medium">
+                        {lastTelemetry.detectedToSseMs != null ? `${lastTelemetry.detectedToSseMs}ms` : 'N/A'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-stone-400">SSE → Phát âm</span>
+                      <span className="font-mono text-stone-700 font-medium">
+                        {lastTelemetry.sseToSpeakMs != null ? `${lastTelemetry.sseToSpeakMs}ms` : 'N/A'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-stone-400">Tổng cộng</span>
+                      <span className="font-mono text-stone-700 font-medium">
+                        {lastTelemetry.totalLatencyMs != null ? `${lastTelemetry.totalLatencyMs}ms` : 'N/A'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
 

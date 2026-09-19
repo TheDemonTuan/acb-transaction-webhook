@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { api, isMutation, ApiError, CSRF_CODE_TOKEN_INVALID, invalidateCsrfToken } from './api';
+import { api, apiAudio, isMutation, ApiError, CSRF_CODE_TOKEN_INVALID, invalidateCsrfToken } from './api';
+import * as runtimeMode from './app/runtime-mode';
 
 describe('api transport and centralized CSRF', () => {
   const originalFetch = globalThis.fetch;
@@ -242,5 +243,35 @@ describe('api transport and centralized CSRF', () => {
         signal: controller.signal,
       })
     ).rejects.toThrowError(expect.objectContaining({ name: 'AbortError' }));
+  });
+
+  it('apiAudio routes to /api/public/v1/voice/transactions/ on public host', async () => {
+    vi.spyOn(runtimeMode, 'isPublicViewerHost').mockReturnValue(true);
+
+    let requestedUrl = '';
+    const fetchMock = vi.fn(async (url: any) => {
+      requestedUrl = String(url);
+      return new Response(new ArrayBuffer(4), {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/mpeg',
+          'X-TTS-Provider': 'edge',
+          'X-TTS-Voice': 'vi-VN-HoaiMyNeural',
+        },
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await apiAudio('/voice/transactions/txn_public_1');
+    expect(requestedUrl).toBe('/api/public/v1/voice/transactions/txn_public_1');
+    expect(res.provider).toBe('edge');
+  });
+
+  it('apiAudio rejects arbitrary non-transaction routes on public host', async () => {
+    vi.spyOn(runtimeMode, 'isPublicViewerHost').mockReturnValue(true);
+
+    await expect(apiAudio('/voice/test')).rejects.toThrow(
+      'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.'
+    );
   });
 });

@@ -76,9 +76,18 @@ export class BrowserSpeechEngine implements VoiceEngine {
         u.rate = 1;
 
         let finished = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const cleanup = () => {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+        };
+
         const finish = (success: boolean) => {
           if (finished) return;
           finished = true;
+          cleanup();
           if (success) {
             this.audioReady = true;
             this.currentStatus = 'ready';
@@ -98,7 +107,8 @@ export class BrowserSpeechEngine implements VoiceEngine {
         };
 
         synth.speak(u);
-        setTimeout(() => finish(true), 250);
+        // Autoplay policy guard: if playback lifecycle events do not fire, fail closed
+        timer = setTimeout(() => finish(false), 1500);
       } catch {
         this.currentStatus = 'error';
         resolve(false);

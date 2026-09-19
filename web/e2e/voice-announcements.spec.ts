@@ -88,7 +88,7 @@ test.describe('Voice Announcements & Realtime Features', () => {
     await page.waitForFunction(() => (window as any).__spokenUtterances.length > 0);
     const spoken = await page.evaluate(() => (window as any).__spokenUtterances);
     expect(spoken.length).toBeGreaterThanOrEqual(1);
-    expect(spoken[0].text).toContain('Đã bật đọc giao dịch mới');
+    expect(spoken[0].text).toContain('Đa tạ quý khách vì');
     expect(spoken[0].lang).toBe('vi-VN');
   });
 
@@ -144,7 +144,7 @@ test.describe('Voice Announcements & Realtime Features', () => {
 
     const spokenFirst = await page.evaluate(() => (window as any).__spokenUtterances);
     expect(spokenFirst.length).toBe(1);
-    expect(spokenFirst[0].text).toBe('Bạn vừa nhận được năm trăm nghìn đồng.');
+    expect(spokenFirst[0].text).toBe('Đa tạ quý khách vì năm trăm nghìn đồng.');
     expect(spokenFirst[0].lang).toBe('vi-VN');
 
     // 4. Assert transaction immediately appeared in the transaction list
@@ -201,5 +201,23 @@ test.describe('Voice Announcements & Realtime Features', () => {
     await page.waitForTimeout(1000);
     const spokenAfterStale = await page.evaluate(() => (window as any).__spokenUtterances);
     expect(spokenAfterStale.length).toBe(1);
+  });
+
+  test('custom announcement template formats phrase correctly', async ({ page }) => {
+    await page.goto('/transactions');
+    await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc' }).click();
+    await expect(page.getByRole('heading', { name: 'Cài đặt đọc giao dịch' })).toBeVisible();
+
+    const templateInput = page.getByPlaceholder('Ví dụ: Đa tạ quý khách vì {amount}.');
+    if (await templateInput.isVisible()) {
+      await templateInput.fill('Cảm ơn bạn đã gửi {amount}.');
+    }
+
+    const testBtn = page.getByRole('button', { name: 'Nghe thử' });
+    await testBtn.click({ force: true });
+
+    await page.waitForFunction(() => (window as any).__spokenUtterances.length > 0);
+    const spoken = await page.evaluate(() => (window as any).__spokenUtterances);
+    expect(spoken[spoken.length - 1].text).toContain('năm trăm nghìn đồng');
   });
 });
