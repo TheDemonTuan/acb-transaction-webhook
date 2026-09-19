@@ -15,8 +15,8 @@ describe('Schedule Settings Section Helpers', () => {
     expect(keepaliveProfile.minSeconds).toBe(60);
     expect(keepaliveProfile.maxSeconds).toBe(120);
     expect(realtimeProfile.mode).toBe('REALTIME');
-    expect(realtimeProfile.minSeconds).toBe(3);
-    expect(realtimeProfile.maxSeconds).toBe(10);
+    expect(realtimeProfile.minSeconds).toBe(20);
+    expect(realtimeProfile.maxSeconds).toBe(30);
   });
 
   it('contains correct days of week definitions', () => {

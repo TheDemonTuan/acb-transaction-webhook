@@ -139,6 +139,17 @@ func (m *mockWorkerHandler) Resume(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockWorkerHandler) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
+	return workerrpc.PaymentBoostStatus{
+		Active:     true,
+		AmountVnd:  amount,
+		ExpiresIn:  180,
+		Phase:      1,
+		MinSeconds: 2,
+		MaxSeconds: 4,
+	}, nil
+}
+
 func TestWorkerRPC_ConstructorValidation(t *testing.T) {
 	mock := &mockWorkerHandler{}
 
@@ -815,5 +826,39 @@ func TestWorkerRPC_NotificationProviders_SuccessAndAuth(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Fatalf("expected 500 error, got: %v", err)
+	}
+}
+
+func TestWorkerRPC_PaymentBoost(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	token := "valid-secret-token"
+	srv, err := workerrpc.NewServer(mock, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	// 1. Unauthorized call (bad token)
+	badClient := workerrpc.NewClient(ts.URL, "wrong-token")
+	_, err = badClient.StartPaymentBoost(ctx, 100000)
+	if err == nil {
+		t.Fatal("expected unauthorized error with bad token, got nil")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected 401 unauthorized, got: %v", err)
+	}
+
+	// 2. Authorized call
+	client := workerrpc.NewClient(ts.URL, token)
+	res, err := client.StartPaymentBoost(ctx, 100000)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	if !res.Active || res.AmountVnd != 100000 || res.Phase != 1 || res.MinSeconds != 2 || res.MaxSeconds != 4 {
+		t.Fatalf("unexpected payment boost status: %+v", res)
 	}
 }

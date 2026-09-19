@@ -96,7 +96,7 @@ export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const method = init?.method?.toUpperCase() ?? 'GET';
   const mutating = isMutation(method);
 
-  if (isPublicViewerHost() && mutating) {
+  if (isPublicViewerHost() && mutating && path !== '/payment-activity') {
     throw new ApiError(
       'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
       405,
