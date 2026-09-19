@@ -93,4 +93,25 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
       expect(getDynamicPaymentQRURL()).toBe('/api/public/v1/payment-qr/image');
     });
   });
+
+  describe('stopPaymentActivity helper', () => {
+    it('calls DELETE /api/public/v1/payment-activity', async () => {
+      const origFetch = globalThis.fetch;
+      let requestedUrl = '';
+      let requestedMethod = '';
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        requestedUrl = String(input);
+        requestedMethod = init?.method || 'GET';
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch;
+
+      const { stopPaymentActivity } = await import('../src/shared/api/queries');
+      await stopPaymentActivity();
+
+      expect(requestedUrl).toBe('/api/public/v1/payment-activity');
+      expect(requestedMethod).toBe('DELETE');
+
+      globalThis.fetch = origFetch;
+    });
+  });
 });

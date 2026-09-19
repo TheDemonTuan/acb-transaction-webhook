@@ -445,7 +445,7 @@ func main() {
 
 		server = httpapi.New(cfg, store).
 			WithSyncRequester(bankMonitor).
-			WithPaymentBooster(&monolithPaymentBooster{bankMonitor: bankMonitor}).
+			WithPaymentBooster(&monolithPaymentBooster{bankMonitor: bankMonitor, store: store}).
 			WithHistoryJobManager(&monolithHistoryJobManager{store: store, runner: historyRunner}).
 			WithMonitorNotifier(httpapi.MonitorNotifierFunc(func(ctx context.Context) error {
 				bankMonitor.NotifySettingsChanged()
@@ -531,11 +531,21 @@ type monolithHistoryJobManager struct {
 
 type monolithPaymentBooster struct {
 	bankMonitor *monitor.Monitor
+	store       *storage.Store
 }
 
 func (m *monolithPaymentBooster) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
 	if m.bankMonitor == nil {
 		return workerrpc.PaymentBoostStatus{}, errors.New("bank monitor not initialized")
+	}
+	if m.store != nil {
+		conn, err := m.store.Connection(ctx)
+		if err != nil {
+			return workerrpc.PaymentBoostStatus{}, fmt.Errorf("lookup connection: %w", err)
+		}
+		if conn.State != "MONITORING" {
+			return workerrpc.PaymentBoostStatus{}, errors.New("bank connection is not in MONITORING state")
+		}
 	}
 	st := m.bankMonitor.StartPaymentBoost(amount)
 	return workerrpc.PaymentBoostStatus{
@@ -546,6 +556,14 @@ func (m *monolithPaymentBooster) StartPaymentBoost(ctx context.Context, amount i
 		MinSeconds: st.MinSeconds,
 		MaxSeconds: st.MaxSeconds,
 	}, nil
+}
+
+func (m *monolithPaymentBooster) StopPaymentBoost(ctx context.Context) error {
+	if m.bankMonitor == nil {
+		return errors.New("bank monitor not initialized")
+	}
+	m.bankMonitor.StopPaymentBoost()
+	return nil
 }
 
 func (m *monolithHistoryJobManager) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {

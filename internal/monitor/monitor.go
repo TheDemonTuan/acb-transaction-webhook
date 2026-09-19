@@ -165,9 +165,7 @@ func (m *Monitor) StartPaymentBoost(amount int64) PaymentBoostStatus {
 	m.boostMu.Lock()
 	if m.boost != nil && now.Before(m.boost.ExpiresAt) {
 		// Enforce hard cap: active boost cannot reset or extend 180s expiration.
-		if amount > 0 {
-			m.boost.ExpectedAmount = amount
-		}
+		m.boost.ExpectedAmount = amount
 	} else {
 		m.boost = &PaymentBoost{
 			StartedAt:      now,

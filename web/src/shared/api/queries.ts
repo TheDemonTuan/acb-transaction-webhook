@@ -223,6 +223,14 @@ export const startPaymentActivity = async (payload: { amountVnd: number }): Prom
   return res.json();
 };
 
+export const stopPaymentActivity = async (): Promise<void> => {
+  try {
+    await fetch('/api/public/v1/payment-activity', {
+      method: 'DELETE',
+    });
+  } catch {}
+};
+
 export const getDynamicPaymentQRURL = (amountVnd?: number): string => {
   if (amountVnd && amountVnd > 0) {
     return `/api/public/v1/payment-qr/image?amount=${amountVnd}`;

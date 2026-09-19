@@ -150,6 +150,10 @@ func (m *mockWorkerHandler) StartPaymentBoost(ctx context.Context, amount int64)
 	}, nil
 }
 
+func (m *mockWorkerHandler) StopPaymentBoost(ctx context.Context) error {
+	return nil
+}
+
 func TestWorkerRPC_ConstructorValidation(t *testing.T) {
 	mock := &mockWorkerHandler{}
 
@@ -860,5 +864,10 @@ func TestWorkerRPC_PaymentBoost(t *testing.T) {
 	}
 	if !res.Active || res.AmountVnd != 100000 || res.Phase != 1 || res.MinSeconds != 2 || res.MaxSeconds != 4 {
 		t.Fatalf("unexpected payment boost status: %+v", res)
+	}
+
+	// 3. StopPaymentBoost call
+	if err := client.StopPaymentBoost(ctx); err != nil {
+		t.Fatalf("expected StopPaymentBoost success, got error: %v", err)
 	}
 }

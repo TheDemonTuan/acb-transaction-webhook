@@ -942,11 +942,14 @@ func TestPaymentBoost_HardCapDuration(t *testing.T) {
 		t.Fatalf("expected Phase 2 at t=60s, got %d", st2.Phase)
 	}
 
-	// Advance to t=130s (Phase 3, remaining 50s)
+	// Advance to t=130s (Phase 3, remaining 50s) - switch to unfixed amount (amount=0)
 	curr = base.Add(130 * time.Second)
 	st3 := m.StartPaymentBoost(0)
 	if !st3.Active || st3.ExpiresIn != 50 || st3.Phase != 3 {
 		t.Fatalf("expected Phase 3 with 50s remaining, got %+v", st3)
+	}
+	if st3.AmountVnd != 0 {
+		t.Fatalf("expected amount updated to 0 for unfixed mode, got %d", st3.AmountVnd)
 	}
 
 	// Advance past 180s (e.g. t=181s) -> boost is expired

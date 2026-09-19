@@ -29,6 +29,7 @@ import {
   fetchTransactions,
   getDynamicPaymentQRURL,
   startPaymentActivity,
+  stopPaymentActivity,
 } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { useRealtimeContext } from '../../realtime/RealtimeProvider';
@@ -170,6 +171,8 @@ export const ReceivingQRModal: React.FC<{
   const [boostRemainingSec, setBoostRemainingSec] = useState<number>(0);
   const [boostDegraded, setBoostDegraded] = useState<boolean>(false);
   const [isStartingBoost, setIsStartingBoost] = useState<boolean>(false);
+  const isStartingBoostRef = useRef<boolean>(false);
+  isStartingBoostRef.current = isStartingBoost;
   const [matchedCredit, setMatchedCredit] = useState<LiveCreditAlert | null>(null);
 
   const amountInputRef = useRef<HTMLInputElement>(null);
@@ -278,7 +281,8 @@ export const ReceivingQRModal: React.FC<{
 
   // Trigger boost activation
   const handleStartBoost = async (amountVnd: number) => {
-    if (isStartingBoost) return;
+    if (isStartingBoostRef.current) return;
+    isStartingBoostRef.current = true;
     setIsStartingBoost(true);
     setTargetAmountVnd(amountVnd);
     setBoostDegraded(false);
@@ -297,18 +301,21 @@ export const ReceivingQRModal: React.FC<{
       setBoostRemainingSec(0);
       setBoostDegraded(true);
     } finally {
+      isStartingBoostRef.current = false;
       setIsStartingBoost(false);
       setModalState('active');
     }
   };
 
   const handleNextTransaction = () => {
+    void stopPaymentActivity();
     setModalState('idle');
     setAmountInput('');
     setTargetAmountVnd(0);
     setMatchedCredit(null);
     setBoostRemainingSec(0);
     setBoostDegraded(false);
+    isStartingBoostRef.current = false;
     setIsStartingBoost(false);
     setTimeout(() => {
       amountInputRef.current?.focus();
@@ -434,14 +441,21 @@ export const ReceivingQRModal: React.FC<{
     };
   }, [isOpen, isPublic, subscribe]);
 
+  // Close wrapper: ensure active boost is stopped
+  const handleClose = () => {
+    void stopPaymentActivity();
+    onClose();
+  };
+
   // Keyboard navigation: Escape to close, Enter to advance
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        handleClose();
       } else if (e.key === 'Enter') {
         if (modalState === 'idle') {
           e.preventDefault();
+          if (isStartingBoostRef.current) return;
           const amountVnd = parseAmountThousandsToVnd(amountInput);
           void handleStartBoost(amountVnd);
         } else if (modalState === 'success') {
@@ -454,7 +468,7 @@ export const ReceivingQRModal: React.FC<{
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose, modalState, amountInput]);
+  }, [isOpen, handleClose, modalState, amountInput]);
 
   if (!isOpen) return null;
 
@@ -554,7 +568,7 @@ export const ReceivingQRModal: React.FC<{
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="p-2 text-stone-400 hover:text-stone-700 rounded-xl hover:bg-stone-200/60 transition cursor-pointer"
             title="Đóng cửa sổ (ESC)"
           >
