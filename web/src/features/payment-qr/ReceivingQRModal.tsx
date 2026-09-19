@@ -136,6 +136,13 @@ export function computeQRHealthState({
   };
 }
 
+export function evaluateCanStartPayment(
+  isPublic: boolean,
+  paymentReadiness?: { ready: boolean; status?: string } | null
+): boolean {
+  return !isPublic || paymentReadiness?.ready === true;
+}
+
 export function parseAmountThousandsToVnd(raw: string): number {
   const digits = raw.replace(/\D/g, '').replace(/^0+/, '');
   if (!digits) return 0;
@@ -336,9 +343,12 @@ export const ReceivingQRModal: React.FC<{
     publicReadiness: paymentReadiness,
   });
 
+  // ponytail: operator mode bypasses paymentReadiness check; upgrade if operator needs explicit readiness gate
+  const canStartPayment = evaluateCanStartPayment(isPublic, paymentReadiness);
+
   // Trigger boost activation
   const handleStartBoost = async (amountVnd: number) => {
-    if (isStartingBoostRef.current || isAcbCritical) return;
+    if (isStartingBoostRef.current || !canStartPayment) return;
     isStartingBoostRef.current = true;
     setIsStartingBoost(true);
     setTargetAmountVnd(amountVnd);
@@ -549,7 +559,7 @@ export const ReceivingQRModal: React.FC<{
       } else if (e.key === 'Enter') {
         if (modalState === 'idle') {
           e.preventDefault();
-          if (isStartingBoostRef.current || isAcbCritical) return;
+          if (isStartingBoostRef.current || !canStartPayment) return;
           const amountVnd = parseAmountThousandsToVnd(amountInput);
           void handleStartBoost(amountVnd);
         }
@@ -559,7 +569,7 @@ export const ReceivingQRModal: React.FC<{
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, handleClose, modalState, amountInput, isAcbCritical]);
+  }, [isOpen, handleClose, modalState, amountInput, canStartPayment]);
 
   if (!isOpen) return null;
 
@@ -935,23 +945,25 @@ export const ReceivingQRModal: React.FC<{
                   <div className="w-full space-y-2 pt-1">
                     <button
                       type="button"
-                      disabled={isStartingBoost || isAcbCritical}
+                      disabled={isStartingBoost || !canStartPayment}
                       onClick={() => handleStartBoost(previewAmountVnd)}
                       className={`w-full py-3 px-4 rounded-xl font-bold text-xs shadow-sm transition flex items-center justify-center gap-2 ${
-                        isAcbCritical
+                        !canStartPayment
                           ? 'bg-stone-200 text-stone-400 cursor-not-allowed border border-stone-300'
                           : 'bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white hover:shadow cursor-pointer'
                       }`}
                     >
                       <QrCode className="w-4 h-4" />
-                      {isAcbCritical
-                        ? 'Không thể nhận tiền lúc này'
+                      {!canStartPayment
+                        ? (isPublic && paymentReadiness === undefined
+                            ? 'Đang kiểm tra kết nối...'
+                            : 'Không thể nhận tiền lúc này')
                         : isStartingBoost
                           ? 'Đang kích hoạt...'
                           : 'Tạo QR & bắt đầu nhận tiền'}
                     </button>
 
-                    {!isAcbCritical && (
+                    {canStartPayment && (
                       <button
                         type="button"
                         disabled={isStartingBoost}

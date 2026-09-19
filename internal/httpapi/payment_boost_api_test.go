@@ -62,6 +62,14 @@ func TestPaymentActivity_API_ValidationAndBoost(t *testing.T) {
 	}
 	defer store.Close()
 
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING' WHERE id = ?`, conn.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	booster := &mockPaymentBooster{}
 	cfg := config.Config{
 		DatabasePath: filepath.Join(t.TempDir(), "api_boost.db"),
@@ -122,6 +130,14 @@ func TestPaymentActivity_RateLimiting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING' WHERE id = ?`, conn.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	booster := &mockPaymentBooster{}
 	cfg := config.Config{
@@ -438,4 +454,107 @@ func TestPaymentBoost_RejectionWhenBankNotReady(t *testing.T) {
 	if rec3.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK, got %d: %s", rec3.Code, rec3.Body.String())
 	}
+}
+
+func TestStartPaymentActivity_FailClosed(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("missing bank connection returns 409 PAYMENT_NOT_READY", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "unconfigured.db")
+		store, err := storage.Open(ctx, dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+
+		booster := &mockPaymentBooster{}
+		srv := New(config.Config{DatabasePath: dbPath}, store).WithPaymentBooster(booster)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity", bytes.NewBufferString(`{"amountVnd": 100000}`))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp["code"] != "PAYMENT_NOT_READY" || resp["status"] != "UNCONFIGURED" {
+			t.Fatalf("expected code=PAYMENT_NOT_READY status=UNCONFIGURED, got %+v", resp)
+		}
+		if booster.callCount != 0 {
+			t.Fatalf("booster should not be called, got callCount=%d", booster.callCount)
+		}
+	})
+
+	t.Run("store failure returns 503 PAYMENT_UNAVAILABLE", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "store_fail.db")
+		store, err := storage.Open(ctx, dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Close underlying store to trigger query failure on lookup
+		store.Close()
+
+		booster := &mockPaymentBooster{}
+		srv := New(config.Config{DatabasePath: dbPath}, store).WithPaymentBooster(booster)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity", bytes.NewBufferString(`{"amountVnd": 100000}`))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp["code"] != "PAYMENT_UNAVAILABLE" {
+			t.Fatalf("expected code=PAYMENT_UNAVAILABLE, got %+v", resp)
+		}
+		if booster.callCount != 0 {
+			t.Fatalf("booster should not be called, got callCount=%d", booster.callCount)
+		}
+	})
+
+	t.Run("non-monitoring state returns 409 PAYMENT_NOT_READY", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "non_monitoring.db")
+		store, err := storage.Open(ctx, dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+
+		conn, err := store.ConfigureConnection(ctx, "***1234")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='AUTH_STARTING' WHERE id = ?`, conn.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		booster := &mockPaymentBooster{}
+		srv := New(config.Config{DatabasePath: dbPath}, store).WithPaymentBooster(booster)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity", bytes.NewBufferString(`{"amountVnd": 100000}`))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp["code"] != "PAYMENT_NOT_READY" || resp["status"] != "AUTH_STARTING" {
+			t.Fatalf("expected code=PAYMENT_NOT_READY status=AUTH_STARTING, got %+v", resp)
+		}
+		if booster.callCount != 0 {
+			t.Fatalf("booster should not be called, got callCount=%d", booster.callCount)
+		}
+	})
 }
