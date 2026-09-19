@@ -54,22 +54,45 @@ func (s *StreamResult) Close() error {
 }
 
 type Client struct {
-	baseURL       string
-	internalToken string
-	httpClient    *http.Client
+	baseURL        string
+	internalToken  string
+	bufferedClient *http.Client
+	streamClient   *http.Client
 }
 
 func New(baseURL, internalToken string) *Client {
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:8081"
 	}
+
+	streamTransport := http.DefaultTransport
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		cloned := t.Clone()
+		cloned.ResponseHeaderTimeout = 5 * time.Second
+		streamTransport = cloned
+	}
+
 	return &Client{
 		baseURL:       strings.TrimRight(baseURL, "/"),
 		internalToken: internalToken,
-		httpClient: &http.Client{
+		bufferedClient: &http.Client{
 			Timeout: 8 * time.Second,
 		},
+		streamClient: &http.Client{
+			Transport: streamTransport,
+			Timeout:   0,
+		},
 	}
+}
+
+func (c *Client) WithHTTPClients(buffered, stream *http.Client) *Client {
+	if buffered != nil {
+		c.bufferedClient = buffered
+	}
+	if stream != nil {
+		c.streamClient = stream
+	}
+	return c
 }
 
 func (c *Client) SynthesizeStream(ctx context.Context, req SynthesizeRequest) (*StreamResult, error) {
@@ -90,7 +113,7 @@ func (c *Client) SynthesizeStream(ctx context.Context, req SynthesizeRequest) (*
 	}
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.streamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
@@ -201,7 +224,7 @@ func (c *Client) synthesizeBuffered(ctx context.Context, req SynthesizeRequest) 
 		httpReq.Header.Set("X-Internal-TTS-Token", c.internalToken)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.bufferedClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}

@@ -118,6 +118,23 @@ platform/edge/probe.sh --target slot-probe --slot green --path /internal/deployz
 platform/edge/probe.sh --target production --service acb --path /readyz
 ```
 
+---
+
+## 5. Cloudflare Configuration Rules for Voice Audio Streaming
+
+Cloudflare Tunnel defaults to buffering HTTP response bodies. While Server-Sent Events (`text/event-stream`) bypass buffering automatically, `audio/mpeg` streaming responses are buffered by Cloudflare's edge proxy unless explicitly disabled via Configuration Rules.
+
+### Path-Scoped Configuration Rule
+To enable immediate first-byte streaming while preserving Cloudflare WAF inspection and Bot Management across the rest of the zone:
+- **Rule Type**: Configuration Rules -> Response Body Buffering
+- **Setting**: `Response Body Buffering = None`
+- **Scope Expression**:
+  ```text
+  (http.request.uri.path wildcard "/api/public/v1/voice/*/stream*") or
+  (http.request.uri.path wildcard "/api/v1/voice/*/stream*")
+  ```
+- **Constraint**: Do **not** disable response body buffering globally across the zone, as global disabling degrades edge security inspection and DDoS mitigation capabilities for non-streaming endpoints.
+
 ### Pinned Probe Containers
 Defined in `compose.yml` under the `probe` profile using pinned `curlimages/curl:8.12.1`:
 - `edge-probe-traefik` (`network_mode: "container:edge-traefik"`)

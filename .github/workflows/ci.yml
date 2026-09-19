@@ -85,7 +85,7 @@ jobs:
       - name: Test TTS Gateway
         working-directory: tts-gateway
         run: |
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -r requirements.lock -r requirements-dev.lock
           pytest -v
       - name: Test failover controller
         run: |
@@ -191,7 +191,7 @@ jobs:
     name: Docker smoke test (tts-gateway)
     timeout-minutes: 10
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0

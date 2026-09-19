@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,16 @@ type voiceTestRequest struct {
 	Pitch              any    `json:"pitch,omitempty"`
 }
 
+func clampInt(val, minVal, maxVal int) int {
+	if val < minVal {
+		return minVal
+	}
+	if val > maxVal {
+		return maxVal
+	}
+	return val
+}
+
 func sanitizeAnnouncementTemplate(raw string) string {
 	tpl := strings.TrimSpace(raw)
 	if tpl == "" {
@@ -67,12 +78,20 @@ func formatTTSRate(val any) string {
 			return ""
 		}
 		if strings.HasSuffix(v, "%") {
-			return v
+			numStr := strings.TrimSuffix(v, "%")
+			if p, err := strconv.Atoi(numStr); err == nil {
+				p = clampInt(p, -50, 100)
+				if p >= 0 {
+					return fmt.Sprintf("+%d%%", p)
+				}
+				return fmt.Sprintf("%d%%", p)
+			}
+			return ""
 		}
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return formatFloatRate(f)
 		}
-		return v
+		return ""
 	case float64:
 		return formatFloatRate(v)
 	case int:
@@ -89,7 +108,7 @@ func formatFloatRate(rate float64) string {
 		return ""
 	}
 	diff := (rate - 1.0) * 100.0
-	pct := int(math.Round(diff))
+	pct := clampInt(int(math.Round(diff)), -50, 100)
 	if pct >= 0 {
 		return fmt.Sprintf("+%d%%", pct)
 	}
@@ -106,13 +125,32 @@ func formatTTSPitch(val any) string {
 		if v == "" {
 			return ""
 		}
-		if strings.HasSuffix(v, "Hz") || strings.HasSuffix(v, "%") {
-			return v
+		if strings.HasSuffix(v, "Hz") {
+			numStr := strings.TrimSuffix(v, "Hz")
+			if p, err := strconv.Atoi(numStr); err == nil {
+				p = clampInt(p, -50, 50)
+				if p >= 0 {
+					return fmt.Sprintf("+%dHz", p)
+				}
+				return fmt.Sprintf("%dHz", p)
+			}
+			return ""
+		}
+		if strings.HasSuffix(v, "%") {
+			numStr := strings.TrimSuffix(v, "%")
+			if p, err := strconv.Atoi(numStr); err == nil {
+				p = clampInt(p, -50, 50)
+				if p >= 0 {
+					return fmt.Sprintf("+%d%%", p)
+				}
+				return fmt.Sprintf("%d%%", p)
+			}
+			return ""
 		}
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return formatFloatPitch(f)
 		}
-		return v
+		return ""
 	case float64:
 		return formatFloatPitch(v)
 	case int:
@@ -129,7 +167,7 @@ func formatFloatPitch(pitch float64) string {
 		return ""
 	}
 	diff := (pitch - 1.0) * 50.0
-	diffInt := int(math.Round(diff))
+	diffInt := clampInt(int(math.Round(diff)), -50, 50)
 	if diffInt >= 0 {
 		return fmt.Sprintf("+%dHz", diffInt)
 	}
@@ -246,7 +284,9 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	phrase := voicecopy.FormatAnnouncementTemplate(template, 500000, "Ung ho quy", req.IncludeDescription)
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
-	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -293,7 +333,9 @@ func (s *Server) publicTestVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	phrase := voicecopy.FormatAnnouncementTemplate(voicecopy.DefaultAnnouncementTemplate, 500000, "", false)
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
-	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -391,7 +433,9 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
-	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -415,9 +459,28 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req voiceSummaryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
+	if r.Method == http.MethodGet {
+		ids := r.URL.Query()["transactionIds"]
+		if len(ids) == 0 {
+			ids = r.URL.Query()["txIds"]
+		}
+		for _, raw := range ids {
+			for _, id := range strings.Split(raw, ",") {
+				id = strings.TrimSpace(id)
+				if id != "" {
+					req.TransactionIDs = append(req.TransactionIDs, id)
+				}
+			}
+		}
+		req.VoiceID = r.URL.Query().Get("voiceId")
+		req.Rate = r.URL.Query().Get("rate")
+		req.Pitch = r.URL.Query().Get("pitch")
+		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	if len(req.TransactionIDs) < 2 || len(req.TransactionIDs) > 50 {
@@ -459,7 +522,9 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
-	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -527,7 +592,9 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
-	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,

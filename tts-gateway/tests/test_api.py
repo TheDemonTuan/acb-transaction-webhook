@@ -115,6 +115,72 @@ async def test_synthesize_stream_fallback_to_gtts(monkeypatch):
         assert resp.content == b"gtts_stream_audio"
 
 @pytest.mark.asyncio
+async def test_synthesize_stream_initial_chunk_timeout_fallback(monkeypatch):
+    import asyncio
+    from app.config import config
+    monkeypatch.setattr(config, "edge_stream_initial_timeout", 0.05)
+
+    async def mock_edge_slow_first_chunk(*args, **kwargs):
+        await asyncio.sleep(0.2)
+        yield b"chunk_never"
+
+    async def mock_gtts_success(*args, **kwargs):
+        return b"gtts_fallback_on_initial_timeout"
+
+    monkeypatch.setattr(edge_provider, "stream", mock_edge_slow_first_chunk)
+    monkeypatch.setattr(gtts_provider, "synthesize", mock_gtts_success)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/synthesize/stream",
+            json={"text": "Test timeout fallback", "voice": "vi-VN-HoaiMyNeural"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["x-tts-provider"] == "gtts"
+        assert resp.headers["x-tts-fallback"] == "true"
+        assert resp.content == b"gtts_fallback_on_initial_timeout"
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_idle_chunk_timeout(monkeypatch):
+    import asyncio
+    from app.config import config
+    monkeypatch.setattr(config, "edge_stream_idle_timeout", 0.05)
+
+    async def mock_edge_slow_idle_chunk(*args, **kwargs):
+        yield b"chunk_1"
+        await asyncio.sleep(0.2)
+        yield b"chunk_2"
+
+    monkeypatch.setattr(edge_provider, "stream", mock_edge_slow_idle_chunk)
+    edge_circuit.record_success()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with pytest.raises(Exception):
+            await ac.post(
+                "/synthesize/stream",
+                json={"text": "Test idle timeout", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
+            )
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_midstream_exception_propagates(monkeypatch):
+    async def mock_edge_broken_midstream(*args, **kwargs):
+        yield b"chunk_1"
+        raise ConnectionResetError("Connection lost mid-stream")
+
+    monkeypatch.setattr(edge_provider, "stream", mock_edge_broken_midstream)
+    edge_circuit.record_success()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        with pytest.raises(ConnectionResetError):
+            await ac.post(
+                "/synthesize/stream",
+                json={"text": "Test midstream exception", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
+            )
+
+@pytest.mark.asyncio
 async def test_cache_max_bytes_configured():
     from app.main import cache
     from app.config import config

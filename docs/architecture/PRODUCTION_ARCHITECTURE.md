@@ -162,6 +162,13 @@ The ACB stack does not manage Traefik container lifecycles or cloudflared tunnel
      - `X-Release-Commit`: matches intended release commit SHA.
    - If route ACK fails within the deadline, the previous configuration is atomically restored and the rollback is verified before reporting failure.
 
+4. **Cloudflare Response Body Buffering for Voice Streaming:**
+   - Cloudflare Tunnel buffers `audio/mpeg` responses by default, negating the latency benefit of chunked TTS streaming.
+   - A Cloudflare Configuration Rule must set `Response Body Buffering = None` strictly scoped to voice stream paths:
+     - `/api/public/v1/voice/*/stream*`
+     - `/api/v1/voice/*/stream*`
+   - Buffering must **never** be disabled globally across the zone so that edge WAF and Bot Management retain payload inspection capabilities.
+
 ---
 
 ## 7. Storage, Persistence, and Concurrency Model

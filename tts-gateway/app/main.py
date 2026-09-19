@@ -163,7 +163,7 @@ async def synthesize_stream(
 
     try:
         edge_gen = edge_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch)
-        first_chunk = await anext(edge_gen)
+        first_chunk = await asyncio.wait_for(anext(edge_gen), timeout=config.edge_stream_initial_timeout)
         edge_circuit.record_success()
     except Exception as e:
         logger.warning(f"Edge TTS stream initialization failed: {e}")
@@ -203,7 +203,11 @@ async def synthesize_stream(
             collected.write(first_chunk)
         yield first_chunk
         try:
-            async for chunk in edge_gen:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(anext(edge_gen), timeout=config.edge_stream_idle_timeout)
+                except StopAsyncIteration:
+                    break
                 if collected:
                     collected.write(chunk)
                 yield chunk
@@ -212,6 +216,7 @@ async def synthesize_stream(
         except Exception as err:
             logger.error(f"Error during Edge stream chunk iteration: {err}")
             edge_circuit.record_failure()
+            raise
 
     return StreamingResponse(
         _stream_and_tee(),

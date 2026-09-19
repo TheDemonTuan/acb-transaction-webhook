@@ -129,3 +129,46 @@ func TestClientSynthesizeUnauthorized(t *testing.T) {
 		t.Errorf("expected ErrUnauthorized, got %v", err)
 	}
 }
+
+func TestClientSynthesizeStreamSeparatedClientTimeouts(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("X-TTS-Provider", "edge")
+		w.WriteHeader(http.StatusOK)
+
+		flusher, ok := w.(http.Flusher)
+		_, _ = w.Write([]byte("start_"))
+		if ok {
+			flusher.Flush()
+		}
+		// Sleep longer than bufferedClient timeout (60ms > 30ms)
+		time.Sleep(60 * time.Millisecond)
+		_, _ = w.Write([]byte("end"))
+		if ok {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	client := New(ts.URL, "")
+	// bufferedClient has aggressive 30ms timeout, streamClient has no overall timeout
+	client.WithHTTPClients(&http.Client{Timeout: 30 * time.Millisecond}, &http.Client{Timeout: 0})
+
+	// Streaming request must succeed even though duration exceeds bufferedClient timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stream, err := client.SynthesizeStream(ctx, SynthesizeRequest{Text: "long stream"})
+	if err != nil {
+		t.Fatalf("SynthesizeStream failed: %v", err)
+	}
+	defer stream.Close()
+
+	data, err := io.ReadAll(stream.Reader)
+	if err != nil {
+		t.Fatalf("read stream failed: %v", err)
+	}
+	if string(data) != "start_end" {
+		t.Errorf("unexpected stream content: %q", string(data))
+	}
+}

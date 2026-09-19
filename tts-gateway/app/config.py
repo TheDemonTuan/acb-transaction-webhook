@@ -14,6 +14,8 @@ class Config(BaseModel):
     cache_ttl_seconds: int = 600  # 10 minutes
     edge_circuit_failure_threshold: int = 3
     edge_circuit_reset_timeout: float = 45.0  # seconds
+    edge_stream_initial_timeout: float = float(os.getenv("TTS_EDGE_INITIAL_TIMEOUT", "4.0"))
+    edge_stream_idle_timeout: float = float(os.getenv("TTS_EDGE_IDLE_TIMEOUT", "5.0"))
 
     def get_token(self) -> str:
         if self.internal_token:
