@@ -1001,7 +1001,7 @@ func TestPaymentBoost_ReadLockRaceSafety(t *testing.T) {
 				if j%2 == 0 {
 					m.StartPaymentBoost(int64(10000 * (id + 1)))
 				} else {
-					m.StopPaymentBoost()
+					m.StopPaymentBoost("")
 				}
 			}
 		}(i)

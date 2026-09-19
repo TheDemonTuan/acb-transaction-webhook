@@ -74,6 +74,7 @@ func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (wo
 	st := w.bankMonitor.StartPaymentBoost(amount)
 	return workerrpc.PaymentBoostStatus{
 		Active:     st.Active,
+		SessionID:  st.SessionID,
 		AmountVnd:  st.AmountVnd,
 		ExpiresIn:  st.ExpiresIn,
 		Phase:      st.Phase,
@@ -82,11 +83,11 @@ func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (wo
 	}, nil
 }
 
-func (w *workerService) StopPaymentBoost(ctx context.Context) error {
+func (w *workerService) StopPaymentBoost(ctx context.Context, sessionID string) error {
 	if w.bankMonitor == nil {
 		return fmt.Errorf("bank monitor not initialized")
 	}
-	w.bankMonitor.StopPaymentBoost()
+	w.bankMonitor.StopPaymentBoost(sessionID)
 	return nil
 }
 

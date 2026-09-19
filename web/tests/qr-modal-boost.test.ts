@@ -24,12 +24,12 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
   });
 
   describe('computeBoostPhase', () => {
-    it('assigns Phase 1 (2–4s) during the first 60 seconds (121–180s remaining)', () => {
+    it('assigns Phase 1 (1–3s) during the first 60 seconds (121–180s remaining)', () => {
       const p1 = computeBoostPhase(180);
       expect(p1.phase).toBe(1);
-      expect(p1.minSec).toBe(2);
-      expect(p1.maxSec).toBe(4);
-      expect(p1.label).toContain('2–4 giây');
+      expect(p1.minSec).toBe(1);
+      expect(p1.maxSec).toBe(3);
+      expect(p1.label).toContain('1–3 giây');
 
       const p1End = computeBoostPhase(121);
       expect(p1End.phase).toBe(1);
@@ -95,7 +95,7 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
   });
 
   describe('stopPaymentActivity helper', () => {
-    it('calls DELETE /api/public/v1/payment-activity', async () => {
+    it('calls DELETE /api/public/v1/payment-activity without sessionId', async () => {
       const origFetch = globalThis.fetch;
       let requestedUrl = '';
       let requestedMethod = '';
@@ -109,6 +109,25 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
       await stopPaymentActivity();
 
       expect(requestedUrl).toBe('/api/public/v1/payment-activity');
+      expect(requestedMethod).toBe('DELETE');
+
+      globalThis.fetch = origFetch;
+    });
+
+    it('calls DELETE /api/public/v1/payment-activity?sessionId=... when sessionId provided', async () => {
+      const origFetch = globalThis.fetch;
+      let requestedUrl = '';
+      let requestedMethod = '';
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        requestedUrl = String(input);
+        requestedMethod = init?.method || 'GET';
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch;
+
+      const { stopPaymentActivity } = await import('../src/shared/api/queries');
+      await stopPaymentActivity('session_abc_123');
+
+      expect(requestedUrl).toBe('/api/public/v1/payment-activity?sessionId=session_abc_123');
       expect(requestedMethod).toBe('DELETE');
 
       globalThis.fetch = origFetch;

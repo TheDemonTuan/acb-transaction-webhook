@@ -2,6 +2,8 @@ package monitor
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -31,19 +33,27 @@ type syncRequest struct {
 	generation   int64
 }
 
+func generateSessionID() string {
+	b := make([]byte, 16)
+	_, _ = cryptorand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 type PaymentBoost struct {
+	SessionID      string
 	StartedAt      time.Time
 	ExpiresAt      time.Time
 	ExpectedAmount int64 // 0 = any amount
 }
 
 type PaymentBoostStatus struct {
-	Active     bool  `json:"active"`
-	AmountVnd  int64 `json:"amountVnd"`
-	ExpiresIn  int   `json:"expiresIn"`
-	Phase      int   `json:"phase"`
-	MinSeconds int   `json:"minSeconds"`
-	MaxSeconds int   `json:"maxSeconds"`
+	Active     bool   `json:"active"`
+	SessionID  string `json:"sessionId,omitempty"`
+	AmountVnd  int64  `json:"amountVnd"`
+	ExpiresIn  int    `json:"expiresIn"`
+	Phase      int    `json:"phase"`
+	MinSeconds int    `json:"minSeconds"`
+	MaxSeconds int    `json:"maxSeconds"`
 }
 
 type Monitor struct {
@@ -163,11 +173,14 @@ func (m *Monitor) StartPaymentBoost(amount int64) PaymentBoostStatus {
 	}
 	now := m.now()
 	m.boostMu.Lock()
+	sessionID := generateSessionID()
 	if m.boost != nil && now.Before(m.boost.ExpiresAt) {
 		// Enforce hard cap: active boost cannot reset or extend 180s expiration.
 		m.boost.ExpectedAmount = amount
+		m.boost.SessionID = sessionID
 	} else {
 		m.boost = &PaymentBoost{
+			SessionID:      sessionID,
 			StartedAt:      now,
 			ExpiresAt:      now.Add(180 * time.Second),
 			ExpectedAmount: amount,
@@ -185,13 +198,21 @@ func (m *Monitor) StartPaymentBoost(amount int64) PaymentBoostStatus {
 }
 
 // StopPaymentBoost clears any active payment boost.
-func (m *Monitor) StopPaymentBoost() {
+// If sessionID is provided and does not match the active boost session, the stop is ignored.
+// If sessionID is empty, the boost is stopped unconditionally.
+func (m *Monitor) StopPaymentBoost(sessionID string) {
 	if m == nil {
 		return
 	}
 	m.boostMu.Lock()
+	defer m.boostMu.Unlock()
+	if m.boost == nil {
+		return
+	}
+	if sessionID != "" && m.boost.SessionID != "" && m.boost.SessionID != sessionID {
+		return
+	}
 	m.boost = nil
-	m.boostMu.Unlock()
 }
 
 // PaymentBoostStatus reports the current payment boost state.
@@ -221,8 +242,8 @@ func (m *Monitor) boostStatusLocked(now time.Time) PaymentBoostStatus {
 	switch {
 	case elapsed < 60*time.Second:
 		phase = 1
-		minSec = 2
-		maxSec = 4
+		minSec = 1
+		maxSec = 3
 	case elapsed < 120*time.Second:
 		phase = 2
 		minSec = 3
@@ -237,6 +258,7 @@ func (m *Monitor) boostStatusLocked(now time.Time) PaymentBoostStatus {
 
 	return PaymentBoostStatus{
 		Active:     true,
+		SessionID:  m.boost.SessionID,
 		AmountVnd:  m.boost.ExpectedAmount,
 		ExpiresIn:  expiresIn,
 		Phase:      phase,

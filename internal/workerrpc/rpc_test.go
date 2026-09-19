@@ -142,15 +142,16 @@ func (m *mockWorkerHandler) Resume(ctx context.Context) error {
 func (m *mockWorkerHandler) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
 	return workerrpc.PaymentBoostStatus{
 		Active:     true,
+		SessionID:  "mock-session-123",
 		AmountVnd:  amount,
 		ExpiresIn:  180,
 		Phase:      1,
-		MinSeconds: 2,
-		MaxSeconds: 4,
+		MinSeconds: 1,
+		MaxSeconds: 3,
 	}, nil
 }
 
-func (m *mockWorkerHandler) StopPaymentBoost(ctx context.Context) error {
+func (m *mockWorkerHandler) StopPaymentBoost(ctx context.Context, sessionID string) error {
 	return nil
 }
 
@@ -862,12 +863,12 @@ func TestWorkerRPC_PaymentBoost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
-	if !res.Active || res.AmountVnd != 100000 || res.Phase != 1 || res.MinSeconds != 2 || res.MaxSeconds != 4 {
+	if !res.Active || res.SessionID != "mock-session-123" || res.AmountVnd != 100000 || res.Phase != 1 || res.MinSeconds != 1 || res.MaxSeconds != 3 {
 		t.Fatalf("unexpected payment boost status: %+v", res)
 	}
 
 	// 3. StopPaymentBoost call
-	if err := client.StopPaymentBoost(ctx); err != nil {
+	if err := client.StopPaymentBoost(ctx, res.SessionID); err != nil {
 		t.Fatalf("expected StopPaymentBoost success, got error: %v", err)
 	}
 }

@@ -550,6 +550,7 @@ func (m *monolithPaymentBooster) StartPaymentBoost(ctx context.Context, amount i
 	st := m.bankMonitor.StartPaymentBoost(amount)
 	return workerrpc.PaymentBoostStatus{
 		Active:     st.Active,
+		SessionID:  st.SessionID,
 		AmountVnd:  st.AmountVnd,
 		ExpiresIn:  st.ExpiresIn,
 		Phase:      st.Phase,
@@ -558,11 +559,11 @@ func (m *monolithPaymentBooster) StartPaymentBoost(ctx context.Context, amount i
 	}, nil
 }
 
-func (m *monolithPaymentBooster) StopPaymentBoost(ctx context.Context) error {
+func (m *monolithPaymentBooster) StopPaymentBoost(ctx context.Context, sessionID string) error {
 	if m.bankMonitor == nil {
 		return errors.New("bank monitor not initialized")
 	}
-	m.bankMonitor.StopPaymentBoost()
+	m.bankMonitor.StopPaymentBoost(sessionID)
 	return nil
 }
 

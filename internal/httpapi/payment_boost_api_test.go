@@ -17,10 +17,11 @@ import (
 )
 
 type mockPaymentBooster struct {
-	calledWithAmount int64
-	callCount        int
-	stopCallCount    int
-	err              error
+	calledWithAmount    int64
+	calledWithSessionID string
+	callCount           int
+	stopCallCount       int
+	err                 error
 }
 
 func (m *mockPaymentBooster) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
@@ -31,15 +32,17 @@ func (m *mockPaymentBooster) StartPaymentBoost(ctx context.Context, amount int64
 	}
 	return workerrpc.PaymentBoostStatus{
 		Active:     true,
+		SessionID:  "test-session-id-123",
 		AmountVnd:  amount,
 		ExpiresIn:  180,
 		Phase:      1,
-		MinSeconds: 2,
-		MaxSeconds: 4,
+		MinSeconds: 1,
+		MaxSeconds: 3,
 	}, nil
 }
 
-func (m *mockPaymentBooster) StopPaymentBoost(ctx context.Context) error {
+func (m *mockPaymentBooster) StopPaymentBoost(ctx context.Context, sessionID string) error {
+	m.calledWithSessionID = sessionID
 	m.stopCallCount++
 	return m.err
 }
@@ -82,7 +85,7 @@ func TestPaymentActivity_API_ValidationAndBoost(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if !status.Active || status.AmountVnd != 250000 || status.Phase != 1 || status.MinSeconds != 2 || status.MaxSeconds != 4 {
+	if !status.Active || status.AmountVnd != 250000 || status.Phase != 1 || status.MinSeconds != 1 || status.MaxSeconds != 3 || status.SessionID != "test-session-id-123" {
 		t.Fatalf("unexpected response payload: %+v", status)
 	}
 
@@ -254,8 +257,8 @@ func TestPaymentActivity_StopEndpoints(t *testing.T) {
 	}
 	srv := New(cfg, store).WithPaymentBooster(booster)
 
-	// 1. DELETE /api/public/v1/payment-activity
-	reqDel := httptest.NewRequest(http.MethodDelete, "/api/public/v1/payment-activity", nil)
+	// 1. DELETE /api/public/v1/payment-activity with query param sessionId
+	reqDel := httptest.NewRequest(http.MethodDelete, "/api/public/v1/payment-activity?sessionId=sess-del-abc", nil)
 	recDel := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recDel, reqDel)
 
@@ -265,9 +268,13 @@ func TestPaymentActivity_StopEndpoints(t *testing.T) {
 	if booster.stopCallCount != 1 {
 		t.Fatalf("expected stopCallCount 1, got %d", booster.stopCallCount)
 	}
+	if booster.calledWithSessionID != "sess-del-abc" {
+		t.Fatalf("expected calledWithSessionID sess-del-abc, got %s", booster.calledWithSessionID)
+	}
 
-	// 2. POST /api/public/v1/payment-activity/stop
-	reqPost := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity/stop", nil)
+	// 2. POST /api/public/v1/payment-activity/stop with JSON body
+	bodyPost := bytes.NewBufferString(`{"sessionId": "sess-post-xyz"}`)
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity/stop", bodyPost)
 	recPost := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recPost, reqPost)
 
@@ -276,5 +283,8 @@ func TestPaymentActivity_StopEndpoints(t *testing.T) {
 	}
 	if booster.stopCallCount != 2 {
 		t.Fatalf("expected stopCallCount 2, got %d", booster.stopCallCount)
+	}
+	if booster.calledWithSessionID != "sess-post-xyz" {
+		t.Fatalf("expected calledWithSessionID sess-post-xyz, got %s", booster.calledWithSessionID)
 	}
 }

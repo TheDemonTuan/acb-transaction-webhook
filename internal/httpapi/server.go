@@ -77,7 +77,7 @@ type NotificationProviderReader interface {
 
 type PaymentBooster interface {
 	StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error)
-	StopPaymentBoost(ctx context.Context) error
+	StopPaymentBoost(ctx context.Context, sessionID string) error
 }
 
 type ipRateLimiter struct {

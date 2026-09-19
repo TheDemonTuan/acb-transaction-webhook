@@ -199,6 +199,7 @@ export const deletePaymentQR = async (): Promise<any> => {
 
 export interface PaymentBoostStatus {
   active: boolean;
+  sessionId?: string;
   amountVnd: number;
   expiresIn: number;
   phase: number;
@@ -223,9 +224,12 @@ export const startPaymentActivity = async (payload: { amountVnd: number }): Prom
   return res.json();
 };
 
-export const stopPaymentActivity = async (): Promise<void> => {
+export const stopPaymentActivity = async (sessionId?: string): Promise<void> => {
   try {
-    await fetch('/api/public/v1/payment-activity', {
+    const url = sessionId
+      ? `/api/public/v1/payment-activity?sessionId=${encodeURIComponent(sessionId)}`
+      : '/api/public/v1/payment-activity';
+    await fetch(url, {
       method: 'DELETE',
     });
   } catch {}

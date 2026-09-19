@@ -21,7 +21,6 @@ import {
   WifiOff,
   Zap,
   RotateCcw,
-  ArrowRight,
 } from 'lucide-react';
 import {
   fetchPaymentQR,
@@ -131,7 +130,7 @@ export function computeBoostPhase(remainingSeconds: number): {
   label: string;
 } {
   if (remainingSeconds > 120) {
-    return { phase: 1, minSec: 2, maxSec: 4, label: '⚡ Kiểm tra nhanh · 2–4 giây' };
+    return { phase: 1, minSec: 1, maxSec: 3, label: '⚡ Kiểm tra rất nhanh · 1–3 giây' };
   }
   if (remainingSeconds > 60) {
     return { phase: 2, minSec: 3, maxSec: 6, label: '⚡ Kiểm tra nhanh · 3–6 giây' };
@@ -149,7 +148,7 @@ export function isCreditMatch(expectedAmountVnd: number, incomingAmount: number)
   return incomingAmount === expectedAmountVnd;
 }
 
-export type ModalWorkflowState = 'idle' | 'active' | 'success';
+export type ModalWorkflowState = 'idle' | 'active';
 
 export const ReceivingQRModal: React.FC<{
   isOpen: boolean;
@@ -164,16 +163,17 @@ export const ReceivingQRModal: React.FC<{
   const [nowTick, setNowTick] = useState<number>(Date.now());
   const seenTxIdsRef = useRef<Set<string>>(new Set());
 
-  // Workflow FSM: idle -> active -> success
+  // Workflow FSM: idle -> active
   const [modalState, setModalState] = useState<ModalWorkflowState>('idle');
   const [amountInput, setAmountInput] = useState<string>('');
   const [targetAmountVnd, setTargetAmountVnd] = useState<number>(0);
   const [boostRemainingSec, setBoostRemainingSec] = useState<number>(0);
   const [boostDegraded, setBoostDegraded] = useState<boolean>(false);
+  const [boostSessionId, setBoostSessionId] = useState<string | null>(null);
+  const boostSessionIdRef = useRef<string | null>(null);
   const [isStartingBoost, setIsStartingBoost] = useState<boolean>(false);
   const isStartingBoostRef = useRef<boolean>(false);
   isStartingBoostRef.current = isStartingBoost;
-  const [matchedCredit, setMatchedCredit] = useState<LiveCreditAlert | null>(null);
 
   const amountInputRef = useRef<HTMLInputElement>(null);
   const modalStateRef = useRef<ModalWorkflowState>(modalState);
@@ -259,8 +259,9 @@ export const ReceivingQRModal: React.FC<{
     setTargetAmountVnd(0);
     setBoostRemainingSec(0);
     setBoostDegraded(false);
+    setBoostSessionId(null);
+    boostSessionIdRef.current = null;
     setIsStartingBoost(false);
-    setMatchedCredit(null);
     void refetchTx();
 
     // Auto-focus amount input on modal open
@@ -290,14 +291,20 @@ export const ReceivingQRModal: React.FC<{
     try {
       const status = await startPaymentActivity({ amountVnd });
       if (status && status.active) {
+        setBoostSessionId(status.sessionId || null);
+        boostSessionIdRef.current = status.sessionId || null;
         setBoostRemainingSec(status.expiresIn || 180);
         setBoostDegraded(false);
       } else {
+        setBoostSessionId(null);
+        boostSessionIdRef.current = null;
         setBoostRemainingSec(0);
         setBoostDegraded(true);
       }
     } catch {
       // Degraded: keep UI moving to QR view, but indicate standard polling
+      setBoostSessionId(null);
+      boostSessionIdRef.current = null;
       setBoostRemainingSec(0);
       setBoostDegraded(true);
     } finally {
@@ -307,19 +314,20 @@ export const ReceivingQRModal: React.FC<{
     }
   };
 
-  const handleNextTransaction = () => {
-    void stopPaymentActivity();
+  const handleResetToIdle = () => {
+    void stopPaymentActivity(boostSessionIdRef.current || undefined);
+    setBoostSessionId(null);
+    boostSessionIdRef.current = null;
     setModalState('idle');
     setAmountInput('');
     setTargetAmountVnd(0);
-    setMatchedCredit(null);
     setBoostRemainingSec(0);
     setBoostDegraded(false);
     isStartingBoostRef.current = false;
     setIsStartingBoost(false);
     setTimeout(() => {
       amountInputRef.current?.focus();
-    }, 100);
+    }, 50);
   };
 
   // Subscribe to live incoming payment events
@@ -361,11 +369,21 @@ export const ReceivingQRModal: React.FC<{
           setActiveAlert(alertItem);
           queryClient.invalidateQueries({ queryKey: queryKeys.transactions() });
 
-          // FSM: Match credit in ACTIVE state -> transition to SUCCESS
+          // FSM: Match credit in ACTIVE state -> backend auto-stops boost, frontend immediately resets to IDLE
           if (modalStateRef.current === 'active') {
             if (isCreditMatch(targetAmountRef.current, creditVal)) {
-              setMatchedCredit(alertItem);
-              setModalState('success');
+              setBoostSessionId(null);
+              boostSessionIdRef.current = null;
+              setModalState('idle');
+              setAmountInput('');
+              setTargetAmountVnd(0);
+              setBoostRemainingSec(0);
+              setBoostDegraded(false);
+              isStartingBoostRef.current = false;
+              setIsStartingBoost(false);
+              setTimeout(() => {
+                amountInputRef.current?.focus();
+              }, 50);
             }
           }
         }
@@ -443,7 +461,9 @@ export const ReceivingQRModal: React.FC<{
 
   // Close wrapper: ensure active boost is stopped
   const handleClose = () => {
-    void stopPaymentActivity();
+    void stopPaymentActivity(boostSessionIdRef.current || undefined);
+    setBoostSessionId(null);
+    boostSessionIdRef.current = null;
     onClose();
   };
 
@@ -458,9 +478,6 @@ export const ReceivingQRModal: React.FC<{
           if (isStartingBoostRef.current) return;
           const amountVnd = parseAmountThousandsToVnd(amountInput);
           void handleStartBoost(amountVnd);
-        } else if (modalState === 'success') {
-          e.preventDefault();
-          handleNextTransaction();
         }
       }
     };
@@ -676,11 +693,11 @@ export const ReceivingQRModal: React.FC<{
         </div>
 
         {/* Modal Body - 2 Columns on Desktop, Tabbed on Mobile */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="grid grid-cols-1 md:grid-cols-12 min-h-full">
-            {/* LEFT COLUMN: Interactive Workflow (IDLE / ACTIVE / SUCCESS) */}
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <div className="grid grid-cols-1 md:grid-cols-12 flex-1 min-h-0 h-full">
+            {/* LEFT COLUMN: Interactive Workflow (IDLE / ACTIVE) */}
             <div
-              className={`md:col-span-5 p-5 sm:p-6 bg-stone-50/50 md:border-r border-stone-200/80 flex flex-col items-center justify-start text-center gap-4 min-h-0 md:min-h-full ${
+              className={`md:col-span-5 p-5 sm:p-6 bg-stone-50/50 md:border-r border-stone-200/80 flex flex-col items-center justify-start text-center gap-4 min-h-0 h-full overflow-y-auto ${
                 activeTab === 'qr' ? 'flex' : 'hidden md:flex'
               }`}
             >
@@ -964,47 +981,11 @@ export const ReceivingQRModal: React.FC<{
                   {/* Action / Reset Button */}
                   <button
                     type="button"
-                    onClick={handleNextTransaction}
+                    onClick={handleResetToIdle}
                     className="text-xs text-stone-500 hover:text-stone-800 flex items-center gap-1.5 py-1 px-3 rounded-lg hover:bg-stone-200/50 transition cursor-pointer"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     Đổi số tiền / Hủy phiên này
-                  </button>
-                </div>
-              )}
-
-              {/* FSM STATE 3: SUCCESS - Credit Arrival Confirmation */}
-              {modalState === 'success' && matchedCredit && (
-                <div className="w-full max-w-[320px] bg-emerald-500 text-white rounded-3xl p-6 shadow-xl border-2 border-emerald-400 text-center space-y-4 animate-in fade-in zoom-in-95 duration-200">
-                  <div className="w-16 h-16 rounded-full bg-white text-emerald-600 mx-auto flex items-center justify-center shadow-md animate-bounce">
-                    <CheckCircle2 className="w-10 h-10" />
-                  </div>
-
-                  <div>
-                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-100">
-                      Giao dịch thành công
-                    </span>
-                    <p className="text-3xl font-black text-white mt-1">
-                      +{formatVndCurrency(matchedCredit.amount)}
-                    </p>
-                  </div>
-
-                  <div className="bg-emerald-600/60 rounded-2xl p-3 text-xs text-emerald-50 text-left space-y-1">
-                    <p className="font-medium truncate">
-                      Nội dung: <strong>{matchedCredit.description}</strong>
-                    </p>
-                    <p className="text-[11px] text-emerald-100 font-mono">
-                      Mã GD: #{matchedCredit.transactionNumber} • Lúc {matchedCredit.timeStr}
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handleNextTransaction}
-                    className="w-full py-3 px-4 rounded-xl bg-white text-emerald-800 font-bold text-xs shadow-md hover:bg-emerald-50 transition flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    Nhận giao dịch tiếp theo (Enter)
-                    <ArrowRight className="w-4 h-4" />
                   </button>
                 </div>
               )}
@@ -1022,8 +1003,8 @@ export const ReceivingQRModal: React.FC<{
 
             {/* RIGHT COLUMN: Live Monitor Status & Recent Transactions History */}
             <div
-              className={`md:col-span-7 p-5 sm:p-6 flex flex-col justify-between space-y-4 ${
-                activeTab === 'history' ? 'block' : 'hidden md:flex'
+              className={`md:col-span-7 p-5 sm:p-6 flex flex-col space-y-4 min-h-0 h-full overflow-hidden ${
+                activeTab === 'history' ? 'flex' : 'hidden md:flex'
               }`}
             >
               {/* TOP: Live Status & Active Alert Banner */}
@@ -1097,8 +1078,8 @@ export const ReceivingQRModal: React.FC<{
               </div>
 
               {/* Transactions History List */}
-              <div className="flex-1 min-h-0 flex flex-col pt-2">
-                <div className="flex items-center justify-between pb-2 border-b border-stone-100">
+              <div className="flex-1 min-h-0 flex flex-col pt-2 overflow-hidden">
+                <div className="flex items-center justify-between pb-2 border-b border-stone-100 shrink-0">
                   <h4 className="font-bold text-xs text-stone-800 uppercase tracking-wider flex items-center gap-1.5">
                     <Receipt className="w-3.5 h-3.5 text-stone-400" />
                     Lịch sử nhận tiền hôm nay
@@ -1108,7 +1089,7 @@ export const ReceivingQRModal: React.FC<{
                   </span>
                 </div>
 
-                <div className="flex-1 overflow-y-auto divide-y divide-stone-100 mt-2">
+                <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-stone-100 mt-2 pr-1">
                   {rawHistoryItems.length === 0 ? (
                     <div className="py-12 text-center text-stone-400 text-xs">
                       Chưa có giao dịch nhận tiền nào hôm nay.
