@@ -32,6 +32,9 @@ func (q *quiesceMockHandler) VerifySession(ctx context.Context, acc string, gen 
 func (q *quiesceMockHandler) TestNotificationChannel(ctx context.Context, id string) (workerrpc.TestNotificationResponse, error) {
 	return workerrpc.TestNotificationResponse{Success: true}, nil
 }
+func (q *quiesceMockHandler) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
+	return workerrpc.PaymentBoostStatus{Active: true}, nil
+}
 
 func (q *quiesceMockHandler) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse, error) {
 	if err := q.coordinator.Quiesce(ctx); err != nil {

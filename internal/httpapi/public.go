@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -152,4 +154,49 @@ func (s *Server) publicPaymentQR(w http.ResponseWriter, r *http.Request) {
 			"bankName":      qr.BankName,
 		},
 	})
+}
+
+type paymentActivityRequest struct {
+	AmountVnd int64 `json:"amountVnd"`
+}
+
+func (s *Server) startPaymentActivity(w http.ResponseWriter, r *http.Request) {
+	ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
+	if ip == "" {
+		ip = strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+	}
+	if ip == "" {
+		ip = strings.TrimSpace(strings.Split(r.RemoteAddr, ":")[0])
+	}
+
+	if s.boostLimiter != nil && !s.boostLimiter.allow(ip, 6, time.Minute, time.Now()) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded: max 6 requests per minute")
+		return
+	}
+
+	var req paymentActivityRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+	if req.AmountVnd < 0 {
+		writeError(w, http.StatusBadRequest, "amountVnd must not be negative")
+		return
+	}
+
+	if s.paymentBooster == nil {
+		writeError(w, http.StatusServiceUnavailable, "payment booster unavailable")
+		return
+	}
+
+	status, err := s.paymentBooster.StartPaymentBoost(r.Context(), req.AmountVnd)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start payment boost: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, status)
 }

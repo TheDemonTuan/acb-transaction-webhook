@@ -2,9 +2,11 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,6 +31,21 @@ type syncRequest struct {
 	generation   int64
 }
 
+type PaymentBoost struct {
+	StartedAt      time.Time
+	ExpiresAt      time.Time
+	ExpectedAmount int64 // 0 = any amount
+}
+
+type PaymentBoostStatus struct {
+	Active     bool  `json:"active"`
+	AmountVnd  int64 `json:"amountVnd"`
+	ExpiresIn  int   `json:"expiresIn"`
+	Phase      int   `json:"phase"`
+	MinSeconds int   `json:"minSeconds"`
+	MaxSeconds int   `json:"maxSeconds"`
+}
+
 type Monitor struct {
 	store           *storage.Store
 	client          BankClient
@@ -38,9 +55,13 @@ type Monitor struct {
 	syncMu          sync.Mutex
 	syncReq         *syncRequest
 	settingsCh      chan struct{}
+	boostCh         chan struct{}
 	cachedSettings  storage.MonitorSettings
 	lastMode        storage.PollMode
 	catchUpPending  bool
+
+	boostMu sync.RWMutex
+	boost   *PaymentBoost
 
 	configMu       sync.RWMutex
 	onNewEvents    func([]storage.EventNotification)
@@ -70,6 +91,7 @@ func (m *Monitor) notifyNewEvents(events []storage.EventNotification) {
 	if m == nil || len(events) == 0 {
 		return
 	}
+	m.checkAndStopBoost(events)
 	m.configMu.RLock()
 	fn := m.onNewEvents
 	m.configMu.RUnlock()
@@ -127,9 +149,145 @@ func New(store *storage.Store, client BankClient, minInterval, maxInterval time.
 			return minimum + time.Duration(rand.Int64N(int64(maximum-minimum)+1))
 		},
 		settingsCh:     make(chan struct{}, 1),
+		boostCh:        make(chan struct{}, 1),
 		cachedSettings: storage.DefaultMonitorSettings,
 		scheduler:      scheduler.New(&scheduler.Options{Metrics: telemetry.NewSchedulerAdapter(telemetry.Default)}),
 		now:            time.Now,
+	}
+}
+
+// StartPaymentBoost activates an ephemeral payment boost window.
+func (m *Monitor) StartPaymentBoost(amount int64) PaymentBoostStatus {
+	if m == nil {
+		return PaymentBoostStatus{}
+	}
+	now := m.now()
+	m.boostMu.Lock()
+	m.boost = &PaymentBoost{
+		StartedAt:      now,
+		ExpiresAt:      now.Add(180 * time.Second),
+		ExpectedAmount: amount,
+	}
+	status := m.boostStatusLocked(now)
+	m.boostMu.Unlock()
+
+	select {
+	case m.boostCh <- struct{}{}:
+	default:
+	}
+
+	return status
+}
+
+// StopPaymentBoost clears any active payment boost.
+func (m *Monitor) StopPaymentBoost() {
+	if m == nil {
+		return
+	}
+	m.boostMu.Lock()
+	m.boost = nil
+	m.boostMu.Unlock()
+}
+
+// PaymentBoostStatus reports the current payment boost state.
+func (m *Monitor) PaymentBoostStatus() PaymentBoostStatus {
+	if m == nil {
+		return PaymentBoostStatus{}
+	}
+	m.boostMu.RLock()
+	defer m.boostMu.RUnlock()
+	return m.boostStatusLocked(m.now())
+}
+
+func (m *Monitor) boostStatusLocked(now time.Time) PaymentBoostStatus {
+	if m.boost == nil || !now.Before(m.boost.ExpiresAt) {
+		m.boost = nil
+		return PaymentBoostStatus{Active: false}
+	}
+	elapsed := now.Sub(m.boost.StartedAt)
+	expiresIn := int(m.boost.ExpiresAt.Sub(now).Seconds())
+	if expiresIn < 0 {
+		expiresIn = 0
+	}
+
+	var phase, minSec, maxSec int
+	switch {
+	case elapsed < 60*time.Second:
+		phase = 1
+		minSec = 2
+		maxSec = 4
+	case elapsed < 120*time.Second:
+		phase = 2
+		minSec = 3
+		maxSec = 6
+	case elapsed < 180*time.Second:
+		phase = 3
+		minSec = 6
+		maxSec = 10
+	default:
+		m.boost = nil
+		return PaymentBoostStatus{Active: false}
+	}
+
+	return PaymentBoostStatus{
+		Active:     true,
+		AmountVnd:  m.boost.ExpectedAmount,
+		ExpiresIn:  expiresIn,
+		Phase:      phase,
+		MinSeconds: minSec,
+		MaxSeconds: maxSec,
+	}
+}
+
+type creditPayloadCheck struct {
+	Credit     string `json:"credit"`
+	DetectedAt string `json:"detectedAt"`
+}
+
+func (m *Monitor) checkAndStopBoost(events []storage.EventNotification) {
+	if m == nil || len(events) == 0 {
+		return
+	}
+	m.boostMu.Lock()
+	defer m.boostMu.Unlock()
+	if m.boost == nil {
+		return
+	}
+	now := m.now()
+	if !now.Before(m.boost.ExpiresAt) {
+		m.boost = nil
+		return
+	}
+
+	for _, ev := range events {
+		if ev.EventType != "bank.transaction.credit" {
+			continue
+		}
+		var payload creditPayloadCheck
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			continue
+		}
+		creditVal, err := strconv.ParseInt(payload.Credit, 10, 64)
+		if err != nil || creditVal <= 0 {
+			continue
+		}
+
+		if payload.DetectedAt != "" {
+			if detTime, err := time.Parse(time.RFC3339, payload.DetectedAt); err == nil {
+				if detTime.Before(m.boost.StartedAt.Add(-2 * time.Second)) {
+					continue
+				}
+			}
+		}
+
+		if m.boost.ExpectedAmount == 0 || m.boost.ExpectedAmount == creditVal {
+			slog.Info("payment boost matched credit, stopping boost",
+				"expectedAmount", m.boost.ExpectedAmount,
+				"credit", creditVal,
+				"eventId", ev.EventID)
+			m.boost = nil
+			return
+		}
 	}
 }
 
@@ -433,15 +591,36 @@ func (m *Monitor) Run(ctx context.Context) {
 		if schedule.Mode == storage.ModePaused {
 			wait = 10 * time.Minute
 		}
-		untilTrans := time.Until(schedule.NextTransition)
-		if untilTrans > 0 && untilTrans < wait {
-			wait = untilTrans
+
+		boostStatus := m.PaymentBoostStatus()
+		if boostStatus.Active && schedule.Mode != storage.ModePaused {
+			wait = m.nextInterval(time.Duration(boostStatus.MinSeconds)*time.Second, time.Duration(boostStatus.MaxSeconds)*time.Second)
+		} else {
+			untilTrans := time.Until(schedule.NextTransition)
+			if untilTrans > 0 && untilTrans < wait {
+				wait = untilTrans
+			}
 		}
 		timer.Reset(wait)
 
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-m.boostCh:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			conn, err := m.store.Connection(ctx)
+			if err == nil && conn.State == "MONITORING" {
+				if s := m.Scheduler(); s != nil {
+					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+				}
+			}
+			continue
 
 		case <-m.settingsCh:
 			// Hot reload settings
@@ -464,13 +643,18 @@ func (m *Monitor) Run(ctx context.Context) {
 			}
 
 			if s := m.Scheduler(); s != nil {
-				switch schedule.Mode {
-				case storage.ModeRealtime:
+				curBoost := m.PaymentBoostStatus()
+				if curBoost.Active && schedule.Mode != storage.ModePaused {
 					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
-				case storage.ModeKeepaliveOnly:
-					_ = s.Enqueue(NewKeepaliveTask(m, conn.ID, conn.Generation))
-				case storage.ModePaused:
-					// No upstream request
+				} else {
+					switch schedule.Mode {
+					case storage.ModeRealtime:
+						_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+					case storage.ModeKeepaliveOnly:
+						_ = s.Enqueue(NewKeepaliveTask(m, conn.ID, conn.Generation))
+					case storage.ModePaused:
+						// No upstream request
+					}
 				}
 			}
 		}

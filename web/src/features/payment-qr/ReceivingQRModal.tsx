@@ -10,9 +10,7 @@ import {
   CreditCard,
   CheckCircle2,
   Sparkles,
-  Clock,
   ShieldCheck,
-  ArrowDownLeft,
   RefreshCw,
   Radio,
   Receipt,
@@ -21,8 +19,17 @@ import {
   ChevronDown,
   ChevronUp,
   WifiOff,
+  Zap,
+  RotateCcw,
+  ArrowRight,
 } from 'lucide-react';
-import { fetchPaymentQR, fetchStatus, fetchTransactions } from '../../shared/api/queries';
+import {
+  fetchPaymentQR,
+  fetchStatus,
+  fetchTransactions,
+  getDynamicPaymentQRURL,
+  startPaymentActivity,
+} from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { useRealtimeContext } from '../../realtime/RealtimeProvider';
 import type {
@@ -35,12 +42,12 @@ import type {
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { isPublicViewerHost } from '../../app/runtime-mode';
 
-interface LiveCreditAlert {
+export interface LiveCreditAlert {
   id: string;
   transactionNumber: string;
   amount: number;
   description: string;
-  timestamp: number; // Date.now()
+  timestamp: number;
   timeStr: string;
 }
 
@@ -109,6 +116,40 @@ export function computeQRHealthState({
   };
 }
 
+export function parseAmountThousandsToVnd(raw: string): number {
+  const digits = raw.replace(/\D/g, '').replace(/^0+/, '');
+  if (!digits) return 0;
+  const thousands = parseInt(digits, 10);
+  return isNaN(thousands) ? 0 : thousands * 1000;
+}
+
+export function computeBoostPhase(remainingSeconds: number): {
+  phase: number;
+  minSec: number;
+  maxSec: number;
+  label: string;
+} {
+  if (remainingSeconds > 120) {
+    return { phase: 1, minSec: 2, maxSec: 4, label: '⚡ Kiểm tra nhanh · 2–4 giây' };
+  }
+  if (remainingSeconds > 60) {
+    return { phase: 2, minSec: 3, maxSec: 6, label: '⚡ Kiểm tra nhanh · 3–6 giây' };
+  }
+  if (remainingSeconds > 0) {
+    return { phase: 3, minSec: 6, maxSec: 10, label: '⚡ Kiểm tra nhanh · 6–10 giây' };
+  }
+  return { phase: 0, minSec: 20, maxSec: 30, label: 'Kiểm tra tiêu chuẩn · 20–30 giây' };
+}
+
+export function isCreditMatch(expectedAmountVnd: number, incomingAmount: number): boolean {
+  if (expectedAmountVnd === 0) {
+    return incomingAmount > 0;
+  }
+  return incomingAmount === expectedAmountVnd;
+}
+
+export type ModalWorkflowState = 'idle' | 'active' | 'success';
+
 export const ReceivingQRModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -121,6 +162,19 @@ export const ReceivingQRModal: React.FC<{
   const [activeAlert, setActiveAlert] = useState<LiveCreditAlert | null>(null);
   const [nowTick, setNowTick] = useState<number>(Date.now());
   const seenTxIdsRef = useRef<Set<string>>(new Set());
+
+  // Workflow FSM: idle -> active -> success
+  const [modalState, setModalState] = useState<ModalWorkflowState>('idle');
+  const [amountInput, setAmountInput] = useState<string>('');
+  const [targetAmountVnd, setTargetAmountVnd] = useState<number>(0);
+  const [boostRemainingSec, setBoostRemainingSec] = useState<number>(0);
+  const [matchedCredit, setMatchedCredit] = useState<LiveCreditAlert | null>(null);
+
+  const amountInputRef = useRef<HTMLInputElement>(null);
+  const modalStateRef = useRef<ModalWorkflowState>(modalState);
+  modalStateRef.current = modalState;
+  const targetAmountRef = useRef<number>(targetAmountVnd);
+  targetAmountRef.current = targetAmountVnd;
 
   const isPublic = isPublicViewerHost();
 
@@ -150,7 +204,7 @@ export const ReceivingQRModal: React.FC<{
     enabled: isOpen,
   });
 
-  // Authoritative system status (admin only; public viewer does not expose /status)
+  // Authoritative system status (admin only)
   const { data: systemStatus } = useQuery({
     queryKey: queryKeys.status,
     queryFn: fetchStatus,
@@ -195,15 +249,55 @@ export const ReceivingQRModal: React.FC<{
     seenTxIdsRef.current.clear();
     setPollError(null);
     setShowHealthDetails(false);
+    setModalState('idle');
+    setAmountInput('');
+    setTargetAmountVnd(0);
+    setBoostRemainingSec(0);
+    setMatchedCredit(null);
     void refetchTx();
+
+    // Auto-focus amount input on modal open
+    setTimeout(() => {
+      amountInputRef.current?.focus();
+    }, 100);
   }, [isOpen, refetchTx]);
 
-  // Second-by-second ticker for relative time displays ("vài giây trước")
+  // Second-by-second ticker for relative time and boost countdown
   useEffect(() => {
     if (!isOpen) return;
-    const interval = setInterval(() => setNowTick(Date.now()), 2000);
+    const interval = setInterval(() => {
+      setNowTick(Date.now());
+      setBoostRemainingSec((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
     return () => clearInterval(interval);
   }, [isOpen]);
+
+  // Trigger boost activation
+  const handleStartBoost = async (amountVnd: number) => {
+    setTargetAmountVnd(amountVnd);
+    setModalState('active');
+    setBoostRemainingSec(180);
+
+    try {
+      const status = await startPaymentActivity({ amountVnd });
+      if (status?.expiresIn) {
+        setBoostRemainingSec(status.expiresIn);
+      }
+    } catch (err) {
+      // Degraded: keep UI in active state even if boost RPC failed
+    }
+  };
+
+  const handleNextTransaction = () => {
+    setModalState('idle');
+    setAmountInput('');
+    setTargetAmountVnd(0);
+    setMatchedCredit(null);
+    setBoostRemainingSec(0);
+    setTimeout(() => {
+      amountInputRef.current?.focus();
+    }, 100);
+  };
 
   // Subscribe to live incoming payment events
   useEffect(() => {
@@ -243,6 +337,14 @@ export const ReceivingQRModal: React.FC<{
           setSessionCredits((prev) => [alertItem, ...prev]);
           setActiveAlert(alertItem);
           queryClient.invalidateQueries({ queryKey: queryKeys.transactions() });
+
+          // FSM: Match credit in ACTIVE state -> transition to SUCCESS
+          if (modalStateRef.current === 'active') {
+            if (isCreditMatch(targetAmountRef.current, creditVal)) {
+              setMatchedCredit(alertItem);
+              setModalState('success');
+            }
+          }
         }
       }
     );
@@ -316,18 +418,27 @@ export const ReceivingQRModal: React.FC<{
     };
   }, [isOpen, isPublic, subscribe]);
 
-  // ESC key listener
+  // Keyboard navigation: Escape to close, Enter to advance
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         onClose();
+      } else if (e.key === 'Enter') {
+        if (modalState === 'idle') {
+          e.preventDefault();
+          const amountVnd = parseAmountThousandsToVnd(amountInput);
+          void handleStartBoost(amountVnd);
+        } else if (modalState === 'success') {
+          e.preventDefault();
+          handleNextTransaction();
+        }
       }
     };
     if (isOpen) {
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, modalState, amountInput]);
 
   if (!isOpen) return null;
 
@@ -375,6 +486,13 @@ export const ReceivingQRModal: React.FC<{
     : null;
 
   const rawHistoryItems = txData?.items || [];
+  const previewAmountVnd = parseAmountThousandsToVnd(amountInput);
+  const boostPhase = computeBoostPhase(boostRemainingSec);
+
+  // Dynamic image URL: target amount or static
+  const qrImageSrc = targetAmountVnd > 0
+    ? getDynamicPaymentQRURL(targetAmountVnd)
+    : qrData?.imageURL || '/api/public/v1/payment-qr/image';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 md:p-6 bg-stone-950/70 backdrop-blur-xs animate-in fade-in duration-150">
@@ -412,7 +530,9 @@ export const ReceivingQRModal: React.FC<{
                   ? 'Kênh kiểm tra giao dịch đang có sự cố'
                   : hasWarning
                     ? 'Đang đồng bộ lại kết nối trực tiếp...'
-                    : 'Đang trực tiếp theo dõi biến động số dư tài khoản'}
+                    : modalState === 'active'
+                      ? `⚡ Đang tăng tốc kiểm tra (${boostRemainingSec}s)`
+                      : 'Đang trực tiếp theo dõi biến động số dư tài khoản'}
               </p>
             </div>
           </div>
@@ -426,7 +546,7 @@ export const ReceivingQRModal: React.FC<{
           </button>
         </div>
 
-        {/* Prominent Critical / Warning Alert Banner */}
+        {/* Critical Alerts */}
         {isInternetDown && (
           <div className="px-5 py-3 bg-rose-600 text-white text-xs flex items-center justify-between gap-3 shrink-0">
             <div className="flex items-center gap-2">
@@ -455,7 +575,7 @@ export const ReceivingQRModal: React.FC<{
             <button
               type="button"
               onClick={forceReconnect}
-              className="px-2.5 py-1 rounded-lg bg-white/20 hover:bg-white/30 text-white font-medium text-[11px] shrink-0"
+              className="px-2.5 py-1 rounded-lg bg-white/20 hover:bg-white/30 text-white font-medium text-[11px] shrink-0 cursor-pointer"
             >
               Thử lại ngay
             </button>
@@ -482,40 +602,19 @@ export const ReceivingQRModal: React.FC<{
               <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
               <div>
                 <strong className="font-bold">Kênh cập nhật realtime bị gián đoạn</strong>
-                <span className="text-amber-100 text-[11px] ml-2">
-                  Gateway vẫn hoạt động. Đang tự thiết lập lại kết nối SSE...
-                </span>
               </div>
             </div>
             <button
               type="button"
               onClick={forceReconnect}
-              className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white font-medium text-[11px] shrink-0"
+              className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white font-medium text-[11px] shrink-0 cursor-pointer"
             >
               Kết nối lại
             </button>
           </div>
         )}
 
-        {!hasCritical && !isSseStale && isAcbWarning && (
-          <div className="px-5 py-2.5 bg-amber-500 text-white text-xs flex items-center justify-between gap-3 shrink-0">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              <div>
-                <strong className="font-bold">
-                  {acbState === 'AUTH_STARTING'
-                    ? 'Đang khởi động phiên ACB...'
-                    : pollError?.message || 'Cảnh báo kết nối ACB'}
-                </strong>
-                <span className="text-amber-100 text-[11px] ml-2">
-                  Hệ thống đang tiếp tục chu kỳ kiểm tra tự động.
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Mobile Navigation Tabs (visible only on screens < md) */}
+        {/* Mobile Navigation Tabs */}
         <div className="flex md:hidden border-b border-stone-200 bg-stone-100/70 p-1 shrink-0">
           <button
             type="button"
@@ -549,41 +648,12 @@ export const ReceivingQRModal: React.FC<{
         {/* Modal Body - 2 Columns on Desktop, Tabbed on Mobile */}
         <div className="flex-1 overflow-y-auto">
           <div className="grid grid-cols-1 md:grid-cols-12 min-h-full">
-            {/* LEFT COLUMN: Large QR Code & Account Information (Col 5/12 on desktop) */}
+            {/* LEFT COLUMN: Interactive Workflow (IDLE / ACTIVE / SUCCESS) */}
             <div
               className={`md:col-span-5 p-5 sm:p-6 bg-stone-50/50 md:border-r border-stone-200/80 flex flex-col items-center justify-between text-center space-y-4 ${
                 activeTab === 'qr' ? 'block' : 'hidden md:flex'
               }`}
             >
-              {/* Mobile Realtime Alert Banner on QR screen */}
-              {activeAlert && (
-                <div className="w-full md:hidden bg-emerald-500 text-white rounded-2xl p-3.5 shadow-md border border-emerald-400 text-left animate-in slide-in-from-top-2 duration-200">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2.5">
-                      <CheckCircle2 className="w-5 h-5 text-white shrink-0 mt-0.5" />
-                      <div>
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-100">
-                          ĐÃ NHẬN TIỀN ({formatRelativeTime(activeAlert.timestamp)})
-                        </span>
-                        <p className="text-xl font-black text-white">
-                          +{formatVndCurrency(activeAlert.amount)}
-                        </p>
-                        <p className="text-xs text-emerald-100 line-clamp-1">
-                          {activeAlert.description}
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setActiveAlert(null)}
-                      className="text-white/80 hover:text-white p-1"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {/* Realtime Health Diagnostics Panel */}
               <div className="w-full max-w-[320px] rounded-2xl border border-stone-200 bg-white shadow-2xs overflow-hidden text-xs text-left transition">
                 <button
@@ -698,40 +768,113 @@ export const ReceivingQRModal: React.FC<{
                             </span>
                           </span>
                         </div>
-
-                        <div className="flex items-center justify-between">
-                          <span className="text-stone-500">Chế độ kiểm tra ACB</span>
-                          <span className="font-medium flex items-center gap-1 text-stone-800">
-                            {systemStatus?.acb?.scheduleMode
-                              ? `${systemStatus.acb.scheduleMode === 'REALTIME' ? 'Realtime' : 'Tiêu chuẩn'}${
-                                  systemStatus.acb.scheduleMinSeconds && systemStatus.acb.scheduleMaxSeconds
-                                    ? ` · ${systemStatus.acb.scheduleMinSeconds}–${systemStatus.acb.scheduleMaxSeconds}s`
-                                    : ''
-                                }`
-                              : 'Tự động định kỳ'}
-                          </span>
-                        </div>
                       </>
                     )}
                   </div>
                 )}
               </div>
 
-              {isConfigured ? (
-                <>
-                  {/* Huge High-Contrast QR Code Card */}
-                  <div className="w-full max-w-[320px] bg-white rounded-3xl p-4 sm:p-5 border border-stone-200 shadow-sm relative group">
+              {/* FSM STATE 1: IDLE - Amount Input Form */}
+              {modalState === 'idle' && (
+                <div className="w-full max-w-[320px] bg-white rounded-3xl p-5 sm:p-6 border border-stone-200 shadow-xs flex flex-col items-center text-center space-y-4 animate-in fade-in zoom-in-95 duration-150">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center border border-emerald-100">
+                    <Zap className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-stone-900 text-sm">Nhập số tiền nhận</h4>
+                    <p className="text-[11px] text-stone-500 mt-0.5">
+                      Đơn vị nghìn đồng (nhập 100 = 100.000 ₫)
+                    </p>
+                  </div>
+
+                  <div className="w-full space-y-2">
+                    <div className="relative">
+                      <input
+                        ref={amountInputRef}
+                        type="text"
+                        inputMode="numeric"
+                        autoFocus
+                        value={amountInput}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                          setAmountInput(val);
+                        }}
+                        placeholder="Ví dụ: 100"
+                        className="w-full px-4 py-3 rounded-xl border border-stone-300 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/20 text-center font-mono font-bold text-xl text-stone-900 placeholder:text-stone-300 outline-none transition"
+                      />
+                      <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-400">
+                        .000 ₫
+                      </span>
+                    </div>
+
+                    <div className="min-h-[20px] text-xs">
+                      {previewAmountVnd > 0 ? (
+                        <p className="font-black text-emerald-600 text-sm animate-in fade-in duration-100">
+                          = {formatVndCurrency(previewAmountVnd)}
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-stone-400">Chưa cố định số tiền</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="w-full space-y-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleStartBoost(previewAmountVnd)}
+                      className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm hover:shadow transition flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <QrCode className="w-4 h-4" />
+                      Tạo QR & bắt đầu nhận tiền
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleStartBoost(0)}
+                      className="w-full py-2 px-3 text-[11px] text-stone-500 hover:text-stone-800 font-medium transition cursor-pointer"
+                    >
+                      Hoặc: Nhận tiền không cố định số tiền (Enter)
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* FSM STATE 2: ACTIVE - Dynamic QR & Live Boost Countdown */}
+              {modalState === 'active' && isConfigured && (
+                <div className="w-full max-w-[320px] flex flex-col items-center space-y-3 animate-in fade-in zoom-in-95 duration-150">
+                  {/* Boost Phase Indicator Header */}
+                  <div className="w-full bg-amber-500 text-white rounded-2xl p-2.5 shadow-xs flex items-center justify-between text-xs px-3.5">
+                    <div className="flex items-center gap-1.5 font-bold">
+                      <Zap className="w-3.5 h-3.5 fill-white animate-pulse" />
+                      <span>{boostPhase.label}</span>
+                    </div>
+                    <span className="text-[11px] font-mono bg-amber-600/60 px-2 py-0.5 rounded-full font-bold">
+                      {boostRemainingSec}s
+                    </span>
+                  </div>
+
+                  {/* High-Contrast QR Code Card */}
+                  <div className="w-full bg-white rounded-3xl p-4 sm:p-5 border border-stone-200 shadow-sm relative group">
                     <div className="aspect-square bg-white flex items-center justify-center overflow-hidden rounded-2xl">
                       <img
-                        src={qrData.imageURL}
+                        src={qrImageSrc}
                         alt="Mã QR nhận tiền ACB"
                         className="w-full h-full object-contain"
                       />
                     </div>
+
+                    {targetAmountVnd > 0 && (
+                      <div className="mt-3 pt-2.5 border-t border-stone-100">
+                        <span className="text-[10px] text-stone-400 uppercase font-semibold">Số tiền cần nhận</span>
+                        <p className="text-xl font-black text-emerald-700 font-mono tracking-tight">
+                          {formatVndCurrency(targetAmountVnd)}
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   {/* Account Information with Copy Button */}
-                  <div className="w-full max-w-[320px] bg-white rounded-2xl p-4 border border-stone-200 shadow-2xs text-xs text-left space-y-2.5">
+                  <div className="w-full bg-white rounded-2xl p-3.5 border border-stone-200 shadow-2xs text-xs text-left space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-stone-500 flex items-center gap-1.5 font-medium">
                         <Building2 className="w-3.5 h-3.5 text-stone-400" />
@@ -775,11 +918,55 @@ export const ReceivingQRModal: React.FC<{
                     </div>
                   </div>
 
-                  <p className="text-[11px] text-stone-500 leading-relaxed max-w-xs">
-                    Quét bằng ứng dụng ngân hàng bất kỳ qua VietQR. Tiền vào được ghi nhận và hiển thị ngay trên màn hình này.
-                  </p>
-                </>
-              ) : (
+                  {/* Action / Reset Button */}
+                  <button
+                    type="button"
+                    onClick={handleNextTransaction}
+                    className="text-xs text-stone-500 hover:text-stone-800 flex items-center gap-1.5 py-1 px-3 rounded-lg hover:bg-stone-200/50 transition cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Đổi số tiền / Hủy phiên này
+                  </button>
+                </div>
+              )}
+
+              {/* FSM STATE 3: SUCCESS - Credit Arrival Confirmation */}
+              {modalState === 'success' && matchedCredit && (
+                <div className="w-full max-w-[320px] bg-emerald-500 text-white rounded-3xl p-6 shadow-xl border-2 border-emerald-400 text-center space-y-4 animate-in fade-in zoom-in-95 duration-200">
+                  <div className="w-16 h-16 rounded-full bg-white text-emerald-600 mx-auto flex items-center justify-center shadow-md animate-bounce">
+                    <CheckCircle2 className="w-10 h-10" />
+                  </div>
+
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-100">
+                      Giao dịch thành công
+                    </span>
+                    <p className="text-3xl font-black text-white mt-1">
+                      +{formatVndCurrency(matchedCredit.amount)}
+                    </p>
+                  </div>
+
+                  <div className="bg-emerald-600/60 rounded-2xl p-3 text-xs text-emerald-50 text-left space-y-1">
+                    <p className="font-medium truncate">
+                      Nội dung: <strong>{matchedCredit.description}</strong>
+                    </p>
+                    <p className="text-[11px] text-emerald-100 font-mono">
+                      Mã GD: #{matchedCredit.transactionNumber} • Lúc {matchedCredit.timeStr}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleNextTransaction}
+                    className="w-full py-3 px-4 rounded-xl bg-white text-emerald-800 font-bold text-xs shadow-md hover:bg-emerald-50 transition flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    Nhận giao dịch tiếp theo (Enter)
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {modalState === 'active' && !isConfigured && (
                 <div className="py-16 space-y-3 text-stone-400">
                   <QrCode className="w-16 h-16 mx-auto stroke-1" />
                   <p className="text-sm font-bold text-stone-700">Chưa thiết lập mã QR nhận tiền</p>
@@ -790,16 +977,15 @@ export const ReceivingQRModal: React.FC<{
               )}
             </div>
 
-            {/* RIGHT COLUMN: Live Monitor Status & Recent Transactions History (Col 7/12 on desktop) */}
+            {/* RIGHT COLUMN: Live Monitor Status & Recent Transactions History */}
             <div
               className={`md:col-span-7 p-5 sm:p-6 flex flex-col justify-between space-y-4 ${
                 activeTab === 'history' ? 'block' : 'hidden md:flex'
               }`}
             >
-              {/* TOP: Live Status & Celebration Banner */}
+              {/* TOP: Live Status & Active Alert Banner */}
               <div className="space-y-3 shrink-0">
-                {/* Active Session Arrival Banner */}
-                {activeAlert ? (
+                {activeAlert && (
                   <div className="bg-emerald-500 text-white rounded-2xl p-4 sm:p-5 shadow-lg border-2 border-emerald-400 text-left animate-in slide-in-from-top-3 fade-in duration-200 relative overflow-hidden">
                     <div className="absolute -right-6 -bottom-6 w-36 h-36 bg-white/10 rounded-full blur-2xl pointer-events-none" />
                     <div className="flex items-start justify-between gap-3 relative z-10">
@@ -843,8 +1029,10 @@ export const ReceivingQRModal: React.FC<{
                       </button>
                     </div>
                   </div>
-                ) : (
-                  /* Live Listening Waiting Card */
+                )}
+
+                {/* Waiting card when no active alert */}
+                {!activeAlert && (
                   <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200/80 flex items-center justify-between gap-3 text-left">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0">
@@ -852,120 +1040,57 @@ export const ReceivingQRModal: React.FC<{
                       </div>
                       <div>
                         <p className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
-                          Đang chờ khách hàng chuyển khoản...
+                          {modalState === 'active'
+                            ? `Đang tăng tốc kiểm tra: còn ${boostRemainingSec}s...`
+                            : 'Đang chờ khách hàng chuyển khoản...'}
                         </p>
                         <p className="text-[11px] text-stone-500 mt-0.5">
                           Phiên mở lúc {new Date(sessionOpenedAt).toLocaleTimeString('vi-VN')} • Tự động báo ngay khi tài khoản có tiền
                         </p>
                       </div>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => refetchTx()}
-                      disabled={loadingTx}
-                      className="p-2 text-stone-500 hover:text-stone-900 rounded-xl hover:bg-stone-200/50 transition cursor-pointer"
-                      title="Kiểm tra lại giao dịch"
-                    >
-                      <RefreshCw className={`w-4 h-4 ${loadingTx ? 'animate-spin' : ''}`} />
-                    </button>
                   </div>
                 )}
               </div>
 
-              {/* BOTTOM: Anti-Fraud Recent Transactions Feed */}
-              <div className="flex-1 flex flex-col min-h-0 space-y-2">
-                <div className="flex items-center justify-between text-xs pb-1 border-b border-stone-100">
-                  <div className="flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-stone-400" />
-                    <span className="font-bold text-stone-800">Lịch sử nhận tiền gần nhất hôm nay</span>
-                  </div>
-                  <span className="text-[11px] text-stone-400">
-                    Phân biệt rõ giao dịch mới vs cũ
+              {/* Transactions History List */}
+              <div className="flex-1 min-h-0 flex flex-col pt-2">
+                <div className="flex items-center justify-between pb-2 border-b border-stone-100">
+                  <h4 className="font-bold text-xs text-stone-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <Receipt className="w-3.5 h-3.5 text-stone-400" />
+                    Lịch sử nhận tiền hôm nay
+                  </h4>
+                  <span className="text-[11px] text-stone-400 font-medium">
+                    {rawHistoryItems.length} giao dịch
                   </span>
                 </div>
 
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[280px] sm:max-h-[320px]">
-                  {loadingTx ? (
-                    <div className="py-12 text-center text-xs text-stone-400">
-                      <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-stone-300" />
-                      Đang tải danh sách giao dịch...
-                    </div>
-                  ) : rawHistoryItems.length === 0 && sessionCredits.length === 0 ? (
-                    <div className="py-12 text-center text-xs text-stone-400 space-y-1">
-                      <Receipt className="w-8 h-8 mx-auto text-stone-300" />
-                      <p className="font-medium text-stone-600">Chưa có giao dịch nhận tiền nào hôm nay</p>
+                <div className="flex-1 overflow-y-auto divide-y divide-stone-100 mt-2">
+                  {rawHistoryItems.length === 0 ? (
+                    <div className="py-12 text-center text-stone-400 text-xs">
+                      Chưa có giao dịch nhận tiền nào hôm nay.
                     </div>
                   ) : (
-                    <>
-                      {/* 1. Transactions received in this active modal session */}
-                      {sessionCredits.map((item) => (
-                        <div
-                          key={`session-${item.id}`}
-                          className="p-3 rounded-2xl bg-emerald-50/80 border-2 border-emerald-400 shadow-2xs flex items-center justify-between gap-3 text-xs"
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                              <ArrowDownLeft className="w-4 h-4" />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-1.5">
-                                <span className="px-2 py-0.5 rounded-md font-black text-[10px] bg-emerald-600 text-white animate-pulse">
-                                  VỪA NHẬN TRONG PHIÊN NÀY
-                                </span>
-                                <span className="text-[11px] text-stone-500 font-medium">
-                                  {item.timeStr}
-                                </span>
-                              </div>
-                              <p className="font-medium text-stone-900 truncate max-w-xs mt-0.5">
-                                {item.description}
-                              </p>
-                              <span className="text-[10px] font-mono text-stone-400">
-                                #{item.transactionNumber}
-                              </span>
-                            </div>
-                          </div>
-                          <span className="font-black text-emerald-700 text-sm whitespace-nowrap">
-                            +{formatVndCurrency(item.amount)}
+                    rawHistoryItems.map((item) => (
+                      <div
+                        key={item.id}
+                        className="py-2.5 flex items-center justify-between text-xs hover:bg-stone-50/60 px-2 rounded-xl transition"
+                      >
+                        <div className="text-left space-y-0.5 min-w-0 pr-3">
+                          <p className="font-medium text-stone-800 truncate">
+                            {item.description || 'Chuyển khoản'}
+                          </p>
+                          <p className="text-[11px] text-stone-400 font-mono">
+                            {item.transactionDate || ''}
+                          </p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <span className="font-bold text-emerald-600 font-mono">
+                            +{formatVndCurrency(item.credit)}
                           </span>
                         </div>
-                      ))}
-
-                      {/* 2. Earlier transactions (received before opening this modal) */}
-                      {rawHistoryItems
-                        .filter((tx) => !sessionCredits.some((sc) => sc.id === tx.id))
-                        .map((tx) => (
-                          <div
-                            key={tx.id}
-                            className="p-3 rounded-2xl bg-stone-50/80 border border-stone-200/80 hover:bg-stone-100/70 transition flex items-center justify-between gap-3 text-xs"
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-8 h-8 rounded-xl bg-stone-200 text-stone-600 flex items-center justify-center shrink-0">
-                                <ArrowDownLeft className="w-4 h-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-stone-200 text-stone-600">
-                                    ĐÃ NHẬN TRƯỚC ĐÓ
-                                  </span>
-                                  <span className="text-[11px] text-stone-500 font-medium">
-                                    {tx.transactionDate || tx.firstSeenAt}
-                                  </span>
-                                </div>
-                                <p className="font-medium text-stone-800 truncate max-w-xs mt-0.5">
-                                  {tx.description || 'Không có nội dung'}
-                                </p>
-                                <span className="text-[10px] font-mono text-stone-400">
-                                  {tx.semanticKey}
-                                </span>
-                              </div>
-                            </div>
-                            <span className="font-bold text-stone-600 text-sm whitespace-nowrap">
-                              +{formatVndCurrency(Number(tx.credit || 0))}
-                            </span>
-                          </div>
-                        ))}
-                    </>
+                      </div>
+                    ))
                   )}
                 </div>
               </div>

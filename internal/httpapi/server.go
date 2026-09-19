@@ -75,10 +75,48 @@ type NotificationProviderReader interface {
 	NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error)
 }
 
+type PaymentBooster interface {
+	StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error)
+}
+
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	history map[string][]time.Time
+}
+
+func newIPRateLimiter() *ipRateLimiter {
+	return &ipRateLimiter{
+		history: make(map[string][]time.Time),
+	}
+}
+
+func (l *ipRateLimiter) allow(ip string, limit int, window time.Duration, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.history == nil {
+		l.history = make(map[string][]time.Time)
+	}
+	cutoff := now.Add(-window)
+	timestamps := l.history[ip]
+	valid := timestamps[:0]
+	for _, t := range timestamps {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	if len(valid) >= limit {
+		l.history[ip] = valid
+		return false
+	}
+	l.history[ip] = append(valid, now)
+	return true
+}
+
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
 	syncRequester     SyncRequester
+	paymentBooster    PaymentBooster
 	historyEnsurer    HistoryEnsurer
 	historyJobManager HistoryJobManager
 	monitorNotifier   MonitorNotifier
@@ -103,6 +141,8 @@ type Server struct {
 	lastTestPerCh     map[string]time.Time
 	started           time.Time
 	handler           http.Handler
+	boostLimiter      *ipRateLimiter
+	vietQRClient      *http.Client
 }
 
 func New(cfg config.Config, store *storage.Store) *Server {
@@ -133,6 +173,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		ttsClient:     ttsClientInstance,
 		instanceNonce: instanceNonce,
 		started:       time.Now().UTC(),
+		boostLimiter:  newIPRateLimiter(),
 	}
 	r := chi.NewRouter()
 	r.Use(requestID, s.platformHeaders, securityHeaders, recoverer)
@@ -146,11 +187,13 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/transactions/{id}", s.publicTransactionDetail)
 		api.Get("/payment-qr", s.publicPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
+		api.Post("/payment-activity", s.startPaymentActivity)
 		api.Get("/events", s.publicEventsStream)
 		api.Get("/events/stream", s.publicEventsStream)
 	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
+		api.Post("/payment-activity", s.startPaymentActivity)
 		api.Get("/status", s.status)
 		api.Get("/csrf", auth.CSRF)
 		api.Get("/telemetry", s.telemetry)
@@ -236,6 +279,16 @@ func (s *Server) EventHub() *eventhub.Hub {
 
 func (s *Server) WithSyncRequester(requester SyncRequester) *Server {
 	s.syncRequester = requester
+	return s
+}
+
+func (s *Server) WithPaymentBooster(booster PaymentBooster) *Server {
+	s.paymentBooster = booster
+	return s
+}
+
+func (s *Server) WithVietQRClient(client *http.Client) *Server {
+	s.vietQRClient = client
 	return s
 }
 
@@ -1562,6 +1615,61 @@ func (s *Server) getPaymentQR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPaymentQRImage(w http.ResponseWriter, r *http.Request) {
+	amountStr := strings.TrimSpace(r.URL.Query().Get("amount"))
+	if amountStr != "" {
+		amount, err := strconv.ParseInt(amountStr, 10, 64)
+		if err != nil || amount <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid amount parameter")
+			return
+		}
+
+		qr, err := s.store.GetPaymentQR(r.Context(), "")
+		if err != nil || qr == nil || qr.AccountNumber == "" || qr.AccountName == "" {
+			writeError(w, http.StatusNotFound, "payment qr not configured")
+			return
+		}
+
+		vietQRURL := fmt.Sprintf("https://img.vietqr.io/image/970416-%s-compact.png?amount=%d&accountName=%s",
+			url.PathEscape(qr.AccountNumber), amount, url.QueryEscape(qr.AccountName))
+
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, vietQRURL, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create upstream request")
+			return
+		}
+
+		client := s.vietQRClient
+		if client == nil {
+			client = &http.Client{Timeout: 10 * time.Second}
+		}
+		resp, err := client.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			writeError(w, http.StatusBadGateway, "failed to fetch dynamic QR from VietQR provider")
+			return
+		}
+		defer resp.Body.Close()
+
+		imgBytes, err := io.ReadAll(http.MaxBytesReader(w, resp.Body, 2*1024*1024))
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to read generated QR data")
+			return
+		}
+
+		contentType := http.DetectContentType(imgBytes)
+		if !strings.HasPrefix(contentType, "image/png") &&
+			!strings.HasPrefix(contentType, "image/jpeg") &&
+			!strings.HasPrefix(contentType, "image/webp") {
+			writeError(w, http.StatusBadGateway, "invalid image received from VietQR provider")
+			return
+		}
+
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(imgBytes)
+		return
+	}
+
 	qr, err := s.store.GetPaymentQR(r.Context(), "")
 	if err != nil || qr == nil || qr.ImagePath == "" {
 		writeError(w, http.StatusNotFound, "payment qr image not found")

@@ -65,8 +65,8 @@ var DefaultMonitorSettings = MonitorSettings{
 			EndTime:    "23:00",
 			Profile: Profile{
 				Mode:       ModeRealtime,
-				MinSeconds: 3,
-				MaxSeconds: 10,
+				MinSeconds: 20,
+				MaxSeconds: 30,
 			},
 		},
 	},

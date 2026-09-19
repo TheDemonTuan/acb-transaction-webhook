@@ -58,6 +58,21 @@ func (w *workerService) RequestSync(ctx context.Context) error {
 	return w.bankMonitor.RequestSync(ctx)
 }
 
+func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
+	if w.bankMonitor == nil {
+		return workerrpc.PaymentBoostStatus{}, fmt.Errorf("bank monitor not initialized")
+	}
+	st := w.bankMonitor.StartPaymentBoost(amount)
+	return workerrpc.PaymentBoostStatus{
+		Active:     st.Active,
+		AmountVnd:  st.AmountVnd,
+		ExpiresIn:  st.ExpiresIn,
+		Phase:      st.Phase,
+		MinSeconds: st.MinSeconds,
+		MaxSeconds: st.MaxSeconds,
+	}, nil
+}
+
 func (w *workerService) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
 	if w.store == nil {
 		return storage.HistorySyncJob{}, errors.New("storage not initialized")

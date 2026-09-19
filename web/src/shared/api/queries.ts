@@ -197,6 +197,39 @@ export const deletePaymentQR = async (): Promise<any> => {
   });
 };
 
+export interface PaymentBoostStatus {
+  active: boolean;
+  amountVnd: number;
+  expiresIn: number;
+  phase: number;
+  minSeconds: number;
+  maxSeconds: number;
+}
+
+export const startPaymentActivity = async (payload: { amountVnd: number }): Promise<PaymentBoostStatus> => {
+  const res = await fetch('/api/public/v1/payment-activity', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let msg = `HTTP error ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data?.error) msg = data.error;
+    } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+};
+
+export const getDynamicPaymentQRURL = (amountVnd?: number): string => {
+  if (amountVnd && amountVnd > 0) {
+    return `/api/public/v1/payment-qr/image?amount=${amountVnd}`;
+  }
+  return '/api/public/v1/payment-qr/image';
+};
+
 export const checkAuthStatus = async (attemptId: string): Promise<{
   status: string;
   error?: string;

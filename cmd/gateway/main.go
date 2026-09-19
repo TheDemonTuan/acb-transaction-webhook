@@ -332,6 +332,7 @@ func main() {
 		workerClient := workerrpc.NewClient(cfg.WorkerRPCURL, cfg.WorkerInternalToken)
 		server = httpapi.New(cfg, store).
 			WithSyncRequester(workerClient).
+			WithPaymentBooster(workerClient).
 			WithHistoryEnsurer(workerClient).
 			WithHistoryJobManager(workerClient).
 			WithMonitorNotifier(workerClient).
@@ -444,6 +445,7 @@ func main() {
 
 		server = httpapi.New(cfg, store).
 			WithSyncRequester(bankMonitor).
+			WithPaymentBooster(&monolithPaymentBooster{bankMonitor: bankMonitor}).
 			WithHistoryJobManager(&monolithHistoryJobManager{store: store, runner: historyRunner}).
 			WithMonitorNotifier(httpapi.MonitorNotifierFunc(func(ctx context.Context) error {
 				bankMonitor.NotifySettingsChanged()
@@ -525,6 +527,25 @@ func main() {
 type monolithHistoryJobManager struct {
 	store  *storage.Store
 	runner *monitor.HistoryJobRunner
+}
+
+type monolithPaymentBooster struct {
+	bankMonitor *monitor.Monitor
+}
+
+func (m *monolithPaymentBooster) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
+	if m.bankMonitor == nil {
+		return workerrpc.PaymentBoostStatus{}, errors.New("bank monitor not initialized")
+	}
+	st := m.bankMonitor.StartPaymentBoost(amount)
+	return workerrpc.PaymentBoostStatus{
+		Active:     st.Active,
+		AmountVnd:  st.AmountVnd,
+		ExpiresIn:  st.ExpiresIn,
+		Phase:      st.Phase,
+		MinSeconds: st.MinSeconds,
+		MaxSeconds: st.MaxSeconds,
+	}, nil
 }
 
 func (m *monolithHistoryJobManager) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {

@@ -83,6 +83,19 @@ type VerifySessionRequest struct {
 	Password   []byte `json:"password"`
 }
 
+type PaymentBoostRequest struct {
+	AmountVnd int64 `json:"amountVnd"`
+}
+
+type PaymentBoostStatus struct {
+	Active     bool  `json:"active"`
+	AmountVnd  int64 `json:"amountVnd"`
+	ExpiresIn  int   `json:"expiresIn"`
+	Phase      int   `json:"phase"`
+	MinSeconds int   `json:"minSeconds"`
+	MaxSeconds int   `json:"maxSeconds"`
+}
+
 type TestNotificationRequest struct {
 	ChannelID string `json:"channelId"`
 }
@@ -144,6 +157,7 @@ type WorkerHandler interface {
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
+	StartPaymentBoost(ctx context.Context, amount int64) (PaymentBoostStatus, error)
 }
 
 type ServerOption func(*Server)
@@ -671,6 +685,35 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
 	}))
 
+	s.mux.HandleFunc("/rpc/payment-boost", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.checkWorkAllowed(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     err.Error(),
+				"code":      "WORKER_DRAINING",
+				"requestId": reqID,
+			})
+			return
+		}
+		var req PaymentBoostRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "bad request", reqID)
+				return
+			}
+		}
+		status, err := s.handler.StartPaymentBoost(r.Context(), req.AmountVnd)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	}))
+
 	s.mux.HandleFunc("/rpc/history-jobs", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
@@ -938,6 +981,14 @@ func (c *Client) RequestSync(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return c.post(callCtx, "/rpc/request-sync", nil, nil)
+}
+
+func (c *Client) StartPaymentBoost(ctx context.Context, amount int64) (PaymentBoostStatus, error) {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var resp PaymentBoostStatus
+	err := c.post(callCtx, "/rpc/payment-boost", PaymentBoostRequest{AmountVnd: amount}, &resp)
+	return resp, err
 }
 
 func (c *Client) Drain(ctx context.Context) error {
