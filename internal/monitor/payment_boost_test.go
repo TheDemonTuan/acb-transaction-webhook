@@ -26,7 +26,7 @@ func TestPaymentBoost_PhasesAndExpiration(t *testing.T) {
 
 	// 2. Start boost with 100,000 VND
 	status = m.StartPaymentBoost(100000)
-	if !status.Active || status.AmountVnd != 100000 || status.Phase != 1 || status.MinSeconds != 2 || status.MaxSeconds != 4 {
+	if !status.Active || status.AmountVnd != 100000 || status.Phase != 1 || status.MinSeconds != 1 || status.MaxSeconds != 3 || status.SessionID == "" {
 		t.Fatalf("unexpected initial boost status: %+v", status)
 	}
 	if status.ExpiresIn != 180 {
@@ -41,10 +41,10 @@ func TestPaymentBoost_PhasesAndExpiration(t *testing.T) {
 		t.Fatal("expected wake signal in boostCh")
 	}
 
-	// 3. Advance to 59s -> still Phase 1 (2-4s)
+	// 3. Advance to 59s -> still Phase 1 (1-3s)
 	currentTime = baseTime.Add(59 * time.Second)
 	status = m.PaymentBoostStatus()
-	if !status.Active || status.Phase != 1 || status.MinSeconds != 2 || status.MaxSeconds != 4 {
+	if !status.Active || status.Phase != 1 || status.MinSeconds != 1 || status.MaxSeconds != 3 {
 		t.Fatalf("expected Phase 1 at 59s, got %+v", status)
 	}
 
@@ -173,8 +173,41 @@ func TestPaymentBoost_ManualStop(t *testing.T) {
 	if !m.PaymentBoostStatus().Active {
 		t.Fatal("expected active boost")
 	}
-	m.StopPaymentBoost()
+	m.StopPaymentBoost("")
 	if m.PaymentBoostStatus().Active {
 		t.Fatal("expected inactive boost after StopPaymentBoost")
+	}
+}
+
+func TestPaymentBoost_SessionScopedStop(t *testing.T) {
+	m := &Monitor{
+		now:     time.Now,
+		boostCh: make(chan struct{}, 1),
+	}
+	st1 := m.StartPaymentBoost(50000)
+	if !st1.Active || st1.SessionID == "" {
+		t.Fatalf("expected active boost with session ID, got %+v", st1)
+	}
+
+	// Another session ID tries to stop -> ignored
+	m.StopPaymentBoost("wrong-session-id")
+	if !m.PaymentBoostStatus().Active {
+		t.Fatal("expected boost to remain active when stopped with mismatched session ID")
+	}
+
+	// Correct session ID stops boost
+	m.StopPaymentBoost(st1.SessionID)
+	if m.PaymentBoostStatus().Active {
+		t.Fatal("expected boost to stop when stopped with matching session ID")
+	}
+
+	// Unconditional stop (empty session ID) also stops boost
+	st2 := m.StartPaymentBoost(60000)
+	if !st2.Active {
+		t.Fatal("expected active boost")
+	}
+	m.StopPaymentBoost("")
+	if m.PaymentBoostStatus().Active {
+		t.Fatal("expected boost to stop with empty session ID")
 	}
 }

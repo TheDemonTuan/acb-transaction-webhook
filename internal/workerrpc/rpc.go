@@ -87,13 +87,18 @@ type PaymentBoostRequest struct {
 	AmountVnd int64 `json:"amountVnd"`
 }
 
+type PaymentBoostStopRequest struct {
+	SessionID string `json:"sessionId,omitempty"`
+}
+
 type PaymentBoostStatus struct {
-	Active     bool  `json:"active"`
-	AmountVnd  int64 `json:"amountVnd"`
-	ExpiresIn  int   `json:"expiresIn"`
-	Phase      int   `json:"phase"`
-	MinSeconds int   `json:"minSeconds"`
-	MaxSeconds int   `json:"maxSeconds"`
+	Active     bool   `json:"active"`
+	SessionID  string `json:"sessionId,omitempty"`
+	AmountVnd  int64  `json:"amountVnd"`
+	ExpiresIn  int    `json:"expiresIn"`
+	Phase      int    `json:"phase"`
+	MinSeconds int    `json:"minSeconds"`
+	MaxSeconds int    `json:"maxSeconds"`
 }
 
 type TestNotificationRequest struct {
@@ -158,7 +163,7 @@ type WorkerHandler interface {
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
 	StartPaymentBoost(ctx context.Context, amount int64) (PaymentBoostStatus, error)
-	StopPaymentBoost(ctx context.Context) error
+	StopPaymentBoost(ctx context.Context, sessionID string) error
 }
 
 type ServerOption func(*Server)
@@ -721,7 +726,11 @@ func (s *Server) routes() {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
 			return
 		}
-		if err := s.handler.StopPaymentBoost(r.Context()); err != nil {
+		var req PaymentBoostStopRequest
+		if r.Body != nil && r.ContentLength != 0 {
+			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req)
+		}
+		if err := s.handler.StopPaymentBoost(r.Context(), req.SessionID); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
 			return
 		}
@@ -1005,10 +1014,14 @@ func (c *Client) StartPaymentBoost(ctx context.Context, amount int64) (PaymentBo
 	return resp, err
 }
 
-func (c *Client) StopPaymentBoost(ctx context.Context) error {
+func (c *Client) StopPaymentBoost(ctx context.Context, sessionID string) error {
 	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return c.post(callCtx, "/rpc/payment-boost/stop", nil, nil)
+	var body any
+	if sessionID != "" {
+		body = PaymentBoostStopRequest{SessionID: sessionID}
+	}
+	return c.post(callCtx, "/rpc/payment-boost/stop", body, nil)
 }
 
 func (c *Client) Drain(ctx context.Context) error {

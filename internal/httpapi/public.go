@@ -201,12 +201,28 @@ func (s *Server) startPaymentActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+type paymentActivityStopRequest struct {
+	SessionID string `json:"sessionId"`
+}
+
 func (s *Server) stopPaymentActivity(w http.ResponseWriter, r *http.Request) {
 	if s.paymentBooster == nil {
 		writeError(w, http.StatusServiceUnavailable, "payment booster unavailable")
 		return
 	}
-	if err := s.paymentBooster.StopPaymentBoost(r.Context()); err != nil {
+	var sessionID string
+	if q := r.URL.Query().Get("sessionId"); q != "" {
+		sessionID = q
+	} else if q := r.URL.Query().Get("session_id"); q != "" {
+		sessionID = q
+	}
+	if sessionID == "" && r.Body != nil && r.ContentLength != 0 {
+		var req paymentActivityStopRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err == nil {
+			sessionID = req.SessionID
+		}
+	}
+	if err := s.paymentBooster.StopPaymentBoost(r.Context(), sessionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to stop payment boost: "+err.Error())
 		return
 	}
