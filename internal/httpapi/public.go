@@ -200,3 +200,16 @@ func (s *Server) startPaymentActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, status)
 }
+
+func (s *Server) stopPaymentActivity(w http.ResponseWriter, r *http.Request) {
+	if s.paymentBooster == nil {
+		writeError(w, http.StatusServiceUnavailable, "payment booster unavailable")
+		return
+	}
+	if err := s.paymentBooster.StopPaymentBoost(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to stop payment boost: "+err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}

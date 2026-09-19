@@ -77,6 +77,7 @@ type NotificationProviderReader interface {
 
 type PaymentBooster interface {
 	StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error)
+	StopPaymentBoost(ctx context.Context) error
 }
 
 type ipRateLimiter struct {
@@ -188,12 +189,16 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Get("/payment-qr", s.publicPaymentQR)
 		api.Get("/payment-qr/image", s.getPaymentQRImage)
 		api.Post("/payment-activity", s.startPaymentActivity)
+		api.Delete("/payment-activity", s.stopPaymentActivity)
+		api.Post("/payment-activity/stop", s.stopPaymentActivity)
 		api.Get("/events", s.publicEventsStream)
 		api.Get("/events/stream", s.publicEventsStream)
 	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
 		api.Post("/payment-activity", s.startPaymentActivity)
+		api.Delete("/payment-activity", s.stopPaymentActivity)
+		api.Post("/payment-activity/stop", s.stopPaymentActivity)
 		api.Get("/status", s.status)
 		api.Get("/csrf", auth.CSRF)
 		api.Get("/telemetry", s.telemetry)

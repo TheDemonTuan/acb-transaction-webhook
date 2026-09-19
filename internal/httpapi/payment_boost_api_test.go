@@ -19,6 +19,7 @@ import (
 type mockPaymentBooster struct {
 	calledWithAmount int64
 	callCount        int
+	stopCallCount    int
 	err              error
 }
 
@@ -36,6 +37,11 @@ func (m *mockPaymentBooster) StartPaymentBoost(ctx context.Context, amount int64
 		MinSeconds: 2,
 		MaxSeconds: 4,
 	}, nil
+}
+
+func (m *mockPaymentBooster) StopPaymentBoost(ctx context.Context) error {
+	m.stopCallCount++
+	return m.err
 }
 
 type roundTripFunc func(req *http.Request) (*http.Response, error)
@@ -231,5 +237,44 @@ func TestDynamicVietQRImage_Streaming(t *testing.T) {
 
 	if recInvalid.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid amount, got %d: %s", recInvalid.Code, recInvalid.Body.String())
+	}
+}
+
+func TestPaymentActivity_StopEndpoints(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "api_boost_stop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	booster := &mockPaymentBooster{}
+	cfg := config.Config{
+		DatabasePath: filepath.Join(t.TempDir(), "api_boost_stop.db"),
+	}
+	srv := New(cfg, store).WithPaymentBooster(booster)
+
+	// 1. DELETE /api/public/v1/payment-activity
+	reqDel := httptest.NewRequest(http.MethodDelete, "/api/public/v1/payment-activity", nil)
+	recDel := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recDel, reqDel)
+
+	if recDel.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recDel.Code, recDel.Body.String())
+	}
+	if booster.stopCallCount != 1 {
+		t.Fatalf("expected stopCallCount 1, got %d", booster.stopCallCount)
+	}
+
+	// 2. POST /api/public/v1/payment-activity/stop
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity/stop", nil)
+	recPost := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recPost, reqPost)
+
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recPost.Code, recPost.Body.String())
+	}
+	if booster.stopCallCount != 2 {
+		t.Fatalf("expected stopCallCount 2, got %d", booster.stopCallCount)
 	}
 }

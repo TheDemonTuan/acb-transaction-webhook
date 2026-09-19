@@ -62,6 +62,15 @@ func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (wo
 	if w.bankMonitor == nil {
 		return workerrpc.PaymentBoostStatus{}, fmt.Errorf("bank monitor not initialized")
 	}
+	if w.store != nil {
+		conn, err := w.store.Connection(ctx)
+		if err != nil {
+			return workerrpc.PaymentBoostStatus{}, fmt.Errorf("lookup connection: %w", err)
+		}
+		if conn.State != "MONITORING" {
+			return workerrpc.PaymentBoostStatus{}, errors.New("bank connection is not in MONITORING state")
+		}
+	}
 	st := w.bankMonitor.StartPaymentBoost(amount)
 	return workerrpc.PaymentBoostStatus{
 		Active:     st.Active,
@@ -71,6 +80,14 @@ func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (wo
 		MinSeconds: st.MinSeconds,
 		MaxSeconds: st.MaxSeconds,
 	}, nil
+}
+
+func (w *workerService) StopPaymentBoost(ctx context.Context) error {
+	if w.bankMonitor == nil {
+		return fmt.Errorf("bank monitor not initialized")
+	}
+	w.bankMonitor.StopPaymentBoost()
+	return nil
 }
 
 func (w *workerService) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {

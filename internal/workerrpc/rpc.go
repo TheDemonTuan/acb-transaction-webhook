@@ -158,6 +158,7 @@ type WorkerHandler interface {
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
 	StartPaymentBoost(ctx context.Context, amount int64) (PaymentBoostStatus, error)
+	StopPaymentBoost(ctx context.Context) error
 }
 
 type ServerOption func(*Server)
@@ -714,6 +715,19 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, status)
 	}))
 
+	s.mux.HandleFunc("/rpc/payment-boost/stop", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		if err := s.handler.StopPaymentBoost(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+
 	s.mux.HandleFunc("/rpc/history-jobs", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
@@ -989,6 +1003,12 @@ func (c *Client) StartPaymentBoost(ctx context.Context, amount int64) (PaymentBo
 	var resp PaymentBoostStatus
 	err := c.post(callCtx, "/rpc/payment-boost", PaymentBoostRequest{AmountVnd: amount}, &resp)
 	return resp, err
+}
+
+func (c *Client) StopPaymentBoost(ctx context.Context) error {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.post(callCtx, "/rpc/payment-boost/stop", nil, nil)
 }
 
 func (c *Client) Drain(ctx context.Context) error {
