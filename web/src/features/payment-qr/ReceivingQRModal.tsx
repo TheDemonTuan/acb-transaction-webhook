@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import {
   fetchPaymentQR,
+  fetchPaymentReadiness,
   fetchStatus,
   fetchTransactions,
   getDynamicPaymentQRURL,
@@ -58,6 +59,7 @@ export interface QRHealthParams {
   sseStatus: string;
   acbState: string;
   pollError: { type: 'warning' | 'critical'; message: string } | null;
+  publicReadiness?: { ready: boolean; status: string } | null;
 }
 
 export interface QRHealthResult {
@@ -78,28 +80,46 @@ export function computeQRHealthState({
   sseStatus,
   acbState,
   pollError,
+  publicReadiness,
 }: QRHealthParams): QRHealthResult {
   const isInternetDown = !networkOnline;
   const isGatewayDown = networkOnline && !serverReachable;
   const isSseBroken = sseStatus === 'DISCONNECTED';
   const isSseStale = sseStatus === 'STALE' || sseStatus === 'RECONNECTING';
 
-  const isAcbCritical =
-    !isPublic &&
-    (acbState === 'AUTH_REQUIRED' ||
+  let isAcbCritical = false;
+  let isAcbWarning = false;
+
+  if (isPublic) {
+    if (publicReadiness) {
+      if (!publicReadiness.ready) {
+        if (
+          publicReadiness.status === 'AUTH_STARTING' ||
+          publicReadiness.status === 'IN_PROGRESS' ||
+          publicReadiness.status === 'PAUSED'
+        ) {
+          isAcbWarning = true;
+        } else {
+          isAcbCritical = true;
+        }
+      }
+    }
+  } else {
+    isAcbCritical =
+      acbState === 'AUTH_REQUIRED' ||
       acbState === 'DISCONNECTED' ||
       acbState === 'UNCONFIGURED' ||
       acbState === 'FAILED' ||
       acbState === 'EXPIRED' ||
-      pollError?.type === 'critical');
+      pollError?.type === 'critical';
 
-  const isAcbWarning =
-    !isPublic &&
-    !isAcbCritical &&
-    (acbState === 'AUTH_STARTING' ||
-      acbState === 'PAUSED' ||
-      acbState === 'IN_PROGRESS' ||
-      pollError?.type === 'warning');
+    isAcbWarning =
+      !isAcbCritical &&
+      (acbState === 'AUTH_STARTING' ||
+        acbState === 'PAUSED' ||
+        acbState === 'IN_PROGRESS' ||
+        pollError?.type === 'warning');
+  }
 
   const hasCritical = isInternetDown || isGatewayDown || isAcbCritical || isSseBroken;
   const hasWarning = !hasCritical && (isSseStale || isAcbWarning);
@@ -216,6 +236,14 @@ export const ReceivingQRModal: React.FC<{
     enabled: isOpen && !isPublic,
   });
 
+  // Public sanitized payment readiness query
+  const { data: paymentReadiness } = useQuery({
+    queryKey: queryKeys.paymentReadiness,
+    queryFn: fetchPaymentReadiness,
+    enabled: isOpen && isPublic,
+    refetchInterval: 3000,
+  });
+
   // Load recent credit transactions for today
   const {
     data: txData,
@@ -243,6 +271,14 @@ export const ReceivingQRModal: React.FC<{
       }
     }
   }, [isOpen, systemStatus]);
+
+  // Hydrate ACB state from public payment readiness when in public mode
+  useEffect(() => {
+    if (!isOpen || !isPublic || !paymentReadiness) return;
+    if (paymentReadiness.status) {
+      setAcbState(paymentReadiness.status);
+    }
+  }, [isOpen, isPublic, paymentReadiness]);
 
   // Reset state when modal opens
   useEffect(() => {
@@ -280,9 +316,29 @@ export const ReceivingQRModal: React.FC<{
     return () => clearInterval(interval);
   }, [isOpen]);
 
+  // Compute layered health state
+  const {
+    isInternetDown,
+    isGatewayDown,
+    isSseBroken,
+    isSseStale,
+    isAcbCritical,
+    isAcbWarning,
+    hasCritical,
+    hasWarning,
+  } = computeQRHealthState({
+    isPublic,
+    networkOnline,
+    serverReachable,
+    sseStatus,
+    acbState,
+    pollError,
+    publicReadiness: paymentReadiness,
+  });
+
   // Trigger boost activation
   const handleStartBoost = async (amountVnd: number) => {
-    if (isStartingBoostRef.current) return;
+    if (isStartingBoostRef.current || isAcbCritical) return;
     isStartingBoostRef.current = true;
     setIsStartingBoost(true);
     setTargetAmountVnd(amountVnd);
@@ -295,22 +351,40 @@ export const ReceivingQRModal: React.FC<{
         boostSessionIdRef.current = status.sessionId || null;
         setBoostRemainingSec(status.expiresIn || 180);
         setBoostDegraded(false);
+        setModalState('active');
       } else {
         setBoostSessionId(null);
         boostSessionIdRef.current = null;
         setBoostRemainingSec(0);
         setBoostDegraded(true);
+        setModalState('active');
       }
-    } catch {
-      // Degraded: keep UI moving to QR view, but indicate standard polling
-      setBoostSessionId(null);
-      boostSessionIdRef.current = null;
-      setBoostRemainingSec(0);
-      setBoostDegraded(true);
+    } catch (err: unknown) {
+      const errorObj = err as { code?: string; status?: number; message?: string } | undefined;
+      const isPaymentNotReady =
+        errorObj?.code === 'PAYMENT_NOT_READY' ||
+        errorObj?.status === 409 ||
+        (typeof errorObj?.message === 'string' &&
+          (errorObj.message.includes('MONITORING') || errorObj.message.includes('PAYMENT_NOT_READY')));
+
+      if (isPaymentNotReady) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.paymentReadiness });
+        setBoostSessionId(null);
+        boostSessionIdRef.current = null;
+        setBoostRemainingSec(0);
+        setBoostDegraded(false);
+        setModalState('idle');
+      } else {
+        // Degraded: keep UI moving to QR view, but indicate standard polling
+        setBoostSessionId(null);
+        boostSessionIdRef.current = null;
+        setBoostRemainingSec(0);
+        setBoostDegraded(true);
+        setModalState('active');
+      }
     } finally {
       isStartingBoostRef.current = false;
       setIsStartingBoost(false);
-      setModalState('active');
     }
   };
 
@@ -475,7 +549,7 @@ export const ReceivingQRModal: React.FC<{
       } else if (e.key === 'Enter') {
         if (modalState === 'idle') {
           e.preventDefault();
-          if (isStartingBoostRef.current) return;
+          if (isStartingBoostRef.current || isAcbCritical) return;
           const amountVnd = parseAmountThousandsToVnd(amountInput);
           void handleStartBoost(amountVnd);
         }
@@ -485,7 +559,7 @@ export const ReceivingQRModal: React.FC<{
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, handleClose, modalState, amountInput]);
+  }, [isOpen, handleClose, modalState, amountInput, isAcbCritical]);
 
   if (!isOpen) return null;
 
@@ -505,25 +579,6 @@ export const ReceivingQRModal: React.FC<{
     if (diffMin < 60) return `${diffMin} phút trước`;
     return `${Math.floor(diffMin / 60)} giờ trước`;
   };
-
-  // Compute layered health state
-  const {
-    isInternetDown,
-    isGatewayDown,
-    isSseBroken,
-    isSseStale,
-    isAcbCritical,
-    isAcbWarning,
-    hasCritical,
-    hasWarning,
-  } = computeQRHealthState({
-    isPublic,
-    networkOnline,
-    serverReachable,
-    sseStatus,
-    acbState,
-    pollError,
-  });
 
   const heartbeatSec = lastHeartbeatAt
     ? Math.max(0, Math.floor((nowTick - lastHeartbeatAt.getTime()) / 1000))
@@ -574,7 +629,7 @@ export const ReceivingQRModal: React.FC<{
                   }`}
                 />
                 {hasCritical
-                  ? 'Kênh kiểm tra giao dịch đang có sự cố'
+                  ? (isAcbCritical ? 'Phiên ACB cần đăng nhập lại' : 'Kênh kiểm tra giao dịch đang có sự cố')
                   : hasWarning
                     ? 'Đang đồng bộ lại kết nối trực tiếp...'
                     : modalState === 'active'
@@ -720,7 +775,7 @@ export const ReceivingQRModal: React.FC<{
                     />
                     <span className="font-bold text-stone-800 truncate">
                       {hasCritical
-                        ? 'Không thể xác nhận tự động'
+                        ? (isAcbCritical ? 'Phiên ACB cần đăng nhập lại' : 'Không thể xác nhận tự động')
                         : hasWarning
                           ? 'Đang phục hồi kênh trực tiếp'
                           : 'Hệ thống sẵn sàng nhận tiền'}
@@ -736,7 +791,7 @@ export const ReceivingQRModal: React.FC<{
                   </div>
                 </button>
 
-                {(showHealthDetails || hasCritical || hasWarning) && (
+                {showHealthDetails && (
                   <div className="px-3 pb-3 pt-1 border-t border-stone-100 space-y-1.5 text-[11px]">
                     <div className="flex items-center justify-between">
                       <span className="text-stone-500">Gateway</span>
@@ -774,7 +829,19 @@ export const ReceivingQRModal: React.FC<{
                       </span>
                     </div>
 
-                    {!isPublic && (
+                    {isPublic ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-stone-500">Trạng thái nhận tiền</span>
+                        <span className="font-medium flex items-center gap-1">
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${!isAcbCritical ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                          />
+                          <span className={!isAcbCritical ? 'text-stone-800' : 'text-rose-600 font-bold'}>
+                            {isAcbCritical ? 'Cần đăng nhập lại' : isAcbWarning ? 'Đang kết nối...' : 'Sẵn sàng'}
+                          </span>
+                        </span>
+                      </div>
+                    ) : (
                       <>
                         <div className="flex items-center justify-between">
                           <span className="text-stone-500">Phiên ACB</span>
@@ -868,22 +935,32 @@ export const ReceivingQRModal: React.FC<{
                   <div className="w-full space-y-2 pt-1">
                     <button
                       type="button"
-                      disabled={isStartingBoost}
+                      disabled={isStartingBoost || isAcbCritical}
                       onClick={() => handleStartBoost(previewAmountVnd)}
-                      className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-bold text-xs shadow-sm hover:shadow transition flex items-center justify-center gap-2 cursor-pointer"
+                      className={`w-full py-3 px-4 rounded-xl font-bold text-xs shadow-sm transition flex items-center justify-center gap-2 ${
+                        isAcbCritical
+                          ? 'bg-stone-200 text-stone-400 cursor-not-allowed border border-stone-300'
+                          : 'bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white hover:shadow cursor-pointer'
+                      }`}
                     >
                       <QrCode className="w-4 h-4" />
-                      {isStartingBoost ? 'Đang kích hoạt...' : 'Tạo QR & bắt đầu nhận tiền'}
+                      {isAcbCritical
+                        ? 'Không thể nhận tiền lúc này'
+                        : isStartingBoost
+                          ? 'Đang kích hoạt...'
+                          : 'Tạo QR & bắt đầu nhận tiền'}
                     </button>
 
-                    <button
-                      type="button"
-                      disabled={isStartingBoost}
-                      onClick={() => handleStartBoost(0)}
-                      className="w-full py-2 px-3 text-[11px] text-stone-500 hover:text-stone-800 disabled:opacity-60 font-medium transition cursor-pointer"
-                    >
-                      Hoặc: Nhận tiền không cố định số tiền (Enter)
-                    </button>
+                    {!isAcbCritical && (
+                      <button
+                        type="button"
+                        disabled={isStartingBoost}
+                        onClick={() => handleStartBoost(0)}
+                        className="w-full py-2 px-3 text-[11px] text-stone-500 hover:text-stone-800 disabled:opacity-60 font-medium transition cursor-pointer"
+                      >
+                        Hoặc: Nhận tiền không cố định số tiền (Enter)
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -892,12 +969,7 @@ export const ReceivingQRModal: React.FC<{
               {modalState === 'active' && isConfigured && (
                 <div className="w-full max-w-[320px] flex flex-col items-center space-y-3 animate-in fade-in zoom-in-95 duration-150">
                   {/* Boost Phase Indicator Header */}
-                  {boostDegraded ? (
-                    <div className="w-full bg-stone-100 border border-stone-200 text-stone-700 rounded-2xl p-2.5 shadow-2xs flex items-center gap-2 text-xs px-3.5">
-                      <AlertCircle className="w-4 h-4 text-stone-500 shrink-0" />
-                      <span className="font-medium">Không thể tăng tốc, đang kiểm tra theo chu kỳ bình thường</span>
-                    </div>
-                  ) : boostRemainingSec > 0 ? (
+                  {boostRemainingSec > 0 ? (
                     <div className="w-full bg-amber-500 text-white rounded-2xl p-2.5 shadow-xs flex items-center justify-between text-xs px-3.5">
                       <div className="flex items-center gap-1.5 font-bold">
                         <Zap className="w-3.5 h-3.5 fill-white animate-pulse" />

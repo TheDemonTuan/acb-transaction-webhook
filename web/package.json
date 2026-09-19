@@ -7,6 +7,7 @@
     "dev": "bunx --bun vite --host 127.0.0.1",
     "build": "bunx --bun tsc --noEmit && bunx --bun vite build",
     "test": "vitest run",
+    "test:run": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test"
   },

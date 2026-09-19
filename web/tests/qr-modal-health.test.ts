@@ -93,6 +93,55 @@ describe('QR Modal Health State Computation', () => {
       expect(resStale.hasWarning).toBe(true);
       expect(resStale.isSseStale).toBe(true);
     });
+
+    it('triggers critical when public readiness reports AUTH_REQUIRED', () => {
+      const res = computeQRHealthState({
+        isPublic: true,
+        networkOnline: true,
+        serverReachable: true,
+        sseStatus: 'CONNECTED',
+        acbState: 'UNKNOWN',
+        pollError: null,
+        publicReadiness: { ready: false, status: 'AUTH_REQUIRED' },
+      });
+
+      expect(res.isAcbCritical).toBe(true);
+      expect(res.hasCritical).toBe(true);
+      expect(res.hasWarning).toBe(false);
+    });
+
+    it('evaluates to healthy when public readiness reports READY', () => {
+      const res = computeQRHealthState({
+        isPublic: true,
+        networkOnline: true,
+        serverReachable: true,
+        sseStatus: 'CONNECTED',
+        acbState: 'UNKNOWN',
+        pollError: null,
+        publicReadiness: { ready: true, status: 'READY' },
+      });
+
+      expect(res.isAcbCritical).toBe(false);
+      expect(res.hasCritical).toBe(false);
+      expect(res.hasWarning).toBe(false);
+    });
+
+    it('triggers warning when public readiness reports AUTH_STARTING', () => {
+      const res = computeQRHealthState({
+        isPublic: true,
+        networkOnline: true,
+        serverReachable: true,
+        sseStatus: 'CONNECTED',
+        acbState: 'UNKNOWN',
+        pollError: null,
+        publicReadiness: { ready: false, status: 'AUTH_STARTING' },
+      });
+
+      expect(res.isAcbCritical).toBe(false);
+      expect(res.isAcbWarning).toBe(true);
+      expect(res.hasCritical).toBe(false);
+      expect(res.hasWarning).toBe(true);
+    });
   });
 
   describe('Admin View (isPublic = false)', () => {

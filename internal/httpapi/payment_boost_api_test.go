@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -286,5 +287,155 @@ func TestPaymentActivity_StopEndpoints(t *testing.T) {
 	}
 	if booster.calledWithSessionID != "sess-post-xyz" {
 		t.Fatalf("expected calledWithSessionID sess-post-xyz, got %s", booster.calledWithSessionID)
+	}
+}
+
+func TestPublicPaymentReadiness(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "public_readiness.db")
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := config.Config{DatabasePath: dbPath}
+	srv := New(cfg, store)
+
+	// 1. Unconfigured store
+	reqUnconf := httptest.NewRequest(http.MethodGet, "/api/public/v1/payment-readiness", nil)
+	recUnconf := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recUnconf, reqUnconf)
+
+	if recUnconf.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recUnconf.Code, recUnconf.Body.String())
+	}
+	var unconfResp map[string]any
+	if err := json.Unmarshal(recUnconf.Body.Bytes(), &unconfResp); err != nil {
+		t.Fatalf("unmarshal unconfResp: %v", err)
+	}
+	if unconfResp["ready"] != false || unconfResp["status"] != "UNCONFIGURED" {
+		t.Fatalf("expected ready=false status=UNCONFIGURED, got %+v", unconfResp)
+	}
+	// Sanity check: must only contain ready and status, no leaked internal details
+	if len(unconfResp) != 2 {
+		t.Fatalf("expected sanitized payload with 2 keys, got %d keys: %+v", len(unconfResp), unconfResp)
+	}
+
+	// 2. Configured with AUTH_REQUIRED
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqAuthReq := httptest.NewRequest(http.MethodGet, "/api/public/v1/payment-readiness", nil)
+	recAuthReq := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recAuthReq, reqAuthReq)
+
+	if recAuthReq.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recAuthReq.Code, recAuthReq.Body.String())
+	}
+	var authReqResp map[string]any
+	if err := json.Unmarshal(recAuthReq.Body.Bytes(), &authReqResp); err != nil {
+		t.Fatalf("unmarshal authReqResp: %v", err)
+	}
+	if authReqResp["ready"] != false || authReqResp["status"] != "AUTH_REQUIRED" {
+		t.Fatalf("expected ready=false status=AUTH_REQUIRED, got %+v", authReqResp)
+	}
+	if len(authReqResp) != 2 {
+		t.Fatalf("expected sanitized payload with 2 keys, got %+v", authReqResp)
+	}
+
+	// 3. Updated to MONITORING
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING' WHERE id = ?`, conn.ID); err != nil {
+		t.Fatal(err)
+	}
+	reqMon := httptest.NewRequest(http.MethodGet, "/api/public/v1/payment-readiness", nil)
+	recMon := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recMon, reqMon)
+
+	if recMon.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recMon.Code, recMon.Body.String())
+	}
+	var monResp map[string]any
+	if err := json.Unmarshal(recMon.Body.Bytes(), &monResp); err != nil {
+		t.Fatalf("unmarshal monResp: %v", err)
+	}
+	if monResp["ready"] != true || monResp["status"] != "READY" {
+		t.Fatalf("expected ready=true status=READY, got %+v", monResp)
+	}
+	if len(monResp) != 2 {
+		t.Fatalf("expected sanitized payload with 2 keys, got %+v", monResp)
+	}
+}
+
+func TestPaymentBoost_RejectionWhenBankNotReady(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "boost_rejection.db")
+	store, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	booster := &mockPaymentBooster{}
+	cfg := config.Config{DatabasePath: dbPath}
+	srv := New(cfg, store).WithPaymentBooster(booster)
+
+	// 1. Connection is AUTH_REQUIRED -> local store fast-path rejection 409 PAYMENT_NOT_READY
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewBufferString(`{"amountVnd": 100000}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity", body)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when AUTH_REQUIRED, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal errResp: %v", err)
+	}
+	if errResp["code"] != "PAYMENT_NOT_READY" {
+		t.Fatalf("expected code=PAYMENT_NOT_READY, got %+v", errResp)
+	}
+	if booster.callCount != 0 {
+		t.Fatalf("booster should not be called when bank connection is unready, callCount=%d", booster.callCount)
+	}
+
+	// 2. Connection is MONITORING in local store, but booster reports connection not ready (race/worker sync)
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING' WHERE id = ?`, conn.ID); err != nil {
+		t.Fatal(err)
+	}
+	booster.err = errors.New("bank connection is not in MONITORING state")
+
+	body2 := bytes.NewBufferString(`{"amountVnd": 100000}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity", body2)
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when booster rejects with not in MONITORING, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var errResp2 map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &errResp2); err != nil {
+		t.Fatalf("unmarshal errResp2: %v", err)
+	}
+	if errResp2["code"] != "PAYMENT_NOT_READY" {
+		t.Fatalf("expected code=PAYMENT_NOT_READY from booster error, got %+v", errResp2)
+	}
+
+	// 3. Connection is MONITORING and booster succeeds -> 200 OK
+	booster.err = nil
+	body3 := bytes.NewBufferString(`{"amountVnd": 100000}`)
+	req3 := httptest.NewRequest(http.MethodPost, "/api/public/v1/payment-activity", body3)
+	rec3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec3, req3)
+
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec3.Code, rec3.Body.String())
 	}
 }

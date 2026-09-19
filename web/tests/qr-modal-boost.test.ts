@@ -133,4 +133,117 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
       globalThis.fetch = origFetch;
     });
   });
+
+  describe('fetchPaymentReadiness helper', () => {
+    it('calls GET /api/public/v1/payment-readiness and returns status', async () => {
+      const origFetch = globalThis.fetch;
+      let requestedUrl = '';
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        requestedUrl = String(input);
+        return new Response(JSON.stringify({ ready: true, status: 'READY' }), { status: 200 });
+      }) as typeof fetch;
+
+      const { fetchPaymentReadiness } = await import('../src/shared/api/queries');
+      const res = await fetchPaymentReadiness();
+
+      expect(requestedUrl).toBe('/api/public/v1/payment-readiness');
+      expect(res.ready).toBe(true);
+      expect(res.status).toBe('READY');
+
+      globalThis.fetch = origFetch;
+    });
+  });
+
+  describe('startPaymentActivity error handling', () => {
+    it('attaches code and status on 409 PAYMENT_NOT_READY rejection', async () => {
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async () => {
+        return new Response(
+          JSON.stringify({ error: 'bank connection is not in MONITORING state', code: 'PAYMENT_NOT_READY' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as typeof fetch;
+
+      const { startPaymentActivity } = await import('../src/shared/api/queries');
+      await expect(startPaymentActivity({ amountVnd: 100000 })).rejects.toMatchObject({
+        status: 409,
+        code: 'PAYMENT_NOT_READY',
+      });
+
+      globalThis.fetch = origFetch;
+    });
+  });
+
+  describe('Boost rejection vs Generic failure state transition logic', () => {
+    function simulateBoostStart({
+      isAcbCritical,
+      apiError,
+    }: {
+      isAcbCritical: boolean;
+      apiError?: { code?: string; status?: number; message?: string };
+    }) {
+      let state: 'idle' | 'active' = 'idle';
+      let boostDegraded = false;
+      let invalidatedReadiness = false;
+
+      // Guard check before calling API
+      if (isAcbCritical) {
+        return { state, boostDegraded, invalidatedReadiness };
+      }
+
+      if (apiError) {
+        const isPaymentNotReady =
+          apiError.code === 'PAYMENT_NOT_READY' ||
+          apiError.status === 409 ||
+          (typeof apiError.message === 'string' &&
+            (apiError.message.includes('MONITORING') || apiError.message.includes('PAYMENT_NOT_READY')));
+
+        if (isPaymentNotReady) {
+          invalidatedReadiness = true;
+          state = 'idle';
+          boostDegraded = false;
+        } else {
+          // Generic failure (e.g. RPC unavailable) -> proceed to active with standard polling
+          state = 'active';
+          boostDegraded = true;
+        }
+      } else {
+        state = 'active';
+        boostDegraded = false;
+      }
+
+      return { state, boostDegraded, invalidatedReadiness };
+    }
+
+    it('stays in IDLE and invalidates readiness when session is dead (PAYMENT_NOT_READY)', () => {
+      const outcome = simulateBoostStart({
+        isAcbCritical: false,
+        apiError: { status: 409, code: 'PAYMENT_NOT_READY', message: 'bank connection is not in MONITORING state' },
+      });
+
+      expect(outcome.state).toBe('idle');
+      expect(outcome.invalidatedReadiness).toBe(true);
+      expect(outcome.boostDegraded).toBe(false);
+    });
+
+    it('blocks start immediately when already isAcbCritical', () => {
+      const outcome = simulateBoostStart({
+        isAcbCritical: true,
+      });
+
+      expect(outcome.state).toBe('idle');
+      expect(outcome.invalidatedReadiness).toBe(false);
+    });
+
+    it('transitions to ACTIVE with degraded status when generic boost RPC fails', () => {
+      const outcome = simulateBoostStart({
+        isAcbCritical: false,
+        apiError: { status: 500, message: 'payment booster unavailable' },
+      });
+
+      expect(outcome.state).toBe('active');
+      expect(outcome.boostDegraded).toBe(true);
+      expect(outcome.invalidatedReadiness).toBe(false);
+    });
+  });
 });

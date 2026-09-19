@@ -156,6 +156,55 @@ func (s *Server) publicPaymentQR(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type publicPaymentReadinessResponse struct {
+	Ready  bool   `json:"ready"`
+	Status string `json:"status"`
+}
+
+func (s *Server) publicPaymentReadiness(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.store == nil {
+		writeJSON(w, http.StatusOK, publicPaymentReadinessResponse{
+			Ready:  false,
+			Status: "UNCONFIGURED",
+		})
+		return
+	}
+
+	conn, err := s.store.Connection(r.Context())
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeJSON(w, http.StatusOK, publicPaymentReadinessResponse{
+				Ready:  false,
+				Status: "UNCONFIGURED",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, publicPaymentReadinessResponse{
+			Ready:  false,
+			Status: "UNAVAILABLE",
+		})
+		return
+	}
+
+	if conn.State == "MONITORING" {
+		writeJSON(w, http.StatusOK, publicPaymentReadinessResponse{
+			Ready:  true,
+			Status: "READY",
+		})
+		return
+	}
+
+	status := conn.State
+	if status == "" {
+		status = "NOT_READY"
+	}
+	writeJSON(w, http.StatusOK, publicPaymentReadinessResponse{
+		Ready:  false,
+		Status: status,
+	})
+}
+
 type paymentActivityRequest struct {
 	AmountVnd int64 `json:"amountVnd"`
 }
@@ -186,6 +235,18 @@ func (s *Server) startPaymentActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.store != nil {
+		conn, err := s.store.Connection(r.Context())
+		if err == nil && conn.State != "MONITORING" {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":  "bank connection is not in MONITORING state",
+				"code":   "PAYMENT_NOT_READY",
+				"status": conn.State,
+			})
+			return
+		}
+	}
+
 	if s.paymentBooster == nil {
 		writeError(w, http.StatusServiceUnavailable, "payment booster unavailable")
 		return
@@ -193,7 +254,15 @@ func (s *Server) startPaymentActivity(w http.ResponseWriter, r *http.Request) {
 
 	status, err := s.paymentBooster.StartPaymentBoost(r.Context(), req.AmountVnd)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start payment boost: "+err.Error())
+		errStr := err.Error()
+		if strings.Contains(strings.ToLower(errStr), "not in monitoring state") || strings.Contains(strings.ToLower(errStr), "payment_not_ready") {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "bank connection is not in MONITORING state",
+				"code":  "PAYMENT_NOT_READY",
+			})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to start payment boost: "+errStr)
 		return
 	}
 
