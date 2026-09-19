@@ -178,6 +178,42 @@ func (s *Server) voiceStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult) {
+	defer stream.Close()
+
+	firstByteMs := stream.FirstByteDuration.Milliseconds()
+
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-TTS-Provider", stream.Provider)
+	w.Header().Set("X-TTS-Voice", stream.Voice)
+	w.Header().Set("X-TTS-Fallback", fmt.Sprintf("%t", stream.Fallback))
+	w.Header().Set("X-TTS-Cached", fmt.Sprintf("%t", stream.Cached))
+	w.Header().Set("X-TTS-First-Byte-Ms", strconv.FormatInt(firstByteMs, 10))
+	w.Header().Set("Server-Timing", fmt.Sprintf("tts_fb;dur=%d", firstByteMs))
+	w.WriteHeader(http.StatusOK)
+
+	flusher, canFlush := w.(http.Flusher)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := stream.Reader.Read(buf)
+		if n > 0 {
+			_, _ = w.Write(buf[:n])
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+}
+
 func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	if s.ttsClient == nil {
 		writeError(w, http.StatusServiceUnavailable, "tts_client_not_configured")
@@ -185,7 +221,15 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req voiceTestRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if r.Method == http.MethodGet {
+		req.VoiceID = r.URL.Query().Get("voiceId")
+		req.Rate = r.URL.Query().Get("rate")
+		req.Pitch = r.URL.Query().Get("pitch")
+		req.Template = r.URL.Query().Get("template")
+		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
+	} else {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
 
 	settings, _ := s.store.GetVoiceSettings(r.Context())
 	if settings.ProviderMode == "BROWSER_ONLY" {
@@ -202,7 +246,7 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	phrase := voicecopy.FormatAnnouncementTemplate(template, 500000, "Ung ho quy", req.IncludeDescription)
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
-	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
+	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -216,15 +260,54 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "audio/mpeg")
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-TTS-Provider", res.Provider)
-	w.Header().Set("X-TTS-Voice", res.Voice)
-	w.Header().Set("X-TTS-Fallback", fmt.Sprintf("%t", res.Fallback))
-	w.Header().Set("X-TTS-Cached", fmt.Sprintf("%t", res.Cached))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(res.Audio)
+	writeAudioStream(w, stream)
+}
+
+func (s *Server) publicTestVoiceAudio(w http.ResponseWriter, r *http.Request) {
+	if s.ttsClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "tts_client_not_configured")
+		return
+	}
+
+	var req voiceTestRequest
+	if r.Method == http.MethodGet {
+		req.VoiceID = r.URL.Query().Get("voiceId")
+		req.Rate = r.URL.Query().Get("rate")
+		req.Pitch = r.URL.Query().Get("pitch")
+	} else {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	settings, _ := s.store.GetVoiceSettings(r.Context())
+	if settings.ProviderMode == "BROWSER_ONLY" {
+		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
+		return
+	}
+	voice := settings.EdgeVoice
+	if req.VoiceID == "vi-VN-HoaiMyNeural" || req.VoiceID == "vi-VN-NamMinhNeural" {
+		voice = req.VoiceID
+	}
+	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
+
+	// Strict fixed test phrase for public viewer - do not allow custom templates or descriptions
+	phrase := voicecopy.FormatAnnouncementTemplate(voicecopy.DefaultAnnouncementTemplate, 500000, "", false)
+	ttsRate := formatTTSRate(req.Rate)
+	ttsPitch := formatTTSPitch(req.Pitch)
+	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
+		Text:          phrase,
+		Voice:         voice,
+		Rate:          ttsRate,
+		Pitch:         ttsPitch,
+		Cacheable:     true,
+		AllowFallback: &allowFallback,
+		ProviderMode:  settings.ProviderMode,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("tts_synthesis_failed: %v", err))
+		return
+	}
+
+	writeAudioStream(w, stream)
 }
 
 func (s *Server) synthesizePublicTransactionAudio(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +331,15 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 	}
 
 	var req voiceAudioRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if r.Method == http.MethodGet {
+		req.VoiceID = r.URL.Query().Get("voiceId")
+		req.Rate = r.URL.Query().Get("rate")
+		req.Pitch = r.URL.Query().Get("pitch")
+		req.Template = r.URL.Query().Get("template")
+		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
+	} else {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
 
 	item, err := s.store.GetTransactionByID(r.Context(), id)
 	if err != nil {
@@ -300,7 +391,7 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
-	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
+	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -314,15 +405,7 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 		return
 	}
 
-	w.Header().Set("Content-Type", "audio/mpeg")
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-TTS-Provider", res.Provider)
-	w.Header().Set("X-TTS-Voice", res.Voice)
-	w.Header().Set("X-TTS-Fallback", fmt.Sprintf("%t", res.Fallback))
-	w.Header().Set("X-TTS-Cached", fmt.Sprintf("%t", res.Cached))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(res.Audio)
+	writeAudioStream(w, stream)
 }
 
 func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +459,7 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
-	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
+	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -390,15 +473,7 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Header().Set("Content-Type", "audio/mpeg")
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-TTS-Provider", res.Provider)
-	w.Header().Set("X-TTS-Voice", res.Voice)
-	w.Header().Set("X-TTS-Fallback", fmt.Sprintf("%t", res.Fallback))
-	w.Header().Set("X-TTS-Cached", fmt.Sprintf("%t", res.Cached))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(res.Audio)
+	writeAudioStream(w, stream)
 }
 
 func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) {
@@ -414,7 +489,15 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req voiceAudioRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if r.Method == http.MethodGet {
+		req.VoiceID = r.URL.Query().Get("voiceId")
+		req.Rate = r.URL.Query().Get("rate")
+		req.Pitch = r.URL.Query().Get("pitch")
+		req.Template = r.URL.Query().Get("template")
+		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
+	} else {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
 
 	item, err := s.store.GetTransactionByID(r.Context(), id)
 	if err != nil {
@@ -444,7 +527,7 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 	ttsRate := formatTTSRate(req.Rate)
 	ttsPitch := formatTTSPitch(req.Pitch)
 
-	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
+	stream, err := s.ttsClient.SynthesizeStream(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
 		Rate:          ttsRate,
@@ -458,13 +541,5 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Header().Set("Content-Type", "audio/mpeg")
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-TTS-Provider", res.Provider)
-	w.Header().Set("X-TTS-Voice", res.Voice)
-	w.Header().Set("X-TTS-Fallback", fmt.Sprintf("%t", res.Fallback))
-	w.Header().Set("X-TTS-Cached", fmt.Sprintf("%t", res.Cached))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(res.Audio)
+	writeAudioStream(w, stream)
 }

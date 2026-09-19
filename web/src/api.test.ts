@@ -267,10 +267,35 @@ describe('api transport and centralized CSRF', () => {
     expect(res.provider).toBe('edge');
   });
 
-  it('apiAudio rejects arbitrary non-transaction routes on public host', async () => {
+  it('apiAudio routes /voice/test to /api/public/v1/voice/test on public host', async () => {
     vi.spyOn(runtimeMode, 'isPublicViewerHost').mockReturnValue(true);
 
-    await expect(apiAudio('/voice/test')).rejects.toThrow(
+    let requestedUrl = '';
+    const fetchMock = vi.fn(async (url: any) => {
+      requestedUrl = String(url);
+      return new Response(new ArrayBuffer(4), {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/mpeg',
+          'X-TTS-Provider': 'edge',
+          'X-TTS-Voice': 'vi-VN-HoaiMyNeural',
+        },
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await apiAudio('/voice/test', {
+      method: 'POST',
+      body: JSON.stringify({ voiceId: 'vi-VN-HoaiMyNeural' }),
+    });
+    expect(requestedUrl).toBe('/api/public/v1/voice/test');
+    expect(res.provider).toBe('edge');
+  });
+
+  it('apiAudio rejects arbitrary non-voice routes on public host', async () => {
+    vi.spyOn(runtimeMode, 'isPublicViewerHost').mockReturnValue(true);
+
+    await expect(apiAudio('/voice/settings')).rejects.toThrow(
       'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.'
     );
   });

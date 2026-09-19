@@ -62,22 +62,24 @@ describe('Runtime Mode & Public Isolation', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('blocks arbitrary apiAudio on public host and allows transaction-scoped audio', async () => {
+    it('blocks arbitrary apiAudio on public host and allows transaction-scoped audio and voice test', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
-      await expect(apiAudio('/voice/test')).rejects.toThrow(
+      await expect(apiAudio('/voice/settings')).rejects.toThrow(
         'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
       );
       expect(fetchSpy).not.toHaveBeenCalled();
 
-      const mockFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
         ok: true,
         headers: new Headers({ 'content-type': 'audio/mpeg', 'x-tts-provider': 'edge' }),
         arrayBuffer: async () => new ArrayBuffer(4),
       } as Response);
 
       await apiAudio('/voice/transactions/1');
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-      expect(mockFetch.mock.calls[0][0]).toBe('/api/public/v1/voice/transactions/1');
+      expect(mockFetch).toHaveBeenCalledWith('/api/public/v1/voice/transactions/1', expect.anything());
+
+      await apiAudio('/voice/test');
+      expect(mockFetch).toHaveBeenCalledWith('/api/public/v1/voice/test', expect.anything());
     });
 
     it('routes GET requests to /api/public/v1 namespace', async () => {

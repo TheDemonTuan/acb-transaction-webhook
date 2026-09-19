@@ -162,7 +162,11 @@ export interface AudioResponseResult {
 
 export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioResponseResult> => {
   const isPublic = isPublicViewerHost();
-  if (isPublic && !path.startsWith('/voice/transactions/')) {
+  if (
+    isPublic &&
+    !path.startsWith('/voice/transactions/') &&
+    !path.startsWith('/voice/test')
+  ) {
     throw new ApiError(
       'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
       405,
