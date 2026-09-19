@@ -909,3 +909,109 @@ func TestMonitorSuccessResetResetSuccessPreservesSessionVsTrueLogin(t *testing.T
 		t.Fatalf("expected run 1 status SUCCEEDED, got %s", runs[4].Status)
 	}
 }
+
+func TestPaymentBoost_HardCapDuration(t *testing.T) {
+	m := &Monitor{
+		now:     time.Now,
+		boostCh: make(chan struct{}, 1),
+	}
+	base := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	curr := base
+	m.now = func() time.Time { return curr }
+
+	// Initial start at t=0
+	st := m.StartPaymentBoost(100000)
+	if !st.Active || st.ExpiresIn != 180 || st.Phase != 1 {
+		t.Fatalf("unexpected initial boost: %+v", st)
+	}
+
+	// Advance to t=60s (Phase 2, remaining 120s)
+	curr = base.Add(60 * time.Second)
+	// Repeat start at t=60s must NOT reset expiration back to 180s
+	st2 := m.StartPaymentBoost(250000)
+	if !st2.Active {
+		t.Fatal("expected boost to remain active")
+	}
+	if st2.AmountVnd != 250000 {
+		t.Fatalf("expected updated amount 250000, got %d", st2.AmountVnd)
+	}
+	if st2.ExpiresIn != 120 {
+		t.Fatalf("expected hard-cap remaining 120s, got %d", st2.ExpiresIn)
+	}
+	if st2.Phase != 2 {
+		t.Fatalf("expected Phase 2 at t=60s, got %d", st2.Phase)
+	}
+
+	// Advance to t=130s (Phase 3, remaining 50s)
+	curr = base.Add(130 * time.Second)
+	st3 := m.StartPaymentBoost(0)
+	if !st3.Active || st3.ExpiresIn != 50 || st3.Phase != 3 {
+		t.Fatalf("expected Phase 3 with 50s remaining, got %+v", st3)
+	}
+
+	// Advance past 180s (e.g. t=181s) -> boost is expired
+	curr = base.Add(181 * time.Second)
+	stExpired := m.PaymentBoostStatus()
+	if stExpired.Active {
+		t.Fatalf("expected boost expired at t=181s, got %+v", stExpired)
+	}
+
+	// Starting after expiration creates a fresh 180s window
+	stFresh := m.StartPaymentBoost(50000)
+	if !stFresh.Active || stFresh.ExpiresIn != 180 || stFresh.Phase != 1 {
+		t.Fatalf("expected fresh 180s boost after expiration, got %+v", stFresh)
+	}
+}
+
+func TestPaymentBoost_ReadLockRaceSafety(t *testing.T) {
+	m := &Monitor{
+		now:     time.Now,
+		boostCh: make(chan struct{}, 10),
+	}
+	base := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	var currentNanos atomic.Int64
+	currentNanos.Store(base.UnixNano())
+	m.now = func() time.Time {
+		return time.Unix(0, currentNanos.Load())
+	}
+
+	m.StartPaymentBoost(100000)
+
+	var wg sync.WaitGroup
+	// 20 concurrent readers calling PaymentBoostStatus under RLock
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				_ = m.PaymentBoostStatus()
+			}
+		}()
+	}
+
+	// 5 concurrent goroutines calling StartPaymentBoost / StopPaymentBoost
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				if j%2 == 0 {
+					m.StartPaymentBoost(int64(10000 * (id + 1)))
+				} else {
+					m.StopPaymentBoost()
+				}
+			}
+		}(i)
+	}
+
+	// Time advancer advancing time past 180s
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for sec := int64(1); sec <= 200; sec++ {
+			currentNanos.Store(base.Add(time.Duration(sec) * time.Second).UnixNano())
+		}
+	}()
+
+	wg.Wait()
+}

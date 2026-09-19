@@ -168,6 +168,8 @@ export const ReceivingQRModal: React.FC<{
   const [amountInput, setAmountInput] = useState<string>('');
   const [targetAmountVnd, setTargetAmountVnd] = useState<number>(0);
   const [boostRemainingSec, setBoostRemainingSec] = useState<number>(0);
+  const [boostDegraded, setBoostDegraded] = useState<boolean>(false);
+  const [isStartingBoost, setIsStartingBoost] = useState<boolean>(false);
   const [matchedCredit, setMatchedCredit] = useState<LiveCreditAlert | null>(null);
 
   const amountInputRef = useRef<HTMLInputElement>(null);
@@ -253,6 +255,8 @@ export const ReceivingQRModal: React.FC<{
     setAmountInput('');
     setTargetAmountVnd(0);
     setBoostRemainingSec(0);
+    setBoostDegraded(false);
+    setIsStartingBoost(false);
     setMatchedCredit(null);
     void refetchTx();
 
@@ -274,17 +278,27 @@ export const ReceivingQRModal: React.FC<{
 
   // Trigger boost activation
   const handleStartBoost = async (amountVnd: number) => {
+    if (isStartingBoost) return;
+    setIsStartingBoost(true);
     setTargetAmountVnd(amountVnd);
-    setModalState('active');
-    setBoostRemainingSec(180);
+    setBoostDegraded(false);
 
     try {
       const status = await startPaymentActivity({ amountVnd });
-      if (status?.expiresIn) {
-        setBoostRemainingSec(status.expiresIn);
+      if (status && status.active) {
+        setBoostRemainingSec(status.expiresIn || 180);
+        setBoostDegraded(false);
+      } else {
+        setBoostRemainingSec(0);
+        setBoostDegraded(true);
       }
-    } catch (err) {
-      // Degraded: keep UI in active state even if boost RPC failed
+    } catch {
+      // Degraded: keep UI moving to QR view, but indicate standard polling
+      setBoostRemainingSec(0);
+      setBoostDegraded(true);
+    } finally {
+      setIsStartingBoost(false);
+      setModalState('active');
     }
   };
 
@@ -294,6 +308,8 @@ export const ReceivingQRModal: React.FC<{
     setTargetAmountVnd(0);
     setMatchedCredit(null);
     setBoostRemainingSec(0);
+    setBoostDegraded(false);
+    setIsStartingBoost(false);
     setTimeout(() => {
       amountInputRef.current?.focus();
     }, 100);
@@ -650,8 +666,8 @@ export const ReceivingQRModal: React.FC<{
           <div className="grid grid-cols-1 md:grid-cols-12 min-h-full">
             {/* LEFT COLUMN: Interactive Workflow (IDLE / ACTIVE / SUCCESS) */}
             <div
-              className={`md:col-span-5 p-5 sm:p-6 bg-stone-50/50 md:border-r border-stone-200/80 flex flex-col items-center justify-between text-center space-y-4 ${
-                activeTab === 'qr' ? 'block' : 'hidden md:flex'
+              className={`md:col-span-5 p-5 sm:p-6 bg-stone-50/50 md:border-r border-stone-200/80 flex flex-col items-center justify-start text-center gap-4 min-h-0 md:min-h-full ${
+                activeTab === 'qr' ? 'flex' : 'hidden md:flex'
               }`}
             >
               {/* Realtime Health Diagnostics Panel */}
@@ -821,17 +837,19 @@ export const ReceivingQRModal: React.FC<{
                   <div className="w-full space-y-2 pt-1">
                     <button
                       type="button"
+                      disabled={isStartingBoost}
                       onClick={() => handleStartBoost(previewAmountVnd)}
-                      className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm hover:shadow transition flex items-center justify-center gap-2 cursor-pointer"
+                      className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-bold text-xs shadow-sm hover:shadow transition flex items-center justify-center gap-2 cursor-pointer"
                     >
                       <QrCode className="w-4 h-4" />
-                      Tạo QR & bắt đầu nhận tiền
+                      {isStartingBoost ? 'Đang kích hoạt...' : 'Tạo QR & bắt đầu nhận tiền'}
                     </button>
 
                     <button
                       type="button"
+                      disabled={isStartingBoost}
                       onClick={() => handleStartBoost(0)}
-                      className="w-full py-2 px-3 text-[11px] text-stone-500 hover:text-stone-800 font-medium transition cursor-pointer"
+                      className="w-full py-2 px-3 text-[11px] text-stone-500 hover:text-stone-800 disabled:opacity-60 font-medium transition cursor-pointer"
                     >
                       Hoặc: Nhận tiền không cố định số tiền (Enter)
                     </button>
@@ -843,15 +861,26 @@ export const ReceivingQRModal: React.FC<{
               {modalState === 'active' && isConfigured && (
                 <div className="w-full max-w-[320px] flex flex-col items-center space-y-3 animate-in fade-in zoom-in-95 duration-150">
                   {/* Boost Phase Indicator Header */}
-                  <div className="w-full bg-amber-500 text-white rounded-2xl p-2.5 shadow-xs flex items-center justify-between text-xs px-3.5">
-                    <div className="flex items-center gap-1.5 font-bold">
-                      <Zap className="w-3.5 h-3.5 fill-white animate-pulse" />
-                      <span>{boostPhase.label}</span>
+                  {boostDegraded ? (
+                    <div className="w-full bg-stone-100 border border-stone-200 text-stone-700 rounded-2xl p-2.5 shadow-2xs flex items-center gap-2 text-xs px-3.5">
+                      <AlertCircle className="w-4 h-4 text-stone-500 shrink-0" />
+                      <span className="font-medium">Không thể tăng tốc, đang kiểm tra theo chu kỳ bình thường</span>
                     </div>
-                    <span className="text-[11px] font-mono bg-amber-600/60 px-2 py-0.5 rounded-full font-bold">
-                      {boostRemainingSec}s
-                    </span>
-                  </div>
+                  ) : boostRemainingSec > 0 ? (
+                    <div className="w-full bg-amber-500 text-white rounded-2xl p-2.5 shadow-xs flex items-center justify-between text-xs px-3.5">
+                      <div className="flex items-center gap-1.5 font-bold">
+                        <Zap className="w-3.5 h-3.5 fill-white animate-pulse" />
+                        <span>{boostPhase.label}</span>
+                      </div>
+                      <span className="text-[11px] font-mono bg-amber-600/60 px-2 py-0.5 rounded-full font-bold">
+                        {boostRemainingSec}s
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="w-full bg-stone-100 border border-stone-200 text-stone-700 rounded-2xl p-2.5 shadow-2xs flex items-center gap-2 text-xs px-3.5">
+                      <span className="font-medium">{boostPhase.label}</span>
+                    </div>
+                  )}
 
                   {/* High-Contrast QR Code Card */}
                   <div className="w-full bg-white rounded-3xl p-4 sm:p-5 border border-stone-200 shadow-sm relative group">
