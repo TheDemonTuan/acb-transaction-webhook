@@ -1,4 +1,4 @@
-export type RealtimeStatus = 'CONNECTING' | 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED';
+export type RealtimeStatus = 'CONNECTING' | 'CONNECTED' | 'STALE' | 'RECONNECTING' | 'DISCONNECTED';
 
 export interface RealtimeEnvelope<T = unknown> {
   id: string | null;
@@ -59,11 +59,17 @@ export interface DeliveryChangedData {
 
 export interface PollCompletedData {
   id?: string;
+  pollId?: string;
   status: string;
+  classifier?: string;
+  httpStatus?: number;
   pages?: number;
   rowsSeen?: number;
   insertedCount?: number;
   durationMs?: number;
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 export interface AuditCreatedData {
@@ -73,9 +79,30 @@ export interface AuditCreatedData {
   role: string;
 }
 
+export interface StreamHeartbeatData {
+  serverTime: string;
+  epoch: string;
+  release?: string;
+  slot?: string;
+}
+
 export interface StreamErrorData {
-  code: string;
+  reason?: string;
+  code?: string;
   message?: string;
+}
+
+export interface RealtimeDiagnostics {
+  status: RealtimeStatus;
+  lastHeartbeatAt: number | null;
+  lastMessageAt: number | null;
+  lastEventId: string | null;
+  connectedAt: number | null;
+  disconnectedAt: number | null;
+  reconnectCount: number;
+  lastError: unknown | null;
+  networkOnline: boolean;
+  serverReachable: boolean;
 }
 
 export interface RealtimeEventMap {
@@ -87,6 +114,7 @@ export interface RealtimeEventMap {
   'delivery.changed': DeliveryChangedData;
   'poll.completed': PollCompletedData;
   'audit.created': AuditCreatedData;
+  'stream.heartbeat': StreamHeartbeatData;
   'stream_error': StreamErrorData;
 }
 
