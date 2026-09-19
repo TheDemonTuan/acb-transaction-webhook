@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 import { TransactionAudioEngine } from './transaction-audio-engine';
 import { MultiTabLeader } from './multi-tab-leader';
 import { VoiceDedupe } from './voice-dedupe';
-import type { VoiceEngine, VoiceInfo } from './voice-engine';
+import type { VoiceEngine, VoiceInfo, VoiceTelemetry } from './voice-engine';
 import { VoiceQueue } from './voice-queue';
 import {
   loadVoiceSettings,
@@ -21,6 +21,7 @@ export interface VoiceAnnouncementContextValue {
   isLeader: boolean;
   isSpeaking: boolean;
   voices: VoiceInfo[];
+  lastTelemetry?: VoiceTelemetry | null;
   handleCreditEvent: (envelope: RealtimeEnvelope<BankTransactionCreditData>) => void;
   testVoice: (customPhrase?: string) => Promise<void>;
   replayVoice: (transactionId: string) => Promise<void>;
@@ -43,6 +44,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
   const [isLeader, setIsLeader] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
+  const [lastTelemetry, setLastTelemetry] = useState<VoiceTelemetry | null>(null);
 
   const engine = useMemo<VoiceEngine>(() => {
     return injectedEngine || new TransactionAudioEngine();
@@ -167,8 +169,20 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       return;
     }
 
+    const now = Date.now();
+    const sseReceivedAt = envelope.receivedAt || now;
+    const detectedAtMs = data.detectedAt ? new Date(data.detectedAt).getTime() : undefined;
+    const telemetry: VoiceTelemetry = {
+      detectedAt: data.detectedAt,
+      sseReceivedAt,
+      queuedAt: now,
+      detectedToSseMs: detectedAtMs ? Math.max(0, sseReceivedAt - detectedAtMs) : undefined,
+      sseToQueueMs: Math.max(0, now - sseReceivedAt),
+    };
+
     const text = buildSingleTransactionPhrase(amountBigInt.toString(), data.description || '', {
       includeDescription: settings.includeDescription,
+      template: settings.announcementTemplate,
     });
     queue.enqueue({
       text,
@@ -178,6 +192,10 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       voiceURI: settings.voiceURI,
       transactionId: dedupeOpts.transactionId || undefined,
       includeDescription: settings.includeDescription,
+      telemetry,
+      onStart: (t) => {
+        if (t) setLastTelemetry({ ...t });
+      },
       onSuccess: () => {
         dedupe.commit(dedupeOpts);
       },
@@ -190,7 +208,11 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
   const testVoice = async (customPhrase?: string) => {
     queue.cancel();
     const testText =
-      customPhrase || 'Đã bật đọc giao dịch mới. Bạn vừa nhận được năm trăm nghìn đồng.';
+      customPhrase ||
+      buildSingleTransactionPhrase('500000', 'Ung ho quy', {
+        includeDescription: settings.includeDescription,
+        template: settings.announcementTemplate,
+      });
 
     return new Promise<void>((resolve, reject) => {
       queue.enqueue({
@@ -243,13 +265,14 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       isLeader,
       isSpeaking,
       voices,
+      lastTelemetry,
       handleCreditEvent,
       testVoice,
       replayVoice,
       unlockAudio,
       cancelVoice,
     };
-  }, [settings, isSupported, isLeader, isSpeaking, voices]);
+  }, [settings, isSupported, isLeader, isSpeaking, voices, lastTelemetry]);
 
   return (
     <VoiceAnnouncementContext.Provider value={value}>

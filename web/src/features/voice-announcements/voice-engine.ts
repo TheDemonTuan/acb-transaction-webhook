@@ -5,6 +5,18 @@ export interface VoiceInfo {
   isDefault: boolean;
 }
 
+export interface VoiceTelemetry {
+  detectedAt?: string;
+  sseReceivedAt?: number;
+  queuedAt?: number;
+  speechStartedAt?: number;
+  detectedToSseMs?: number;
+  sseToQueueMs?: number;
+  queueToSpeakMs?: number;
+  sseToSpeakMs?: number;
+  totalLatencyMs?: number;
+}
+
 export interface VoiceMessage {
   text: string;
   volume?: number;
@@ -17,6 +29,8 @@ export interface VoiceMessage {
   isTest?: boolean;
   isReplay?: boolean;
   includeDescription?: boolean;
+  telemetry?: VoiceTelemetry;
+  onStart?: (telemetry?: VoiceTelemetry) => void;
   onSuccess?: () => void;
   onError?: (error: unknown) => void;
 }

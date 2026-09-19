@@ -45,6 +45,7 @@ export class TransactionAudioEngine implements VoiceEngine {
         return false;
       }
     }
+    await this.browserFallback.prime();
     return ctx.state === 'running';
   }
 
@@ -65,11 +66,7 @@ export class TransactionAudioEngine implements VoiceEngine {
     ];
 
     try {
-      const localVoices = await this.browserFallback.getVoices();
-      const localVi = localVoices.filter((v) => {
-        const l = v.lang.toLowerCase().replace('_', '-');
-        return l === 'vi' || l.startsWith('vi-');
-      });
+      const localVi = await this.browserFallback.getVoices();
       return [...onlineVoices, ...localVi];
     } catch {
       return onlineVoices;
@@ -114,12 +111,18 @@ export class TransactionAudioEngine implements VoiceEngine {
 
     if (message.isTest) {
       path = '/voice/test';
-      body = { voiceId: message.voiceURI || 'vi-VN-HoaiMyNeural' };
+      body = {
+        voiceId: message.voiceURI || 'vi-VN-HoaiMyNeural',
+        rate: message.rate,
+        pitch: message.pitch,
+      };
     } else if (message.isReplay && message.transactionId) {
       path = `/voice/transactions/${encodeURIComponent(message.transactionId)}/replay`;
       body = {
         includeDescription: Boolean(message.includeDescription),
         voiceId: message.voiceURI,
+        rate: message.rate,
+        pitch: message.pitch,
       };
     } else if (
       message.summaryTransactionIds &&
@@ -130,12 +133,16 @@ export class TransactionAudioEngine implements VoiceEngine {
         transactionIds: message.summaryTransactionIds,
         includeDescription: false,
         voiceId: message.voiceURI,
+        rate: message.rate,
+        pitch: message.pitch,
       };
     } else if (message.transactionId) {
       path = `/voice/transactions/${encodeURIComponent(message.transactionId)}`;
       body = {
         includeDescription: Boolean(message.includeDescription),
         voiceId: message.voiceURI,
+        rate: message.rate,
+        pitch: message.pitch,
       };
     } else {
       // If no transaction ID, fall back directly to browser speech
@@ -153,12 +160,13 @@ export class TransactionAudioEngine implements VoiceEngine {
       throw new Error('VOICE_CANCELLED');
     }
 
-    await this.playAudioBuffer(audioData, message.volume ?? 1);
+    await this.playAudioBuffer(audioData, message.volume ?? 1, message);
   }
 
   private async playAudioBuffer(
     arrayBuffer: ArrayBuffer,
-    volume: number
+    volume: number,
+    message?: VoiceMessage
   ): Promise<void> {
     const ctx = this.initAudioContext();
     if (!ctx) {
@@ -198,6 +206,23 @@ export class TransactionAudioEngine implements VoiceEngine {
         };
 
         this.currentSource = source;
+        if (message?.telemetry) {
+          message.telemetry.speechStartedAt = Date.now();
+          const sseAt = message.telemetry.sseReceivedAt || message.telemetry.queuedAt;
+          if (sseAt) {
+            message.telemetry.sseToSpeakMs = message.telemetry.speechStartedAt - sseAt;
+          }
+          if (message.telemetry.queuedAt) {
+            message.telemetry.queueToSpeakMs = message.telemetry.speechStartedAt - message.telemetry.queuedAt;
+          }
+          if (message.telemetry.detectedAt) {
+            const d = new Date(message.telemetry.detectedAt).getTime();
+            if (!isNaN(d)) {
+              message.telemetry.totalLatencyMs = message.telemetry.speechStartedAt - d;
+            }
+          }
+        }
+        message?.onStart?.(message.telemetry);
         source.start(0);
       } catch (err) {
         reject(err);

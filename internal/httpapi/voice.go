@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,16 +19,102 @@ import (
 type voiceAudioRequest struct {
 	IncludeDescription bool   `json:"includeDescription"`
 	VoiceID            string `json:"voiceId,omitempty"`
+	Rate               any    `json:"rate,omitempty"`
+	Pitch              any    `json:"pitch,omitempty"`
 }
 
 type voiceSummaryRequest struct {
 	TransactionIDs     []string `json:"transactionIds"`
 	IncludeDescription bool     `json:"includeDescription"`
 	VoiceID            string   `json:"voiceId,omitempty"`
+	Rate               any      `json:"rate,omitempty"`
+	Pitch              any      `json:"pitch,omitempty"`
 }
 
 type voiceTestRequest struct {
 	VoiceID string `json:"voiceId,omitempty"`
+	Rate    any    `json:"rate,omitempty"`
+	Pitch   any    `json:"pitch,omitempty"`
+}
+
+func formatTTSRate(val any) string {
+	if val == nil {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return ""
+		}
+		if strings.HasSuffix(v, "%") {
+			return v
+		}
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return formatFloatRate(f)
+		}
+		return v
+	case float64:
+		return formatFloatRate(v)
+	case int:
+		return formatFloatRate(float64(v))
+	case int64:
+		return formatFloatRate(float64(v))
+	default:
+		return ""
+	}
+}
+
+func formatFloatRate(rate float64) string {
+	if rate <= 0 {
+		return ""
+	}
+	diff := (rate - 1.0) * 100.0
+	pct := int(math.Round(diff))
+	if pct >= 0 {
+		return fmt.Sprintf("+%d%%", pct)
+	}
+	return fmt.Sprintf("%d%%", pct)
+}
+
+func formatTTSPitch(val any) string {
+	if val == nil {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return ""
+		}
+		if strings.HasSuffix(v, "Hz") || strings.HasSuffix(v, "%") {
+			return v
+		}
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return formatFloatPitch(f)
+		}
+		return v
+	case float64:
+		return formatFloatPitch(v)
+	case int:
+		return formatFloatPitch(float64(v))
+	case int64:
+		return formatFloatPitch(float64(v))
+	default:
+		return ""
+	}
+}
+
+func formatFloatPitch(pitch float64) string {
+	if pitch <= 0 {
+		return ""
+	}
+	diff := (pitch - 1.0) * 50.0
+	diffInt := int(math.Round(diff))
+	if diffInt >= 0 {
+		return fmt.Sprintf("+%dHz", diffInt)
+	}
+	return fmt.Sprintf("%dHz", diffInt)
 }
 
 func (s *Server) getVoiceSettings(w http.ResponseWriter, r *http.Request) {
@@ -91,10 +180,14 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
 	phrase := "Đã bật đọc giao dịch mới. Bạn vừa nhận được năm trăm nghìn đồng."
+	ttsRate := formatTTSRate(req.Rate)
+	ttsPitch := formatTTSPitch(req.Pitch)
 	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
-		Cacheable:     true,
+		Rate:          ttsRate,
+		Pitch:         ttsPitch,
+		Cacheable:     ttsRate == "" && ttsPitch == "",
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
@@ -172,11 +265,15 @@ func (s *Server) synthesizeTransactionAudio(w http.ResponseWriter, r *http.Reque
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
 	phrase := voicecopy.BuildCreditAnnouncement(item.Credit, item.Description, req.IncludeDescription)
+	ttsRate := formatTTSRate(req.Rate)
+	ttsPitch := formatTTSPitch(req.Pitch)
 
 	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
-		Cacheable:     !req.IncludeDescription,
+		Rate:          ttsRate,
+		Pitch:         ttsPitch,
+		Cacheable:     !req.IncludeDescription && ttsRate == "" && ttsPitch == "",
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
@@ -244,11 +341,15 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
 	phrase := voicecopy.BuildBurstAnnouncement(validCount, totalCredit)
+	ttsRate := formatTTSRate(req.Rate)
+	ttsPitch := formatTTSPitch(req.Pitch)
 
 	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
-		Cacheable:     true,
+		Rate:          ttsRate,
+		Pitch:         ttsPitch,
+		Cacheable:     ttsRate == "" && ttsPitch == "",
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
@@ -307,11 +408,15 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
 	phrase := voicecopy.BuildCreditAnnouncement(item.Credit, item.Description, req.IncludeDescription)
+	ttsRate := formatTTSRate(req.Rate)
+	ttsPitch := formatTTSPitch(req.Pitch)
 
 	res, err := s.ttsClient.Synthesize(r.Context(), ttsclient.SynthesizeRequest{
 		Text:          phrase,
 		Voice:         voice,
-		Cacheable:     !req.IncludeDescription,
+		Rate:          ttsRate,
+		Pitch:         ttsPitch,
+		Cacheable:     !req.IncludeDescription && ttsRate == "" && ttsPitch == "",
 		AllowFallback: &allowFallback,
 		ProviderMode:  settings.ProviderMode,
 	})
