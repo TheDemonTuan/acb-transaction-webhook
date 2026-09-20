@@ -202,20 +202,34 @@ jobs:
           tags: acb-tts-gateway:smoke-test
           load: true
       - name: Run tts-gateway image smoke test
+        run: bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: 0.74.0
         run: |
-          docker run -d --name smoke-test-tts \
-            -e TTS_PORT=8081 \
-            -p 127.0.0.1:18081:8081 \
+          set -euo pipefail
+          archive="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl --fail --location --retry 3 --output "$archive" "$base/$archive"
+          curl --fail --location --retry 3 --output trivy-checksums.txt "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep "  $archive$" trivy-checksums.txt | sha256sum --check -
+          tar -xzf "$archive" trivy
+          install -m 0755 trivy "$RUNNER_TEMP/trivy"
+          printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Scan tts-gateway image with Trivy
+        run: |
+          set -euo pipefail
+          bash deploy/validate-cve-allowlist.sh \
+            --file deploy/cve-allowlist.json \
+            --component tts-gateway \
+            --output-ignorefile .trivyignore-tts-gateway
+          trivy image \
+            --platform linux/arm64 \
+            --scanners vuln \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-tts-gateway \
             acb-tts-gateway:smoke-test
-          trap 'docker rm -f smoke-test-tts >/dev/null 2>&1 || true' EXIT
-          for attempt in {1..15}; do
-            if curl --fail --silent --show-error http://127.0.0.1:18081/health; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs smoke-test-tts
-          exit 1
 
   production-contract:
     name: Production Contract

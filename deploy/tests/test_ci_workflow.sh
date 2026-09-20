@@ -168,6 +168,24 @@ assert_contains "$ci_checkout_context" "fetch-depth: 0" "CI verify job fetches f
 assert_contains "$ci_content" "Validate pull request promotion scope diff" "CI workflow includes PR promotion scope validation step"
 assert_contains "$ci_content" "compute-promotion-scope.sh" "CI workflow executes promotion scope classifier on PR diff"
 assert_contains "$ci_content" "github.event_name == 'pull_request'" "CI workflow runs promotion scope validation only on pull requests"
+assert_contains "$ci_content" "pip install -r requirements.lock -r requirements-dev.lock" "TTS tests install committed lock files"
+
+# 4b. ARM64 TTS Image Security Gate
+printf "\n4b. Testing ARM64 TTS Image Security Gate...\n"
+tts_job_context="$(grep -A 65 '^  docker-smoke-tts-gateway:' "$ci_yml" || true)"
+assert_contains "$tts_job_context" "runs-on: ubuntu-24.04-arm" "TTS image gate runs on native ARM64"
+assert_contains "$tts_job_context" "context: ./tts-gateway" "TTS image gate builds the production Docker context"
+assert_contains "$tts_job_context" "tags: acb-tts-gateway:smoke-test" "TTS image gate tags the loaded production-equivalent image"
+assert_contains "$tts_job_context" "load: true" "TTS image gate loads the exact built image"
+assert_contains "$tts_job_context" "bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test" "TTS image gate runs the real health and auth smoke path"
+assert_contains "$tts_job_context" "TRIVY_VERSION: 0.74.0" "TTS image gate installs a pinned Trivy release"
+assert_contains "$tts_job_context" 'trivy_${TRIVY_VERSION}_checksums.txt' "TTS image gate verifies the Trivy archive checksum"
+assert_contains "$tts_job_context" "--platform linux/arm64" "TTS image gate scans ARM64 image metadata"
+assert_contains "$tts_job_context" "--scanners vuln" "TTS image gate scans vulnerabilities"
+assert_contains "$tts_job_context" "--exit-code 1" "TTS image gate fails on policy violations"
+assert_contains "$tts_job_context" "--severity HIGH,CRITICAL" "TTS image gate blocks HIGH and CRITICAL findings"
+assert_contains "$tts_job_context" "--ignorefile .trivyignore-tts-gateway" "TTS image gate uses the validated TTS exception file"
+assert_contains "$tts_job_context" "acb-tts-gateway:smoke-test" "TTS scan targets the smoke-tested image"
 
 # 5. Step-Level Timeouts on Deploy Job
 printf "\n5. Testing Step-Level Timeouts on Critical Steps...\n"

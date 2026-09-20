@@ -5,3 +5,4 @@ pydantic>=2.13.5
 edge-tts==7.2.8
 gTTS==2.5.4
 requests>=2.32.0
+msgpack==1.2.1
