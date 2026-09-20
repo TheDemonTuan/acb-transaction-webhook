@@ -192,7 +192,7 @@ assert_contains "$tts_job_context" "Run tts-gateway image smoke test twice" "TTS
 smoke_invocations="$(grep -F -c 'bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test' <<< "$tts_job_context" || true)"
 assert_eq "2" "$smoke_invocations" "TTS image gate runs two independent real health and auth smoke paths"
 assert_contains "$tts_job_context" "TRIVY_VERSION: 0.74.0" "TTS image gate installs a pinned Trivy release"
-assert_contains "$tts_job_context" 'trivy_${TRIVY_VERSION}_checksums.txt' "TTS image gate verifies the Trivy archive checksum"
+assert_contains "$tts_job_context" "trivy_\${TRIVY_VERSION}_checksums.txt" "TTS image gate verifies the Trivy archive checksum"
 assert_contains "$tts_job_context" "--platform linux/arm64" "TTS image gate scans ARM64 image metadata"
 assert_contains "$tts_job_context" "--scanners vuln" "TTS image gate scans vulnerabilities"
 assert_contains "$tts_job_context" "--exit-code 1" "TTS image gate fails on policy violations"
