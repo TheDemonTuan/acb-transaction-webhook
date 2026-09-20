@@ -201,8 +201,10 @@ jobs:
           push: false
           tags: acb-tts-gateway:smoke-test
           load: true
-      - name: Run tts-gateway image smoke test
-        run: bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
+      - name: Run tts-gateway image smoke test twice
+        run: |
+          bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
+          bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
       - name: Install pinned Trivy
         env:
           TRIVY_VERSION: 0.74.0
