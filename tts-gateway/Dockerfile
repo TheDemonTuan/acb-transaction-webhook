@@ -1,26 +1,37 @@
+FROM python:3.13.15-alpine3.24 AS builder
+
+WORKDIR /app
+
+COPY requirements.lock ./
+RUN apk upgrade --no-cache && \
+    python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.lock && \
+    rm -rf /opt/venv/bin/pip* \
+      /opt/venv/lib/python3.13/site-packages/pip* \
+      /opt/venv/lib/python3.13/site-packages/setuptools* \
+      /opt/venv/lib/python3.13/site-packages/pkg_resources* \
+      /opt/venv/lib/python3.13/site-packages/wheel*
+
 FROM python:3.13.15-alpine3.24
 
-ENV PYTHONUNBUFFERED=1 \
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8081
 
 WORKDIR /app
 
-# Upgrade the base image security baseline before installing dependencies.
 RUN apk upgrade --no-cache && \
-    python -m pip install --no-cache-dir --upgrade "pip==25.3" "setuptools==80.9.0"
-
-# Copy dependencies
-COPY requirements.lock ./
-RUN python -m pip install --no-cache-dir -r requirements.lock
-
-# Create unprivileged user
-RUN addgroup -g 1000 -S appgroup && \
+    rm -rf /usr/local/bin/pip* \
+      /usr/local/lib/python3.13/site-packages/pip* \
+      /usr/local/lib/python3.13/site-packages/setuptools* && \
+    addgroup -g 1000 -S appgroup && \
     adduser -u 1000 -S -G appgroup appuser
 
+COPY --from=builder /opt/venv /opt/venv
 COPY app ./app
 
-RUN chown -R appuser:appgroup /app
+RUN chown -R appuser:appgroup /app /opt/venv
 USER appuser
 
 EXPOSE 8081
