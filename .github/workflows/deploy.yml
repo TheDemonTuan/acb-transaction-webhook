@@ -245,7 +245,7 @@ jobs:
       - name: Test TTS Gateway
         working-directory: tts-gateway
         run: |
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -r requirements.lock -r requirements-dev.lock
           pytest -v
       - name: Test failover controller
         run: |

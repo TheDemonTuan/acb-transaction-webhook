@@ -7,11 +7,12 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Upgrade the base image security baseline before installing dependencies.
-RUN apk upgrade --no-cache
+RUN apk upgrade --no-cache && \
+    python -m pip install --no-cache-dir --upgrade "pip==25.3" "setuptools==80.9.0"
 
 # Copy dependencies
-COPY requirements.txt requirements.lock ./
-RUN pip install --no-cache-dir -r requirements.lock
+COPY requirements.lock ./
+RUN python -m pip install --no-cache-dir -r requirements.lock
 
 # Create unprivileged user
 RUN addgroup -g 1000 -S appgroup && \
