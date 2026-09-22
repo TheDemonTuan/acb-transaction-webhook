@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 )
 
@@ -64,26 +62,8 @@ type HistorySyncJob struct {
 	UpdatedAt     string           `json:"updatedAt"`
 }
 
-var sensitiveErrorPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(token|bearer|password|passwd|pwd|secret|cookie|authorization|auth)[=:\s]+[^\s,;]+`),
-}
-
 func sanitizeJobErrorMessage(msg string) string {
-	if msg == "" {
-		return ""
-	}
-	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<body") {
-		msg = "upstream returned HTML error response"
-	}
-	for _, p := range sensitiveErrorPatterns {
-		msg = p.ReplaceAllString(msg, "$1=[REDACTED]")
-	}
-	const maxLen = 1000
-	if len(msg) > maxLen {
-		msg = msg[:maxLen] + "..."
-	}
-	return msg
+	return sanitizeStoredErrorMessage(msg)
 }
 
 type rowScanner interface {

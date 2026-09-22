@@ -53,6 +53,89 @@ func TestPrepareHistoryFieldsUsesVietnamCalendarAcrossUTCDate(t *testing.T) {
 	}
 }
 
+func TestPinDateRangePreservingPagination(t *testing.T) {
+	original := map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "server-page-2",
+		"dse_sessionId":      "session-2",
+		"dse_nextEventName":  "nextPage",
+		"_raw":               "true",
+		"FromDate":           "01/09/2026",
+		"ToDate":             "01/09/2026",
+	}
+	pinned, err := PinDateRangePreservingPagination(original, "12/09/2026", "12/09/2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned["FromDate"] != "12/09/2026" || pinned["ToDate"] != "12/09/2026" {
+		t.Fatalf("wrong pinned range: %#v", pinned)
+	}
+	for _, key := range []string{"dse_operationName", "dse_processorState", "dse_sessionId", "dse_nextEventName", "_raw"} {
+		if pinned[key] != original[key] {
+			t.Fatalf("pagination field %q changed: got %q want %q", key, pinned[key], original[key])
+		}
+	}
+	if original["FromDate"] != "01/09/2026" {
+		t.Fatal("helper mutated input")
+	}
+}
+
+func TestPrepareHistoryFieldsRejectsIncompleteExplicitRange(t *testing.T) {
+	location := time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60)
+	for name, fields := range map[string]map[string]string{
+		"missing from": {"_explicitRange": "true", "ToDate": "12/09/2026"},
+		"missing to":   {"_explicitRange": "true", "FromDate": "12/09/2026"},
+		"invalid from": {"_explicitRange": "true", "FromDate": "31/02/2026", "ToDate": "12/09/2026"},
+		"invalid to":   {"_explicitRange": "true", "FromDate": "12/09/2026", "ToDate": "2026-09-12"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := PrepareHistoryFields(fields, time.Date(2026, 9, 12, 0, 0, 0, 0, location), location)
+			if err == nil {
+				t.Fatal("accepted incomplete or invalid explicit range")
+			}
+		})
+	}
+}
+
+func TestPrepareHistoryFieldsRawPinsTodayAndPreservesNavigation(t *testing.T) {
+	location := time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60)
+	fields, err := PrepareHistoryFields(map[string]string{
+		"_raw":               "true",
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "server-page-2",
+		"dse_sessionId":      "session-2",
+		"dse_nextEventName":  "nextPage",
+		"FromDate":           "01/09/2026",
+		"ToDate":             "01/09/2026",
+	}, time.Date(2026, 9, 12, 0, 0, 0, 0, location), location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields["FromDate"] != "12/09/2026" || fields["ToDate"] != "12/09/2026" || fields["_raw"] != "" {
+		t.Fatalf("raw request not pinned/stripped: %#v", fields)
+	}
+	if fields["dse_processorState"] != "server-page-2" || fields["dse_sessionId"] != "session-2" || fields["dse_nextEventName"] != "nextPage" {
+		t.Fatalf("raw pagination state changed: %#v", fields)
+	}
+}
+
+func TestPrepareHistoryFieldsPreservesExplicitRange(t *testing.T) {
+	location := time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60)
+	fields, err := PrepareHistoryFields(map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "acctDetailPage",
+		"_explicitRange":     "true",
+		"FromDate":           "01/09/2026",
+		"ToDate":             "12/09/2026",
+	}, time.Date(2026, 9, 30, 0, 0, 0, 0, location), location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields["FromDate"] != "01/09/2026" || fields["ToDate"] != "12/09/2026" || fields["_explicitRange"] != "" {
+		t.Fatalf("explicit range changed: %#v", fields)
+	}
+}
+
 func TestExtractHistoryForm(t *testing.T) {
 	form, err := ExtractHistoryForm(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh-state"><input name="dse_sessionId" value="rotated"></form>`)
 	if err != nil {

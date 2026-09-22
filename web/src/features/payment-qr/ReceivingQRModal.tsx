@@ -652,6 +652,7 @@ export const ReceivingQRModal: React.FC<{
             type="button"
             onClick={handleClose}
             className="p-2 text-stone-400 hover:text-stone-700 rounded-xl hover:bg-stone-200/60 transition cursor-pointer"
+            aria-label="Đóng"
             title="Đóng cửa sổ (ESC)"
           >
             <X className="w-5 h-5" />

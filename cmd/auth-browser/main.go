@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 )
 
 const (
@@ -106,9 +108,12 @@ func sessionResponse(item *browserSession) browserSessionResponse {
 }
 
 type server struct {
-	mu           sync.Mutex
-	session      *browserSession
-	profiles     string
+	mu                   sync.Mutex
+	session              *browserSession
+	internalToken        string
+	internalAuthRequired bool
+	profiles             string
+
 	browserExec  string
 	extraFlags   []string
 	allocatePort func() (int, error)
@@ -124,15 +129,29 @@ func main() {
 		return
 	}
 
+	internalToken, err := config.ReadSecret("AUTH_BROWSER_INTERNAL_TOKEN", "AUTH_BROWSER_INTERNAL_TOKEN_FILE")
+	if err != nil {
+		slog.Error("load auth-browser internal token", "error", err)
+		os.Exit(1)
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") && internalToken == "" {
+		slog.Error("AUTH_BROWSER_INTERNAL_TOKEN or AUTH_BROWSER_INTERNAL_TOKEN_FILE is required in production")
+		os.Exit(1)
+	}
+
 	ctx, cancel := signalContext()
 	defer cancel()
-	controller := &server{profiles: "/tmp/acb-browser"}
+	controller := &server{
+		profiles:             "/tmp/acb-browser",
+		internalToken:        internalToken,
+		internalAuthRequired: internalToken != "" || strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production"),
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /sessions", controller.start)
-	mux.HandleFunc("DELETE /sessions/{attemptID}", controller.cancel)
-	mux.HandleFunc("GET /sessions/{attemptID}/status", controller.status)
-	mux.HandleFunc("POST /sessions/{attemptID}/handoff", controller.handoff)
-	mux.HandleFunc("POST /sessions/{attemptID}/complete", controller.complete)
+	mux.Handle("POST /sessions", controller.requireInternal(http.HandlerFunc(controller.start)))
+	mux.Handle("DELETE /sessions/{attemptID}", controller.requireInternal(http.HandlerFunc(controller.cancel)))
+	mux.Handle("GET /sessions/{attemptID}/status", controller.requireInternal(http.HandlerFunc(controller.status)))
+	mux.Handle("POST /sessions/{attemptID}/handoff", controller.requireInternal(http.HandlerFunc(controller.handoff)))
+	mux.Handle("POST /sessions/{attemptID}/complete", controller.requireInternal(http.HandlerFunc(controller.complete)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Runtime-Role", "auth-browser")
 		expectedRole := r.URL.Query().Get("role")
@@ -470,6 +489,17 @@ func (s *server) failStartup(item *browserSession, ready chan<- error, message s
 	s.setStatus(item.AttemptID, "FAILED", message)
 	slog.Warn(message, "attempt_id", item.AttemptID, "error", err)
 	ready <- err
+}
+
+func (s *server) requireInternal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := r.Header.Get(authbrowser.InternalTokenHeader)
+		if s.internalAuthRequired && (s.internalToken == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(s.internalToken)) != 1) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) cancel(w http.ResponseWriter, r *http.Request) {

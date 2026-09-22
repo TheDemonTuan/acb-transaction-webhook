@@ -23,8 +23,6 @@ services:
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
       POLL_MIN_INTERVAL_SEC: ${POLL_MIN_INTERVAL_SEC:-3}
       POLL_MAX_INTERVAL_SEC: ${POLL_MAX_INTERVAL_SEC:-10}
-      AUTH_BROWSER_URL: http://auth-browser:8181
-      AUTH_BROWSER_VNC_URL: http://auth-browser:6080
       BARK_SERVER_URL: http://bark:8080
       BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
       BARK_BASIC_AUTH_USER_FILE: /run/secrets/bark_basic_auth_user
@@ -90,9 +88,12 @@ services:
       SCREEN_HEIGHT: 800
       SCREEN_DEPTH: 24
       TZ: Asia/Ho_Chi_Minh
+      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
     expose:
       - "8181"
       - "6080"
+    secrets:
+      - auth_browser_internal_token
     networks:
       acb-core:
         aliases:
@@ -318,6 +319,7 @@ services:
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -334,6 +336,7 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - auth_browser_internal_token
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=edge-acb"
@@ -399,6 +402,7 @@ services:
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -415,6 +419,7 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - auth_browser_internal_token
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=edge-acb"

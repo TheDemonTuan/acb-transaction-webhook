@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,8 +56,8 @@ func TestFinishSupersededAuthDoesNotAdvanceCurrentGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FinishAuthAttempt(ctx, attempt.ID, "FAILED"); err != nil {
-		t.Fatal(err)
+	if err := store.FinishAuthAttempt(ctx, attempt.ID, "FAILED"); !errors.Is(err, ErrGenerationFenceMismatch) {
+		t.Fatalf("expected stale auth attempt to be fenced, got %v", err)
 	}
 	after, err := store.Connection(ctx)
 	if err != nil {
@@ -65,9 +66,9 @@ func TestFinishSupersededAuthDoesNotAdvanceCurrentGeneration(t *testing.T) {
 	if after.State != before.State || after.Generation != before.Generation {
 		t.Fatalf("stale attempt mutated current connection: before=%+v after=%+v", before, after)
 	}
-	finished, err := store.AuthAttemptStatusForOwner(ctx, attempt.ID, "owner")
-	if err != nil || finished.Status != "FAILED" {
-		t.Fatalf("attempt=%+v err=%v", finished, err)
+	active, err := store.AuthAttemptStatusForOwner(ctx, attempt.ID, "owner")
+	if err != nil || active.Status == "FAILED" {
+		t.Fatalf("stale attempt was terminalized: attempt=%+v err=%v", active, err)
 	}
 }
 

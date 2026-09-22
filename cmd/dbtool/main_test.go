@@ -56,7 +56,7 @@ func TestDBTool_ReadOnlyProbeFlags(t *testing.T) {
 	})
 
 	t.Run("dbtool -schema-compat -readonly verifies compatibility", func(t *testing.T) {
-		cmd := exec.Command("go", "run", ".", "-path", dbPath, "-readonly", "-schema-compat", "-min-version", "9")
+		cmd := exec.Command("go", "run", ".", "-path", dbPath, "-readonly", "-schema-compat", "-min-version", "10")
 		cmd.Dir = "."
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout

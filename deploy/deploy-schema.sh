@@ -99,7 +99,7 @@ fi
 
 # 6. Verify schema compatibility post-migration
 log_info "Verifying schema compatibility post-migration..."
-if ! verify_schema_compat "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" 9; then
+if ! verify_schema_compat "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" 10; then
   log_error "Post-migration schema compatibility check failed!"
   exit 1
 fi
@@ -127,7 +127,7 @@ cat <<EOF > "$MIGRATION_RECORD"
   "target_image": "${DBTOOL_IMAGE}",
   "backup_file": "$(basename "$BACKUP_FILE")",
   "status": "COMPLETED",
-  "schema_version": 9,
+  "schema_version": 11,
   "route_touched": false
 }
 EOF

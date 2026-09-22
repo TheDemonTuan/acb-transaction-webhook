@@ -60,7 +60,7 @@ func (m *multiPageMockClient) History(ctx context.Context, endpoint string, fiel
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
 }
 
-func TestRealtimeTask_FivePageBudgetAndPartial(t *testing.T) {
+func TestRealtimeTask_ContinuesBeyondForegroundPageBudget(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_budget.db"))
 	if err != nil {
@@ -71,50 +71,33 @@ func TestRealtimeTask_FivePageBudgetAndPartial(t *testing.T) {
 	conn, _ := store.ConfigureConnection(ctx, "***1234")
 	_, _ = store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'")
 
-	// Mock client returns 10 pages, budget is 5
 	client := &multiPageMockClient{maxPages: 10}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
-
 	task := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
 	res, err := task.Step(ctx)
-	if err != nil {
-		t.Fatalf("unexpected step error: %v", err)
+	if err != nil || res.Done {
+		t.Fatalf("expected foreground quantum to yield, result=%+v err=%v", res, err)
 	}
-	if !res.Done {
-		t.Fatal("expected task to be done")
+	for i := 0; i < 10 && !res.Done; i++ {
+		res, err = task.Step(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	// Verify only 5 pages were fetched
-	if client.pagesReturned.Load() != 5 {
-		t.Fatalf("expected 5 pages fetched due to budget, got %d", client.pagesReturned.Load())
+	if !res.Done || client.pagesReturned.Load() != 10 {
+		t.Fatalf("expected continuation through 10 pages, done=%v pages=%d", res.Done, client.pagesReturned.Load())
 	}
-
-	// Verify poll was recorded as PARTIAL
 	runs, err := store.ListPollRuns(ctx, 5)
-	if err != nil || len(runs) != 1 {
-		t.Fatalf("expected 1 poll run, got %v (err: %v)", len(runs), err)
+	if err != nil || len(runs) != 1 || runs[0].Status != "SUCCEEDED" || runs[0].Pages != 10 {
+		t.Fatalf("unexpected completed poll: %+v %v", runs, err)
 	}
-	if runs[0].Status != "PARTIAL" {
-		t.Fatalf("expected PARTIAL status, got %s", runs[0].Status)
-	}
-	if runs[0].Pages != 5 {
-		t.Fatalf("expected 5 pages in poll run, got %d", runs[0].Pages)
-	}
-	if runs[0].RowsSeen != 5 {
-		t.Fatalf("expected 5 rows seen, got %d", runs[0].RowsSeen)
-	}
-
-	// Verify 5 transactions were safely ingested
 	txns, err := store.ListTransactions(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(txns) != 5 {
-		t.Fatalf("expected 5 transactions committed, got %d", len(txns))
+	if err != nil || len(txns) != 10 {
+		t.Fatalf("expected 10 transactions committed, got %d (%v)", len(txns), err)
 	}
 }
 
-func TestRealtimeTask_PartialPollSchedulesCatchUp(t *testing.T) {
+func TestRealtimeTask_NoHistoricalCatchUpAfterPageBudget(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_catchup.db"))
 	if err != nil {
@@ -128,37 +111,27 @@ func TestRealtimeTask_PartialPollSchedulesCatchUp(t *testing.T) {
 	client := &multiPageMockClient{maxPages: 8}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
 
-	// Attach scheduler and start it
-	sched := mon.Scheduler()
-	sched.Start(ctx)
-	defer sched.Stop()
-
 	task := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
-	if err := sched.Enqueue(task); err != nil {
-		t.Fatal(err)
+	res, err := task.Step(ctx)
+	if err != nil || res.Done {
+		t.Fatalf("expected first quantum to yield, result=%+v err=%v", res, err)
 	}
-
-	// Wait for realtime poll to finish and catchup to be enqueued
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for poll completion")
+	for i := 0; i < 8 && !res.Done; i++ {
+		res, err = task.Step(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		runs, _ := store.ListPollRuns(ctx, 1)
-		if len(runs) > 0 && runs[0].Status == "PARTIAL" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
-
-	// Poll succeeded partially; verified that catch-up queue depth or busy state is active
-	// or catch-up was scheduled into scheduler
+	if !res.Done {
+		t.Fatal("expected realtime continuation to finish")
+	}
+	runs, err := store.ListPollRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || runs[0].Status != "SUCCEEDED" {
+		t.Fatalf("expected one successful poll, got %+v (%v)", runs, err)
+	}
 	txns, err := store.ListTransactions(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(txns) < 5 {
-		t.Fatalf("expected at least 5 transactions ingested from partial poll, got %d", len(txns))
+	if err != nil || len(txns) != 8 {
+		t.Fatalf("expected 8 realtime transactions, got %d (%v)", len(txns), err)
 	}
 }
 

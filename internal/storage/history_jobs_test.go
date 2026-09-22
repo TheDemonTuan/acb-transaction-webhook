@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -538,6 +539,31 @@ func TestStore_HistorySyncJobs_SanitizeErrorMessages(t *testing.T) {
 	}
 	if len(failedJob2.ErrorMessage) > 1005 {
 		t.Fatalf("error message exceeded max length: %d", len(failedJob2.ErrorMessage))
+	}
+
+	job3, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, "2026-09-08", "2026-09-09")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"cookie":"cookie-secret","dse_sessionId":"session-secret"}`,
+		`POST /history?token=query-secret dse_processorState=form-secret`,
+		`<form><input name="rawForm" value="raw-secret"></form>`,
+	} {
+		if err := store.FailHistorySyncJob(ctx, job3.ID, "UPSTREAM", raw); err != nil {
+			t.Fatal(err)
+		}
+		failed, err := store.GetHistorySyncJob(ctx, job3.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(failed.ErrorMessage, "secret") || strings.Contains(failed.ErrorMessage, "rawForm") {
+			t.Fatalf("sensitive history error leaked: %q", failed.ErrorMessage)
+		}
+		job3, _, err = store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, "2026-09-08", "2026-09-09")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

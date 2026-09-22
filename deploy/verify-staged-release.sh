@@ -104,7 +104,7 @@ fi
 
 created_dummy_secrets=()
 mkdir -p "$DEPLOY_DIR/secrets"
-for s in app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   if [[ ! -f "$DEPLOY_DIR/secrets/$s" ]]; then
     touch "$DEPLOY_DIR/secrets/$s"
     created_dummy_secrets+=("$DEPLOY_DIR/secrets/$s")

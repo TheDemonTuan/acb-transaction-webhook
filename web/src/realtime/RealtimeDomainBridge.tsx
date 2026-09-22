@@ -18,7 +18,7 @@ export const RealtimeDomainBridge: React.FC = () => {
     // 1. bank.transaction.credit -> Update cache & trigger voice
     const unsubCredit = subscribe<BankTransactionCreditData>(
       'bank.transaction.credit',
-      (envelope: RealtimeEnvelope<BankTransactionCreditData>) => {
+      async (envelope: RealtimeEnvelope<BankTransactionCreditData>) => {
         const data = envelope.data;
         if (!data) return;
 
@@ -40,6 +40,9 @@ export const RealtimeDomainBridge: React.FC = () => {
           firstSeenAt: data.detectedAt || new Date().toISOString(),
           source: data.source || 'REALTIME',
         };
+
+        // Stop an in-flight snapshot request from overwriting this realtime row.
+        await queryClient.cancelQueries({ queryKey: queryKeys.transactions() });
 
         // Optimistically prepend transaction ONLY to the first page (no cursor) to avoid mixing across pages
         queryClient.setQueriesData<PageResponse<Transaction>>(

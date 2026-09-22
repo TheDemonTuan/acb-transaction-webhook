@@ -13,7 +13,7 @@ test.describe('V3 Features: Schedule, QR, Server-side Transactions & Detail', ()
     await page.getByRole('button', { name: /Chuẩn V3/ }).click();
     await expect(page.getByText(/Đã áp dụng mẫu cấu hình/)).toBeVisible();
 
-    await expect(page.getByText(/07:00–23:00 Realtime \(3–10s\)/)).toBeVisible();
+    await expect(page.getByText(/07:00–23:00 Realtime \(20–30s\)/)).toBeVisible();
     await expect(page.getByText(/Ngoài giờ Giữ phiên \(1–2p\)/)).toBeVisible();
 
     // Verify draft summary appears immediately upon preset selection
@@ -33,8 +33,8 @@ test.describe('V3 Features: Schedule, QR, Server-side Transactions & Detail', ()
     await expect(page.getByText('Đã lưu cấu hình lịch trình polling thành công!')).toBeVisible();
 
     await page.reload();
-    await expect(page.locator('input[type="number"][value="3"]').first()).toBeVisible();
-    await expect(page.locator('input[type="number"][value="10"]').first()).toBeVisible();
+    await expect(page.locator('input[type="number"][value="20"]').first()).toBeVisible();
+    await expect(page.locator('input[type="number"][value="30"]').first()).toBeVisible();
 
     await page.getByRole('button', { name: 'Thêm khung giờ' }).click();
     await expect(page.getByPlaceholder('Tên khung giờ (ví dụ: Ban ngày)').last()).toBeVisible();

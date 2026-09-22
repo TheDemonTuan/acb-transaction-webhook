@@ -19,9 +19,12 @@ services:
       SCREEN_HEIGHT: 800
       SCREEN_DEPTH: 24
       TZ: Asia/Ho_Chi_Minh
+      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
     expose:
       - "8181"
       - "6080"
+    secrets:
+      - auth_browser_internal_token
     networks:
       acb-core:
         aliases:

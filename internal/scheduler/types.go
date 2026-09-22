@@ -14,12 +14,13 @@ import (
 type UpstreamPriority int
 
 const (
-	PriorityAuth       UpstreamPriority = 100 // Interactive verify / auth challenges
-	PriorityRealtime   UpstreamPriority = 80  // Realtime adaptive poll
-	PriorityManualSync UpstreamPriority = 70  // Operator manual immediate refresh
-	PriorityCatchUp    UpstreamPriority = 50  // Gap scan following downtime or startup
-	PriorityHistory    UpstreamPriority = 30  // Durable background historical range sync
-	PriorityKeepalive  UpstreamPriority = 10  // Idle keepalive session touch
+	PriorityAuth                 UpstreamPriority = 100 // Interactive verify / auth challenges
+	PriorityRealtime             UpstreamPriority = 80  // Realtime adaptive poll
+	PriorityManualSync           UpstreamPriority = 70  // Operator manual immediate refresh
+	PriorityRealtimeContinuation UpstreamPriority = 60  // Stateful realtime cursor continuation
+	PriorityCatchUp              UpstreamPriority = 50  // Gap scan following downtime or startup
+	PriorityHistory              UpstreamPriority = 30  // Durable background historical range sync
+	PriorityKeepalive            UpstreamPriority = 10  // Idle keepalive session touch
 )
 
 // Compatibility aliases matching COMPATIBILITY_CONTRACTS.md and specifications.

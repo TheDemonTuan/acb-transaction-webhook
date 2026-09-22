@@ -17,6 +17,23 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
+type signalingResponseWriter struct {
+	*httptest.ResponseRecorder
+	onWrite func([]byte)
+}
+
+func (w *signalingResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(p)
+	if err == nil && w.onWrite != nil {
+		w.onWrite(p[:n])
+	}
+	return n, err
+}
+
+func (w *signalingResponseWriter) Flush() {
+	w.ResponseRecorder.Flush()
+}
+
 func TestSSEStreamInitialStateAndLiveEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -37,20 +54,43 @@ func TestSSEStreamInitialStateAndLiveEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	initialStateWritten := make(chan struct{})
+	liveEventWritten := make(chan struct{})
+	w := &signalingResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		onWrite: func(p []byte) {
+			switch {
+			case strings.Contains(string(p), "event: initial_state"):
+				select {
+				case <-initialStateWritten:
+				default:
+					close(initialStateWritten)
+				}
+			case strings.Contains(string(p), "txn_102"):
+				select {
+				case <-liveEventWritten:
+				default:
+					close(liveEventWritten)
+				}
+			}
+		},
+	}
+
 	// 1. Initial connect without cursor
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
-	w := httptest.NewRecorder()
-
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
 		server.Handler().ServeHTTP(w, req)
 	}()
 
-	// Wait briefly for handler to start and write initial state
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-initialStateWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial SSE state")
+	}
 
-	// Publish live event
+	// Publish live event only after the handler has subscribed and established its watermark.
 	hub.Publish(eventhub.Event{
 		Seq:         seq1 + 1,
 		Epoch:       "ep1",
@@ -59,7 +99,12 @@ func TestSSEStreamInitialStateAndLiveEvents(t *testing.T) {
 		Payload:     []byte(`{"amount":102,"transactionId":"txn_102"}`),
 	})
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-liveEventWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for live SSE event")
+	}
+
 	// Cancel request context to terminate stream
 	cancel()
 	<-doneCh
@@ -93,14 +138,32 @@ func TestSSEReplayFromCursor(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
 	req.Header.Set("Last-Event-ID", "ep1:1")
-	w := httptest.NewRecorder()
+	replayed := make(chan struct{})
+	w := &signalingResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		onWrite: func(p []byte) {
+			if strings.Contains(string(p), "txn_202") {
+				select {
+				case <-replayed:
+				default:
+					close(replayed)
+				}
+			}
+		},
+	}
 
+	doneCh := make(chan struct{})
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		defer close(doneCh)
+		server.Handler().ServeHTTP(w, req.WithContext(ctx))
 	}()
-
-	server.Handler().ServeHTTP(w, req.WithContext(ctx))
+	select {
+	case <-replayed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for replayed SSE event")
+	}
+	cancel()
+	<-doneCh
 
 	body := w.Body.String()
 	// Should NOT contain txn_201 (seq 1), but SHOULD contain txn_202 (seq 2)

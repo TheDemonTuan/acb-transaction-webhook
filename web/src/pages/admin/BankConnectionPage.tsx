@@ -71,9 +71,10 @@ export const BankConnectionPage: React.FC = () => {
       const connData = (res as any)?.connection ? res : { configured: true, connection: res };
       queryClient.setQueryData(queryKeys.connection, connData);
       setGlobalNotice({ kind: 'ok', text: 'Đã lưu kết nối.' });
+      // Keep the submitted connection visible while background status catches up.
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.connection }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.connection, refetchType: 'none' }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status, refetchType: 'none' }),
       ]);
     } catch (err: any) {
       setGlobalNotice({

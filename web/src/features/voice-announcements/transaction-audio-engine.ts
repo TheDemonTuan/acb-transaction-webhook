@@ -56,7 +56,6 @@ export class TransactionAudioEngine implements VoiceEngine {
         return false;
       }
     }
-    await this.browserFallback.prime();
     return ctx.state === 'running';
   }
 

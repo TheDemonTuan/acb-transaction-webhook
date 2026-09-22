@@ -73,6 +73,7 @@ setup_dispatcher_env() {
   cp "$DEPLOY_DIR/compose.prod.yaml" "$tdir/deploy/"
   printf 'mock-master\n' > "$tdir/secrets/app_master_key"
   printf 'mock-worker\n' > "$tdir/secrets/worker_internal_token"
+  printf 'mock-worker\n' > "$tdir/secrets/auth_browser_internal_token"
   printf 'mock-tts\n' > "$tdir/secrets/tts_internal_token"
   printf 'mock-bark-user\n' > "$tdir/secrets/bark_basic_auth_user"
   printf 'mock-bark-pass\n' > "$tdir/secrets/bark_basic_auth_password"

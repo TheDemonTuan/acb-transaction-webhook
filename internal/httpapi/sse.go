@@ -19,16 +19,16 @@ const (
 )
 
 func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
-	s.eventsStreamFiltered(w, r, nil)
+	s.eventsStreamFiltered(w, r, nil, false)
 }
 
 func (s *Server) publicEventsStream(w http.ResponseWriter, r *http.Request) {
 	s.eventsStreamFiltered(w, r, func(eventType string) bool {
 		return eventType == "bank.transaction.credit"
-	})
+	}, true)
 }
 
-func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, allowEvent func(string) bool) {
+func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, allowEvent func(string) bool, public bool) {
 	if s.eventHub == nil {
 		http.Error(w, "event stream unavailable", http.StatusServiceUnavailable)
 		return
@@ -114,7 +114,7 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 				watermark = entry.Seq
 				continue
 			}
-			if err := writeJournalEntry(rc, w, flusher, entry.Epoch, entry.Seq, entry.EventType, entry.Payload); err != nil {
+			if err := writeJournalEntry(rc, w, flusher, entry.Epoch, entry.Seq, entry.EventType, entry.Payload, public); err != nil {
 				return
 			}
 			watermark = entry.Seq
@@ -154,7 +154,7 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 				continue
 			}
 			if hint.Seq > watermark+1 {
-				if !s.drainJournal(ctx, rc, w, flusher, &watermark, allowEvent) {
+				if !s.drainJournal(ctx, rc, w, flusher, &watermark, allowEvent, public) {
 					return
 				}
 				if hint.Seq <= watermark {
@@ -169,7 +169,8 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 				continue
 			}
 			start := time.Now()
-			if err := writeJournalEntry(rc, w, flusher, hint.Epoch, hint.Seq, hint.EventType, hint.Payload); err != nil {
+			if err := writeJournalEntry(rc, w, flusher, hint.Epoch, hint.Seq, hint.EventType, hint.Payload, public); err != nil {
+
 				return
 			}
 			telemetry.Default.RecordSSE(time.Since(start))
@@ -179,7 +180,7 @@ func (s *Server) eventsStreamFiltered(w http.ResponseWriter, r *http.Request, al
 	}
 }
 
-func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, watermark *int64, allowEvent func(string) bool) bool {
+func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, watermark *int64, allowEvent func(string) bool, public bool) bool {
 	for {
 		entries, err := s.store.ReadJournalEvents(ctx, realtimeEpoch, *watermark, replayBatch)
 		if err != nil {
@@ -191,7 +192,7 @@ func (s *Server) drainJournal(ctx context.Context, rc *http.ResponseController, 
 				*watermark = entry.Seq
 				continue
 			}
-			if err := writeJournalEntry(rc, w, flusher, entry.Epoch, entry.Seq, entry.EventType, entry.Payload); err != nil {
+			if err := writeJournalEntry(rc, w, flusher, entry.Epoch, entry.Seq, entry.EventType, entry.Payload, public); err != nil {
 				return false
 			}
 			telemetry.Default.RecordSSE(time.Since(start))
@@ -217,16 +218,23 @@ func recordCommitToBrowser(event eventhub.Event) {
 	}
 }
 
-func writeJournalEntry(rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, epoch string, seq int64, eventType string, payload []byte) error {
+func writeJournalEntry(rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, epoch string, seq int64, eventType string, payload []byte, public bool) error {
 	data := string(payload)
-	if eventType == "bank.transaction.credit" {
+	if public && eventType == "bank.transaction.credit" {
 		var raw map[string]any
 		if err := json.Unmarshal(payload, &raw); err != nil {
 			return fmt.Errorf("sanitize credit event: %w", err)
 		}
-		delete(raw, "balance")
-		delete(raw, "accountNumber")
-		delete(raw, "sessionToken")
+		allowed := map[string]struct{}{
+			"bank": {}, "accountMasked": {}, "transactionId": {}, "transactionNumber": {},
+			"credit": {}, "debit": {}, "currency": {}, "transactionDate": {}, "transactionDay": {},
+			"datePrecision": {}, "source": {}, "description": {}, "detectedAt": {},
+		}
+		for key := range raw {
+			if _, ok := allowed[key]; !ok {
+				delete(raw, key)
+			}
+		}
 		safe, err := json.Marshal(raw)
 		if err != nil {
 			return fmt.Errorf("sanitize credit event: %w", err)

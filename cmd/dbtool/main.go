@@ -35,7 +35,7 @@ func main() {
 	leaseTokenFlag := flag.String("lease-token", "", "lease token for release or renewal")
 	leaseDurationFlag := flag.Duration("lease-duration", 2*time.Minute, "duration of lease")
 	reasonFlag := flag.String("reason", "deploy", "reason for mutation gate lease")
-	minVersionFlag := flag.Int("min-version", 9, "minimum required schema version for schema-compat check")
+	minVersionFlag := flag.Int("min-version", 10, "minimum required schema version for schema-compat check")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))

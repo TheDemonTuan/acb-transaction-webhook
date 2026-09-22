@@ -678,6 +678,37 @@ func TestObserverBoundedRetryPreservesSession(t *testing.T) {
 	}
 }
 
+func TestHandoffRequiresInternalToken(t *testing.T) {
+	s := &server{
+		internalToken:        "internal-secret",
+		internalAuthRequired: true,
+		session: &browserSession{
+			AttemptID: "handoff-auth-test",
+			Status:    "VERIFIED",
+			verified:  true,
+			handoff:   "sensitive-handoff",
+		},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/sessions/handoff-auth-test/handoff", nil)
+	request.SetPathValue("attemptID", "handoff-auth-test")
+
+	unauthorized := httptest.NewRecorder()
+	s.requireInternal(http.HandlerFunc(s.handoff)).ServeHTTP(unauthorized, request)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized handoff status = %d, want 401", unauthorized.Code)
+	}
+	if strings.Contains(unauthorized.Body.String(), "sensitive-handoff") {
+		t.Fatal("unauthorized response leaked handoff")
+	}
+
+	request.Header.Set(authbrowser.InternalTokenHeader, "internal-secret")
+	authorized := httptest.NewRecorder()
+	s.requireInternal(http.HandlerFunc(s.handoff)).ServeHTTP(authorized, request)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized handoff status = %d: %s", authorized.Code, authorized.Body.String())
+	}
+}
+
 func TestHandoffReapsProcessAndSetsCompleted(t *testing.T) {
 	profileDir := t.TempDir()
 	s := &server{

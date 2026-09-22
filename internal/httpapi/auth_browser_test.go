@@ -22,6 +22,21 @@ type acceptingAuthVerifier struct{}
 
 func (acceptingAuthVerifier) VerifySession(context.Context, string, int64, []byte) error { return nil }
 
+type recoveryRecorder struct {
+	calls        int
+	connectionID string
+	generation   int64
+	eventKey     string
+}
+
+func (r *recoveryRecorder) ScheduleRecovery(_ context.Context, connectionID string, generation int64, eventKey string) error {
+	r.calls++
+	r.connectionID = connectionID
+	r.generation = generation
+	r.eventKey = eventKey
+	return nil
+}
+
 type rejectingAuthVerifier struct{ err error }
 
 func (v rejectingAuthVerifier) VerifySession(context.Context, string, int64, []byte) error {
@@ -129,12 +144,13 @@ func TestAuthBrowserStatusTerminalIdempotence(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	recovery := &recoveryRecorder{}
 	server := New(config.Config{
 		Timezone:           time.UTC,
 		DevelopmentSubject: "owner",
 		AuthBrowserURL:     upstream.URL,
 		MasterKeyFile:      keyPath,
-	}, store).WithAuthVerifier(acceptingAuthVerifier{})
+	}, store).WithAuthVerifier(acceptingAuthVerifier{}).WithPostAuthRecoveryRequester(recovery)
 
 	// First poll transitions to MONITORING
 	w1 := httptest.NewRecorder()
@@ -147,6 +163,9 @@ func TestAuthBrowserStatusTerminalIdempotence(t *testing.T) {
 	if res1["status"] != "MONITORING" {
 		t.Fatalf("first poll status=%v, want MONITORING", res1["status"])
 	}
+	if recovery.calls != 1 || recovery.connectionID != attempt.ConnectionID || recovery.generation != attempt.Generation || recovery.eventKey != attempt.ID {
+		t.Fatalf("recovery hook = %+v, want one call for completed auth", recovery)
+	}
 
 	// Subsequent poll returns MONITORING idempotently (NOT 404!)
 	w2 := httptest.NewRecorder()
@@ -158,6 +177,9 @@ func TestAuthBrowserStatusTerminalIdempotence(t *testing.T) {
 	_ = json.Unmarshal(w2.Body.Bytes(), &res2)
 	if res2["status"] != "MONITORING" {
 		t.Fatalf("second poll status=%v, want MONITORING", res2["status"])
+	}
+	if recovery.calls != 1 {
+		t.Fatalf("recovery hook called %d times after repeated status, want 1", recovery.calls)
 	}
 
 	// VNC screen access must be rejected after terminal status
@@ -906,4 +928,3 @@ func TestAuthBrowserConcurrentStartLoginRace(t *testing.T) {
 		t.Fatalf("expected %d conflict or resume responses, got %d (all codes: %v)", concurrency-1, okOrConflictCount, codes)
 	}
 }
-

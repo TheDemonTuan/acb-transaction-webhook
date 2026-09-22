@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
@@ -80,12 +80,17 @@ export const TransactionsPage: React.FC = () => {
   const [syncNotice, setSyncNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const pagination = useCursorPagination(20);
   const resetPagination = pagination.reset;
+  const appliedSearchRef = useRef('');
 
-  // Debounce search input
+  // Debounce search input without resetting the initial cursor asynchronously.
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search);
-      resetPagination();
+      const nextSearch = search.trim();
+      setDebouncedSearch(nextSearch);
+      if (nextSearch !== appliedSearchRef.current) {
+        appliedSearchRef.current = nextSearch;
+        resetPagination();
+      }
     }, 300);
     return () => clearTimeout(timer);
   }, [search, resetPagination]);
@@ -657,7 +662,7 @@ export const TransactionsPage: React.FC = () => {
             pageSize={pagination.pageSize}
             hasNext={Boolean(data?.nextCursor)}
             hasPrev={pagination.hasPrev}
-            isLoading={isLoading || isRefetching}
+            isLoading={isLoading}
             onNext={() => pagination.handleNext(data?.nextCursor)}
             onPrev={pagination.handlePrev}
             onFirst={pagination.handleFirst}

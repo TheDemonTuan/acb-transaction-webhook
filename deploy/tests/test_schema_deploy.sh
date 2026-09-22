@@ -97,6 +97,7 @@ EOF
   printf 'mock-master-key\n' > "$test_dir/secrets/app_master_key"
   printf 'mock-tts-token\n' > "$test_dir/secrets/tts_internal_token"
   printf 'mock-worker-token\n' > "$test_dir/secrets/worker_internal_token"
+  printf 'mock-worker-token\n' > "$test_dir/secrets/auth_browser_internal_token"
   printf 'mock-bark-user\n' > "$test_dir/secrets/bark_basic_auth_user"
   printf 'mock-bark-pass\n' > "$test_dir/secrets/bark_basic_auth_password"
   chmod 600 "$test_dir/secrets/"* 2>/dev/null || true
@@ -182,7 +183,10 @@ elif [[ "$cmd" == "run" ]]; then
     exit 0
   fi
   if [[ "$*" =~ -schema-compat ]]; then
-    printf '{"compatible":true,"schemaVersion":9,"requiredVersion":9}\n'
+    if [[ ! "$*" =~ -min-version[[:space:]]10 ]]; then
+      exit 1
+    fi
+    printf '{"compatible":true,"schemaVersion":11,"requiredVersion":10}\n'
     exit 0
   fi
   if [[ "$*" =~ -gate-status ]]; then
@@ -304,6 +308,7 @@ setup_schema_mock_env "$T5"
 
 assert_file_exists "$T5/data/migration-record.json" "Migration metadata record was saved"
 assert_file_contains "$T5/data/migration-record.json" "COMPLETED" "Migration record status is COMPLETED"
+assert_file_contains "$T5/data/migration-record.json" '"schema_version": 11' "Migration record uses schema version 11"
 # Assert Traefik dynamic route remains untouched
 assert_file_contains "$T5/dynamic/acb.yml" "acb-web-blue" "Traefik route was never touched by schema promotion"
 assert_eq "blue" "$(cat "$T5/.active-slot")" "Active slot remains blue"

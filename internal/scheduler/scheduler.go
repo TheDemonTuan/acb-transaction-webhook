@@ -36,6 +36,11 @@ type Scheduler struct {
 	delayedMu sync.Mutex
 	delayed   []delayedItem
 
+	// Active task admission remains held across a yielded quantum so a duplicate
+	// cannot displace a stateful pagination cursor.
+	activeKey        string
+	activeGeneration int64
+
 	// Observability & current task tracking
 	currentMu       sync.RWMutex
 	currentKind     string
@@ -156,6 +161,10 @@ func (s *Scheduler) Enqueue(task UpstreamTask) error {
 	if s.paused.Load() {
 		return ErrSchedulerPaused
 	}
+	key := taskKey(task)
+	if s.activeKey != "" && key == s.activeKey && task.Generation() <= s.activeGeneration {
+		return nil
+	}
 
 	if s.coalesceDelayed(task) {
 		return nil
@@ -233,15 +242,29 @@ func (s *Scheduler) run(ctx context.Context) {
 		// 1. Promote any delayed tasks whose RequeueAt has expired
 		nextWakeup := s.promoteDelayedTasks()
 
-		// 2. Pop highest priority ready task
+		// 2. Pop highest priority ready task and reserve its key before
+		// releasing admission to concurrent producers.
+		s.admissionMu.Lock()
+		// Mark dispatch before popping: observers must not see an empty queue
+		// during the handoff between queue ownership and task execution.
+		s.dispatching.Store(true)
 		task := s.queue.Pop()
 		if task != nil {
-			s.dispatching.Store(true)
+			s.activeKey = taskKey(task)
+			s.activeGeneration = task.Generation()
 			if s.paused.Load() {
 				s.dispatching.Store(false)
 				_ = s.queue.Push(task, time.Now())
+				s.activeKey = ""
+				s.activeGeneration = 0
+				s.admissionMu.Unlock()
 				continue
 			}
+		} else {
+			s.dispatching.Store(false)
+		}
+		s.admissionMu.Unlock()
+		if task != nil {
 			s.executeQuantum(ctx, task)
 			s.dispatching.Store(false)
 			continue
@@ -389,7 +412,9 @@ func (s *Scheduler) executeQuantum(ctx context.Context, task UpstreamTask) {
 		}
 	}
 
-	// Requeue if task is not done and scheduler is still running
+	// Requeue while the task remains admitted. Producers cannot enqueue a
+	// duplicate cursor task until this decision is complete.
+	s.admissionMu.Lock()
 	if !res.Done && !s.stopped.Load() && ctx.Err() == nil {
 		if !res.RequeueAt.IsZero() && res.RequeueAt.After(time.Now()) {
 			s.scheduleDelayed(task, res.RequeueAt)
@@ -397,6 +422,9 @@ func (s *Scheduler) executeQuantum(ctx context.Context, task UpstreamTask) {
 			_ = s.queue.Push(task, time.Now())
 		}
 	}
+	s.activeKey = ""
+	s.activeGeneration = 0
+	s.admissionMu.Unlock()
 }
 
 // QueueDepth returns the number of queued tasks with priority p.
@@ -435,5 +463,5 @@ func (s *Scheduler) CurrentTaskDuration() time.Duration {
 
 // IsBusy reports true if a task is currently executing a quantum.
 func (s *Scheduler) IsBusy() bool {
-	return s.activeGoroutines.Load() > 0
+	return s.dispatching.Load() || s.activeGoroutines.Load() > 0
 }

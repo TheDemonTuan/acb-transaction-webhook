@@ -25,38 +25,39 @@ type RoleSubjects struct {
 }
 
 type Config struct {
-	RuntimeRole           RuntimeRole
-	Address               string
-	DatabasePath          string
-	MasterKeyFile         string
-	Timezone              *time.Location
-	PollMinInterval       time.Duration
-	PollMaxInterval       time.Duration
-	CloudflareIssuer      string
-	CloudflareAudience    string
-	CloudflareJWKSURL     string
-	Roles                 RoleSubjects
-	DevelopmentSubject    string
-	Production            bool
-	PublicOrigin          string
-	AuthBrowserURL        string
-	AuthBrowserVNCURL     string
-	TTSGatewayURL         string
-	TTSInternalToken      string
-	BarkServerURL         string
-	BarkPublicURL         string
-	BarkBasicAuthUser     string
-	BarkBasicAuthPassword string
-	BarkTimeout           time.Duration
-	BarkDefaultGroup      string
-	BarkDefaultLevel      string
-	BarkDefaultSound      string
-	WorkerRPCURL          string
-	WorkerRealtimeURL     string
-	WorkerRealtimeEnabled bool
-	WorkerInternalToken   string
-	Slot                  string
-	ReleaseCommit         string
+	RuntimeRole              RuntimeRole
+	Address                  string
+	DatabasePath             string
+	MasterKeyFile            string
+	Timezone                 *time.Location
+	PollMinInterval          time.Duration
+	PollMaxInterval          time.Duration
+	CloudflareIssuer         string
+	CloudflareAudience       string
+	CloudflareJWKSURL        string
+	Roles                    RoleSubjects
+	DevelopmentSubject       string
+	Production               bool
+	PublicOrigin             string
+	AuthBrowserURL           string
+	AuthBrowserVNCURL        string
+	AuthBrowserInternalToken string
+	TTSGatewayURL            string
+	TTSInternalToken         string
+	BarkServerURL            string
+	BarkPublicURL            string
+	BarkBasicAuthUser        string
+	BarkBasicAuthPassword    string
+	BarkTimeout              time.Duration
+	BarkDefaultGroup         string
+	BarkDefaultLevel         string
+	BarkDefaultSound         string
+	WorkerRPCURL             string
+	WorkerRealtimeURL        string
+	WorkerRealtimeEnabled    bool
+	WorkerInternalToken      string
+	Slot                     string
+	ReleaseCommit            string
 }
 
 func Load() (Config, error) {
@@ -164,6 +165,11 @@ func Load() (Config, error) {
 		}
 	}
 
+	authBrowserToken, err := ReadSecret("AUTH_BROWSER_INTERNAL_TOKEN", "AUTH_BROWSER_INTERNAL_TOKEN_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+
 	ttsToken, err := ReadSecret("TTS_INTERNAL_TOKEN", "TTS_INTERNAL_TOKEN_FILE")
 	if err != nil {
 		return Config{}, err
@@ -266,12 +272,14 @@ func Load() (Config, error) {
 			Operators: set("OPERATOR_SUBJECTS"),
 			Viewers:   set("VIEWER_SUBJECTS"),
 		},
-		DevelopmentSubject:    value("DEVELOPMENT_SUBJECT", "local-owner"),
-		Production:            production,
-		PublicOrigin:          publicOrigin,
-		AuthBrowserURL:        value("AUTH_BROWSER_URL", "http://auth-browser:8181"),
-		AuthBrowserVNCURL:     value("AUTH_BROWSER_VNC_URL", "http://auth-browser:6080"),
-		TTSGatewayURL:         ttsGatewayURL,
+		DevelopmentSubject:       value("DEVELOPMENT_SUBJECT", "local-owner"),
+		Production:               production,
+		PublicOrigin:             publicOrigin,
+		AuthBrowserURL:           value("AUTH_BROWSER_URL", "http://auth-browser:8181"),
+		AuthBrowserVNCURL:        value("AUTH_BROWSER_VNC_URL", "http://auth-browser:6080"),
+		AuthBrowserInternalToken: authBrowserToken,
+		TTSGatewayURL:            ttsGatewayURL,
+
 		TTSInternalToken:      ttsToken,
 		BarkServerURL:         barkServerURL,
 		BarkPublicURL:         barkPublicURL,
@@ -293,7 +301,11 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("APP_MASTER_KEY_FILE is required in production")
 		}
 		if cfg.RuntimeRole == RuntimeRoleGateway {
+			if cfg.AuthBrowserInternalToken == "" {
+				return Config{}, fmt.Errorf("AUTH_BROWSER_INTERNAL_TOKEN or AUTH_BROWSER_INTERNAL_TOKEN_FILE is required for gateway in production")
+			}
 			if len(cfg.Roles.Owners) == 0 {
+
 				return Config{}, fmt.Errorf("OWNER_SUBJECTS is required in production")
 			}
 			if cfg.CloudflareIssuer == "" || cfg.CloudflareAudience == "" || cfg.CloudflareJWKSURL == "" || cfg.CloudflareAudience == "*" || strings.EqualFold(cfg.CloudflareAudience, "any") {

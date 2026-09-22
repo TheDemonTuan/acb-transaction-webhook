@@ -11,7 +11,8 @@ import { isPublicViewerHost } from './runtime-mode';
 export const AppProviders: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isPublic = isPublicViewerHost();
   const refreshSnapshot = () => {
-    queryClient.invalidateQueries();
+    // Refresh active views without evicting optimistic realtime rows.
+    queryClient.invalidateQueries({ refetchType: 'active' });
   };
 
   const engine = useMemo(() => new TransactionAudioEngine({ isPublic }), [isPublic]);

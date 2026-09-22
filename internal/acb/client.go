@@ -180,11 +180,6 @@ func (c *Client) updateFormState(response Response) {
 	c.bootstrapFields = cloneFields(form.Fields)
 }
 
-func (c *Client) historyRange() (string, string) {
-	today := c.now().In(c.location)
-	return today.Format(historyDateLayout), today.Format(historyDateLayout)
-}
-
 func cloneFields(fields map[string]string) map[string]string {
 	cloned := make(map[string]string, len(fields))
 	for key, value := range fields {
@@ -194,6 +189,18 @@ func cloneFields(fields map[string]string) map[string]string {
 }
 
 func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
+	return c.bootstrapForDate(ctx, "")
+}
+
+// BootstrapForDate keeps a realtime poll on one immutable local day.
+func (c *Client) BootstrapForDate(ctx context.Context, date string) (Response, error) {
+	if err := validateHistoryDateRange(date, date); err != nil {
+		return Response{}, err
+	}
+	return c.bootstrapForDate(ctx, date)
+}
+
+func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
@@ -202,19 +209,27 @@ func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
 			return Response{}, ErrAuthenticatedFormStateUnavailable
 		}
 		if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
+			if date != "" && refreshResp.Kind == HistoryPage {
+				return Response{}, ErrAuthenticatedFormStateUnavailable
+			}
 			return refreshResp, nil
 		}
 	}
-	fields, err := PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
+	var fields map[string]string
+	var err error
+	if date != "" {
+		fields, err = PrepareHistoryFieldsForDate(c.bootstrapFields, date)
+	} else {
+		fields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
+	}
 	if err != nil {
 		return Response{}, err
 	}
-	fromDate, toDate := c.historyRange()
-	slog.Debug("requesting ACB history", "from_date", fromDate, "to_date", toDate)
 	values := url.Values{}
 	for key, value := range fields {
 		values.Set(key, value)
 	}
+	slog.Debug("requesting ACB history", "request_path", SafePath(c.bootstrap.String()), "from_date", fields["FromDate"], "to_date", fields["ToDate"])
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.bootstrap.String(), strings.NewReader(values.Encode()))
 	if err != nil {
 		return Response{}, err
@@ -235,14 +250,30 @@ func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
 }
 
 func (c *Client) History(ctx context.Context, endpoint string, fields map[string]string) (Response, error) {
+	return c.historyForDate(ctx, endpoint, fields, "")
+}
+
+// HistoryForDate preserves the realtime poll day while retaining server navigation state.
+func (c *Client) HistoryForDate(ctx context.Context, endpoint string, fields map[string]string, date string) (Response, error) {
+	if err := validateHistoryDateRange(date, date); err != nil {
+		return Response{}, err
+	}
+	return c.historyForDate(ctx, endpoint, fields, date)
+}
+
+func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map[string]string, date string) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	hFields, err := PrepareHistoryFields(fields, c.now(), c.location)
+	var hFields map[string]string
+	var err error
+	if date != "" {
+		hFields, err = PrepareHistoryFieldsForDate(fields, date)
+	} else {
+		hFields, err = PrepareHistoryFields(fields, c.now(), c.location)
+	}
 	if err != nil {
 		return Response{}, err
 	}
-	fromDate, toDate := c.historyRange()
-	slog.Debug("requesting ACB history", "from_date", fromDate, "to_date", toDate)
 	requestURL, err := c.endpoint(endpoint)
 	if err != nil {
 		return Response{}, err
@@ -251,6 +282,7 @@ func (c *Client) History(ctx context.Context, endpoint string, fields map[string
 	for key, value := range hFields {
 		values.Set(key, value)
 	}
+	slog.Debug("requesting ACB history", "request_path", SafePath(requestURL.String()), "from_date", hFields["FromDate"], "to_date", hFields["ToDate"])
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(values.Encode()))
 	if err != nil {
 		return Response{}, err
@@ -364,6 +396,10 @@ func (c *Client) do(req *http.Request) (Response, error) {
 		return Response{}, err
 	}
 	kind, reason := ClassifyPageWithReason(resp.Request.URL.String(), string(body))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		kind = LoginPage
+		reason = "AUTH_HTTP_STATUS"
+	}
 	result := Response{URL: resp.Request.URL.String(), StatusCode: resp.StatusCode, Body: string(body), Kind: kind, ClassifierReason: reason}
 	c.updateFormState(result)
 	return result, nil

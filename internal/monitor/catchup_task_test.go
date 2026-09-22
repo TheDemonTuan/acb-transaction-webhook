@@ -226,6 +226,89 @@ func TestCatchUpTask_EmitsDeliveriesWithCatchUpSource(t *testing.T) {
 	}
 }
 
+func TestCatchUpTask_ClampsCheckpointToInclusiveSevenDays(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cu_clamp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -30).Format("2006-01-02")
+	if err := store.SaveCheckpoint(ctx, storage.Checkpoint{ConnectionID: conn.ID, CoverageFrom: old, CoverageTo: old}); err != nil {
+		t.Fatal(err)
+	}
+
+	task := NewCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
+	if _, err := task.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	today := time.Now().In(acb.DefaultLocation)
+	want := today.AddDate(0, 0, -6).Format("2006-01-02")
+	if task.fromDate != want || task.toDate != today.Format("2006-01-02") {
+		t.Fatalf("expected inclusive seven-day range %s..%s, got %s..%s", want, today.Format("2006-01-02"), task.fromDate, task.toDate)
+	}
+}
+
+func TestCatchUpTask_InvalidCheckpointFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cu_invalid_checkpoint.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveCheckpoint(ctx, storage.Checkpoint{ConnectionID: conn.ID, CoverageFrom: "not-a-date", CoverageTo: "not-a-date"}); err != nil {
+		t.Fatal(err)
+	}
+
+	task := NewCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
+	res, err := task.Step(ctx)
+	if err == nil || res.Outcome != OutcomeFatal {
+		t.Fatalf("expected fatal invalid checkpoint error, got result=%+v err=%v", res, err)
+	}
+}
+
+func TestCatchUpTask_DBErrorIsReturned(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cu_db_error.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	task := NewCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
+	res, err := task.Step(ctx)
+	if err == nil || res.Outcome != OutcomeFatal {
+		t.Fatalf("expected fatal database error, got result=%+v err=%v", res, err)
+	}
+}
+
 func TestCatchUpTask_RestartReconstructsFromCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "cu_restart.db")

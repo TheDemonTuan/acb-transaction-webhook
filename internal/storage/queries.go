@@ -443,6 +443,13 @@ func (s *Store) CompleteAuthSession(ctx context.Context, attemptID string, sessi
 		if _, err := tx.ExecContext(ctx, `UPDATE auth_attempts SET status='VERIFIED',finished_at=? WHERE id=?`, nowString, attemptID); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO recovery_runs(id, connection_id, generation, event_key, reason, status, progress_json, created_at, updated_at)
+			VALUES(?,?,?,?, 'SESSION_AUTHENTICATED', 'PENDING', '{}', ?, ?)
+			ON CONFLICT(connection_id, generation, event_key) DO NOTHING
+		`, id("recovery"), connectionID, generation, attemptID, nowString, nowString); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(connection_id,generation,envelope,key_id,verified_at,updated_at) VALUES(?,?,?,'k1',?,?) ON CONFLICT(connection_id) DO UPDATE SET generation=excluded.generation,envelope=excluded.envelope,verified_at=excluded.verified_at,updated_at=excluded.updated_at`, connectionID, generation, sessionEnvelope, nowString, nowString); err != nil {
 			return err
 		}
@@ -450,9 +457,12 @@ func (s *Store) CompleteAuthSession(ctx context.Context, attemptID string, sessi
 		if err != nil {
 			return err
 		}
-		changed, _ := result.RowsAffected()
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
 		if changed != 1 {
-			return sql.ErrNoRows
+			return ErrGenerationFenceMismatch
 		}
 		return nil
 	})
