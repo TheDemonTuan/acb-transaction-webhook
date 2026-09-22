@@ -182,8 +182,12 @@ func (s *Store) FinishAuthAttempt(ctx context.Context, attemptID, status string)
 		if err != nil {
 			return err
 		}
-		if _, err := result.RowsAffected(); err != nil {
+		changed, err := result.RowsAffected()
+		if err != nil {
 			return err
+		}
+		if changed != 1 {
+			return ErrGenerationFenceMismatch
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE auth_attempts SET status=?,finished_at=? WHERE id=?`, status, now(), attemptID)
 		return err
@@ -195,8 +199,9 @@ func (s *Store) FinishAuthAttempt(ctx context.Context, attemptID, status string)
 func (s *Store) HasActiveAuthAttempt(ctx context.Context, connectionID string) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT count(*) FROM auth_attempts
-		WHERE connection_id = ? AND status IN ('STARTING', 'IN_PROGRESS', 'EXPORTING', 'VERIFYING') AND expires_at > ?
+		SELECT count(*) FROM auth_attempts a
+		WHERE a.connection_id = ? AND a.status IN ('STARTING', 'IN_PROGRESS', 'EXPORTING', 'VERIFYING') AND a.expires_at > ?
+		AND EXISTS (SELECT 1 FROM connections c WHERE c.id=a.connection_id AND c.generation=a.generation)
 	`, connectionID, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&count)
 	return count > 0, err
 }

@@ -159,6 +159,7 @@ chmod 600 "$fixture_db" 2>/dev/null || true
 # Create fixture secrets
 printf 'test_master_key_32_bytes_len_01234567890123456789012345678912\n' > "$fixture_dir/secrets/app_master_key"
 printf 'test_worker_token_canary_0123456789\n' > "$fixture_dir/secrets/worker_internal_token"
+printf 'test_auth_browser_token_canary_0123456789\n' > "$fixture_dir/secrets/auth_browser_internal_token"
 printf 'test_tts_token_canary_0123456789\n' > "$fixture_dir/secrets/tts_internal_token"
 printf 'test_bark_admin\n' > "$fixture_dir/secrets/bark_basic_auth_user"
 printf 'test_bark_pass_canary_0123456789\n' > "$fixture_dir/secrets/bark_basic_auth_password"
@@ -235,7 +236,7 @@ chmod 700 "$restored_secrets_dir" 2>/dev/null || true
 log "Decrypting secret recovery bundle into isolated directory..."
 "$AGE_BIN" -d -i "$identity_file" "$secret_artifact" | tar -C "$restored_secrets_dir" -xf -
 
-for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key worker_internal_token auth_browser_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
   if [[ ! -s "$restored_secrets_dir/$s" ]]; then
     printf 'FAIL: Restored secret is missing: %s\n' "$s" >&2
     exit 1
@@ -247,7 +248,7 @@ for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth
     exit 1
   fi
 done
-log "All 5 required production secrets restored and verified with exact checksum match."
+log "All 6 required production secrets restored and verified with exact checksum match."
 
 # 9. Record Evidence JSON (No secret values!)
 release_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"

@@ -174,7 +174,7 @@ populate_candidate_release() {
   "created_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
   "base": {"git_sha": "0000000000000000000000000000000000000000", "generation": 1},
   "schema_version": 2,
-  "compatibility": {"schema_version": 9, "min_supported_schema_version": 9, "worker_rpc_version": 2},
+  "compatibility": {"schema_version": 11, "min_supported_schema_version": 10, "worker_rpc_version": 2},
   "promotion": {},
   "promotion_scope": [],
   "images": {

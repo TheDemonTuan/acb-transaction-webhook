@@ -88,7 +88,7 @@ func (l *SessionLoader) Persist(ctx context.Context, connectionID string, genera
 	if err != nil {
 		return err
 	}
-	envelope, err := l.keyring.Encrypt([]byte(plaintext), []byte("acb-session:"+connectionID))
+	envelope, err := l.keyring.Encrypt([]byte(plaintext), security.SessionAAD(connectionID, generation))
 	if err != nil {
 		return err
 	}
@@ -113,9 +113,14 @@ func (l *SessionLoader) restoreLocked(connectionID string, generation int64, enc
 	if err := json.Unmarshal(encoded, &envelope); err != nil {
 		return errors.New("stored ACB session envelope is invalid")
 	}
-	plaintext, err := l.keyring.Decrypt(envelope, []byte("acb-session:"+connectionID))
+	plaintext, err := l.keyring.Decrypt(envelope, security.SessionAAD(connectionID, generation))
 	if err != nil {
-		return errors.New("stored ACB session cannot be decrypted")
+		// Existing sessions predate generation-bound AAD; accept once, then refresh
+		// under the stronger binding during the next successful persistence cycle.
+		plaintext, err = l.keyring.Decrypt(envelope, security.LegacySessionAAD(connectionID))
+		if err != nil {
+			return errors.New("stored ACB session cannot be decrypted")
+		}
 	}
 	handoff, err := authbrowser.DecodeHandoff(string(plaintext))
 	if err != nil {

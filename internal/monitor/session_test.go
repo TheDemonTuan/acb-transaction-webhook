@@ -21,6 +21,39 @@ func (r *recordingRestorer) RestoreSession(handoff authbrowser.Handoff) error {
 	return nil
 }
 
+func TestSessionLoaderRejectsCrossGenerationEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyFile, []byte("0123456789012345678901234567890123456789012345678901234567890123"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyring, err := security.LoadKeyring(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectionID := "conn-cross-generation"
+	plaintext, err := authbrowser.EncodeHandoff(authbrowser.Handoff{
+		Version: 1,
+		URL:     "https://online.acb.com.vn/acbib/AccountSummary",
+		Cookies: []authbrowser.Cookie{{Name: "session", Value: "secret", Domain: ".online.acb.com.vn", Path: "/"}},
+	}, []byte("handoff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := keyring.Encrypt([]byte(plaintext), security.SessionAAD(connectionID, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := NewSessionLoader(nil, keyring, &recordingRestorer{})
+	if err := loader.RestoreEnvelope(connectionID, 2, encoded); err == nil {
+		t.Fatal("expected generation-bound session envelope to reject replay")
+	}
+}
+
 func TestSessionLoaderDecryptsAndRestoresCurrentGeneration(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -50,7 +83,7 @@ func TestSessionLoaderDecryptsAndRestoresCurrentGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := keyring.Encrypt([]byte(plaintext), []byte("acb-session:"+connection.ID))
+	envelope, err := keyring.Encrypt([]byte(plaintext), security.SessionAAD(connection.ID, attempt.Generation))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +152,7 @@ func TestSessionLoaderQuiesceWithoutLiveSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := keyring.Encrypt([]byte(plaintext), []byte("acb-session:"+connection.ID))
+	envelope, err := keyring.Encrypt([]byte(plaintext), security.SessionAAD(connection.ID, attempt.Generation))
 	if err != nil {
 		t.Fatal(err)
 	}

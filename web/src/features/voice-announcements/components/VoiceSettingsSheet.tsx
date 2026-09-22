@@ -151,9 +151,8 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                   rows={2}
                   value={settings.announcementTemplate || DEFAULT_ANNOUNCEMENT_TEMPLATE}
                   onChange={(e) => updateSettings({ announcementTemplate: e.target.value })}
-                  disabled={!settings.enabled}
                   placeholder="Ví dụ: Đa tạ quý khách vì {amount}."
-                  className="w-full text-sm rounded-lg border border-stone-300 p-2.5 bg-white text-stone-800 disabled:bg-stone-100 disabled:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className="w-full text-sm rounded-lg border border-stone-300 p-2.5 bg-white text-stone-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
                 <div className="flex flex-wrap gap-1.5 mt-1.5 text-[11px] text-stone-500">
                   <span>Thẻ hỗ trợ:</span>

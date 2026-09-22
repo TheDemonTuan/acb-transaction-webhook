@@ -83,6 +83,12 @@ type VerifySessionRequest struct {
 	Password   []byte `json:"password"`
 }
 
+type ScheduleRecoveryRequest struct {
+	ConnectionID string `json:"connectionId"`
+	Generation   int64  `json:"generation"`
+	EventKey     string `json:"eventKey"`
+}
+
 type PaymentBoostRequest struct {
 	AmountVnd int64 `json:"amountVnd"`
 }
@@ -158,6 +164,7 @@ type WorkerHandler interface {
 	CancelHistoryJob(ctx context.Context, jobID string) error
 	NotifySettingsChanged(ctx context.Context) error
 	WakeDispatcher(ctx context.Context) error
+	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
 	VerifySession(ctx context.Context, account string, generation int64, password []byte) error
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
@@ -840,6 +847,28 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
 	}))
 
+	s.mux.HandleFunc("/rpc/schedule-recovery", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		var req ScheduleRecoveryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad request", reqID)
+			return
+		}
+		if strings.TrimSpace(req.ConnectionID) == "" || req.Generation <= 0 || strings.TrimSpace(req.EventKey) == "" {
+			writeError(w, http.StatusBadRequest, "invalid recovery parameters", reqID)
+			return
+		}
+		if err := s.handler.ScheduleRecovery(r.Context(), req.ConnectionID, req.Generation, req.EventKey); err != nil {
+			writeError(w, http.StatusConflict, err.Error(), reqID)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
+	}))
+
 	s.mux.HandleFunc("/rpc/verify-session", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
@@ -1080,6 +1109,16 @@ func (c *Client) WakeDispatcher(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return c.post(callCtx, "/rpc/wake-dispatcher", nil, nil)
+}
+
+func (c *Client) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.post(callCtx, "/rpc/schedule-recovery", ScheduleRecoveryRequest{
+		ConnectionID: connectionID,
+		Generation:   generation,
+		EventKey:     eventKey,
+	}, nil)
 }
 
 func (c *Client) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {

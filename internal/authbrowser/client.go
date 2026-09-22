@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const maxResponseBody = 64 << 10
+const (
+	maxResponseBody     = 64 << 10
+	InternalTokenHeader = "X-Auth-Browser-Internal-Token"
+)
 
 type Session struct {
 	AttemptID string `json:"attemptId"`
@@ -40,17 +43,37 @@ func IsHTTPStatus(err error, status int) bool {
 }
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL       string
+	internalToken string
+	http          *http.Client
 }
 
-func NewClient(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimSuffix(baseURL, "/"), http: &http.Client{Timeout: 12 * time.Second}}
+func NewClient(baseURL string, internalToken ...string) *Client {
+	token := ""
+	if len(internalToken) > 0 {
+		token = strings.TrimSpace(internalToken[0])
+	}
+	return &Client{
+		baseURL:       strings.TrimSuffix(baseURL, "/"),
+		internalToken: token,
+		http:          &http.Client{Timeout: 12 * time.Second},
+	}
+}
+
+func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if c.internalToken != "" {
+		request.Header.Set(InternalTokenHeader, c.internalToken)
+	}
+	return request, nil
 }
 
 func (c *Client) Start(ctx context.Context, attemptID string) (Session, error) {
 	body, _ := json.Marshal(map[string]string{"attemptId": attemptID})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sessions", bytes.NewReader(body))
+	request, err := c.request(ctx, http.MethodPost, "/sessions", bytes.NewReader(body))
 	if err != nil {
 		return Session{}, err
 	}
@@ -59,7 +82,7 @@ func (c *Client) Start(ctx context.Context, attemptID string) (Session, error) {
 }
 
 func (c *Client) Cancel(ctx context.Context, attemptID string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/sessions/"+attemptID, nil)
+	request, err := c.request(ctx, http.MethodDelete, "/sessions/"+attemptID, nil)
 	if err != nil {
 		return err
 	}
@@ -75,7 +98,7 @@ func (c *Client) Cancel(ctx context.Context, attemptID string) error {
 }
 
 func (c *Client) Status(ctx context.Context, attemptID string) (Session, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/sessions/"+attemptID+"/status", nil)
+	request, err := c.request(ctx, http.MethodGet, "/sessions/"+attemptID+"/status", nil)
 	if err != nil {
 		return Session{}, err
 	}
@@ -83,7 +106,7 @@ func (c *Client) Status(ctx context.Context, attemptID string) (Session, error) 
 }
 
 func (c *Client) Handoff(ctx context.Context, attemptID string) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sessions/"+attemptID+"/handoff", bytes.NewReader(nil))
+	request, err := c.request(ctx, http.MethodPost, "/sessions/"+attemptID+"/handoff", bytes.NewReader(nil))
 	if err != nil {
 		return "", err
 	}
@@ -108,7 +131,7 @@ func (c *Client) Handoff(ctx context.Context, attemptID string) (string, error) 
 }
 
 func (c *Client) Complete(ctx context.Context, attemptID string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sessions/"+attemptID+"/complete", bytes.NewReader(nil))
+	request, err := c.request(ctx, http.MethodPost, "/sessions/"+attemptID+"/complete", bytes.NewReader(nil))
 	if err != nil {
 		return err
 	}

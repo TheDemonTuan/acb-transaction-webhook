@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"net/http"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
@@ -14,6 +16,10 @@ import (
 )
 
 // RealtimeTask executes a realtime adaptive transaction poll or an operator manual sync.
+const realtimeMaxPages = 20
+
+var errRealtimeDateRollover = errors.New("REALTIME_DATE_ROLLOVER")
+
 type RealtimeTask struct {
 	m            *Monitor
 	id           string
@@ -21,12 +27,125 @@ type RealtimeTask struct {
 	connectionID string
 	generation   int64
 	done         chan error
+
+	// Continuation state stays on the task so the scheduler can yield after each
+	// page without restarting today's query at page one.
+	started       bool
+	today         string
+	poll          storage.PollRun
+	pages         int
+	rowsSeen      int
+	totalInserted int
+	nextAction    string
+	nextFields    map[string]string
+	cursor        *acb.PaginationCursor
+	continuation  bool
+	finished      bool
+}
+
+func (t *RealtimeTask) pinToday(fields map[string]string) map[string]string {
+	pinned := make(map[string]string, len(fields)+3)
+	for key, value := range fields {
+		pinned[key] = value
+	}
+	pinned["FromDate"] = t.today
+	pinned["ToDate"] = t.today
+	pinned["activeDatetimeYN"] = "N"
+	delete(pinned, "activeDatetimeByMonth")
+	delete(pinned, "MonthCurr")
+	delete(pinned, "YearCurr")
+	delete(pinned, "_explicitRange")
+	pinned["_raw"] = "true"
+	return pinned
+}
+
+func (t *RealtimeTask) todayStillCurrent() bool {
+	return t.today != "" && t.m.now().In(acb.DefaultLocation).Format("02/01/2006") == t.today
+}
+
+func (t *RealtimeTask) rolloverResult(ctx context.Context) (scheduler.TaskStepResult, error) {
+	return t.finishPoll(ctx, "PARTIAL", "REALTIME_DATE_ROLLOVER")
+}
+
+func (t *RealtimeTask) bootstrap(ctx context.Context) (acb.Response, error) {
+	if !t.todayStillCurrent() {
+		return acb.Response{}, errRealtimeDateRollover
+	}
+	if client, ok := t.m.client.(realtimeDateBankClient); ok {
+		return client.BootstrapForDate(ctx, t.today)
+	}
+	return t.m.client.Bootstrap(ctx)
+}
+
+func (t *RealtimeTask) history(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
+	if !t.todayStillCurrent() {
+		return acb.Response{}, errRealtimeDateRollover
+	}
+	if client, ok := t.m.client.(realtimeDateBankClient); ok {
+		return client.HistoryForDate(ctx, endpoint, fields, t.today)
+	}
+	return t.m.client.History(ctx, endpoint, fields)
+}
+
+func classifyRealtimeResponse(resp *acb.Response) {
+	if resp.Kind == acb.UnknownPage && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		resp.Kind = acb.LoginPage
+	}
+}
+
+func realtimeAuthResponse(resp acb.Response) (string, bool) {
+	classifyRealtimeResponse(&resp)
+	if resp.Kind == acb.LoginPage || resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
+		return "SESSION_EXPIRED", true
+	}
+	return "", false
+}
+
+func sameRealtimeCursor(action string, fields map[string]string, nextAction string, nextFields map[string]string) bool {
+	return action == nextAction && maps.Equal(fields, nextFields)
+}
+
+func (t *RealtimeTask) finishPoll(ctx context.Context, status, pollErr string) (scheduler.TaskStepResult, error) {
+	if t.finished {
+		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+	}
+	t.poll.Status = status
+	t.poll.Pages = t.pages
+	t.poll.RowsSeen = t.rowsSeen
+	if pollErr != "" {
+		t.poll.Error = pollErr
+	}
+	if err := t.m.finishPoll(ctx, t.poll, t.totalInserted); err != nil {
+		return scheduler.TaskStepResult{Done: false, RequeueAt: time.Now().Add(time.Second), Error: err, Outcome: scheduler.OutcomeTransient}, err
+	}
+	t.finished = true
+	if status == "AUTH_REQUIRED" {
+		t.m.notifyPollWaiters(nil)
+		t.finishDone(nil)
+		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
+	}
+	if status == "PARTIAL" {
+		t.m.notifyPollWaiters(nil)
+		t.finishDone(nil)
+		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+	}
+	if pollErr != "" {
+		terminalErr := errors.New(pollErr)
+		t.m.notifyPollWaiters(terminalErr)
+		t.finishDone(terminalErr)
+		return scheduler.TaskStepResult{Done: true, Error: terminalErr, Outcome: scheduler.OutcomeTransient}, terminalErr
+	}
+	t.m.notifyPollWaiters(nil)
+	t.finishDone(nil)
+	return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 }
 
 func NewRealtimeTask(m *Monitor, priority UpstreamPriority, connectionID string, generation int64) *RealtimeTask {
 	kind := "REALTIME_POLL"
 	if priority == PriorityManualSync {
 		kind = "MANUAL_SYNC"
+	} else if priority == PriorityRealtimeContinuation {
+		kind = "REALTIME_CONTINUATION"
 	}
 	return &RealtimeTask{
 		m:            m,
@@ -45,28 +164,38 @@ func (t *RealtimeTask) Kind() string {
 	if t.priority == PriorityManualSync {
 		return "MANUAL_SYNC"
 	}
-	return "REALTIME_POLL"
-}
-
-func (t *RealtimeTask) CoalesceKey() string {
-	if t.priority == PriorityManualSync {
-		return "MANUAL_SYNC"
+	if t.priority == PriorityRealtimeContinuation {
+		return "REALTIME_CONTINUATION"
 	}
 	return "REALTIME_POLL"
 }
 
+func (t *RealtimeTask) CoalesceKey() string {
+	return fmt.Sprintf("REALTIME:%s:%d", t.connectionID, t.generation)
+}
+
 func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	if err := ctx.Err(); err != nil {
+		if t.started && t.poll.ID != "" && !t.finished {
+			return t.finishPoll(ctx, "PARTIAL", "REALTIME_CANCELED")
+		}
+		t.m.clearSyncRequest(t.connectionID, t.generation)
 		t.finishDone(err)
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
 	}
 
 	conn, err := t.m.store.Connection(ctx)
 	if err != nil {
+		t.m.clearSyncRequest(t.connectionID, t.generation)
 		t.finishDone(err)
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 	}
 	if conn.State != "MONITORING" {
+		if t.started && t.poll.ID != "" && !t.finished {
+			return t.finishPoll(ctx, "PARTIAL", "REALTIME_CONNECTION_NOT_MONITORING")
+		}
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(nil)
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
@@ -75,6 +204,11 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	if t.generation > 0 && (conn.ID != t.connectionID || conn.Generation != t.generation) {
 		slog.Info("stale realtime/manual task discarded due to generation mismatch",
 			"task_gen", t.generation, "current_gen", conn.Generation, "conn_id", conn.ID)
+		if t.started && t.poll.ID != "" && !t.finished {
+			return t.finishPoll(ctx, "PARTIAL", "REALTIME_GENERATION_CHANGED")
+		}
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(nil)
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
@@ -89,23 +223,38 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	if err != nil {
 		slog.Error("poll fail-closed: failed to check active auth attempt", "connection_id", conn.ID, "error", err)
 		checkErr := fmt.Errorf("check active auth attempt: %w", err)
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(checkErr)
 		t.finishDone(checkErr)
 		return scheduler.TaskStepResult{Done: true, Error: checkErr, Outcome: scheduler.OutcomeFatal}, checkErr
 	}
 	if hasActiveAttempt {
 		slog.Info("skipping poll: browser authentication in progress", "connection_id", conn.ID)
+		if t.started && t.poll.ID != "" && !t.finished {
+			return t.finishPoll(ctx, "PARTIAL", "AUTH_IN_PROGRESS")
+		}
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(nil)
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
 
 	if t.m.client == nil {
 		clientErr := errors.New("bank client not configured")
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(clientErr)
 		t.finishDone(clientErr)
 		return scheduler.TaskStepResult{Done: true, Error: clientErr, Outcome: scheduler.OutcomeFatal}, clientErr
 	}
+	if t.started {
+		return t.stepContinuation(ctx, conn)
+	}
+	t.today = t.m.now().In(acb.DefaultLocation).Format("02/01/2006")
 	if s := t.m.SessionLoader(); s != nil {
 		if err := s.Restore(ctx, conn.ID, conn.Generation); err != nil {
 			restoreErr := fmt.Errorf("restore ACB session: %w", err)
+			t.m.clearSyncRequest(t.connectionID, t.generation)
+			t.m.notifyPollWaiters(restoreErr)
 			t.finishDone(restoreErr)
 			return scheduler.TaskStepResult{Done: true, Error: restoreErr, Outcome: scheduler.OutcomeAuth}, restoreErr
 		}
@@ -114,68 +263,50 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	poll, err := t.m.store.StartPoll(ctx)
 	if err != nil {
 		startErr := fmt.Errorf("start poll: %w", err)
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(startErr)
 		t.finishDone(startErr)
 		return scheduler.TaskStepResult{Done: true, Error: startErr, Outcome: scheduler.OutcomeFatal}, startErr
 	}
+	t.started = true
+	t.poll = poll
+	t.pages = 0
+	t.rowsSeen = 0
+	t.totalInserted = 0
+	t.continuation = false
 
-	// 1. Fetch account detail page to verify session and extract form state
-	resp, err := t.m.client.Bootstrap(ctx)
+	// 1. Fetch account detail page to verify session and extract form state.
+	if !t.todayStillCurrent() {
+		return t.rolloverResult(ctx)
+	}
+	slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "bootstrap")
+	resp, err := t.bootstrap(ctx)
+
 	if err != nil {
-		poll.Status = "FAILED"
-		poll.Error = acb.SanitizeTransportError(err)
-		finishErr := t.m.finishPoll(ctx, poll, 0)
-		if finishErr != nil {
-			err = errors.Join(err, finishErr)
+		if errors.Is(err, errRealtimeDateRollover) {
+			return t.rolloverResult(ctx)
 		}
+		sanitized := acb.SanitizeTransportError(err)
 		until := t.m.RecordNetworkFailure(err)
-		slog.Warn("ACB request failed", "phase", "bootstrap", "generation", conn.Generation, "elapsed_backoff_until", until, "error", poll.Error)
-		t.m.notifyPollWaiters(err)
-		t.finishDone(err)
-		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
+		slog.Warn("ACB request failed", "phase", "bootstrap", "generation", conn.Generation, "elapsed_backoff_until", until, "error", sanitized)
+		return t.finishPoll(ctx, "FAILED", sanitized)
 	}
 
-	poll.Classifier = string(resp.Kind)
-	poll.HTTPStatus = resp.StatusCode
+	classifyRealtimeResponse(&resp)
+	t.poll.Classifier = string(resp.Kind)
+	t.poll.HTTPStatus = resp.StatusCode
 
-	if resp.Kind == acb.LoginPage {
-		poll.Status = "AUTH_REQUIRED"
-		poll.Error = "SESSION_EXPIRED"
-		_ = t.m.finishPoll(ctx, poll, 0)
+	if authErr, ok := realtimeAuthResponse(resp); ok {
 		slog.Warn("ACB confirmed the session is no longer authenticated; transitioned to AUTH_REQUIRED", "phase", "bootstrap", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
-		t.m.notifyPollWaiters(nil)
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
+		return t.finishPoll(ctx, "AUTH_REQUIRED", authErr)
 	}
-	if resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
-		poll.Status = "AUTH_REQUIRED"
-		poll.Error = string(resp.Kind)
-		_ = t.m.finishPoll(ctx, poll, 0)
-		slog.Warn("ACB requires interactive authentication", "challenge", resp.Kind)
-		t.m.notifyPollWaiters(nil)
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
-	}
-
-	if resp.StatusCode == 429 {
-		poll.Status = "FAILED"
-		poll.Error = "ACB_RATE_LIMITED"
+	if resp.StatusCode == http.StatusTooManyRequests {
 		t.m.SetBackoff(60 * time.Second)
-		_ = t.m.finishPoll(ctx, poll, 0)
-		slog.Warn("ACB rate limit detected (429); backoff for 60s")
-		t.m.notifyPollWaiters(nil)
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+		return t.finishPoll(ctx, "FAILED", "ACB_RATE_LIMITED")
 	}
-
 	if resp.Kind == acb.MaintenancePage {
-		poll.Status = "FAILED"
-		poll.Error = "ACB_MAINTENANCE"
 		t.m.SetBackoff(60 * time.Second)
-		_ = t.m.finishPoll(ctx, poll, 0)
-		slog.Warn("ACB maintenance detected; backoff for 60s")
-		t.m.notifyPollWaiters(nil)
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+		return t.finishPoll(ctx, "FAILED", "ACB_MAINTENANCE")
 	}
 
 	// If the page is not HistoryPage directly, try extracting form state
@@ -183,70 +314,42 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	if resp.Kind != acb.HistoryPage {
 		form, formErr := acb.ExtractHistoryForm(resp.Body)
 		if formErr != nil {
-			poll.Status = "FAILED"
-			poll.Error = formErr.Error()
-			_ = t.m.finishPoll(ctx, poll, 0)
-			t.m.notifyPollWaiters(formErr)
-			t.finishDone(formErr)
-			return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
+			return t.finishPoll(ctx, "PARTIAL", formErr.Error())
 		}
 
 		if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
 			form.Fields["AccountNbr"] = conn.AccountMasked
 		}
-		histResp, histErr := t.m.client.History(ctx, form.Action, form.Fields)
-		if histErr != nil {
-			poll.Status = "FAILED"
-			poll.Error = acb.SanitizeTransportError(histErr)
-			finishErr := t.m.finishPoll(ctx, poll, 0)
-			if finishErr != nil {
-				histErr = errors.Join(histErr, finishErr)
-			}
-			until := t.m.RecordNetworkFailure(histErr)
-			slog.Warn("ACB request failed", "phase", "history", "generation", conn.Generation, "elapsed_backoff_until", until, "error", poll.Error)
-			t.m.notifyPollWaiters(histErr)
-			t.finishDone(histErr)
-			return scheduler.TaskStepResult{Done: true, Error: histErr, Outcome: scheduler.OutcomeTransient}, histErr
-		}
-		historyMarkup = histResp.Body
-		poll.Classifier = string(histResp.Kind)
-		poll.HTTPStatus = histResp.StatusCode
+		slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
+		histResp, histErr := t.history(ctx, form.Action, t.pinToday(form.Fields))
 
-		if histResp.Kind == acb.LoginPage {
-			poll.Status = "AUTH_REQUIRED"
-			poll.Error = "SESSION_EXPIRED"
-			_ = t.m.finishPoll(ctx, poll, 0)
+		if histErr != nil {
+			if errors.Is(histErr, errRealtimeDateRollover) {
+				return t.rolloverResult(ctx)
+			}
+			sanitized := acb.SanitizeTransportError(histErr)
+			until := t.m.RecordNetworkFailure(histErr)
+			slog.Warn("ACB request failed", "phase", "history", "generation", conn.Generation, "elapsed_backoff_until", until, "error", sanitized)
+			return t.finishPoll(ctx, "FAILED", sanitized)
+		}
+		classifyRealtimeResponse(&histResp)
+		historyMarkup = histResp.Body
+		t.poll.Classifier = string(histResp.Kind)
+		t.poll.HTTPStatus = histResp.StatusCode
+
+		if authErr, ok := realtimeAuthResponse(histResp); ok {
 			slog.Warn("ACB session expired during history fetch; transitioned to AUTH_REQUIRED", "phase", "history", "generation", conn.Generation, "status", histResp.StatusCode, "classifier_reason", histResp.ClassifierReason, "path", acb.SafePath(histResp.URL))
-			t.m.notifyPollWaiters(nil)
-			t.finishDone(nil)
-			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
+			return t.finishPoll(ctx, "AUTH_REQUIRED", authErr)
 		}
-		if histResp.Kind == acb.OTPChallenge || histResp.Kind == acb.CaptchaPage {
-			poll.Status = "AUTH_REQUIRED"
-			poll.Error = string(histResp.Kind)
-			_ = t.m.finishPoll(ctx, poll, 0)
-			t.m.notifyPollWaiters(nil)
-			t.finishDone(nil)
-			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
-		}
-		if histResp.StatusCode == 429 {
-			poll.Status = "FAILED"
-			poll.Error = "ACB_RATE_LIMITED"
+		if histResp.StatusCode == http.StatusTooManyRequests {
 			t.m.SetBackoff(60 * time.Second)
-			_ = t.m.finishPoll(ctx, poll, 0)
-			t.m.notifyPollWaiters(nil)
-			t.finishDone(nil)
-			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+			return t.finishPoll(ctx, "FAILED", "ACB_RATE_LIMITED")
 		}
 		if histResp.Kind == acb.MaintenancePage {
-			poll.Status = "FAILED"
-			poll.Error = "ACB_MAINTENANCE"
 			t.m.SetBackoff(60 * time.Second)
-			_ = t.m.finishPoll(ctx, poll, 0)
-			t.m.notifyPollWaiters(nil)
-			t.finishDone(nil)
-			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+			return t.finishPoll(ctx, "FAILED", "ACB_MAINTENANCE")
 		}
+
 	}
 
 	// Any complete non-authenticated response proves the transport recovered.
@@ -255,12 +358,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	// Parse transaction history
 	pageResult, parseErr := acb.ParseHistoryPage(historyMarkup)
 	if parseErr != nil {
-		poll.Status = "FAILED"
-		poll.Error = parseErr.Error()
-		_ = t.m.finishPoll(ctx, poll, 0)
-		t.m.notifyPollWaiters(parseErr)
-		t.finishDone(parseErr)
-		return scheduler.TaskStepResult{Done: true, Error: parseErr, Outcome: scheduler.OutcomeFatal}, parseErr
+		return t.finishPoll(ctx, "PARTIAL", parseErr.Error())
 	}
 
 	pagesCount := 1
@@ -300,18 +398,18 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		} else {
 			slog.Error("batch ingest failed", "error", err)
 		}
-		poll.RowsSeen = rowsSeen
-		poll.Pages = pagesCount
-		poll.Status = "FAILED"
+		status := "FAILED"
 		if totalInserted > 0 {
-			poll.Status = "PARTIAL"
-			t.m.ScheduleCatchUp()
+			status = "PARTIAL"
 		}
-		poll.Error = err.Error()
-		_ = t.m.finishPoll(ctx, poll, totalInserted)
-		t.m.notifyPollWaiters(err)
-		t.finishDone(err)
-		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+		t.pages = pagesCount
+		t.rowsSeen = rowsSeen
+		t.totalInserted = totalInserted
+		result, finishErr := t.finishPoll(ctx, status, err.Error())
+		if finishErr != nil {
+			return result, finishErr
+		}
+		return result, err
 	}
 
 	inserted, err := ingestAndNotify(pageResult.Transactions)
@@ -320,27 +418,63 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	}
 	totalInserted += inserted
 
-	// If page has next, fetch up to 5 pages for realtime poll
-	if pageResult.HasNext {
-		if pageResult.NextAction == "" && len(pageResult.NextFields) == 0 {
-			slog.Warn("realtime poll page indicates next page exists but no navigation available")
+	// If page has next, fetch up to 5 pages for realtime poll.
+	t.cursor = acb.NewPaginationCursor("", nil)
+	t.cursor.Step(pageResult, len(pageResult.Transactions))
+	curAction := t.cursor.Action
+	curFields := t.cursor.Fields
+	lastHasNext := t.cursor.HasNext
+	if t.cursor.Truncated {
+		isPartial = true
+		pollErr = errors.New("REALTIME_PAGINATION_TRUNCATED")
+	}
+	if t.cursor.HasNext {
+		if curAction == "" || len(curFields) == 0 || curFields["dse_operationName"] == "" || curFields["dse_processorState"] == "" {
+			slog.Warn("realtime poll page indicates next page exists but navigation form is incomplete")
 			isPartial = true
 			pollErr = errors.New("pagination unavailable: next page exists but navigation action and fields are empty")
 		} else {
-			curAction := pageResult.NextAction
-			curFields := pageResult.NextFields
 			for pagesCount < 5 {
+				if !t.todayStillCurrent() {
+					t.pages = pagesCount
+					t.rowsSeen = rowsSeen
+					t.totalInserted = totalInserted
+					return t.rolloverResult(ctx)
+				}
 				if curFields == nil {
+
 					curFields = make(map[string]string)
 				}
-				curFields["_raw"] = "true"
-				nextResp, nextErr := t.m.client.History(ctx, curAction, curFields)
+				pinnedFields, pinErr := acb.PinDateRangePreservingPagination(curFields, t.today, t.today)
+				if pinErr != nil {
+					isPartial = true
+					pollErr = pinErr
+					break
+				}
+				pinnedFields["_raw"] = "true"
+				slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", pagesCount+1, "phase", "foreground_continuation")
+				nextResp, nextErr := t.history(ctx, curAction, pinnedFields)
 				if nextErr != nil {
+					if errors.Is(nextErr, errRealtimeDateRollover) {
+						return t.rolloverResult(ctx)
+					}
 					until := t.m.RecordNetworkFailure(nextErr)
 					slog.Warn("realtime poll next page fetch error", "page", pagesCount+1, "backoff_until", until, "error", acb.SanitizeTransportError(nextErr))
 					isPartial = true
 					pollErr = errors.New(acb.SanitizeTransportError(nextErr))
 					break
+				}
+				classifyRealtimeResponse(&nextResp)
+				if authErr, ok := realtimeAuthResponse(nextResp); ok {
+					return t.finishPoll(ctx, "AUTH_REQUIRED", authErr)
+				}
+				if nextResp.StatusCode == http.StatusTooManyRequests {
+					t.m.SetBackoff(60 * time.Second)
+					return t.finishPoll(ctx, "PARTIAL", "ACB_RATE_LIMITED")
+				}
+				if nextResp.Kind == acb.MaintenancePage {
+					t.m.SetBackoff(60 * time.Second)
+					return t.finishPoll(ctx, "PARTIAL", "ACB_MAINTENANCE")
 				}
 				pagesCount++
 				nextPage, err := acb.ParseHistoryPage(nextResp.Body)
@@ -357,58 +491,171 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 				}
 				totalInserted += nextInserted
 
-				if !nextPage.HasNext {
+				previousAction := t.cursor.Action
+				previousFields := t.cursor.Fields
+				t.cursor.Step(nextPage, len(nextPage.Transactions))
+				lastHasNext = t.cursor.HasNext
+				if lastHasNext && sameRealtimeCursor(previousAction, previousFields, t.cursor.Action, t.cursor.Fields) {
+					isPartial = true
+					pollErr = errors.New("pagination unavailable: cursor did not progress")
 					break
 				}
-				if nextPage.NextAction == "" && len(nextPage.NextFields) == 0 {
-					slog.Warn("realtime poll reached page with HasNext but no navigation available", "page", pagesCount)
+				if !t.cursor.HasNext {
+					break
+				}
+				if t.cursor.Action == "" || len(t.cursor.Fields) == 0 || t.cursor.Fields["dse_operationName"] == "" || t.cursor.Fields["dse_processorState"] == "" {
+					slog.Warn("realtime poll reached page with incomplete navigation form", "page", pagesCount)
 					isPartial = true
 					pollErr = errors.New("pagination unavailable: next page exists but navigation action and fields are empty")
 					break
 				}
-				curAction = nextPage.NextAction
-				curFields = nextPage.NextFields
+				curAction = t.cursor.Action
+				curFields = t.cursor.Fields
 				if pagesCount >= 5 && nextPage.HasNext {
-					slog.Warn("realtime poll reached 5 page limit while more records remain; marking PARTIAL and scheduling catch-up")
-					isPartial = true
-					pollErr = errors.New("PARTIAL_PAGE_BUDGET_REACHED")
 					break
 				}
 			}
 		}
 	}
 
-	poll.RowsSeen = rowsSeen
-	poll.Pages = pagesCount
-	slog.Info("ACB history parsed", "rows_seen", poll.RowsSeen, "pages", poll.Pages, "partial", isPartial)
+	if lastHasNext && pagesCount >= 5 && curAction != "" && len(curFields) > 0 {
+		// Keep the poll open; the scheduler will resume this same cursor.
+		t.pages = pagesCount
+		t.rowsSeen = rowsSeen
+		t.totalInserted = totalInserted
+		t.nextAction = curAction
+		t.nextFields = curFields
+		t.continuation = true
+		if t.priority != PriorityManualSync {
+			t.priority = PriorityRealtimeContinuation
+		}
+		return scheduler.TaskStepResult{Done: false, Outcome: scheduler.OutcomeSuccess}, nil
+	}
+
+	t.pages = pagesCount
+	t.rowsSeen = rowsSeen
+	t.totalInserted = totalInserted
+	slog.Info("ACB history parsed", "rows_seen", rowsSeen, "pages", pagesCount, "partial", isPartial)
 
 	if isPartial {
-		poll.Status = "PARTIAL"
 		if pollErr != nil {
-			poll.Error = pollErr.Error()
-		} else {
-			poll.Error = "PARTIAL_PAGE_BUDGET_REACHED"
+			return t.finishPoll(ctx, "PARTIAL", pollErr.Error())
 		}
-		t.m.ScheduleCatchUp()
-	} else {
-		poll.Status = "SUCCEEDED"
-		t.m.ClearBackoff()
+		return t.finishPoll(ctx, "PARTIAL", "PARTIAL_PAGE_BUDGET_REACHED")
 	}
-	if err := t.m.finishPoll(ctx, poll, totalInserted); err != nil {
-		t.m.notifyPollWaiters(err)
-		t.finishDone(err)
-		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+	t.m.ClearBackoff()
+	if result, err := t.finishPoll(ctx, "SUCCEEDED", ""); err != nil {
+		return result, err
 	}
-
 	if s := t.m.SessionLoader(); s != nil {
 		if err := s.Persist(ctx, conn.ID, conn.Generation); err != nil {
 			slog.Warn("could not persist refreshed ACB session", "error", err)
 		}
 	}
-
-	t.m.notifyPollWaiters(nil)
-	t.finishDone(nil)
 	return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+}
+
+func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connection) (scheduler.TaskStepResult, error) {
+	if !t.todayStillCurrent() {
+		return t.rolloverResult(ctx)
+	}
+	if t.cursor == nil {
+		t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
+	}
+	if t.cursor.Action == "" && t.nextAction != "" {
+		t.cursor.Action = t.nextAction
+		t.cursor.Fields = cloneRealtimeFields(t.nextFields)
+	}
+	if t.cursor.Action == "" || len(t.cursor.Fields) == 0 ||
+		t.cursor.Fields["dse_operationName"] == "" || t.cursor.Fields["dse_processorState"] == "" {
+		return t.finishPoll(ctx, "PARTIAL", "REALTIME_PAGINATION_UNAVAILABLE")
+	}
+	if t.pages >= realtimeMaxPages {
+		return t.finishPoll(ctx, "PARTIAL", "PARTIAL_PAGE_BUDGET_REACHED")
+	}
+
+	previousAction := t.cursor.Action
+	previousFields := cloneRealtimeFields(t.cursor.Fields)
+	fields := t.pinToday(t.cursor.Fields)
+	slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", t.pages+1, "phase", "continuation")
+	resp, err := t.history(ctx, t.cursor.Action, fields)
+	if err != nil {
+		if errors.Is(err, errRealtimeDateRollover) {
+			return t.rolloverResult(ctx)
+		}
+		t.m.RecordNetworkFailure(err)
+		return t.finishPoll(ctx, "PARTIAL", acb.SanitizeTransportError(err))
+	}
+	classifyRealtimeResponse(&resp)
+	if authErr, ok := realtimeAuthResponse(resp); ok {
+		return t.finishPoll(ctx, "AUTH_REQUIRED", authErr)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		t.m.SetBackoff(60 * time.Second)
+		return t.finishPoll(ctx, "PARTIAL", "ACB_RATE_LIMITED")
+	}
+	if resp.Kind == acb.MaintenancePage {
+		t.m.SetBackoff(60 * time.Second)
+		return t.finishPoll(ctx, "PARTIAL", "ACB_MAINTENANCE")
+	}
+	page, err := acb.ParseHistoryPage(resp.Body)
+	if err != nil {
+		return t.finishPoll(ctx, "PARTIAL", err.Error())
+	}
+
+	items := make([]storage.BatchTransactionItem, 0, len(page.Transactions))
+	for _, txn := range page.Transactions {
+		items = append(items, storage.BatchTransactionItem{
+			Number: txn.Number, Credit: txn.Credit, Debit: txn.Debit, Balance: txn.Balance,
+			TransactionAt: txn.TransactionAt, EffectiveAt: txn.EffectiveDate, Description: txn.Description,
+		})
+	}
+	res, err := t.m.store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, conn.AccountMasked, items, false)
+	if err != nil {
+		status := "FAILED"
+		if t.totalInserted > 0 {
+			status = "PARTIAL"
+		}
+		return t.finishPoll(ctx, status, err.Error())
+	}
+	t.m.notifyNewEvents(res.NewEvents)
+	t.totalInserted += res.InsertedCount
+	t.rowsSeen += len(page.Transactions)
+	t.cursor.Step(page, len(page.Transactions))
+	t.pages = t.cursor.PageNumber
+	if t.cursor.Truncated {
+		return t.finishPoll(ctx, "PARTIAL", "REALTIME_PAGINATION_TRUNCATED")
+	}
+	if !t.cursor.HasNext {
+		if s := t.m.SessionLoader(); s != nil {
+			_ = s.Persist(ctx, conn.ID, conn.Generation)
+		}
+		return t.finishPoll(ctx, "SUCCEEDED", "")
+	}
+	if sameRealtimeCursor(previousAction, previousFields, t.cursor.Action, t.cursor.Fields) {
+		return t.finishPoll(ctx, "PARTIAL", "REALTIME_CURSOR_NO_PROGRESS")
+	}
+	if t.cursor.Action == "" || len(t.cursor.Fields) == 0 ||
+		t.cursor.Fields["dse_operationName"] == "" || t.cursor.Fields["dse_processorState"] == "" {
+		return t.finishPoll(ctx, "PARTIAL", "REALTIME_PAGINATION_UNAVAILABLE")
+	}
+	t.nextAction = t.cursor.Action
+	t.nextFields = t.cursor.Fields
+	if t.pages >= realtimeMaxPages {
+		return t.finishPoll(ctx, "PARTIAL", "PARTIAL_PAGE_BUDGET_REACHED")
+	}
+	return scheduler.TaskStepResult{Done: false, Outcome: scheduler.OutcomeSuccess}, nil
+}
+
+func cloneRealtimeFields(fields map[string]string) map[string]string {
+	if fields == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(fields))
+	for key, value := range fields {
+		clone[key] = value
+	}
+	return clone
 }
 
 func (t *RealtimeTask) finishDone(err error) {

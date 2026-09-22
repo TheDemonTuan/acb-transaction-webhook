@@ -468,7 +468,13 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 	for !t.curDay.After(t.toDay) && t.dayPageCount == 0 {
 		dayStr := t.curDay.Format("2006-01-02")
 		covered, err := t.runner.store.CheckRangeCoverage(ctx, conn.ID, dayStr, dayStr)
-		if err == nil && covered {
+		if err != nil {
+			coverageErr := fmt.Errorf("check history coverage for %s: %w", dayStr, err)
+			_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "COVERAGE_LOOKUP_ERROR", coverageErr.Error())
+			t.finish(coverageErr)
+			return scheduler.TaskStepResult{Done: true, Error: coverageErr, Outcome: scheduler.OutcomeFatal}, coverageErr
+		}
+		if covered {
 			t.curDay = t.curDay.AddDate(0, 0, 1)
 			continue
 		}

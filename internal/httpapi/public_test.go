@@ -216,10 +216,11 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		nowTime := time.Now().UTC().Format(time.RFC3339Nano)
 		_, err := store.DB().ExecContext(ctx, `
 			INSERT INTO event_journal(epoch, event_type, aggregate_id, payload_json, created_at)
-			VALUES
-				('ep1', 'audit.created', 'aud_1', '{"action":"login"}', ?),
-				('ep1', 'bank.transaction.credit', 'txn_1', '{"credit":"50000","transactionId":"t1"}', ?),
-				('ep1', 'connection.changed', 'conn_1', '{"state":"MONITORING"}', ?)
+				VALUES
+					('ep1', 'audit.created', 'aud_1', '{"action":"login"}', ?),
+					('ep1', 'bank.transaction.credit', 'txn_1', '{"bank":"ACB","transactionId":"t1","transactionNumber":"N1","credit":"50000","debit":"0","currency":"VND","transactionDate":"2026-09-22T10:00:00Z","transactionDay":"2026-09-22","source":"REALTIME","description":"safe description","detectedAt":"2026-09-22T10:00:00Z","balance":"987654321","accountNumber":"123456789","sessionToken":"session-secret","cookie":"cookie-secret","rawForm":"raw-secret","dse_sessionId":"dse-secret"}', ?),
+					('ep1', 'connection.changed', 'conn_1', '{"state":"MONITORING"}', ?)
+
 		`, nowTime, nowTime, nowTime)
 		if err != nil {
 			t.Fatalf("insert journal: %v", err)
@@ -241,18 +242,22 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 
 		// Read first few SSE events with timeout
 		readDone := make(chan struct{})
+		streamBody := make(chan string, 1)
 		go func() {
 			defer close(readDone)
+			var lines strings.Builder
 			for {
 				line, err := reader.ReadString('\n')
 				if err != nil {
 					return
 				}
+				lines.WriteString(line)
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "event: ") {
 					evt := strings.TrimPrefix(line, "event: ")
 					receivedEvents = append(receivedEvents, evt)
 					if evt == "bank.transaction.credit" {
+						streamBody <- lines.String()
 						return
 					}
 				}
@@ -278,5 +283,16 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		if !foundCredit {
 			t.Errorf("expected bank.transaction.credit in public SSE, received: %v", receivedEvents)
 		}
+		select {
+		case body := <-streamBody:
+			for _, secret := range []string{"987654321", "123456789", "session-secret", "cookie-secret", "raw-secret", "dse-secret"} {
+				if strings.Contains(body, secret) {
+					t.Errorf("SECURITY LEAK: sensitive credit field %q reached public SSE: %s", secret, body)
+				}
+			}
+		default:
+			t.Fatal("public SSE credit body was not captured")
+		}
+
 	})
 }

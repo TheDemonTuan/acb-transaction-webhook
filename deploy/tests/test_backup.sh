@@ -42,6 +42,7 @@ setup_backup_env() {
   # Secrets
   printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n' > "$SECRETS_DIR/app_master_key"
   printf 'worker-tok-123\n' > "$SECRETS_DIR/worker_internal_token"
+  printf 'worker-tok-123\n' > "$SECRETS_DIR/auth_browser_internal_token"
   printf 'tts-tok-123\n' > "$SECRETS_DIR/tts_internal_token"
   printf 'bark-user\n' > "$SECRETS_DIR/bark_basic_auth_user"
   printf 'bark-pass\n' > "$SECRETS_DIR/bark_basic_auth_password"

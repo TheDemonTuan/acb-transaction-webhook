@@ -144,8 +144,10 @@ func TestGatewayRoleValidation_Subprocess(t *testing.T) {
 				"CF_ACCESS_ISSUER=https://test.cloudflareaccess.com",
 				"CF_ACCESS_AUDIENCE=aud123",
 				"CF_ACCESS_JWKS_URL=https://test.cloudflareaccess.com/certs",
-				"TTS_INTERNAL_TOKEN=token",
-				"WORKER_RPC_URL=",
+					"TTS_INTERNAL_TOKEN=token",
+					"AUTH_BROWSER_INTERNAL_TOKEN=auth-browser-token",
+					"WORKER_RPC_URL=",
+
 			},
 			wantStderr: "WORKER_RPC_URL is required for gateway in production",
 		},

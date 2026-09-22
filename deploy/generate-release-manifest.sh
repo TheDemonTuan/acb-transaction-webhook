@@ -412,8 +412,8 @@ const manifest = {
   ...(baseSha ? { base: { git_sha: baseSha, generation: Number(baseGeneration) } } : {}),
   created_at: createdAt,
   compatibility: {
-    schema_version: 9,
-    min_supported_schema_version: 9,
+    schema_version: 11,
+    min_supported_schema_version: 10,
     worker_rpc_version: 2,
     worker_rpc_endpoints: [
       "/rpc/request-sync",
@@ -492,8 +492,8 @@ manifest = {
     **({"base": {"git_sha": base_sha, "generation": int(base_generation)}} if base_sha else {}),
     "created_at": created_at,
     "compatibility": {
-        "schema_version": 9,
-        "min_supported_schema_version": 9,
+        "schema_version": 11,
+        "min_supported_schema_version": 10,
         "worker_rpc_version": 2,
         "worker_rpc_endpoints": [
             "/rpc/request-sync",

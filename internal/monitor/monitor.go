@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"strconv"
@@ -21,6 +22,11 @@ import (
 type BankClient interface {
 	Bootstrap(ctx context.Context) (acb.Response, error)
 	History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error)
+}
+
+type realtimeDateBankClient interface {
+	BootstrapForDate(ctx context.Context, date string) (acb.Response, error)
+	HistoryForDate(ctx context.Context, endpoint string, fields map[string]string, date string) (acb.Response, error)
 }
 
 var (
@@ -69,6 +75,8 @@ type Monitor struct {
 	cachedSettings  storage.MonitorSettings
 	lastMode        storage.PollMode
 	catchUpPending  bool
+
+	startupRecoveryOnce sync.Once
 
 	boostMu sync.RWMutex
 	boost   *PaymentBoost
@@ -119,6 +127,14 @@ func (m *Monitor) WithPollNotifier(fn func(poll storage.PollRun, insertedCount i
 	return m
 }
 
+func (m *Monitor) clearSyncRequest(connectionID string, generation int64) {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+	if m.syncReq != nil && m.syncReq.connectionID == connectionID && m.syncReq.generation == generation {
+		m.syncReq = nil
+	}
+}
+
 func (m *Monitor) finishPoll(ctx context.Context, poll storage.PollRun, insertedCount int) error {
 	finishCtx := ctx
 	cancel := func() {}
@@ -131,6 +147,11 @@ func (m *Monitor) finishPoll(ctx context.Context, poll storage.PollRun, inserted
 		slog.Error("finish ACB poll", "poll_id", poll.ID, "generation", poll.Generation, "status", poll.Status, "error", err)
 		return err
 	}
+	m.syncMu.Lock()
+	if m.syncReq != nil && m.syncReq.connectionID == poll.ConnectionID && m.syncReq.generation == poll.Generation {
+		m.syncReq = nil
+	}
+	m.syncMu.Unlock()
 	m.configMu.RLock()
 	fn := m.onPollFinished
 	m.configMu.RUnlock()
@@ -435,6 +456,17 @@ func (m *Monitor) registerPollWaiter() chan error {
 	return ch
 }
 
+func (m *Monitor) removePollWaiter(target chan error) {
+	m.pollWaitersMu.Lock()
+	defer m.pollWaitersMu.Unlock()
+	for i, ch := range m.pollWaiters {
+		if ch == target {
+			m.pollWaiters = append(m.pollWaiters[:i], m.pollWaiters[i+1:]...)
+			return
+		}
+	}
+}
+
 func (m *Monitor) notifyPollWaiters(err error) {
 	m.pollWaitersMu.Lock()
 	defer m.pollWaitersMu.Unlock()
@@ -479,9 +511,14 @@ func (m *Monitor) RequestSync(ctx context.Context) error {
 	task := NewRealtimeTask(m, PriorityManualSync, conn.ID, conn.Generation)
 	sched := m.Scheduler()
 	if sched == nil {
+		m.syncReq = nil
 		return ErrSyncUnavailable
 	}
-	return sched.Enqueue(task)
+	if err := sched.Enqueue(task); err != nil {
+		m.syncReq = nil
+		return err
+	}
+	return nil
 }
 
 // PollOnce executes a single poll cycle if the connection is in MONITORING state.
@@ -508,21 +545,39 @@ func (m *Monitor) pollOnce(ctx context.Context, expected *syncRequest) error {
 	sched := m.Scheduler()
 	if sched == nil || !sched.IsRunning() {
 		task := NewRealtimeTask(m, PriorityRealtimePoll, connID, gen)
-		res, err := task.Step(ctx)
-		if err != nil {
-			return err
+		for {
+			res, err := task.Step(ctx)
+			if err != nil {
+				return err
+			}
+			if res.Done {
+				return res.Error
+			}
+			if !res.RequeueAt.IsZero() {
+				if res.RequeueAt.After(time.Now()) {
+					return res.Error
+				}
+				timer := time.NewTimer(time.Until(res.RequeueAt))
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
 		}
-		return res.Error
 	}
 
 	waiter := m.registerPollWaiter()
 	task := NewRealtimeTask(m, PriorityRealtimePoll, connID, gen)
 	if err := sched.Enqueue(task); err != nil {
+		m.removePollWaiter(waiter)
 		return err
 	}
 
 	select {
 	case <-ctx.Done():
+		m.removePollWaiter(waiter)
 		return ctx.Err()
 	case err := <-waiter:
 		return err
@@ -572,16 +627,138 @@ func (m *Monitor) catchUp(ctx context.Context) error {
 	}
 }
 
-func (m *Monitor) ScheduleCatchUp() {
-	ctx := context.Background()
+// ScheduleRecovery durably admits one recovery intent, then enqueues its task.
+func (m *Monitor) recoveryPlan(ctx context.Context, connectionID string, generation int64, reason string) (storage.RecoveryRunPlan, error) {
+	nowLocal := m.now().In(acb.DefaultLocation)
+	today := nowLocal.Format("2006-01-02")
+	from := nowLocal.AddDate(0, 0, -1)
+	if reason == "WORKER_STARTUP" {
+		from = nowLocal.AddDate(0, 0, -(catchUpMaxDays - 1))
+	}
+	cp, err := m.store.GetCheckpoint(ctx, connectionID)
+	if err != nil {
+		return storage.RecoveryRunPlan{}, fmt.Errorf("load recovery checkpoint: %w", err)
+	}
+	if cp != nil && cp.CoverageTo != "" {
+		checkpointTo, parseErr := time.ParseInLocation("2006-01-02", cp.CoverageTo, acb.DefaultLocation)
+		if parseErr != nil || checkpointTo.After(nowLocal) {
+			slog.Warn("invalid or future recovery checkpoint; using bounded fallback", "connection_id", connectionID, "generation", generation, "coverage_to", cp.CoverageTo)
+		} else {
+			from = checkpointTo
+		}
+	}
+	oldest := nowLocal.AddDate(0, 0, -(catchUpMaxDays - 1))
+	if from.Before(oldest) {
+		from = oldest
+	}
+	if from.After(nowLocal) {
+		from = nowLocal
+	}
+	fromDate := from.Format("2006-01-02")
+	return storage.RecoveryRunPlan{Reason: reason, RangeFrom: fromDate, RangeTo: today, NextDay: fromDate}, nil
+}
+
+func (m *Monitor) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	if m == nil || m.store == nil {
+		return errors.New("recovery monitor is not initialized")
+	}
+	if connectionID == "" || generation <= 0 || eventKey == "" {
+		return errors.New("invalid recovery parameters")
+	}
 	conn, err := m.store.Connection(ctx)
-	if err != nil || conn.State != "MONITORING" {
+	if err != nil {
+		return err
+	}
+	if conn.ID != connectionID || conn.Generation != generation || conn.State != "MONITORING" {
+		return fmt.Errorf("stale recovery request: connection is %s at generation %d in state %s", conn.ID, conn.Generation, conn.State)
+	}
+	plan, err := m.recoveryPlan(ctx, connectionID, generation, "SESSION_AUTHENTICATED")
+	if err != nil {
+		return err
+	}
+	run, _, err := m.store.EnsureRecoveryRunWithPlan(ctx, connectionID, generation, eventKey, plan)
+	if err != nil {
+		return err
+	}
+	if run.Status == storage.RecoveryRunStatusCompleted || run.Status == storage.RecoveryRunStatusFailed || run.Status == storage.RecoveryRunStatusCanceled {
+		return nil
+	}
+	sched := m.Scheduler()
+	if sched == nil || !sched.IsRunning() {
+		return errors.New("recovery scheduler is not running")
+	}
+	return sched.Enqueue(NewRecoveryCatchUpTask(m, connectionID, generation, "SESSION_AUTHENTICATED", run.ID))
+}
+
+func (m *Monitor) admitStartupRecovery(ctx context.Context) {
+	if m == nil || m.store == nil {
 		return
 	}
-	task := NewCatchUpTask(m, conn.ID, conn.Generation)
+	m.startupRecoveryOnce.Do(func() {
+		conn, err := m.store.Connection(ctx)
+		if err != nil {
+			slog.Warn("startup recovery connection lookup failed", "error", err)
+			return
+		}
+		if conn.State != "MONITORING" || conn.Generation <= 0 {
+			return
+		}
+		active, err := m.store.HasActiveAuthAttempt(ctx, conn.ID)
+		if err != nil {
+			slog.Warn("startup recovery auth lookup failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		if active {
+			return
+		}
+		runs, err := m.store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
+		if err != nil {
+			slog.Warn("startup recovery lookup failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		if len(runs) != 0 {
+			return
+		}
+		plan, err := m.recoveryPlan(ctx, conn.ID, conn.Generation, "WORKER_STARTUP")
+		if err != nil {
+			slog.Warn("startup recovery plan failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		covered, err := m.store.CheckRangeCoverage(ctx, conn.ID, plan.RangeFrom, plan.RangeTo)
+		if err != nil {
+			slog.Warn("startup recovery coverage lookup failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		if covered {
+			return
+		}
+		if _, _, err := m.store.EnsureRecoveryRunWithPlan(ctx, conn.ID, conn.Generation, "worker-start:"+generateSessionID(), plan); err != nil {
+			slog.Warn("startup recovery admission failed", "connection_id", conn.ID, "error", err)
+		}
+	})
+}
+
+func (m *Monitor) reconcileOpenRecovery(ctx context.Context) {
+	if m == nil || m.store == nil {
+		return
+	}
+	conn, err := m.store.Connection(ctx)
+	if err != nil || conn.State != "MONITORING" || conn.Generation <= 0 {
+		return
+	}
+	runs, err := m.store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
+	if err != nil {
+		slog.Warn("recovery reconciliation failed", "connection_id", conn.ID, "error", err)
+		return
+	}
 	sched := m.Scheduler()
-	if sched != nil && sched.IsRunning() {
-		_ = sched.Enqueue(task)
+	if sched == nil || !sched.IsRunning() {
+		return
+	}
+	for _, run := range runs {
+		if err := sched.Enqueue(NewRecoveryCatchUpTask(m, conn.ID, conn.Generation, run.Reason, run.ID)); err != nil {
+			slog.Warn("recovery reconciliation enqueue failed", "connection_id", conn.ID, "run_id", run.ID, "error", err)
+		}
 	}
 }
 
@@ -596,19 +773,23 @@ func (m *Monitor) Run(ctx context.Context) {
 	if initSettings, err := m.store.GetMonitorSettings(ctx); err == nil {
 		m.cachedSettings = initSettings
 	}
+	m.admitStartupRecovery(ctx)
+	m.reconcileOpenRecovery(ctx)
 
 	timer := time.NewTimer(100 * time.Millisecond)
 	defer timer.Stop()
+	recoveryTicker := time.NewTicker(5 * time.Second)
+	defer recoveryTicker.Stop()
 
 	for {
 		schedule := storage.ResolveSchedule(time.Now(), &m.cachedSettings)
 
-		// Transition check: transitioning into REALTIME triggers catch-up and immediate realtime poll
+		// Schedule resume is realtime-only. Historical recovery is admitted separately
+		// by an authenticated recovery intent, never by the clock mode transition.
 		if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && schedule.Mode == storage.ModeRealtime {
 			conn, err := m.store.Connection(ctx)
 			if err == nil && conn.State == "MONITORING" {
 				if s := m.Scheduler(); s != nil {
-					_ = s.Enqueue(NewCatchUpTask(m, conn.ID, conn.Generation))
 					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
 				}
 			}
@@ -634,6 +815,9 @@ func (m *Monitor) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-recoveryTicker.C:
+			m.reconcileOpenRecovery(ctx)
 
 		case <-m.boostCh:
 			if !timer.Stop() {
@@ -665,6 +849,7 @@ func (m *Monitor) Run(ctx context.Context) {
 			continue
 
 		case <-timer.C:
+			schedule = storage.ResolveSchedule(time.Now(), &m.cachedSettings)
 			conn, err := m.store.Connection(ctx)
 			if err != nil || conn.State != "MONITORING" {
 				continue

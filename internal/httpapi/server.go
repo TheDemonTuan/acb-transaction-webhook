@@ -63,6 +63,10 @@ type AuthVerifier interface {
 	VerifySession(context.Context, string, int64, []byte) error
 }
 
+type PostAuthRecoveryRequester interface {
+	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
+}
+
 type WorkerProber interface {
 	Ready(ctx context.Context) error
 }
@@ -122,6 +126,7 @@ type Server struct {
 	historyJobManager HistoryJobManager
 	monitorNotifier   MonitorNotifier
 	authVerifier      AuthVerifier
+	postAuthRecovery  PostAuthRecoveryRequester
 	workerProber      WorkerProber
 	channelTester     NotificationChannelTester
 	providerReader    NotificationProviderReader
@@ -167,7 +172,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		cfg:           cfg,
 		store:         store,
 		auth:          auth.New(cfg, verifier),
-		browser:       authbrowser.NewClient(cfg.AuthBrowserURL),
+		browser:       authbrowser.NewClient(cfg.AuthBrowserURL, cfg.AuthBrowserInternalToken),
 		browserVNCURL: cfg.AuthBrowserVNCURL,
 		keyring:       keyring,
 		eventHub:      eventhub.New(),
@@ -279,6 +284,11 @@ func New(cfg config.Config, store *storage.Store) *Server {
 }
 func (s *Server) WithAuthVerifier(verifier AuthVerifier) *Server {
 	s.authVerifier = verifier
+	return s
+}
+
+func (s *Server) WithPostAuthRecoveryRequester(requester PostAuthRecoveryRequester) *Server {
+	s.postAuthRecovery = requester
 	return s
 }
 
@@ -1130,7 +1140,7 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "ACB browser session handoff failed")
 			return
 		}
-		envelope, err := s.keyring.Encrypt([]byte(handoff), []byte("acb-session:"+attempt.ConnectionID))
+		envelope, err := s.keyring.Encrypt([]byte(handoff), security.SessionAAD(attempt.ConnectionID, attempt.Generation))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "session encryption failed")
 			return
@@ -1175,6 +1185,12 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		audit(s.store, r, "auth.verified", completedConn.ID)
 		s.publishStateEvent("connection.changed", completedConn.ID, completedConn)
+		if s.postAuthRecovery != nil {
+			if err := s.postAuthRecovery.ScheduleRecovery(r.Context(), completedConn.ID, completedConn.Generation, attemptID); err != nil {
+				slog.Warn("schedule post-auth recovery", "connection_id", completedConn.ID, "generation", completedConn.Generation, "error", err)
+			}
+		}
+
 		s.publishStateEvent("auth.changed", attemptID, map[string]any{"attemptId": attemptID, "status": "MONITORING"})
 		writeJSON(w, http.StatusOK, map[string]string{"status": "MONITORING"})
 		return

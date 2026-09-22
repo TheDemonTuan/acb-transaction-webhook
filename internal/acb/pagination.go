@@ -43,8 +43,8 @@ func (c *PaginationCursor) Step(page HistoryPageResult, newRows int) {
 		return
 	}
 
-	// Defensive stop if HasNext is reported but navigation target is missing.
-	if page.NextAction == "" && len(page.NextFields) == 0 {
+	// Defensive stop if HasNext is reported but either navigation component is missing.
+	if page.NextAction == "" || len(page.NextFields) == 0 {
 		c.HasNext = false
 		c.Truncated = true
 		c.Complete = false

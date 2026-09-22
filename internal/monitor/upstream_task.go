@@ -10,12 +10,13 @@ type UpstreamPriority = scheduler.UpstreamPriority
 // Upstream priority levels matching the canonical DAG order:
 // auth > realtime > catch-up > history > keepalive.
 const (
-	PriorityInteractiveVerify = scheduler.PriorityInteractiveVerify
-	PriorityRealtimePoll      = scheduler.PriorityRealtimePoll
-	PriorityManualSync        = scheduler.PriorityManualSync
-	PriorityCatchUp           = scheduler.PriorityCatchUp
-	PriorityFilterHistory     = scheduler.PriorityFilterHistory
-	PriorityKeepalive         = scheduler.PriorityKeepalive
+	PriorityInteractiveVerify    = scheduler.PriorityInteractiveVerify
+	PriorityRealtimePoll         = scheduler.PriorityRealtimePoll
+	PriorityManualSync           = scheduler.PriorityManualSync
+	PriorityRealtimeContinuation = scheduler.PriorityRealtimeContinuation
+	PriorityCatchUp              = scheduler.PriorityCatchUp
+	PriorityFilterHistory        = scheduler.PriorityFilterHistory
+	PriorityKeepalive            = scheduler.PriorityKeepalive
 )
 
 // TaskStepResult aliases the scheduler's quantum execution result.

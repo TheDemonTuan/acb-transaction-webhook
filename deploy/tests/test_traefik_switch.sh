@@ -104,6 +104,7 @@ EOF
   printf 'mock-master-key\n' > "$test_dir/secrets/app_master_key"
   printf 'mock-tts-token\n' > "$test_dir/secrets/tts_internal_token"
   printf 'mock-worker-token\n' > "$test_dir/secrets/worker_internal_token"
+  printf 'mock-worker-token\n' > "$test_dir/secrets/auth_browser_internal_token"
   printf 'mock-bark-user\n' > "$test_dir/secrets/bark_basic_auth_user"
   printf 'mock-bark-pass\n' > "$test_dir/secrets/bark_basic_auth_password"
 

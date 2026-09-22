@@ -16,6 +16,14 @@ import (
 
 const EnvelopeVersion = "v1"
 
+func SessionAAD(connectionID string, generation int64) []byte {
+	return []byte(fmt.Sprintf("acb-session:%s:%d", connectionID, generation))
+}
+
+func LegacySessionAAD(connectionID string) []byte {
+	return []byte("acb-session:" + connectionID)
+}
+
 var (
 	ErrAuthenticationFailed = errors.New("decryption authentication failed")
 	ErrUnsupportedEnvelope  = errors.New("unsupported envelope version")

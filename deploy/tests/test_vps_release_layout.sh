@@ -69,7 +69,7 @@ cp "$DEPLOY_DIR/bark-entrypoint.sh" "$release_dir/bark-entrypoint.sh"
 cp "$DEPLOY_DIR/seccomp-auth-browser.json" "$release_dir/seccomp-auth-browser.json"
 
 # Provision secrets in runtime and symlink to release
-for s in app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   printf '%s-secret-val\n' "$s" > "$runtime_root/deploy/secrets/$s"
   chmod 600 "$runtime_root/deploy/secrets/$s"
 done

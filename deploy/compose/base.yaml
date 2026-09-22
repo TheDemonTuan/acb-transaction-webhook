@@ -28,6 +28,8 @@ secrets:
     file: ./secrets/tts_internal_token
   worker_internal_token:
     file: ./secrets/worker_internal_token
+  auth_browser_internal_token:
+    file: ./secrets/auth_browser_internal_token
   bark_basic_auth_user:
     file: ./secrets/bark_basic_auth_user
   bark_basic_auth_password:

@@ -24,6 +24,9 @@ type mockWorkerHandler struct {
 	canceledJobID         string
 	settingsChangedCalled bool
 	wakeDispatcherCalled  bool
+	recoveryConnectionID  string
+	recoveryGeneration    int64
+	recoveryEventKey      string
 	verifiedAccount       string
 
 	createJobErr error
@@ -96,6 +99,13 @@ func (m *mockWorkerHandler) NotifySettingsChanged(ctx context.Context) error {
 func (m *mockWorkerHandler) WakeDispatcher(ctx context.Context) error {
 	m.wakeDispatcherCalled = true
 	return m.wakeErr
+}
+
+func (m *mockWorkerHandler) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	m.recoveryConnectionID = connectionID
+	m.recoveryGeneration = generation
+	m.recoveryEventKey = eventKey
+	return nil
 }
 
 func (m *mockWorkerHandler) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
@@ -233,7 +243,15 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 		t.Errorf("expected WakeDispatcher to be called")
 	}
 
-	// 7. VerifySession success
+	// 7. ScheduleRecovery
+	if err := client.ScheduleRecovery(ctx, "conn_recovery", 7, "auth.verified"); err != nil {
+		t.Fatalf("ScheduleRecovery failed: %v", err)
+	}
+	if mock.recoveryConnectionID != "conn_recovery" || mock.recoveryGeneration != 7 || mock.recoveryEventKey != "auth.verified" {
+		t.Fatalf("unexpected recovery request: %q/%d/%q", mock.recoveryConnectionID, mock.recoveryGeneration, mock.recoveryEventKey)
+	}
+
+	// 8. VerifySession success
 	if err := client.VerifySession(ctx, "12345678", 1, []byte("correct")); err != nil {
 		t.Fatalf("VerifySession failed: %v", err)
 	}
@@ -241,12 +259,12 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 		t.Errorf("expected account to match")
 	}
 
-	// 8. VerifySession failure
+	// 9. VerifySession failure
 	if err := client.VerifySession(ctx, "12345678", 1, []byte("wrong")); err == nil {
 		t.Fatalf("expected VerifySession with wrong password to fail")
 	}
 
-	// 9. Unauthorized client
+	// 10. Unauthorized client
 	unauthClient := workerrpc.NewClient(ts.URL, "bad-token")
 	if err := unauthClient.RequestSync(ctx); err == nil {
 		t.Fatalf("expected unauthenticated request to fail")

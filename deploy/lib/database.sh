@@ -255,12 +255,14 @@ release_mutation_gate() {
 verify_schema_compat() {
   local db_volume="${1:-$DATA_VOLUME_NAME}"
   local dbtool_img="${2:-${DBTOOL_IMAGE_REF:-}}"
-  local min_version="${3:-9}"
+  local min_version="${3:-10}"
 
   log_info "Verifying schema compatibility (minimum version: $min_version)..."
   if [[ -n "${SCHEMA_COMPAT_CMD:-}" ]]; then
-    $SCHEMA_COMPAT_CMD "$min_version" || return 1
-    return 0
+    if ! $SCHEMA_COMPAT_CMD "$min_version"; then
+      log_error "Schema compatibility verification failed via configured verifier"
+      return 1
+    fi
   elif command -v docker >/dev/null 2>&1 && docker volume inspect "$db_volume" >/dev/null 2>&1 && [[ -n "$dbtool_img" ]]; then
     if ! docker run --rm --network none --read-only --user 1000:1000 \
       -e DATABASE_PATH=/data/gateway.db \
@@ -278,6 +280,9 @@ verify_schema_compat() {
       log_error "Schema compatibility verification failed via local dbtool"
       return 1
     fi
+  else
+    log_error "No schema compatibility verification backend executed. Fail closed."
+    return 1
   fi
   log_info "Schema compatibility verified successfully."
   return 0
@@ -384,7 +389,7 @@ perform_sqlite_backup() {
   local secrets_backup_dir="$BACKUP_DIR/secrets-${ts}"
   mkdir -p "$secrets_backup_dir"
   local sec_items=()
-  for s in app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password; do
+  for s in app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
     if [[ -f "$SECRETS_DIR/$s" ]]; then
       cp -p "$SECRETS_DIR/$s" "$secrets_backup_dir/$s"
       chmod 600 "$secrets_backup_dir/$s" 2>/dev/null || true

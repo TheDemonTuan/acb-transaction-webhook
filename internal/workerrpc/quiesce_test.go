@@ -19,13 +19,16 @@ type quiesceMockHandler struct {
 	checkpoint  string
 }
 
-func (q *quiesceMockHandler) RequestSync(ctx context.Context) error                          { return nil }
+func (q *quiesceMockHandler) RequestSync(ctx context.Context) error { return nil }
 func (q *quiesceMockHandler) CreateHistoryJob(ctx context.Context, from, to string) (storage.HistorySyncJob, error) {
 	return storage.HistorySyncJob{ID: "job_1"}, nil
 }
-func (q *quiesceMockHandler) CancelHistoryJob(ctx context.Context, jobID string) error       { return nil }
-func (q *quiesceMockHandler) NotifySettingsChanged(ctx context.Context) error                { return nil }
-func (q *quiesceMockHandler) WakeDispatcher(ctx context.Context) error                       { return nil }
+func (q *quiesceMockHandler) CancelHistoryJob(ctx context.Context, jobID string) error { return nil }
+func (q *quiesceMockHandler) NotifySettingsChanged(ctx context.Context) error          { return nil }
+func (q *quiesceMockHandler) WakeDispatcher(ctx context.Context) error                 { return nil }
+func (q *quiesceMockHandler) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	return nil
+}
 func (q *quiesceMockHandler) VerifySession(ctx context.Context, acc string, gen int64, pw []byte) error {
 	return nil
 }

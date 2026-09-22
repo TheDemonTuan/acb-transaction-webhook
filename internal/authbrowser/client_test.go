@@ -2,6 +2,7 @@ package authbrowser
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +54,26 @@ func TestClientRejectsIncompleteSession(t *testing.T) {
 	_, err := NewClient(server.URL).Status(context.Background(), "auth_1")
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClientSendsInternalToken(t *testing.T) {
+	var gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get(InternalTokenHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"attemptId": "auth_1",
+			"status":    "AWAITING_USER_LOGIN",
+		})
+	}))
+	defer server.Close()
+
+	if _, err := NewClient(server.URL, "internal-secret").Status(context.Background(), "auth_1"); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if gotToken != "internal-secret" {
+		t.Fatalf("internal token header = %q, want internal-secret", gotToken)
 	}
 }
 

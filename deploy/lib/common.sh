@@ -273,7 +273,7 @@ check_required_secrets() {
     log_error "Secrets directory '$SECRETS_DIR' does not exist."
     return 1
   fi
-  local required_secrets=(app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password)
+  local required_secrets=(app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password)
   local missing=()
   for s in "${required_secrets[@]}"; do
     local s_file="$SECRETS_DIR/$s"
@@ -313,7 +313,7 @@ assert_fresh_installation() {
     fi
   fi
   if [[ -d "$SECRETS_DIR" ]]; then
-    for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_password; do
+    for s in app_master_key worker_internal_token tts_internal_token auth_browser_internal_token bark_basic_auth_password; do
       if [[ -s "$SECRETS_DIR/$s" ]]; then
         log_error "assert_fresh_installation: Pre-existing secret '$SECRETS_DIR/$s' detected. Aborting fresh provisioning."
         return 1
@@ -348,6 +348,16 @@ provision_fresh_secrets() {
       head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$worker_token_file"
     fi
     chmod 600 "$worker_token_file" 2>/dev/null || true
+  fi
+
+  local auth_browser_token_file="$SECRETS_DIR/auth_browser_internal_token"
+  if [[ ! -s "$auth_browser_token_file" ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+      openssl rand -hex 32 > "$auth_browser_token_file"
+    else
+      head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > "$auth_browser_token_file"
+    fi
+    chmod 600 "$auth_browser_token_file" 2>/dev/null || true
   fi
 
   local tts_token_file="$SECRETS_DIR/tts_internal_token"

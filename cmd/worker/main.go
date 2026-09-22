@@ -37,8 +37,27 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
+type recoveryScheduler interface {
+	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
+}
+
+type workerRecoveryScheduler struct {
+	monitor *monitor.Monitor
+}
+
+func (s workerRecoveryScheduler) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	if s.monitor == nil {
+		return errors.New("bank monitor not initialized")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.monitor.ScheduleRecovery(ctx, connectionID, generation, eventKey)
+}
+
 type workerService struct {
 	bankMonitor           *monitor.Monitor
+	recoveryScheduler     recoveryScheduler
 	historyRunner         *monitor.HistoryJobRunner
 	dispatcher            *notification.Dispatcher
 	verifierSessionLoader *monitor.SessionLoader
@@ -56,6 +75,26 @@ func (w *workerService) RequestSync(ctx context.Context) error {
 		return fmt.Errorf("bank monitor not initialized")
 	}
 	return w.bankMonitor.RequestSync(ctx)
+}
+
+func (w *workerService) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	if generation <= 0 || strings.TrimSpace(connectionID) == "" || strings.TrimSpace(eventKey) == "" {
+		return errors.New("invalid recovery parameters")
+	}
+	if w.store == nil {
+		return errors.New("storage not initialized")
+	}
+	conn, err := w.store.Connection(ctx)
+	if err != nil {
+		return fmt.Errorf("lookup connection: %w", err)
+	}
+	if conn.ID != connectionID || conn.Generation != generation || conn.State != "MONITORING" {
+		return fmt.Errorf("stale recovery request: connection is %s at generation %d in state %s", conn.ID, conn.Generation, conn.State)
+	}
+	if w.recoveryScheduler == nil {
+		return errors.New("recovery scheduler not configured")
+	}
+	return w.recoveryScheduler.ScheduleRecovery(ctx, connectionID, generation, eventKey)
 }
 
 func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
@@ -770,6 +809,7 @@ func main() {
 	// 6. Setup Private RPC Server
 	ws := &workerService{
 		bankMonitor:           bankMonitor,
+		recoveryScheduler:     workerRecoveryScheduler{monitor: bankMonitor},
 		historyRunner:         historyRunner,
 		dispatcher:            dispatcher,
 		verifierSessionLoader: verifierSessionLoader,

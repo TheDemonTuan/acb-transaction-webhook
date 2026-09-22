@@ -71,6 +71,45 @@ func TestWorkerService_VerifySession_GenerationGuard(t *testing.T) {
 	}
 }
 
+func TestWorkerService_ScheduleRecovery_ValidatesGenerationAndState(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_recovery_test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING', generation=5 WHERE id=?", conn.ID); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	ws := &workerService{store: store, recoveryScheduler: recoverySchedulerFunc(func(context.Context, string, int64, string) error {
+		called = true
+		return nil
+	})}
+	if err := ws.ScheduleRecovery(ctx, conn.ID, 4, "auth.verified"); err == nil {
+		t.Fatal("expected stale generation error")
+	}
+	if called {
+		t.Fatal("scheduler called for stale generation")
+	}
+	if err := ws.ScheduleRecovery(ctx, conn.ID, 5, "auth.verified"); err != nil {
+		t.Fatalf("valid recovery: %v", err)
+	}
+	if !called {
+		t.Fatal("scheduler not called for valid recovery")
+	}
+}
+
+type recoverySchedulerFunc func(context.Context, string, int64, string) error
+
+func (f recoverySchedulerFunc) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+	return f(ctx, connectionID, generation, eventKey)
+}
+
 func TestWorkerService_NotifyAndWake_Uninitialized(t *testing.T) {
 	ctx := context.Background()
 	ws := &workerService{}
@@ -83,6 +122,9 @@ func TestWorkerService_NotifyAndWake_Uninitialized(t *testing.T) {
 	}
 	if err := ws.RequestSync(ctx); err == nil {
 		t.Fatal("expected error when bank monitor is nil, got nil")
+	}
+	if err := ws.ScheduleRecovery(ctx, "conn", 1, "auth.verified"); err == nil {
+		t.Fatal("expected error when storage is nil, got nil")
 	}
 	if _, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02"); err == nil {
 		t.Fatal("expected error when store is nil, got nil")

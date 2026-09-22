@@ -678,6 +678,69 @@ func TestObserverBoundedRetryPreservesSession(t *testing.T) {
 	}
 }
 
+func TestHandoffRequiresInternalToken(t *testing.T) {
+	s := &server{
+		internalToken:        "internal-secret",
+		internalAuthRequired: true,
+		session: &browserSession{
+			AttemptID: "handoff-auth-test",
+			Status:    "VERIFIED",
+			verified:  true,
+			handoff:   "sensitive-handoff",
+		},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/sessions/handoff-auth-test/handoff", nil)
+	request.SetPathValue("attemptID", "handoff-auth-test")
+
+	unauthorized := httptest.NewRecorder()
+	s.requireInternal(http.HandlerFunc(s.handoff)).ServeHTTP(unauthorized, request)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized handoff status = %d, want 401", unauthorized.Code)
+	}
+	if strings.Contains(unauthorized.Body.String(), "sensitive-handoff") {
+		t.Fatal("unauthorized response leaked handoff")
+	}
+
+	request.Header.Set(authbrowser.InternalTokenHeader, "internal-secret")
+	authorized := httptest.NewRecorder()
+	s.requireInternal(http.HandlerFunc(s.handoff)).ServeHTTP(authorized, request)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized handoff status = %d: %s", authorized.Code, authorized.Body.String())
+	}
+}
+
+func TestRequireInternalRejectsMissingOrWrongPOSTWithoutHandlerSideEffects(t *testing.T) {
+	s := &server{
+		internalToken:        "internal-secret",
+		internalAuthRequired: true,
+	}
+	handlerCalls := 0
+	handler := s.requireInternal(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handlerCalls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for name, token := range map[string]string{
+		"missing": "",
+		"wrong":   "wrong-secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/sessions", nil)
+			if token != "" {
+				request.Header.Set(authbrowser.InternalTokenHeader, token)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("POST without valid internal token returned HTTP %d, want 401", recorder.Code)
+			}
+		})
+	}
+	if handlerCalls != 0 {
+		t.Fatalf("handler ran %d times for unauthorized POST requests, want 0", handlerCalls)
+	}
+}
+
 func TestHandoffReapsProcessAndSetsCompleted(t *testing.T) {
 	profileDir := t.TempDir()
 	s := &server{

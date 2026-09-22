@@ -120,7 +120,7 @@ mkdir -p "$RUNTIME_DIR/deploy/secrets"
 mkdir -p "$RELEASE_DIR/compose"
 
 # Write dummy secrets in runtime
-for s in app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   printf 'secret_%s_val' "$s" > "$RUNTIME_DIR/deploy/secrets/$s"
 done
 chmod 600 "$RUNTIME_DIR/deploy/secrets/"*

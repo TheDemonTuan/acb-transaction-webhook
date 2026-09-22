@@ -63,6 +63,7 @@ setup_schema_mock_env() {
   export MOCK_ACTIVE_AUTH_FAIL=0
   export MOCK_BACKUP_FAIL=0
   export MOCK_MIGRATION_FAIL=0
+  export MOCK_SCHEMA_VERSION=11
 
   mkdir -p "$test_dir/bin" "$test_dir/secrets" "$test_dir/data/backups" "$test_dir/dynamic"
   touch "$test_dir/data/gateway.db"
@@ -97,6 +98,7 @@ EOF
   printf 'mock-master-key\n' > "$test_dir/secrets/app_master_key"
   printf 'mock-tts-token\n' > "$test_dir/secrets/tts_internal_token"
   printf 'mock-worker-token\n' > "$test_dir/secrets/worker_internal_token"
+  printf 'mock-worker-token\n' > "$test_dir/secrets/auth_browser_internal_token"
   printf 'mock-bark-user\n' > "$test_dir/secrets/bark_basic_auth_user"
   printf 'mock-bark-pass\n' > "$test_dir/secrets/bark_basic_auth_password"
   chmod 600 "$test_dir/secrets/"* 2>/dev/null || true
@@ -182,7 +184,21 @@ elif [[ "$cmd" == "run" ]]; then
     exit 0
   fi
   if [[ "$*" =~ -schema-compat ]]; then
-    printf '{"compatible":true,"schemaVersion":9,"requiredVersion":9}\n'
+    required_version=""
+    previous_arg=""
+    for arg in "$@"; do
+      if [[ "$previous_arg" == "-min-version" ]]; then
+        required_version="$arg"
+        break
+      fi
+      previous_arg="$arg"
+    done
+    actual_version="${MOCK_SCHEMA_VERSION:-11}"
+    if [[ -z "$required_version" || "$actual_version" -lt "$required_version" ]]; then
+      printf '{"compatible":false,"schemaVersion":%s,"requiredVersion":%s}\n' "${actual_version:-0}" "${required_version:-0}"
+      exit 1
+    fi
+    printf '{"compatible":true,"schemaVersion":%s,"requiredVersion":%s}\n' "$actual_version" "$required_version"
     exit 0
   fi
   if [[ "$*" =~ -gate-status ]]; then
@@ -304,9 +320,49 @@ setup_schema_mock_env "$T5"
 
 assert_file_exists "$T5/data/migration-record.json" "Migration metadata record was saved"
 assert_file_contains "$T5/data/migration-record.json" "COMPLETED" "Migration record status is COMPLETED"
+assert_file_contains "$T5/data/migration-record.json" '"schema_version": 11' "Migration record uses schema version 11"
 # Assert Traefik dynamic route remains untouched
 assert_file_contains "$T5/dynamic/acb.yml" "acb-web-blue" "Traefik route was never touched by schema promotion"
 assert_eq "blue" "$(cat "$T5/.active-slot")" "Active slot remains blue"
+
+# ==============================================================================
+# TEST 6: Schema Below Deployment Target Fails Closed
+# ======================================================================
+printf '\n=== TEST 6: Schema Below Target Fails Closed ===\n'
+T6="$TEST_TMP/t6"
+setup_schema_mock_env "$T6"
+export MOCK_SCHEMA_VERSION=10
+old_receipt="$T6/data/migration-record.json"
+printf '{"status":"COMPLETED","schema_version":10}\n' > "$old_receipt"
+
+set +e
+"$DEPLOY_DIR/deploy-schema.sh" "ghcr.io/test/dbtool@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+exit_code=$?
+set -e
+
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Schema deployment fails when actual schema is below target 11"
+assert_file_contains "$old_receipt" '"schema_version":10' "Failed deployment does not overwrite prior receipt"
+
+# ======================================================================
+# TEST 7: Missing Schema Verifier Fails Closed
+# ======================================================================
+printf '\n=== TEST 7: Missing Schema Verifier Fails Closed ===\n'
+no_backend_script="$T6/no-schema-backend.sh"
+cat <<EOF > "$no_backend_script"
+#!/usr/bin/env bash
+set -euo pipefail
+source "$DEPLOY_DIR/lib.sh"
+DEFAULT_GATEWAY_DB="$T6/missing.db"
+unset SCHEMA_COMPAT_CMD
+PATH="/usr/bin:/bin"
+verify_schema_compat "$T6/missing-volume" "" 11
+EOF
+chmod +x "$no_backend_script"
+set +e
+bash "$no_backend_script" >/dev/null 2>&1
+exit_code=$?
+set -e
+assert_eq "1" "$(( exit_code != 0 ? 1 : 0 ))" "Schema verification fails closed when no backend is available"
 
 printf '\n==================================================\n'
 printf 'SCHEMA DEPLOY TEST RESULTS: %d PASSED, %d FAILED\n' "$TESTS_PASSED" "$TESTS_FAILED"

@@ -58,8 +58,13 @@ printf '\n=== TEST 3: Full End-to-End Isolated Restore Drill ===\n'
 T3="$TEST_TMP/drill_workspace"
 evidence_out="$T3/evidence.json"
 
-rc=0
-"$REPO_ROOT/scripts/ops/restore-drill.sh" --drill-dir "$T3" --evidence "$evidence_out" >/dev/null 2>&1 || rc=$?
+restore_log="$TEST_TMP/restore-drill.log"
+if "$REPO_ROOT/scripts/ops/restore-drill.sh" --drill-dir "$T3" --evidence "$evidence_out" >"$restore_log" 2>&1; then
+  rc=0
+else
+  rc=$?
+  cat "$restore_log" >&2
+fi
 assert_eq "0" "$rc" "restore-drill.sh executes end-to-end successfully"
 
 if [[ -f "$evidence_out" ]]; then
@@ -79,14 +84,25 @@ else
   TESTS_FAILED=$(( TESTS_FAILED + 1 ))
 fi
 
-# Ensure evidence does NOT leak secret values
-if grep -q 'test_master_key' "$evidence_out" || grep -q 'test_worker_token' "$evidence_out"; then
-  printf 'FAIL: Evidence JSON leaked plaintext secret values\n' >&2
-  TESTS_FAILED=$(( TESTS_FAILED + 1 ))
-else
-  printf 'PASS: Evidence JSON contains zero secret values\n'
-  TESTS_PASSED=$(( TESTS_PASSED + 1 ))
-fi
+for secret in app_master_key worker_internal_token auth_browser_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+  original="$T3/fixture/secrets/$secret"
+  restored="$T3/canary_restored/secrets/$secret"
+  if [[ -s "$original" && -s "$restored" ]] && cmp -s "$original" "$restored"; then
+    printf 'PASS: %s restored with matching contents\n' "$secret"
+    TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  else
+    printf 'FAIL: %s missing, empty, or changed after restore\n' "$secret" >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+  fi
+
+  if [[ ! -s "$original" || ! -s "$evidence_out" || ! -s "$restore_log" ]] || grep -Fq -f "$original" "$evidence_out" "$restore_log"; then
+    printf 'FAIL: Cannot verify plaintext protection for %s, or value leaked\n' "$secret" >&2
+    TESTS_FAILED=$(( TESTS_FAILED + 1 ))
+  else
+    printf 'PASS: %s plaintext absent from evidence and log\n' "$secret"
+    TESTS_PASSED=$(( TESTS_PASSED + 1 ))
+  fi
+done
 
 # ==============================================================================
 # TEST 4: restore-db.sh fails when using wrong age recovery identity

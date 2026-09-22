@@ -28,13 +28,14 @@ acquire_deploy_lock
 
 SCHEMA_DEPLOY_OWNER="deploy-schema-$(date -u +%Y%m%d%H%M%S)"
 GATE_TOKEN=""
+GATE_ACQUIRED=0
 
 cleanup_schema_deploy() {
   local exit_code=$?
   if command -v docker >/dev/null 2>&1; then
     docker rm -f acb-schema-check >/dev/null 2>&1 || true
   fi
-  if [[ -n "${GATE_TOKEN:-}" || -n "${SCHEMA_DEPLOY_OWNER:-}" ]]; then
+  if [[ "${GATE_ACQUIRED:-0}" -eq 1 || -n "${GATE_TOKEN:-}" ]]; then
     release_mutation_gate "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" "$SCHEMA_DEPLOY_OWNER" "${GATE_TOKEN:-}" 2>/dev/null || true
   fi
   release_deploy_lock
@@ -56,6 +57,7 @@ fi
 
 # 2. Acquire durable mutation gate lease (atomic auth-start race prevention)
 GATE_TOKEN="$(acquire_mutation_gate "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" "$SCHEMA_DEPLOY_OWNER" "schema-migration")"
+GATE_ACQUIRED=1
 
 # 3. Read-only WAL probe
 if ! verify_wal_probe "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE"; then
@@ -99,7 +101,7 @@ fi
 
 # 6. Verify schema compatibility post-migration
 log_info "Verifying schema compatibility post-migration..."
-if ! verify_schema_compat "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" 9; then
+if ! verify_schema_compat "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" 11; then
   log_error "Post-migration schema compatibility check failed!"
   exit 1
 fi
@@ -117,6 +119,7 @@ fi
 # 7. Release durable mutation gate
 release_mutation_gate "$DATA_VOLUME_NAME" "$DBTOOL_IMAGE" "$SCHEMA_DEPLOY_OWNER" "${GATE_TOKEN:-}"
 GATE_TOKEN=""
+GATE_ACQUIRED=0
 
 # 8. Record migration metadata
 MIGRATION_RECORD="${MIGRATION_RECORD:-${RUNTIME_DATA_DIR:-${DATA_DIR:-$SCRIPT_DIR/data}}/migration-record.json}"
@@ -127,7 +130,7 @@ cat <<EOF > "$MIGRATION_RECORD"
   "target_image": "${DBTOOL_IMAGE}",
   "backup_file": "$(basename "$BACKUP_FILE")",
   "status": "COMPLETED",
-  "schema_version": 9,
+  "schema_version": 11,
   "route_touched": false
 }
 EOF

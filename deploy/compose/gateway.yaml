@@ -28,6 +28,7 @@ services:
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -44,6 +45,7 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - auth_browser_internal_token
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=edge-acb"
@@ -109,6 +111,7 @@ services:
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
       AUTH_BROWSER_VNC_URL: http://auth-browser:6080
+      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -125,6 +128,7 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - auth_browser_internal_token
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=edge-acb"

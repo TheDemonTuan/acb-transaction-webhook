@@ -37,6 +37,7 @@ export SCRIPT_DIR="$T1"
 source "$DEPLOY_DIR/lib.sh"
 
 printf 'worker-tok\n' > "$SECRETS_DIR/worker_internal_token"
+printf 'worker-tok\n' > "$SECRETS_DIR/auth_browser_internal_token"
 printf 'tts-tok\n' > "$SECRETS_DIR/tts_internal_token"
 printf 'admin\n' > "$SECRETS_DIR/bark_basic_auth_user"
 printf 'bark-pass\n' > "$SECRETS_DIR/bark_basic_auth_password"
@@ -59,7 +60,7 @@ printf '\n=== TEST 2: Missing other required secrets fail closed ===\n'
 T2="$TEST_TMP/t2"
 mkdir -p "$T2/secrets"
 export SECRETS_DIR="$T2/secrets"
-for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key worker_internal_token tts_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   printf 'mock\n' > "$SECRETS_DIR/$s"
   chmod 600 "$SECRETS_DIR/$s" 2>/dev/null || true
 done
@@ -70,7 +71,7 @@ validate_secrets >/dev/null 2>&1 || rc=$?
 assert_eq "0" "$rc" "validate_secrets succeeds when all secrets are present"
 
 # Each individual missing secret fails closed
-for s in worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in worker_internal_token tts_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   rm -f "$SECRETS_DIR/$s"
   rc=0
   validate_secrets >/dev/null 2>&1 || rc=$?
@@ -86,7 +87,7 @@ printf '\n=== TEST 3: World-readable secret permissions rejected ===\n'
 T3="$TEST_TMP/t3"
 mkdir -p "$T3/secrets"
 export SECRETS_DIR="$T3/secrets"
-for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key worker_internal_token tts_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   printf 'secret-val\n' > "$SECRETS_DIR/$s"
   chmod 600 "$SECRETS_DIR/$s" 2>/dev/null || true
 done
@@ -155,7 +156,7 @@ key_content="$(tr -d '\r\n' < "$SECRETS_DIR/app_master_key")"
 key_len="${#key_content}"
 assert_eq "64" "$key_len" "app_master_key is 64 hex characters (32 bytes raw)"
 
-for s in worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in worker_internal_token tts_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password; do
   if [[ -s "$SECRETS_DIR/$s" ]]; then
     printf 'PASS: %s is non-empty\n' "$s"
     TESTS_PASSED=$(( TESTS_PASSED + 1 ))
