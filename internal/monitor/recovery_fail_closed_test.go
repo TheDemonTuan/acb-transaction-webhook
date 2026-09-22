@@ -30,7 +30,7 @@ func TestReconcileRecoveryStopsOnCheckpointLookupError(t *testing.T) {
 
 	mon := New(store, nil, 5*time.Second, 15*time.Second)
 	mon.now = fixedRealtimeTime
-	mon.reconcileRecovery(ctx)
+	mon.admitStartupRecovery(ctx)
 
 	runs, err := store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
 	if err != nil {
@@ -62,7 +62,7 @@ func TestReconcileRecoveryStopsOnCoverageLookupError(t *testing.T) {
 
 	mon := New(store, nil, 5*time.Second, 15*time.Second)
 	mon.now = fixedRealtimeTime
-	mon.reconcileRecovery(ctx)
+	mon.admitStartupRecovery(ctx)
 
 	runs, err := store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
 	if err != nil {

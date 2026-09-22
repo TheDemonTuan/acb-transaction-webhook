@@ -349,3 +349,90 @@ func TestCatchUpTask_RestartReconstructsFromCheckpoint(t *testing.T) {
 		t.Fatalf("expected reconstructed fromDate %s, got %s", targetDay, newTask.fromDate)
 	}
 }
+
+type catchUpPaginationFieldsClient struct {
+	mu    sync.Mutex
+	calls []map[string]string
+}
+
+func (c *catchUpPaginationFieldsClient) Bootstrap(context.Context) (acb.Response, error) {
+	return acb.Response{StatusCode: 200, Kind: acb.AccountDetailPage, Body: `<form action="/history" method="POST">
+		<input type="hidden" name="dse_operationName" value="op1" />
+		<input type="hidden" name="dse_processorState" value="bootstrap" />
+		<input type="hidden" name="dse_sessionId" value="session-1" />
+		<input type="hidden" name="activeDatetimeByMonth" value="Y" />
+		<input type="hidden" name="MonthCurr" value="9" />
+		<input type="hidden" name="YearCurr" value="2026" />
+	</form>`}, nil
+}
+
+func (c *catchUpPaginationFieldsClient) History(_ context.Context, _ string, fields map[string]string) (acb.Response, error) {
+	c.mu.Lock()
+	captured := make(map[string]string, len(fields))
+	for key, value := range fields {
+		captured[key] = value
+	}
+	c.calls = append(c.calls, captured)
+	call := len(c.calls)
+	c.mu.Unlock()
+
+	nav := `<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>`
+	if call == 1 {
+		nav = `<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>`
+	}
+	body := fmt.Sprintf(`<form action="/history" method="POST">
+		<input type="hidden" name="dse_operationName" value="op1" />
+		<input type="hidden" name="dse_processorState" value="page-%d" />
+		<input type="hidden" name="dse_sessionId" value="session-%d" />
+		<input type="hidden" name="activeDatetimeByMonth" value="Y" />
+		<input type="hidden" name="MonthCurr" value="9" />
+		<input type="hidden" name="YearCurr" value="2026" />
+	</form>
+	<table>
+		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+		<tr><td>PIN_TX_%d</td><td>21/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer %d</td></tr>
+		%s
+	</table>`, call, call, call, call, nav)
+	return acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: body}, nil
+}
+
+func TestCatchUpTaskPinsContinuationWithoutMutatingPaginationFields(t *testing.T) {
+	ctx := context.Background()
+	store, conn := newRecoveryAdmissionStore(t)
+	defer store.Close()
+
+	client := &catchUpPaginationFieldsClient{}
+	mon := New(store, client, 5*time.Second, 5*time.Second)
+	mon.now = fixedRealtimeTime
+	task := NewCatchUpTask(mon, conn.ID, conn.Generation)
+	if _, err := task.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.calls) != 2 {
+		t.Fatalf("expected two history pages, got %d", len(client.calls))
+	}
+	first, second := client.calls[0], client.calls[1]
+	if first["_explicitRange"] != "true" {
+		t.Fatalf("first page lost explicit-range preparation: %#v", first)
+	}
+	if second["dse_processorState"] != "page-1" || second["dse_sessionId"] != "session-1" || second["dse_nextEventName"] != "nextPage" {
+		t.Fatalf("continuation fields were not preserved: %#v", second)
+	}
+	if second["FromDate"] != "21/09/2026" || second["ToDate"] != "21/09/2026" || second["_raw"] != "true" {
+		t.Fatalf("continuation date pinning is incorrect: %#v", second)
+	}
+	for _, key := range []string{"_explicitRange", "activeDatetimeByMonth", "MonthCurr", "YearCurr"} {
+		if _, ok := second[key]; ok {
+			t.Fatalf("continuation retained forbidden field %q: %#v", key, second)
+		}
+	}
+	if first["FromDate"] != "21/09/2026" || first["ToDate"] != "21/09/2026" || first["_explicitRange"] != "true" {
+		t.Fatalf("first-page fields were mutated after continuation: %#v", first)
+	}
+}

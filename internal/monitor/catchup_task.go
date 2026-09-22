@@ -92,6 +92,13 @@ func (t *CatchUpTask) CoalesceKey() string {
 	return fmt.Sprintf("CATCH_UP:%s:%d", t.connectionID, t.generation)
 }
 
+func (t *CatchUpTask) history(ctx context.Context, endpoint string, fields map[string]string, date string) (acb.Response, error) {
+	if client, ok := t.m.client.(realtimeDateBankClient); ok {
+		return client.HistoryForDate(ctx, endpoint, fields, date)
+	}
+	return t.m.client.History(ctx, endpoint, fields)
+}
+
 func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	if err := ctx.Err(); err != nil {
 		t.finishDone(err)
@@ -389,7 +396,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	}
 
 	// EXECUTE AT MOST ONE ACB History HTTP Request
-	histResp, histErr := t.m.client.History(ctx, t.nextAction, t.nextFields)
+	histResp, histErr := t.history(ctx, t.nextAction, t.nextFields, t.currentDay.Format("02/01/2006"))
 	if histErr != nil {
 		until := t.m.RecordNetworkFailure(histErr)
 		slog.Warn("ACB request failed", "phase", "catchup_history", "generation", conn.Generation, "backoff_until", until, "error", acb.SanitizeTransportError(histErr))
@@ -465,15 +472,19 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 
 	// Check if more pages exist for this day within the fixed page budget.
 	if t.cursor.HasNext && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) && t.dayPageCount < catchUpMaxPages {
-		t.nextAction = t.cursor.Action
-		t.nextFields = t.cursor.Fields
-		if t.nextFields == nil {
-			t.nextFields = make(map[string]string)
+		day := t.currentDay.Format("02/01/2006")
+		pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, day)
+		if err != nil {
+			pinErr := fmt.Errorf("pin recovery pagination for %s: %w", dayStr, err)
+			if progressErr := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "FORM_INVALID", pinErr.Error()); progressErr != nil {
+				pinErr = errors.Join(pinErr, progressErr)
+			}
+			t.finishDone(pinErr)
+			return scheduler.TaskStepResult{Done: true, Error: pinErr, Outcome: scheduler.OutcomeFatal}, pinErr
 		}
-		t.nextFields["FromDate"] = t.currentDay.Format("02/01/2006")
-		t.nextFields["ToDate"] = t.currentDay.Format("02/01/2006")
-		t.nextFields["_explicitRange"] = "true"
-		t.nextFields["_raw"] = "true"
+		pinned["_raw"] = "true"
+		t.nextAction = t.cursor.Action
+		t.nextFields = pinned
 		// Bounded quantum complete! Yield after 1 page so higher-priority tasks can preempt.
 		return scheduler.TaskStepResult{Done: false, Outcome: scheduler.OutcomeSuccess}, nil
 	}

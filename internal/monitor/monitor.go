@@ -76,6 +76,8 @@ type Monitor struct {
 	lastMode        storage.PollMode
 	catchUpPending  bool
 
+	startupRecoveryOnce sync.Once
+
 	boostMu sync.RWMutex
 	boost   *PaymentBoost
 
@@ -630,6 +632,9 @@ func (m *Monitor) recoveryPlan(ctx context.Context, connectionID string, generat
 	nowLocal := m.now().In(acb.DefaultLocation)
 	today := nowLocal.Format("2006-01-02")
 	from := nowLocal.AddDate(0, 0, -1)
+	if reason == "WORKER_STARTUP" {
+		from = nowLocal.AddDate(0, 0, -(catchUpMaxDays - 1))
+	}
 	cp, err := m.store.GetCheckpoint(ctx, connectionID)
 	if err != nil {
 		return storage.RecoveryRunPlan{}, fmt.Errorf("load recovery checkpoint: %w", err)
@@ -685,7 +690,55 @@ func (m *Monitor) ScheduleRecovery(ctx context.Context, connectionID string, gen
 	return sched.Enqueue(NewRecoveryCatchUpTask(m, connectionID, generation, "SESSION_AUTHENTICATED", run.ID))
 }
 
-func (m *Monitor) reconcileRecovery(ctx context.Context) {
+func (m *Monitor) admitStartupRecovery(ctx context.Context) {
+	if m == nil || m.store == nil {
+		return
+	}
+	m.startupRecoveryOnce.Do(func() {
+		conn, err := m.store.Connection(ctx)
+		if err != nil {
+			slog.Warn("startup recovery connection lookup failed", "error", err)
+			return
+		}
+		if conn.State != "MONITORING" || conn.Generation <= 0 {
+			return
+		}
+		active, err := m.store.HasActiveAuthAttempt(ctx, conn.ID)
+		if err != nil {
+			slog.Warn("startup recovery auth lookup failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		if active {
+			return
+		}
+		runs, err := m.store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
+		if err != nil {
+			slog.Warn("startup recovery lookup failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		if len(runs) != 0 {
+			return
+		}
+		plan, err := m.recoveryPlan(ctx, conn.ID, conn.Generation, "WORKER_STARTUP")
+		if err != nil {
+			slog.Warn("startup recovery plan failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		covered, err := m.store.CheckRangeCoverage(ctx, conn.ID, plan.RangeFrom, plan.RangeTo)
+		if err != nil {
+			slog.Warn("startup recovery coverage lookup failed", "connection_id", conn.ID, "error", err)
+			return
+		}
+		if covered {
+			return
+		}
+		if _, _, err := m.store.EnsureRecoveryRunWithPlan(ctx, conn.ID, conn.Generation, "worker-start:"+generateSessionID(), plan); err != nil {
+			slog.Warn("startup recovery admission failed", "connection_id", conn.ID, "error", err)
+		}
+	})
+}
+
+func (m *Monitor) reconcileOpenRecovery(ctx context.Context) {
 	if m == nil || m.store == nil {
 		return
 	}
@@ -698,46 +751,13 @@ func (m *Monitor) reconcileRecovery(ctx context.Context) {
 		slog.Warn("recovery reconciliation failed", "connection_id", conn.ID, "error", err)
 		return
 	}
-	if len(runs) == 0 {
-		today := m.now().In(acb.DefaultLocation).Format("2006-01-02")
-		from := m.now().In(acb.DefaultLocation).AddDate(0, 0, -(catchUpMaxDays - 1)).Format("2006-01-02")
-		cp, cpErr := m.store.GetCheckpoint(ctx, conn.ID)
-		if cpErr != nil {
-			slog.Warn("recovery reconciliation checkpoint lookup failed", "connection_id", conn.ID, "generation", conn.Generation, "error", cpErr)
-			return
-		}
-		if cp != nil && cp.CoverageTo != "" {
-			from = cp.CoverageTo
-		}
-		covered, coverageErr := m.store.CheckRangeCoverage(ctx, conn.ID, from, today)
-		if coverageErr != nil {
-			slog.Warn("recovery reconciliation coverage lookup failed", "connection_id", conn.ID, "generation", conn.Generation, "from", from, "to", today, "error", coverageErr)
-			return
-		}
-		if covered {
-			return
-		}
-
-		plan, planErr := m.recoveryPlan(ctx, conn.ID, conn.Generation, "WORKER_STARTUP")
-		if planErr != nil {
-			return
-		}
-		run, _, err := m.store.EnsureRecoveryRunWithPlan(ctx, conn.ID, conn.Generation, "startup:"+today, plan)
-
-		if err != nil {
-			return
-		}
-		runs = []storage.RecoveryRun{run}
-	}
 	sched := m.Scheduler()
 	if sched == nil || !sched.IsRunning() {
 		return
 	}
 	for _, run := range runs {
-		if run.Status == storage.RecoveryRunStatusPending || run.Status == storage.RecoveryRunStatusRunning {
-			if err := sched.Enqueue(NewRecoveryCatchUpTask(m, conn.ID, conn.Generation, "WORKER_STARTUP", run.ID)); err != nil {
-				slog.Warn("recovery reconciliation enqueue failed", "connection_id", conn.ID, "run_id", run.ID, "error", err)
-			}
+		if err := sched.Enqueue(NewRecoveryCatchUpTask(m, conn.ID, conn.Generation, run.Reason, run.ID)); err != nil {
+			slog.Warn("recovery reconciliation enqueue failed", "connection_id", conn.ID, "run_id", run.ID, "error", err)
 		}
 	}
 }
@@ -753,7 +773,8 @@ func (m *Monitor) Run(ctx context.Context) {
 	if initSettings, err := m.store.GetMonitorSettings(ctx); err == nil {
 		m.cachedSettings = initSettings
 	}
-	m.reconcileRecovery(ctx)
+	m.admitStartupRecovery(ctx)
+	m.reconcileOpenRecovery(ctx)
 
 	timer := time.NewTimer(100 * time.Millisecond)
 	defer timer.Stop()
@@ -796,10 +817,9 @@ func (m *Monitor) Run(ctx context.Context) {
 			return
 
 		case <-recoveryTicker.C:
-			m.reconcileRecovery(ctx)
+			m.reconcileOpenRecovery(ctx)
 
 		case <-m.boostCh:
-			m.reconcileRecovery(ctx)
 			if !timer.Stop() {
 				select {
 				case <-timer.C:
@@ -815,7 +835,6 @@ func (m *Monitor) Run(ctx context.Context) {
 			continue
 
 		case <-m.settingsCh:
-			m.reconcileRecovery(ctx)
 			// Hot reload settings
 			if !timer.Stop() {
 				select {
@@ -830,7 +849,6 @@ func (m *Monitor) Run(ctx context.Context) {
 			continue
 
 		case <-timer.C:
-			m.reconcileRecovery(ctx)
 			schedule = storage.ResolveSchedule(time.Now(), &m.cachedSettings)
 			conn, err := m.store.Connection(ctx)
 			if err != nil || conn.State != "MONITORING" {

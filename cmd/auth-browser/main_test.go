@@ -709,6 +709,38 @@ func TestHandoffRequiresInternalToken(t *testing.T) {
 	}
 }
 
+func TestRequireInternalRejectsMissingOrWrongPOSTWithoutHandlerSideEffects(t *testing.T) {
+	s := &server{
+		internalToken:        "internal-secret",
+		internalAuthRequired: true,
+	}
+	handlerCalls := 0
+	handler := s.requireInternal(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handlerCalls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for name, token := range map[string]string{
+		"missing": "",
+		"wrong":   "wrong-secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/sessions", nil)
+			if token != "" {
+				request.Header.Set(authbrowser.InternalTokenHeader, token)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("POST without valid internal token returned HTTP %d, want 401", recorder.Code)
+			}
+		})
+	}
+	if handlerCalls != 0 {
+		t.Fatalf("handler ran %d times for unauthorized POST requests, want 0", handlerCalls)
+	}
+}
+
 func TestHandoffReapsProcessAndSetsCompleted(t *testing.T) {
 	profileDir := t.TempDir()
 	s := &server{
