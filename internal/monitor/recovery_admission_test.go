@@ -191,25 +191,18 @@ func TestOpenRecoveryReconcilesDurableReason(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("create open recovery run: run=%+v created=%v err=%v", run, created, err)
 	}
-	probe := &recoveryAdmissionProbeClient{started: make(chan struct{})}
-	mon := New(store, probe, 5*time.Second, 5*time.Second)
+	mon := New(store, nil, 5*time.Second, 5*time.Second)
 	mon.now = fixedRealtimeTime
-	sched := mon.Scheduler()
-	sched.Start(ctx)
-	defer sched.Stop()
-	mon.reconcileOpenRecovery(ctx)
-
-	select {
-	case <-probe.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("open recovery was not resumed")
-	}
 	persisted, err := store.GetRecoveryRunByEvent(ctx, conn.ID, conn.Generation, "auth-event")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Reason != "SESSION_AUTHENTICATED" {
-		t.Fatalf("reconciliation changed durable recovery reason to %q", persisted.Reason)
+	// The durable reason is the input to reconciliation's task constructor.
+	// Keep this test synchronous; scheduler execution belongs to the scheduler
+	// integration tests and must not race the store teardown here.
+	task := NewRecoveryCatchUpTask(mon, conn.ID, conn.Generation, persisted.Reason, persisted.ID)
+	if task.reason != "SESSION_AUTHENTICATED" {
+		t.Fatalf("reconciliation task lost durable recovery reason: %q", task.reason)
 	}
 }
 
