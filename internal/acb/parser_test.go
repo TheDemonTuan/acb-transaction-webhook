@@ -96,6 +96,19 @@ func TestParseHistoryAcceptsRecognizedEmptyMarker(t *testing.T) {
 	}
 }
 
+func TestParseHistoryAcceptsNoDataMarker(t *testing.T) {
+	transactions, err := ParseHistory(`<table>
+	<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+	<tr><td colspan="4" class="text-center">Không có dữ liệu trong khoảng thời gian đã chọn</td></tr>
+	</table>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transactions) != 0 {
+		t.Fatalf("transactions=%+v", transactions)
+	}
+}
+
 func TestParseHistoryACBTwoRowLayout(t *testing.T) {
 	html := `<table>
 		<tr><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th></tr>

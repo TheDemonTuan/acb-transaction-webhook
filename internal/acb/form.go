@@ -52,6 +52,8 @@ func PrepareHistoryFieldsWithRange(fields map[string]string, fromDate, toDate st
 		return nil, err
 	}
 	prepared := cloneFields(fields)
+	delete(prepared, "_raw")
+	delete(prepared, "_explicitRange")
 	if prepared["dse_operationName"] == "" || prepared["dse_processorState"] == "" {
 		return nil, errors.New("ACB history request is missing current form state")
 	}

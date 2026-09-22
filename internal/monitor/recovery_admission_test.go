@@ -236,6 +236,114 @@ func TestOpenRecoveryDoesNotAdmitCompletedAuthRunRepeatedly(t *testing.T) {
 	}
 }
 
+func TestStartupRecoveryRetriesCoverageDatabaseErrorWithFixedKey(t *testing.T) {
+	ctx := context.Background()
+	store, conn := newRecoveryAdmissionStore(t)
+	defer store.Close()
+
+	mon := New(store, nil, 5*time.Second, 5*time.Second)
+	mon.now = fixedRealtimeTime
+	if _, err := store.DB().ExecContext(ctx, "DROP TABLE history_coverage"); err != nil {
+		t.Fatal(err)
+	}
+	mon.admitStartupRecovery(ctx)
+	if got := recoveryRunCount(t, store); got != 0 {
+		t.Fatalf("coverage database error must not consume startup admission, got %d runs", got)
+	}
+	if _, err := store.DB().ExecContext(ctx, `CREATE TABLE history_coverage (
+		id TEXT PRIMARY KEY,
+		connection_id TEXT NOT NULL REFERENCES connections(id),
+		day TEXT NOT NULL,
+		status TEXT NOT NULL,
+		last_sync_at TEXT NOT NULL,
+		rows_seen INTEGER NOT NULL DEFAULT 0,
+		error_message TEXT,
+		UNIQUE(connection_id, day)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	mon.admitStartupRecovery(ctx)
+	runs, err := store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected retry to admit one startup recovery run, got %d", len(runs))
+	}
+	if runs[0].EventKey != mon.startupRecoveryKey {
+		t.Fatalf("startup retry changed recovery key: got %q want %q", runs[0].EventKey, mon.startupRecoveryKey)
+	}
+
+	mon.admitStartupRecovery(ctx)
+	if got := recoveryRunCount(t, store); got != 1 {
+		t.Fatalf("fixed startup key must remain one run, got %d", got)
+	}
+}
+
+func TestRunRecoveryTickerRetriesStartupAdmission(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store, conn := newRecoveryAdmissionStore(t)
+	defer store.Close()
+
+	mon := New(store, &recoveryAdmissionProbeClient{started: make(chan struct{})}, 5*time.Second, 5*time.Second)
+	mon.scheduler = nil
+	mon.now = fixedRealtimeTime
+	if _, err := store.DB().ExecContext(ctx, "DROP TABLE history_coverage"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		mon.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if got := recoveryRunCount(t, store); got != 0 {
+		t.Fatalf("initial startup admission must defer on coverage error, got %d runs", got)
+	}
+	if _, err := store.DB().ExecContext(ctx, `CREATE TABLE history_coverage (
+		id TEXT PRIMARY KEY,
+		connection_id TEXT NOT NULL REFERENCES connections(id),
+		day TEXT NOT NULL,
+		status TEXT NOT NULL,
+		last_sync_at TEXT NOT NULL,
+		rows_seen INTEGER NOT NULL DEFAULT 0,
+		error_message TEXT,
+		UNIQUE(connection_id, day)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.NewTimer(7 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		if got := recoveryRunCount(t, store); got == 1 {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("recovery ticker did not retry deferred startup admission")
+		case <-poll.C:
+		}
+	}
+
+	runs, err := store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].EventKey != mon.startupRecoveryKey {
+		t.Fatalf("ticker retry changed startup admission key or run count: runs=%+v key=%q", runs, mon.startupRecoveryKey)
+	}
+}
+
 type recoveryAdmissionProbeClient struct {
 	started   chan struct{}
 	startOnce sync.Once

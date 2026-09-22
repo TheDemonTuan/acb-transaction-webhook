@@ -73,7 +73,7 @@ func ParseHistoryPage(markup string) (HistoryPageResult, error) {
 					}
 				}
 				rowText := strings.ToLower(strings.Join(row, " "))
-				if containsAny(rowText, "khong co giao dich", "không có giao dịch", "no transaction", "chua co giao dich", "chưa có giao dịch") {
+				if containsAny(rowText, "khong co giao dich", "không có giao dịch", "khong co du lieu", "không có dữ liệu", "no transaction", "chua co giao dich", "chưa có giao dịch") {
 					emptyHistory = true
 					continue
 				}

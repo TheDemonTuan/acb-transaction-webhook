@@ -82,7 +82,7 @@ func TestMonitor_ConfigurationCannotRaceWithRunningScheduler(t *testing.T) {
 					return
 				default:
 					if workerID%2 == 0 {
-						_ = sched.Enqueue(NewCatchUpTask(mon, conn.ID, conn.Generation))
+						_ = sched.Enqueue(newTestCatchUpTask(mon, conn.ID, conn.Generation))
 					} else {
 						_ = sched.Enqueue(NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation))
 					}
