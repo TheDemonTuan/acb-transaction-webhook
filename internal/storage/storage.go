@@ -240,5 +240,5 @@ ALTER TABLE deliveries ADD COLUMN retry_cycle_start_attempt INTEGER NOT NULL DEF
 CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_provider_status ON webhook_endpoints(provider, status);
 `}, {8, "2026-09-14-v8-history-job-queue", migrationfiles.HistoryJobQueueSQL},
 	{9, "2026-09-14-v9-deployment-control", migrationfiles.DeploymentControlSQL},
-	{10, "2026-09-21-v10-recovery-runs", migrationfiles.RecoveryRunsSQL},
-	{11, "2026-09-22-v11-recovery-run-plan", migrationfiles.RecoveryRunPlanSQL}}
+	{10, "2026-09-17-v10-monitor-idle-cadence", migrationfiles.MonitorIdleCadenceSQL},
+	{11, "2026-09-22-v11-recovery-runs", migrationfiles.RecoveryRunsSQL}}
