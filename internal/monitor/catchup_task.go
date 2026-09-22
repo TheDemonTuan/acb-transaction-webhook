@@ -151,13 +151,13 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		slog.Info("deferring catch-up: browser authentication in progress", "connection_id", conn.ID)
 		return scheduler.TaskStepResult{
 			Done:      false,
-			RequeueAt: time.Now().Add(5 * time.Second),
+			RequeueAt: t.m.now().Add(5 * time.Second),
 			Outcome:   scheduler.OutcomeTransient,
 		}, nil
 	}
 
 	if !t.initialized {
-		nowInLoc := time.Now().In(acb.DefaultLocation)
+		nowInLoc := t.m.now().In(acb.DefaultLocation)
 		today := nowInLoc.Format("2006-01-02")
 		fromDate := nowInLoc.AddDate(0, 0, -1).Format("2006-01-02")
 		if t.explicitRecovery && t.recoveryPlan.RangeFrom != "" && t.recoveryPlan.RangeTo != "" {
