@@ -13,6 +13,12 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
+func newTestCatchUpTask(m *Monitor, connectionID string, generation int64) *CatchUpTask {
+	task := newCatchUpTask(m, connectionID, generation, "test", "")
+	task.recoveryReady = true
+	return task
+}
+
 type catchUpInterleaveMockClient struct {
 	historyCalls atomic.Int32
 	historyLogMu sync.Mutex
@@ -80,7 +86,7 @@ func TestCatchUpTask_YieldsAfterOnePageAndPreemptedByRealtime(t *testing.T) {
 	defer sched.Stop()
 
 	// Step 1: Enqueue CatchUpTask (priority 50)
-	cuTask := NewCatchUpTask(mon, conn.ID, conn.Generation)
+	cuTask := newTestCatchUpTask(mon, conn.ID, conn.Generation)
 	if err := sched.Enqueue(cuTask); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +163,7 @@ func TestCatchUpTask_CheckpointAdvancesOnlyAfterFullDay(t *testing.T) {
 	client := &catchUpInterleaveMockClient{}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
 
-	task := NewCatchUpTask(mon, conn.ID, conn.Generation)
+	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
 
 	// Step 1: Page 1 of yesterday (returns HasNext=true so quantum yields)
 	res1, err := task.Step(ctx)
@@ -208,7 +214,7 @@ func TestCatchUpTask_EmitsDeliveriesWithCatchUpSource(t *testing.T) {
 	client := &catchUpInterleaveMockClient{}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
 
-	task := NewCatchUpTask(mon, conn.ID, conn.Generation)
+	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
 
 	res, err := task.Step(ctx)
 	if err != nil {
@@ -246,7 +252,7 @@ func TestCatchUpTask_ClampsCheckpointToInclusiveSevenDays(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	task := NewCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
+	task := newTestCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
 	if _, err := task.Step(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +282,7 @@ func TestCatchUpTask_InvalidCheckpointFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	task := NewCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
+	task := newTestCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
 	res, err := task.Step(ctx)
 	if err == nil || res.Outcome != OutcomeFatal {
 		t.Fatalf("expected fatal invalid checkpoint error, got result=%+v err=%v", res, err)
@@ -302,7 +308,7 @@ func TestCatchUpTask_DBErrorIsReturned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	task := NewCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
+	task := newTestCatchUpTask(New(store, &catchUpInterleaveMockClient{}, time.Second, time.Second), conn.ID, conn.Generation)
 	res, err := task.Step(ctx)
 	if err == nil || res.Outcome != OutcomeFatal {
 		t.Fatalf("expected fatal database error, got result=%+v err=%v", res, err)
@@ -334,7 +340,7 @@ func TestCatchUpTask_RestartReconstructsFromCheckpoint(t *testing.T) {
 	client := &catchUpInterleaveMockClient{}
 	newMon := New(store, client, 5*time.Second, 15*time.Second)
 
-	newTask := NewCatchUpTask(newMon, conn.ID, conn.Generation)
+	newTask := newTestCatchUpTask(newMon, conn.ID, conn.Generation)
 	res, err := newTask.Step(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -404,7 +410,7 @@ func TestCatchUpTaskPinsContinuationWithoutMutatingPaginationFields(t *testing.T
 	client := &catchUpPaginationFieldsClient{}
 	mon := New(store, client, 5*time.Second, 5*time.Second)
 	mon.now = fixedRealtimeTime
-	task := NewCatchUpTask(mon, conn.ID, conn.Generation)
+	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
 	if _, err := task.Step(ctx); err != nil {
 		t.Fatal(err)
 	}

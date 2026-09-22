@@ -144,6 +144,51 @@ func TestRestoreSessionRejectsUntrustedBootstrapURL(t *testing.T) {
 	}
 }
 
+func TestHistoryForDatePinsHistoricalDateAndOmitsInternalFields(t *testing.T) {
+	var posted url.Values
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method %s", r.Method)
+		}
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		posted, readErr = url.ParseQuery(string(body))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`ibkacctDetailProc dse_processorState AccountNbr Số GD Ghi nợ Ghi có FromDate ToDate`)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.HistoryForDate(context.Background(), "/acbib/Request", map[string]string{
+		"dse_operationName":     "ibkacctDetailProc",
+		"dse_processorState":    "fresh",
+		"dse_sessionId":         "session",
+		"AccountNbr":            "12345678",
+		"_raw":                  "false",
+		"_explicitRange":        "true",
+		"activeDatetimeByMonth": "Y",
+		"MonthCurr":             "8",
+		"YearCurr":              "2026",
+		"FromDate":              "01/09/2026",
+		"ToDate":                "30/09/2026",
+	}, "21/09/2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posted.Get("FromDate") != "21/09/2026" || posted.Get("ToDate") != "21/09/2026" {
+		t.Fatalf("wrong historical range: %v", posted)
+	}
+	for _, key := range []string{"_raw", "_explicitRange", "MonthCurr", "YearCurr", "activeDatetimeByMonth"} {
+		if posted.Has(key) {
+			t.Fatalf("internal field %q was posted: %v", key, posted)
+		}
+	}
+}
+
 func TestHistorySendsCurrentFormState(t *testing.T) {
 	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost {

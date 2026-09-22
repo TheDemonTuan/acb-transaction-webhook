@@ -47,23 +47,7 @@ type CatchUpTask struct {
 	done         chan error
 }
 
-func NewCatchUpTask(m *Monitor, connectionID string, generation int64, recovery ...string) *CatchUpTask {
-	reason, runID := "legacy", ""
-	if len(recovery) > 0 && recovery[0] != "" {
-		reason = recovery[0]
-	}
-	if len(recovery) > 1 {
-		runID = recovery[1]
-	}
-	task := newCatchUpTask(m, connectionID, generation, reason, runID)
-	// Keep direct three-argument callers working; explicit recovery supplies a run ID.
-	task.recoveryReady = len(recovery) == 0
-	task.explicitRecovery = len(recovery) > 1 && runID != ""
-	return task
-}
-
-// NewRecoveryCatchUpTask creates the recovery-only catch-up task. The legacy constructor
-// remains available for direct tests and older callers; scheduled work must use this path.
+// NewRecoveryCatchUpTask creates the recovery-only catch-up task.
 func NewRecoveryCatchUpTask(m *Monitor, connectionID string, generation int64, reason, runID string) *CatchUpTask {
 	task := newCatchUpTask(m, connectionID, generation, reason, runID)
 	task.explicitRecovery = true
