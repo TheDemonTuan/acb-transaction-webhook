@@ -326,7 +326,7 @@ rollback_platform_config() {
           fi
         done < "$b_dir/.manifest"
       else
-        for f in middlewares.yml portfolio.yml bark.yml acb.yml; do
+        for f in middlewares.yml portfolio.yml bark.yml messenger.yml acb.yml; do
           if [[ -f "$b_dir/$f" ]]; then
             cp -p "$b_dir/$f" "$dyn_dir/$f" 2>/dev/null || failures=$((failures + 1))
           fi

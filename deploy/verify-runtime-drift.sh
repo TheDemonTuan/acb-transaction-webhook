@@ -275,7 +275,7 @@ fi
 # Edge dynamic configuration drift verification
 if [[ -n "${release_dir:-}" && -d "$release_dir/edge/dynamic" ]]; then
   dynamic_dir="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
-  for df in middlewares.yml portfolio.yml bark.yml; do
+  for df in middlewares.yml portfolio.yml bark.yml messenger.yml; do
     expected_file="$release_dir/edge/dynamic/$df"
     actual_file="$dynamic_dir/$df"
     if [[ -f "$expected_file" ]]; then

@@ -67,10 +67,12 @@ EOF
   # Initial active files
   printf 'http:\n  routers: {}\n  services: {}\n# initial middlewares' > "$test_dir/dynamic/middlewares.yml"
   printf 'http:\n  routers: {}\n  services: {}\n# initial portfolio' > "$test_dir/dynamic/portfolio.yml"
+  printf 'http:\n  routers: {}\n  services: {}\n# initial messenger' > "$test_dir/dynamic/messenger.yml"
 
   # Candidate files
   printf 'http:\n  routers: {}\n  services: {}\n# candidate middlewares' > "$test_dir/candidate_dynamic/middlewares.yml"
   printf 'http:\n  routers: {}\n  services: {}\n# candidate portfolio' > "$test_dir/candidate_dynamic/portfolio.yml"
+  printf 'http:\n  routers: {}\n  services: {}\n# candidate messenger' > "$test_dir/candidate_dynamic/messenger.yml"
 
   cat <<'EOF' > "$test_dir/edge-probe.sh"
 #!/usr/bin/env bash
@@ -97,6 +99,7 @@ setup_mock_env "$t2"
 RELEASE_ORCHESTRATED=1 EXPECTED_COMMIT="testcommit" bash "$DEPLOY_DIR/deploy-platform.sh"
 assert_eq "$(cat "$t2/candidate_dynamic/middlewares.yml")" "$(cat "$t2/dynamic/middlewares.yml")" "middlewares.yml updated to candidate"
 assert_eq "$(cat "$t2/candidate_dynamic/portfolio.yml")" "$(cat "$t2/dynamic/portfolio.yml")" "portfolio.yml updated to candidate"
+assert_eq "$(cat "$t2/candidate_dynamic/messenger.yml")" "$(cat "$t2/dynamic/messenger.yml")" "messenger.yml updated to candidate"
 if grep -q "acb-web-blue" "$t2/dynamic/acb.yml"; then
   printf 'PASS: acb.yml rendered for slot blue\n'
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
@@ -135,6 +138,10 @@ assert_eq "http:
   routers: {}
   services: {}
 # initial middlewares" "$(cat "$t4/dynamic/middlewares.yml")" "middlewares.yml restored to initial content"
+assert_eq "http:
+  routers: {}
+  services: {}
+# initial messenger" "$(cat "$t4/dynamic/messenger.yml")" "messenger.yml restored to initial content"
 if [[ ! -f "$t4/dynamic/portfolio.yml" ]]; then
   printf 'PASS: candidate-created portfolio.yml removed by rollback\n'
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))
@@ -169,6 +176,10 @@ assert_eq "http:
   routers: {}
   services: {}
 # initial middlewares" "$(cat "$t5/dynamic/middlewares.yml")" "middlewares.yml reverted by orchestrator rollback"
+assert_eq "http:
+  routers: {}
+  services: {}
+# initial messenger" "$(cat "$t5/dynamic/messenger.yml")" "messenger.yml reverted by orchestrator rollback"
 if [[ ! -f "$PENDING_PLATFORM_ROLLBACK_FILE" ]]; then
   printf 'PASS: pending platform rollback evidence file cleaned up after rollback\n'
   TESTS_PASSED=$(( TESTS_PASSED + 1 ))

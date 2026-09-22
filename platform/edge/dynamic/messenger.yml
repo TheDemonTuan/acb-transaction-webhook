@@ -1,0 +1,45 @@
+http:
+  routers:
+    # Reject health and internal endpoints before the public hostname router.
+    messenger-deny-private:
+      rule: "Host(`messenger.tuannguyenviet.site`) && (PathPrefix(`/internal`) || Path(`/health`) || Path(`/healthz`) || Path(`/ready`) || Path(`/readyz`))"
+      entryPoints:
+        - web
+      priority: 1000
+      middlewares:
+        - deny-internal
+      service: messenger-service
+
+    # Keep event streams on an explicit router so Traefik flushes them promptly.
+    messenger-events-router:
+      rule: "Host(`messenger.tuannguyenviet.site`) && (Path(`/events`) || Path(`/api/events`))"
+      entryPoints:
+        - web
+      priority: 1100
+      middlewares:
+        - tunnel-only
+        - security-headers
+      service: messenger-service
+
+    messenger-public-router:
+      rule: "Host(`messenger.tuannguyenviet.site`) && !PathPrefix(`/internal`) && !Path(`/health`) && !Path(`/healthz`) && !Path(`/ready`) && !Path(`/readyz`)"
+      entryPoints:
+        - web
+      priority: 100
+      middlewares:
+        - tunnel-only
+        - security-headers
+      service: messenger-service
+
+  services:
+    messenger-service:
+      loadBalancer:
+        passHostHeader: true
+        responseForwarding:
+          flushInterval: "100ms"
+        servers:
+          - url: "http://messenger-core:3000"
+        healthCheck:
+          path: "/readyz"
+          interval: "5s"
+          timeout: "2s"

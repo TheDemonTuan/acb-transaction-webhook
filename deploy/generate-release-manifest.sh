@@ -303,6 +303,7 @@ bundle_files=(
   "edge/dynamic/middlewares.yml"
   "edge/dynamic/portfolio.yml"
   "edge/dynamic/bark.yml"
+  "edge/dynamic/messenger.yml"
   "failover/vps-failover-controller.py"
   "failover/vps-failover-controller.service"
   "failover/vps-failover-reconcile.service"

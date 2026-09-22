@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/deploy-platform.sh
-# Transactionally validates, backs up, installs edge dynamic configs (middlewares.yml, portfolio.yml, bark.yml),
+# Transactionally validates, backs up, installs edge dynamic configs,
 # renders acb.yml to the active slot, and verifies edge routes.
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +35,7 @@ rollback_platform() {
         fi
       done < "$BACKUP_DIR/.manifest"
     else
-      for f in middlewares.yml portfolio.yml bark.yml acb.yml; do
+      for f in middlewares.yml portfolio.yml bark.yml messenger.yml acb.yml; do
         if [[ -f "$BACKUP_DIR/$f" ]]; then
           cp -p "$BACKUP_DIR/$f" "$TRAEFIK_DYNAMIC_DIR/$f" 2>/dev/null || true
         fi
@@ -57,7 +57,7 @@ if ! mkdir -p "$TRAEFIK_DYNAMIC_DIR" 2>/dev/null; then
 fi
 
 # 1. Validate candidate YAMLs
-dynamic_files=(middlewares.yml portfolio.yml bark.yml)
+dynamic_files=(middlewares.yml portfolio.yml bark.yml messenger.yml)
 for df in "${dynamic_files[@]}"; do
   candidate_file="$CANDIDATE_DYNAMIC_DIR/$df"
   if [[ -f "$candidate_file" ]]; then

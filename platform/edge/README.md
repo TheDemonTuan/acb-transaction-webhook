@@ -86,7 +86,7 @@ Configured strictly according to Traefik 3.7.13 specifications:
 
 ## 3. Route Protection for Private Endpoints (`/internal/deployz`)
 
-Endpoints under `/internal/*` (such as `/internal/deployz`) contain deployment release metadata and must never be exposed publicly.
+Endpoints under `/internal/*` (such as `/internal/deployz`) contain deployment release metadata and must never be exposed publicly. The shared Messenger route applies the same deny-first policy to `/internal`, `/health`, `/healthz`, `/ready`, and `/readyz` on `messenger.tuannguyenviet.site`, while forwarding through the external `edge-portfolio` network to the stable `messenger-core:3000` alias.
 
 Defense-in-depth is applied across both ACB and Bark dynamic configurations:
 1. **Higher-Priority Deny Router (`priority: 1000`)**:
@@ -148,7 +148,7 @@ Deterministic integration tests in `edge_test.go` validate:
 1. HAProxy ACL simulation for all allowed and denied operations.
 2. Traefik static and dynamic YAML configurations.
 3. Access log privacy and Cloudflare IP restrictions.
-4. Defense-in-depth route protection on ACB and Bark.
+4. Defense-in-depth route protection on ACB, Bark, and Messenger.
 5. Resource and capability limits in Compose.
 6. Helper probe CLI parameter handling and dry-run execution.
 

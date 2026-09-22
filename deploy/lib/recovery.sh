@@ -643,7 +643,7 @@ PY
   if [[ -d "$target_release/edge/dynamic" ]]; then
     local dynamic_dir="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
     local dyn_drift=0
-    for df in middlewares.yml portfolio.yml bark.yml; do
+    for df in middlewares.yml portfolio.yml bark.yml messenger.yml; do
       if [[ -f "$target_release/edge/dynamic/$df" ]]; then
         if [[ ! -f "$dynamic_dir/$df" ]] || ! cmp -s "$target_release/edge/dynamic/$df" "$dynamic_dir/$df"; then
           dyn_drift=1
@@ -654,7 +654,7 @@ PY
     if [[ "$dyn_drift" -eq 1 ]] || comp_was_touched platform; then
       log_info "Restoring platform dynamic edge configurations to canonical release..."
       mkdir -p "$dynamic_dir"
-      for df in middlewares.yml portfolio.yml bark.yml; do
+      for df in middlewares.yml portfolio.yml bark.yml messenger.yml; do
         if [[ -f "$target_release/edge/dynamic/$df" ]]; then
           cp -p "$target_release/edge/dynamic/$df" "$dynamic_dir/$df"
         fi

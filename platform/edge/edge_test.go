@@ -487,6 +487,61 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	}
 }
 
+func TestMessengerDynamicRouteProtection(t *testing.T) {
+	edgeDir := getPlatformEdgeDir(t)
+	messengerPath := filepath.Join(edgeDir, "dynamic", "messenger.yml")
+	content, err := os.ReadFile(messengerPath)
+	if err != nil {
+		t.Fatalf("failed to read messenger.yml: %v", err)
+	}
+	messenger := string(content)
+	routers := extractYAMLBlocks(messenger, "routers:")
+
+	deny, ok := routers["messenger-deny-private"]
+	if !ok {
+		t.Fatalf("messenger.yml missing messenger-deny-private")
+	}
+	for _, path := range []string{"PathPrefix(`/internal`)", "Path(`/health`)", "Path(`/healthz`)", "Path(`/ready`)", "Path(`/readyz`)"} {
+		if !strings.Contains(deny, path) {
+			t.Errorf("messenger deny router missing %s: %s", path, deny)
+		}
+	}
+	if !strings.Contains(deny, "priority: 1000") || !strings.Contains(deny, "deny-internal") {
+		t.Errorf("messenger deny router must be high priority and denied: %s", deny)
+	}
+
+	public, ok := routers["messenger-public-router"]
+	if !ok {
+		t.Fatalf("messenger.yml missing messenger-public-router")
+	}
+	for _, required := range []string{"Host(`messenger.tuannguyenviet.site`)", "- web", "!PathPrefix(`/internal`)", "!Path(`/health`)", "!Path(`/healthz`)", "!Path(`/ready`)", "!Path(`/readyz`)", "tunnel-only", "security-headers"} {
+		if !strings.Contains(public, required) {
+			t.Errorf("messenger public router missing %s: %s", required, public)
+		}
+	}
+
+	events, ok := routers["messenger-events-router"]
+	if !ok {
+		t.Fatalf("messenger.yml missing messenger-events-router")
+	}
+	for _, required := range []string{"Path(`/events`)", "Path(`/api/events`)", "priority: 1100"} {
+		if !strings.Contains(events, required) {
+			t.Errorf("messenger events router missing %s: %s", required, events)
+		}
+	}
+
+	services := extractYAMLBlocks(messenger, "services:")
+	service, ok := services["messenger-service"]
+	if !ok {
+		t.Fatalf("messenger.yml missing messenger-service")
+	}
+	for _, required := range []string{`url: "http://messenger-core:3000"`, "passHostHeader: true", `flushInterval: "100ms"`, "healthCheck:", "/readyz"} {
+		if !strings.Contains(service, required) {
+			t.Errorf("messenger service missing %s: %s", required, service)
+		}
+	}
+}
+
 func TestComposeSecurityHardeningAndProbeContainers(t *testing.T) {
 	edgeDir := getPlatformEdgeDir(t)
 	composePath := filepath.Join(edgeDir, "compose.yml")
@@ -525,6 +580,12 @@ func TestComposeSecurityHardeningAndProbeContainers(t *testing.T) {
 	}
 	if !strings.Contains(compose, "image: curlimages/curl:8.12.1") {
 		t.Errorf("compose.yml helper probe containers must use pinned image curlimages/curl:8.12.1")
+	}
+	if !strings.Contains(compose, "      edge-portfolio:\n") || !strings.Contains(compose, "  edge-portfolio:\n    external: true\n    name: edge-portfolio") {
+		t.Errorf("compose.yml traefik must attach to the external edge-portfolio network")
+	}
+	if strings.Contains(compose, "ports:") {
+		t.Errorf("compose.yml must not publish host ports for shared edge ingress")
 	}
 }
 
