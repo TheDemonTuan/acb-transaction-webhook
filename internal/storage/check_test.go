@@ -65,7 +65,7 @@ func TestSchemaVersion(t *testing.T) {
 	if rep.AppliedCount != 11 {
 		t.Errorf("expected 11 migrations applied, got %d", rep.AppliedCount)
 	}
-	if rep.Checksum != "2026-09-22-v11-recovery-run-plan" {
-		t.Errorf("expected checksum '2026-09-22-v11-recovery-run-plan', got %q", rep.Checksum)
+	if rep.Checksum != "2026-09-22-v11-recovery-runs" {
+		t.Errorf("expected checksum '2026-09-22-v11-recovery-runs', got %q", rep.Checksum)
 	}
 }
