@@ -246,9 +246,9 @@ restore_previous() {
   done
   route_replace "$snap/previous-acb.yml"
   if [[ -f "$prev_bundle/baseline-frontend.sha256" ]]; then
-    baseline_route_ack "$prev_gw" "$prev_sha" "$prev_bundle/baseline-frontend.sha256"
+    baseline_route_ack "$prev_gw" "$prev_sha" "$prev_bundle/baseline-frontend.sha256" || return 1
   else
-    "$HERE/healthcheck.sh" route "$prev_gw" "$prev_sha" "$prev_sha"
+    "$HERE/healthcheck.sh" route "$prev_gw" "$prev_sha" "$prev_sha" || return 1
   fi
   if [[ -f "$STATE" ]] && ! cmp -s "$STATE" "$snap/previous-state.env"; then cat "$snap/previous-state.env" | atomic_write_file "$STATE" 600; fi
   for svc in gateway frontend; do

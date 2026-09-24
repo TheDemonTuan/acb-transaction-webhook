@@ -566,14 +566,6 @@ done
 docker stop edge-traefik >/dev/null
 rollback_ack_rc=0
 timeout 150 bash "$target/deploy.sh" --rollback >"$root/rollback-ack-outage.log" 2>&1 || rollback_ack_rc=$?
-if [[ "$rollback_ack_rc" == 0 ]]; then
-  python3 - "$root/rollback-ack-outage.log" <<'PY'
-import sys
-for line in open(sys.argv[1], errors='replace'):
-    if any(phrase in line for phrase in ('deploy:', 'deploy ERROR:', 'route ACK:', 'healthcheck:')):
-        print(line.rstrip(), file=sys.stderr)
-PY
-fi
 [[ "$rollback_ack_rc" != 0 && "$rollback_ack_rc" != 124 ]] || fail "Rollback ACK outage did not fail boundedly ($rollback_ack_rc)"
 [[ "$(cat "$root/rollback-ack-outage.log")" == *ROLLBACK_FAILED* ]] || fail 'Rollback ACK outage omitted ROLLBACK_FAILED evidence'
 [[ "$(sed -n 's/^RELEASE_SHA=//p' "$root/state.env")" == "$release_sha" ]] || fail 'Rollback ACK outage changed committed state'
