@@ -58,7 +58,13 @@ PY
 dbtool() {
   local access="$1"; shift
   local -a flags=()
+  local name="acb-deploy-dbtool-$$" code
   if [[ "$access" == ro ]]; then flags+=(--read-only); access=ro; else access=rw; fi
+  if [[ -n "${DBTOOL_TIMEOUT_SEC:-}" ]]; then
+    if timeout --foreground --signal=TERM --kill-after=5s "$DBTOOL_TIMEOUT_SEC" docker run --rm --name "$name" --network none --user 1000:1000 "${flags[@]}" -v "bank-event-gateway_gateway_data:/data:$access" "$DBTOOL_IMAGE_REF" -path /data/gateway.db "$@"; then return 0; else code=$?; fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return "$code"
+  fi
   docker run --rm --network none --user 1000:1000 "${flags[@]}" -v "bank-event-gateway_gateway_data:/data:$access" "$DBTOOL_IMAGE_REF" -path /data/gateway.db "$@"
 }
 json_field() { python3 -c 'import json,sys; v=json.load(sys.stdin); x=v; [None for p in sys.argv[1].split(".") if (x:=x[p]) is None]; print(x)' "$1"; }

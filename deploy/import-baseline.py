@@ -6,6 +6,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -90,9 +91,9 @@ assert volumes['gateway_data']['name'] == 'bank-event-gateway_gateway_data'
 assert volumes['bark_data']['name'] == 'bank-event-gateway_bark_data'
 for network in ('edge-acb','acb-core','acb-egress'):
     assert networks[network]['name'] == network, network
-release.mkdir(mode=0o700)
+staging = pathlib.Path(tempfile.mkdtemp(prefix='.baseline-', dir=release.parent))
 composition = {'name': 'acb', 'services': services, 'volumes': volumes, 'networks': networks, 'secrets': secrets}
-compose = release / 'compose.prod.yaml'
+compose = staging / 'compose.prod.yaml'
 compose.write_text(yaml.safe_dump(composition, sort_keys=False))
 compose.chmod(0o600)
 # Persist actual references (auxiliary services may have been recovered from older releases).
@@ -109,13 +110,14 @@ values = {
     'ENV_FILE': str(root / 'deploy/.env.production'),
     'SECRETS_DIR': str(root / 'deploy/secrets'), 'BARK_SECRET_GROUP': '1000',
 }
-with (release / 'runtime.env').open('w') as stream:
+with (staging / 'runtime.env').open('w') as stream:
     for key, value in values.items():
         assert '\n' not in value and '=' not in key
         stream.write(f'{key}={value}\n')
-(release / 'runtime.env').chmod(0o600)
+(staging / 'runtime.env').chmod(0o600)
 image_names = ('GATEWAY_IMAGE_REF', 'FRONTEND_IMAGE_REF', 'WORKER_IMAGE_REF', 'DBTOOL_IMAGE_REF', 'BROWSER_IMAGE_REF', 'TTS_IMAGE_REF', 'BARK_IMAGE_REF')
 image_refs = (refs['gateway-' + slots['gateway']], refs['frontend-' + slots['frontend']], refs['worker'], values['DBTOOL_IMAGE_REF'], refs['auth-browser'], refs['tts-gateway'], refs['bark'])
-(release / 'images.env').write_text('RELEASE_SHA=' + sha + '\n' + ''.join(f'{k}={v}\n' for k,v in zip(image_names,image_refs)))
-(release / 'images.env').chmod(0o600)
+(staging / 'images.env').write_text('RELEASE_SHA=' + sha + '\n' + ''.join(f'{k}={v}\n' for k,v in zip(image_names,image_refs)))
+(staging / 'images.env').chmod(0o600)
+staging.rename(release)
 print(str(release))

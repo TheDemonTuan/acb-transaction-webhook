@@ -28,7 +28,7 @@ gateway_identity() {
 }
 frontend_identity() {
   local response="$1" sha="$2"
-  [[ "${response##*$'\n'}" == 200 && "${response%$'\n'*}" == "$sha" ]]
+  [[ "${response##*$'\n'}" == 200 && "${response%$'\n'*}" == "$sha"$'\n' ]]
 }
 
 case "${1:-}" in
