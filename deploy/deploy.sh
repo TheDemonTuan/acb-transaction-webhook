@@ -472,7 +472,7 @@ receipt="$(timeout --foreground --signal=TERM --kill-after=5s "$remaining" env R
 printf '%s\n' "$receipt" | atomic_write_file "$RELEASE/backup-receipt-path" 600
 renew
 remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'migration deadline expired'
-DBTOOL_TIMEOUT_SEC="$remaining" dbtool rw -migrate >/dev/null
+DBTOOL_TIMEOUT_SEC="$remaining" dbtool rw -migrate
 dbtool ro -readonly -schema-compat -min-version 11 >/dev/null
 dbtool ro -readonly -check >/dev/null
 for svc in auth-browser tts-gateway bark; do
