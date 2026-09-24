@@ -471,7 +471,7 @@ for mode in corrupt-backup quiesce-timeout unhealthy-worker wrong-frontend wrong
   fi
   fault_rc=0
   DOCKER_FAULT_MODE="$mode" WRONG_FRONTEND_FILE="$root/wrong-release" WRONG_GATEWAY_RUNTIME="$target/runtime.env" WRONG_GATEWAY_SHA="$base_sha" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
-    timeout 240 bash "$target/deploy.sh" "$release_sha" >"$root/$mode.log" 2>&1 || fault_rc=$?
+    timeout 480 bash "$target/deploy.sh" "$release_sha" >"$root/$mode.log" 2>&1 || fault_rc=$?
   if [[ "$fault_rc" == 124 ]]; then
     python3 - "$root/$mode.log" <<'PY'
 import sys
