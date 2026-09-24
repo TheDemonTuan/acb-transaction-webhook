@@ -2,6 +2,7 @@ package acb
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -372,18 +373,172 @@ func TestBootstrapReturnsLoginPageWhenSessionTrulyExpired(t *testing.T) {
 			"dse_sessionId":      "sess",
 		},
 		Cookies: []authbrowser.Cookie{{Name: "JSESSIONID", Value: "expired", Domain: "online.acb.com.vn", Path: "/", Secure: true}},
-	}); err != nil {
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Bootstrap(context.Background())
+		var authFail *AuthFailure
+		if !errors.As(err, &authFail) {
+			t.Fatalf("expected AuthFailure error for truly expired session, got: %v", err)
+		}
+		if authFail.Kind != LoginPage {
+			t.Fatalf("expected LoginPage for truly expired session, got %v", authFail.Kind)
+		}
+		if resp.Kind != LoginPage {
+			t.Fatalf("expected LoginPage response, got %v", resp.Kind)
+		}
+		if reqCount != 2 {
+			t.Fatalf("expected 2 requests (POST then GET confirmation), got %d", reqCount)
+		}
+	}
+
+func TestHistoryLoginPageResyncsBeforeAuthRequired(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		if len(requests) == 1 {
+			// Request 1: POST history with stale token -> returns LoginPage
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		} else if len(requests) == 2 {
+			// Request 2: GET /acbib/Request probe -> returns fresh AccountDetailPage
+			freshAccountBody := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh_token_456"><input name="dse_sessionId" value="fresh_sess_789"><input name="AccountNbr" value="12345678"><input name="dse_nextEventName" value="byDate"></form>`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(freshAccountBody)), Request: r}, nil
+		}
+		// Request 3: Replayed POST history with fresh form -> succeeds with history table
+		historyBody := `
+		<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh_token_456"><input name="dse_sessionId" value="fresh_sess_789"><input name="AccountNbr" value="12345678"></form>
+		<table>
+		  <tr><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+		  <tr><td>10/09/2026</td><td>10/09/2026</td><td>7788</td><td>-</td><td>150.000</td><td>2.000.000</td><td>Test Nap Tien</td></tr>
+		</table>`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyBody)), Request: r}, nil
+	}))
+	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Bootstrap(context.Background())
+
+	fields := map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "stale_token_old",
+		"dse_sessionId":      "sess_old",
+		"AccountNbr":         "12345678",
+		"FromDate":           "10/09/2026",
+		"ToDate":             "10/09/2026",
+		"_explicitRange":     "true",
+	}
+
+	resp, err := client.History(context.Background(), "/acbib/Request", fields)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.Kind != LoginPage {
-		t.Fatalf("expected LoginPage for truly expired session, got %v", resp.Kind)
+	if resp.Kind != HistoryPage {
+		t.Fatalf("expected HistoryPage after resync and replay, got: %s", resp.Kind)
 	}
-	if reqCount != 2 {
-		t.Fatalf("expected 2 requests (POST then GET confirmation), got %d", reqCount)
+	if len(requests) != 3 {
+		t.Fatalf("expected exactly 3 requests (POST, GET probe, replay POST), got %d", len(requests))
+	}
+	if requests[0].Method != http.MethodPost || requests[1].Method != http.MethodGet || requests[2].Method != http.MethodPost {
+		t.Fatalf("expected POST -> GET -> POST sequence, got %s -> %s -> %s", requests[0].Method, requests[1].Method, requests[2].Method)
+	}
+}
+
+func TestHistoryConfirmedLoginTransitionsAuthRequired(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		loginBody := `<input name="username"><input type="password" name="password">`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fields := map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "token",
+		"dse_sessionId":      "sess",
+		"AccountNbr":         "12345678",
+	}
+
+	resp, err := client.History(context.Background(), "/acbib/Request", fields)
+	var authFail *AuthFailure
+	if !errors.As(err, &authFail) {
+		t.Fatalf("expected AuthFailure error, got: %v", err)
+	}
+	if authFail.Kind != LoginPage {
+		t.Fatalf("expected LoginPage AuthFailure, got: %v", authFail.Kind)
+	}
+	if resp.Kind != LoginPage {
+		t.Fatalf("expected LoginPage response, got: %v", resp.Kind)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected exactly 2 requests (POST then GET probe confirmation), got %d", len(requests))
+	}
+}
+
+func TestHistoryContinuationStaleResyncsToConversationReset(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		if len(requests) == 1 {
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		}
+		freshAccountBody := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh_token_123"><input name="dse_sessionId" value="fresh_sess_456"><input name="AccountNbr" value="12345678"><input name="dse_nextEventName" value="byDate"></form>`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(freshAccountBody)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	continuationFields := map[string]string{
+		"_raw":               "true",
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "stale_continuation_token",
+		"dse_sessionId":      "sess",
+		"AccountNbr":         "12345678",
+	}
+
+	resp, err := client.History(context.Background(), "/acbib/Request", continuationFields)
+	if !errors.Is(err, ErrConversationReset) {
+		t.Fatalf("expected ErrConversationReset, got: %v", err)
+	}
+	if resp.Kind != AccountDetailPage && resp.Kind != HistoryPage {
+		t.Fatalf("expected probe response to be AccountDetailPage, got: %v", resp.Kind)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("continuation should not replay cursor; expected exactly 2 requests, got %d", len(requests))
+	}
+}
+
+func TestHistoryLoginPageProbeTransportErrorDoesNotConfirmAuth(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		if len(requests) == 1 {
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		}
+		return nil, errors.New("probe connection reset by peer")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fields := map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "token",
+		"dse_sessionId":      "sess",
+	}
+
+	_, err = client.History(context.Background(), "/acbib/Request", fields)
+	var authFail *AuthFailure
+	if errors.As(err, &authFail) {
+		t.Fatalf("probe network failure must not be classified as AuthFailure: %v", err)
+	}
+	if err == nil {
+		t.Fatal("expected transport error, got nil")
 	}
 }
 

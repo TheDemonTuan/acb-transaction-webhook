@@ -94,8 +94,62 @@ func TestPollRunFencesStaleConnection(t *testing.T) {
 	if _, err := store.TransitionConnection(ctx, "pause"); err != nil {
 		t.Fatal(err)
 	}
+		poll.Status = "AUTH_REQUIRED"
+		poll.AuthConfirmed = true
+		if err := store.FinishPoll(ctx, poll); err == nil {
+			t.Fatal("stale poll changed a newer connection")
+		}
+	}
+
+func TestFinishPoll_AuthConfirmedGuardAndCAS(t *testing.T) {
+	store, ctx := monitoringStore(t)
+	defer store.Close()
+
+	connBefore, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	poll, err := store.StartPoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Without AuthConfirmed: must be rejected with error
 	poll.Status = "AUTH_REQUIRED"
+	poll.AuthConfirmed = false
 	if err := store.FinishPoll(ctx, poll); err == nil {
-		t.Fatal("stale poll changed a newer connection")
+		t.Fatal("expected error when finishing AUTH_REQUIRED without AuthConfirmed")
+	}
+
+	// Verify connection state unchanged
+	connMid, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connMid.State != "MONITORING" || connMid.Generation != connBefore.Generation {
+		t.Fatalf("connection changed after unconfirmed auth poll: %+v", connMid)
+	}
+
+	// 2. With AuthConfirmed: successfully transitions to AUTH_REQUIRED and increments generation
+	poll.AuthConfirmed = true
+	if err := store.FinishPoll(ctx, poll); err != nil {
+		t.Fatalf("unexpected error finishing confirmed auth poll: %v", err)
+	}
+
+	connAfter, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connAfter.State != "AUTH_REQUIRED" {
+		t.Fatalf("expected state AUTH_REQUIRED, got %s", connAfter.State)
+	}
+	if connAfter.Generation != connBefore.Generation+1 {
+		t.Fatalf("expected generation %d, got %d", connBefore.Generation+1, connAfter.Generation)
+	}
+
+	// 3. Repeated finish of already finished poll: returns sql.ErrNoRows
+	if err := store.FinishPoll(ctx, poll); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows on duplicate finish, got %v", err)
 	}
 }

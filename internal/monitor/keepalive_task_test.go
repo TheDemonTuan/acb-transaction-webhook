@@ -17,6 +17,7 @@ type keepaliveDetailsMockClient struct {
 	historyCalls   atomic.Int32
 	respKind       acb.PageKind
 	respStatus     int
+	authErr        error
 }
 
 func (m *keepaliveDetailsMockClient) Bootstrap(ctx context.Context) (acb.Response, error) {
@@ -28,6 +29,12 @@ func (m *keepaliveDetailsMockClient) Bootstrap(ctx context.Context) (acb.Respons
 	status := m.respStatus
 	if status == 0 {
 		status = 200
+	}
+	if m.authErr != nil {
+		return acb.Response{StatusCode: status, Kind: kind, Body: "<html><body>OK</body></html>"}, m.authErr
+	}
+	if kind == acb.LoginPage || kind == acb.OTPChallenge || kind == acb.CaptchaPage {
+		return acb.Response{StatusCode: status, Kind: kind, Body: "<html><body>OK</body></html>"}, &acb.AuthFailure{Kind: kind, Reason: "SESSION_EXPIRED"}
 	}
 	return acb.Response{StatusCode: status, Kind: kind, Body: "<html><body>OK</body></html>"}, nil
 }

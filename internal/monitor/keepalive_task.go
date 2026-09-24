@@ -95,31 +95,43 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 		return scheduler.TaskStepResult{Done: true, Error: startErr, Outcome: scheduler.OutcomeFatal}, startErr
 	}
 
-	// Bootstrap page only to keep session alive and rotate cookies - NEVER calls History!
-	resp, err := t.m.client.Bootstrap(ctx)
-	if err != nil {
-		poll.Status = "FAILED"
-		poll.Error = acb.SanitizeTransportError(err)
-		if finishErr := t.m.finishPoll(ctx, poll, 0); finishErr != nil {
-			err = errors.Join(err, finishErr)
+		// Bootstrap page only to keep session alive and rotate cookies - NEVER calls History!
+		resp, err := t.m.client.Bootstrap(ctx)
+		if err != nil {
+			var authFail *acb.AuthFailure
+			if errors.As(err, &authFail) {
+				poll.Status = "AUTH_REQUIRED"
+				poll.AuthConfirmed = true
+				poll.Classifier = string(authFail.Kind)
+				poll.HTTPStatus = resp.StatusCode
+				poll.Error = authFail.Reason
+				_ = t.m.finishPoll(ctx, poll, 0)
+				slog.Warn("ACB session expired during keepalive; transitioned to AUTH_REQUIRED", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
+				t.finishDone(nil)
+				return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
+			}
+			poll.Status = "FAILED"
+			poll.Error = acb.SanitizeTransportError(err)
+			if finishErr := t.m.finishPoll(ctx, poll, 0); finishErr != nil {
+				err = errors.Join(err, finishErr)
+			}
+			until := t.m.RecordNetworkFailure(err)
+			slog.Warn("ACB request failed", "phase", "keepalive", "generation", conn.Generation, "backoff_until", until, "error", poll.Error)
+			t.finishDone(err)
+			return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
 		}
-		until := t.m.RecordNetworkFailure(err)
-		slog.Warn("ACB request failed", "phase", "keepalive", "generation", conn.Generation, "backoff_until", until, "error", poll.Error)
-		t.finishDone(err)
-		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
-	}
 
-	poll.Classifier = string(resp.Kind)
-	poll.HTTPStatus = resp.StatusCode
+		poll.Classifier = string(resp.Kind)
+		poll.HTTPStatus = resp.StatusCode
 
-	if resp.Kind == acb.LoginPage || resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
-		poll.Status = "AUTH_REQUIRED"
-		poll.Error = "SESSION_EXPIRED"
-		_ = t.m.finishPoll(ctx, poll, 0)
-		slog.Warn("ACB session expired during keepalive; transitioned to AUTH_REQUIRED", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
-	}
+		if resp.Kind == acb.LoginPage || resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
+			poll.Status = "FAILED"
+			poll.Error = "AUTH_INCONCLUSIVE"
+			_ = t.m.finishPoll(ctx, poll, 0)
+			slog.Warn("unconfirmed login-like page during keepalive; keeping MONITORING", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
+			t.finishDone(nil)
+			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeTransient}, nil
+		}
 
 	if resp.StatusCode == 429 {
 		poll.Status = "FAILED"

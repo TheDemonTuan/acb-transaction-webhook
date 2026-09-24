@@ -550,106 +550,156 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		form.Fields["ToDate"] = t.curDay.Format("02/01/2006")
 		form.Fields["_explicitRange"] = "true"
 
-		t.nextAction = form.Action
-		t.nextFields = form.Fields
-		t.dayTxns = nil
-	}
-
-	// 8. EXECUTE AT MOST ONE ACB History Page Request
-	histResp, histErr := t.runner.client.History(ctx, t.nextAction, t.nextFields)
-	if histErr != nil {
-		qErr := fmt.Errorf("query ACB history for %s: %w", dayStr, histErr)
-		retryAt := time.Now().Add(5 * time.Second)
-		if mon := t.runner.Monitor(); mon != nil {
-			retryAt = mon.RecordNetworkFailure(histErr)
+			t.nextAction = form.Action
+			t.nextFields = form.Fields
+			t.dayTxns = nil
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", acb.SanitizeTransportError(histErr), retryAt)
-		t.finish(qErr)
-		return scheduler.TaskStepResult{Done: true, Error: qErr, Outcome: scheduler.OutcomeTransient}, qErr
-	}
 
-	if histResp.Kind == acb.LoginPage || histResp.Kind == acb.OTPChallenge || histResp.Kind == acb.CaptchaPage {
-		authErr := errors.New("ACB session expired or challenge required during history fetch")
-		_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "AUTH_REQUIRED", authErr.Error())
-		t.finish(authErr)
-		return scheduler.TaskStepResult{Done: true, Error: authErr, Outcome: scheduler.OutcomeAuth}, authErr
-	}
-	if histResp.Kind == acb.MaintenancePage || histResp.StatusCode == 429 {
-		if mon := t.runner.Monitor(); mon != nil {
-			mon.SetBackoff(60 * time.Second)
+		var dayResets int
+		for t.dayPageCount < t.maxDayPages {
+			if err := ctx.Err(); err != nil {
+				t.finish(err)
+				return scheduler.TaskStepResult{Done: false, Error: err, Outcome: scheduler.OutcomeTransient}, err
+			}
+
+			histResp, histErr := t.runner.client.History(ctx, t.nextAction, t.nextFields)
+			if histErr != nil {
+				var authFail *acb.AuthFailure
+				if errors.As(histErr, &authFail) {
+					authErr := fmt.Errorf("ACB session expired or challenge required during history fetch: %w", authFail)
+					_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "AUTH_REQUIRED", authErr.Error())
+					t.finish(authErr)
+					return scheduler.TaskStepResult{Done: true, Error: authErr, Outcome: scheduler.OutcomeAuth}, authErr
+				}
+				if errors.Is(histErr, acb.ErrConversationReset) {
+					if dayResets == 0 {
+						dayResets++
+						slog.Info("conversational state reset in history sync; restarting day from page 1", "day", dayStr)
+						t.dayPageCount = 0
+						t.dayTxns = nil
+						t.cursor = nil
+						bootResp, bootErr := t.runner.client.Bootstrap(ctx)
+						if bootErr != nil {
+							var bAuthFail *acb.AuthFailure
+							if errors.As(bootErr, &bAuthFail) {
+								_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "AUTH_REQUIRED", bAuthFail.Error())
+								t.finish(bAuthFail)
+								return scheduler.TaskStepResult{Done: true, Error: bAuthFail, Outcome: scheduler.OutcomeAuth}, bAuthFail
+							}
+							return scheduler.TaskStepResult{Done: false, Error: bootErr, Outcome: scheduler.OutcomeTransient}, bootErr
+						}
+						form, formErr := acb.ExtractHistoryForm(bootResp.Body)
+						if formErr != nil {
+							_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "FORM_INVALID", formErr.Error())
+							t.finish(formErr)
+							return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
+						}
+						if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
+							form.Fields["AccountNbr"] = conn.AccountMasked
+						}
+						form.Fields["FromDate"] = t.curDay.Format("02/01/2006")
+						form.Fields["ToDate"] = t.curDay.Format("02/01/2006")
+						form.Fields["_explicitRange"] = "true"
+						t.nextAction = form.Action
+						t.nextFields = form.Fields
+						continue
+					}
+					resetErr := fmt.Errorf("conversational token rejected repeatedly for %s: %w", dayStr, histErr)
+					t.finish(resetErr)
+					return scheduler.TaskStepResult{Done: true, Error: resetErr, Outcome: scheduler.OutcomeTransient}, resetErr
+				}
+				qErr := fmt.Errorf("query ACB history for %s: %w", dayStr, histErr)
+				retryAt := time.Now().Add(5 * time.Second)
+				if mon := t.runner.Monitor(); mon != nil {
+					retryAt = mon.RecordNetworkFailure(histErr)
+				}
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", acb.SanitizeTransportError(histErr), retryAt)
+				t.finish(qErr)
+				return scheduler.TaskStepResult{Done: true, Error: qErr, Outcome: scheduler.OutcomeTransient}, qErr
+			}
+
+			if histResp.Kind == acb.LoginPage || histResp.Kind == acb.OTPChallenge || histResp.Kind == acb.CaptchaPage {
+				inconclusiveErr := errors.New("unconfirmed login response during history fetch; keeping session active")
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", inconclusiveErr.Error(), time.Now().Add(10*time.Second))
+				t.finish(inconclusiveErr)
+				return scheduler.TaskStepResult{Done: true, Error: inconclusiveErr, Outcome: scheduler.OutcomeTransient}, inconclusiveErr
+			}
+			if histResp.Kind == acb.MaintenancePage || histResp.StatusCode == 429 {
+				if mon := t.runner.Monitor(); mon != nil {
+					mon.SetBackoff(60 * time.Second)
+				}
+				maintErr := errors.New("ACB maintenance or rate limit active during history fetch")
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", maintErr.Error(), time.Now().Add(60*time.Second))
+				t.finish(maintErr)
+				return scheduler.TaskStepResult{Done: true, Error: maintErr, Outcome: scheduler.OutcomeTransient}, maintErr
+			}
+
+			if mon := t.runner.Monitor(); mon != nil {
+				mon.ClearBackoff()
+			}
+
+			pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
+			if parseErr != nil {
+				pErr := fmt.Errorf("parse ACB history page for %s: %w", dayStr, parseErr)
+				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "PARSE_ERROR", pErr.Error())
+				t.finish(pErr)
+				return scheduler.TaskStepResult{Done: true, Error: pErr, Outcome: scheduler.OutcomeFatal}, pErr
+			}
+
+			var pageItems []storage.BatchTransactionItem
+			for _, txn := range pageResult.Transactions {
+				pageItems = append(pageItems, storage.BatchTransactionItem{
+					Number:        txn.Number,
+					Credit:        txn.Credit,
+					Debit:         txn.Debit,
+					Balance:       txn.Balance,
+					TransactionAt: txn.TransactionAt,
+					EffectiveAt:   txn.EffectiveDate,
+					Description:   txn.Description,
+				})
+			}
+
+			// 9. Ingest with FILTER_SYNC source: suppresses webhooks, Bark deliveries, and browser voice
+			_, ingestErr := t.runner.store.IngestTransactionsBatchWithSource(ctx, conn.ID, conn.Generation, conn.AccountMasked, pageItems, false, "FILTER_SYNC")
+			if ingestErr != nil {
+				iErr := fmt.Errorf("ingest history page for %s: %w", dayStr, ingestErr)
+				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "INGEST_ERROR", iErr.Error())
+				t.finish(iErr)
+				return scheduler.TaskStepResult{Done: true, Error: iErr, Outcome: scheduler.OutcomeFatal}, iErr
+			}
+
+			t.pagesDone++
+			t.rowsSeen += len(pageItems)
+			t.dayPageCount++
+			t.dayTxns = append(t.dayTxns, pageItems...)
+
+			if t.cursor == nil {
+				t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
+			}
+			t.cursor.Step(pageResult, len(pageResult.Transactions))
+
+			if !t.cursor.HasNext {
+				break
+			}
+
+			if t.cursor.HasNext && t.dayPageCount < t.maxDayPages && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) {
+				t.nextAction = t.cursor.Action
+				t.nextFields = t.cursor.Fields
+				if t.nextFields == nil {
+					t.nextFields = make(map[string]string)
+				}
+				t.nextFields["_raw"] = "true"
+			}
 		}
-		maintErr := errors.New("ACB maintenance or rate limit active during history fetch")
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = t.runner.store.RequeueHistorySyncJob(cleanupCtx, t.job.ID, "TRANSIENT_ERROR", maintErr.Error(), time.Now().Add(60*time.Second))
-		t.finish(maintErr)
-		return scheduler.TaskStepResult{Done: true, Error: maintErr, Outcome: scheduler.OutcomeTransient}, maintErr
-	}
 
-	if mon := t.runner.Monitor(); mon != nil {
-		mon.ClearBackoff()
-	}
-
-	pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
-	if parseErr != nil {
-		pErr := fmt.Errorf("parse ACB history page for %s: %w", dayStr, parseErr)
-		_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "PARSE_ERROR", pErr.Error())
-		t.finish(pErr)
-		return scheduler.TaskStepResult{Done: true, Error: pErr, Outcome: scheduler.OutcomeFatal}, pErr
-	}
-
-	var pageItems []storage.BatchTransactionItem
-	for _, txn := range pageResult.Transactions {
-		pageItems = append(pageItems, storage.BatchTransactionItem{
-			Number:        txn.Number,
-			Credit:        txn.Credit,
-			Debit:         txn.Debit,
-			Balance:       txn.Balance,
-			TransactionAt: txn.TransactionAt,
-			EffectiveAt:   txn.EffectiveDate,
-			Description:   txn.Description,
-		})
-	}
-
-	// 9. Ingest with FILTER_SYNC source: suppresses webhooks, Bark deliveries, and browser voice
-	_, ingestErr := t.runner.store.IngestTransactionsBatchWithSource(ctx, conn.ID, conn.Generation, conn.AccountMasked, pageItems, false, "FILTER_SYNC")
-	if ingestErr != nil {
-		iErr := fmt.Errorf("ingest history page for %s: %w", dayStr, ingestErr)
-		_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "INGEST_ERROR", iErr.Error())
-		t.finish(iErr)
-		return scheduler.TaskStepResult{Done: true, Error: iErr, Outcome: scheduler.OutcomeFatal}, iErr
-	}
-
-	t.pagesDone++
-	t.rowsSeen += len(pageItems)
-	t.dayPageCount++
-	t.dayTxns = append(t.dayTxns, pageItems...)
-
-	if t.cursor == nil {
-		t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
-	}
-	t.cursor.Step(pageResult, len(pageResult.Transactions))
-
-	// 10. Check if more pages exist for this day
-	if t.cursor.HasNext && t.dayPageCount < t.maxDayPages && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) {
-		t.nextAction = t.cursor.Action
-		t.nextFields = t.cursor.Fields
-		if t.nextFields == nil {
-			t.nextFields = make(map[string]string)
-		}
-		t.nextFields["_raw"] = "true"
-
-		// Record intermediate progress & heartbeat
-		_ = t.runner.store.RecordHistoryJobProgress(ctx, t.job.ID, dayStr, t.pagesDone, t.rowsSeen, false, 0)
-
-		// Bounded quantum complete! Yield after 1 page so higher-priority tasks can preempt.
-		return scheduler.TaskStepResult{Done: false, Outcome: scheduler.OutcomeSuccess}, nil
-	}
-
-	// Fail closed if day pagination was truncated or budget exceeded with remaining pages
-	if t.cursor.Truncated || (t.cursor.HasNext && t.dayPageCount >= t.maxDayPages) {
+		// Fail closed if day pagination was truncated or budget exceeded with remaining pages
+		if t.cursor != nil && (t.cursor.Truncated || (t.cursor.HasNext && t.dayPageCount >= t.maxDayPages)) {
 		truncErr := fmt.Errorf("history sync job %s truncated on %s: parsed %d of %d rows (pages: %d)",
 			t.job.ID, dayStr, t.cursor.CumulativeRows, t.cursor.TotalRowsSeen, t.dayPageCount)
 		_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "TRUNCATED_HISTORY", truncErr.Error())

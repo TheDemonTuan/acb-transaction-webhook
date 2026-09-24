@@ -14,15 +14,22 @@ import (
 )
 
 type mockBankClient struct {
-	getResp       acb.Response
-	getErr        error
-	historyResp   acb.Response
-	historyErr    error
-	historyFields map[string]string
+	getResp          acb.Response
+	getErr           error
+	historyResp      acb.Response
+	historyErr       error
+	historyFields    map[string]string
+	allowUnconfirmed bool
 }
 
 func (m *mockBankClient) Bootstrap(ctx context.Context) (acb.Response, error) {
-	return m.getResp, m.getErr
+	if m.getErr != nil {
+		return m.getResp, m.getErr
+	}
+	if !m.allowUnconfirmed && (m.getResp.Kind == acb.LoginPage || m.getResp.Kind == acb.OTPChallenge || m.getResp.Kind == acb.CaptchaPage) {
+		return m.getResp, &acb.AuthFailure{Kind: m.getResp.Kind, Reason: "SESSION_EXPIRED"}
+	}
+	return m.getResp, nil
 }
 
 func (m *mockBankClient) History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
@@ -30,7 +37,13 @@ func (m *mockBankClient) History(ctx context.Context, endpoint string, fields ma
 	for key, value := range fields {
 		m.historyFields[key] = value
 	}
-	return m.historyResp, m.historyErr
+	if m.historyErr != nil {
+		return m.historyResp, m.historyErr
+	}
+	if !m.allowUnconfirmed && (m.historyResp.Kind == acb.LoginPage || m.historyResp.Kind == acb.OTPChallenge || m.historyResp.Kind == acb.CaptchaPage) {
+		return m.historyResp, &acb.AuthFailure{Kind: m.historyResp.Kind, Reason: "SESSION_EXPIRED"}
+	}
+	return m.historyResp, nil
 }
 
 const mockHistoryHTML = `
