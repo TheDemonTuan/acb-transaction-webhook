@@ -283,9 +283,12 @@ case "${DOCKER_FAULT_MODE:-}" in
     if [[ " $* " == *' /worker -quiesce '* ]]; then sleep 50; fi ;;
   wrong-frontend)
     if [[ " $* " == *' up -d --no-deps frontend-green '* ]]; then
-      "$REAL_DOCKER" "$@"
-      "$REAL_DOCKER" cp "${WRONG_FRONTEND_FILE:?}" acb-frontend-green:/usr/share/nginx/html/__release
-      exit 0
+      args=("$@")
+      for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[i]}" == up ]]; then
+          exec "$REAL_DOCKER" "${args[@]:0:i}" -f "${WRONG_FRONTEND_OVERRIDE:?}" "${args[@]:i}"
+        fi
+      done
     fi ;;
   wrong-gateway)
     if [[ " $* " == *' up -d --no-deps gateway-green '* ]]; then
@@ -468,10 +471,12 @@ worker_before="$(docker inspect --format '{{.Id}}' acb-worker)"
 for mode in corrupt-backup quiesce-timeout unhealthy-worker wrong-frontend wrong-gateway stale-service; do
   if [[ "$mode" == wrong-frontend ]]; then
     printf '%s\n' "$base_sha" > "$root/wrong-release"
+    chmod 644 "$root/wrong-release"
+    printf 'services:\n  frontend-green:\n    volumes:\n      - %s:/usr/share/nginx/html/__release:ro\n' "$root/wrong-release" > "$root/wrong-frontend.yaml"
   fi
   fault_rc=0
   fault_started=$SECONDS
-  DOCKER_FAULT_MODE="$mode" WRONG_FRONTEND_FILE="$root/wrong-release" WRONG_GATEWAY_RUNTIME="$target/runtime.env" WRONG_GATEWAY_SHA="$base_sha" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
+  DOCKER_FAULT_MODE="$mode" WRONG_FRONTEND_OVERRIDE="$root/wrong-frontend.yaml" WRONG_GATEWAY_RUNTIME="$target/runtime.env" WRONG_GATEWAY_SHA="$base_sha" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
     timeout 480 bash "$target/deploy.sh" "$release_sha" >"$root/$mode.log" 2>&1 || fault_rc=$?
   if [[ "$fault_rc" == 124 && $((SECONDS-fault_started)) -ge 480 ]]; then
     python3 - "$root/$mode.log" <<'PY'
@@ -490,10 +495,6 @@ import pathlib,sys
 p=pathlib.Path(sys.argv[1]); lines=p.read_text().splitlines()
 p.write_text('\n'.join('RELEASE_COMMIT_GREEN='+sys.argv[2] if s.startswith('RELEASE_COMMIT_GREEN=') else s for s in lines)+'\n')
 PY
-  fi
-  if [[ "$mode" == wrong-frontend ]]; then
-    printf '%s\n' "$release_sha" > "$root/correct-release"
-    docker cp "$root/correct-release" acb-frontend-green:/usr/share/nginx/html/__release
   fi
   if [[ "$mode" == corrupt-backup ]]; then
     [[ "$(docker inspect -f '{{.Id}}' acb-auth-browser acb-tts-gateway acb-bark)" == "$aux_before" ]] || fail 'Backup corruption restarted auxiliaries'
