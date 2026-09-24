@@ -287,6 +287,9 @@ if [[ -n "${release_dir:-}" && -d "$release_dir/edge/dynamic" ]]; then
         actual_h="$(python3 -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$actual_file")"
         if [[ "$expected_h" != "$actual_h" ]]; then
           log_error "PRODUCTION_DRIFT component=edge_dynamic_config file=$df expected=$expected_h actual=$actual_h"
+          if command -v diff >/dev/null 2>&1; then
+            diff -u "$expected_file" "$actual_file" >&2 || true
+          fi
           failures=$((failures + 1))
         fi
       fi
