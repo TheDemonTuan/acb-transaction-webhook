@@ -288,6 +288,7 @@ cleanup() {
   exit "$code"
 }
 trap cleanup EXIT
+trap 'code=$?; log_error "command failed at line $LINENO (exit $code)"' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 preflight
