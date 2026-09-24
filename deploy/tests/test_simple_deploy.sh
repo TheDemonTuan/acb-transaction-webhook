@@ -105,6 +105,7 @@ PY
 target="$root/releases/$release_sha"
 mkdir -p "$target"
 cp "$bundle/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,import-baseline.py} "$target/"
+chmod 644 "$target/bark-entrypoint.sh"
 cp "$images_env" "$target/images.env"
 [[ ! -f "$bundle/SHA256SUMS" ]] || cp "$bundle/SHA256SUMS" "$target/"
 # Synthetic credentials: never mount production secrets or use production sessions.
