@@ -248,7 +248,7 @@ jobs:
           chmod a+rx bundle deploy deploy/tests platform platform/edge platform/edge/dynamic
           path="$GITHUB_WORKSPACE"
           while [[ "$path" != / ]]; do
-            chmod a+x "$path"
+            sudo -u '#1000' test -x "$path" || sudo chmod a+x "$path"
             path="$(dirname "$path")"
           done
           bash deploy/tests/test_simple_deploy.sh --images-env "$PWD/bundle/images.env" --bundle "$PWD/bundle"
