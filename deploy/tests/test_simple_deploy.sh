@@ -470,17 +470,19 @@ for mode in corrupt-backup quiesce-timeout unhealthy-worker wrong-frontend wrong
     printf '%s\n' "$base_sha" > "$root/wrong-release"
   fi
   fault_rc=0
+  fault_started=$SECONDS
   DOCKER_FAULT_MODE="$mode" WRONG_FRONTEND_FILE="$root/wrong-release" WRONG_GATEWAY_RUNTIME="$target/runtime.env" WRONG_GATEWAY_SHA="$base_sha" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
     timeout 480 bash "$target/deploy.sh" "$release_sha" >"$root/$mode.log" 2>&1 || fault_rc=$?
-  if [[ "$fault_rc" == 124 ]]; then
+  if [[ "$fault_rc" == 124 && $((SECONDS-fault_started)) -ge 480 ]]; then
     python3 - "$root/$mode.log" <<'PY'
 import sys
 for line in open(sys.argv[1], errors='replace'):
     if any(phrase in line for phrase in ('deploy ERROR:', 'healthcheck:', 'container timeout:', 'route ACK:', 'worker rpc returned status')):
         print(line.rstrip(), file=sys.stderr)
 PY
+    fail "$mode exceeded outer deployment deadline"
   fi
-  [[ "$fault_rc" != 0 && "$fault_rc" != 124 ]] || fail "$mode failed to abort within deadline ($fault_rc)"
+  [[ "$fault_rc" != 0 ]] || fail "$mode unexpectedly succeeded"
   if [[ "$mode" == stale-service ]]; then [[ -f "$root/stale-service-applied" ]] || fail 'Stale service fault never reached Traefik ACK'; fi
   if [[ "$mode" == wrong-gateway ]]; then
     python3 - "$target/runtime.env" "$release_sha" <<'PY'
