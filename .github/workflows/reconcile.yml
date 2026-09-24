@@ -65,7 +65,7 @@ jobs:
           dyn_dir="/opt/platform/edge/dynamic"
           echo "=== Edge Dynamic Configuration Audit ==="
           if [[ -d "$dyn_dir" ]]; then
-            for f in middlewares.yml portfolio.yml bark.yml; do
+            for f in middlewares.yml portfolio.yml bark.yml acb.yml; do
               if [[ -f "$dyn_dir/$f" ]]; then
                 echo "--- File: $dyn_dir/$f (sha256: $(sha256sum "$dyn_dir/$f" | cut -d' ' -f1)) ---"
                 cat "$dyn_dir/$f"
@@ -78,6 +78,28 @@ jobs:
               fi
             done
           fi
+
+          echo "=== Network & Probe Diagnostics ==="
+          echo "--- edge-cloudflared IP settings ---"
+          docker inspect edge-cloudflared --format '{{range $net, $conf := .NetworkSettings.Networks}}{{$net}}: {{$conf.IPAddress}} {{end}}' 2>/dev/null || true
+          echo ""
+          echo "--- edge-traefik IP settings ---"
+          docker inspect edge-traefik --format '{{range $net, $conf := .NetworkSettings.Networks}}{{$net}}: {{$conf.IPAddress}} {{end}}' 2>/dev/null || true
+          echo ""
+
+          echo "--- Probe GET / with verbose headers ---"
+          docker run --rm --network "container:edge-cloudflared" curlimages/curl:8.12.1 \
+            -v -sS -m 5 -i -H "Host: bank.tuannguyenviet.site" "http://172.31.250.4:8080/" 2>&1 || true
+          echo ""
+
+          echo "--- Probe GET /readyz with verbose headers ---"
+          docker run --rm --network "container:edge-cloudflared" curlimages/curl:8.12.1 \
+            -v -sS -m 5 -i -H "Host: bank.tuannguyenviet.site" "http://172.31.250.4:8080/readyz" 2>&1 || true
+          echo ""
+
+          echo "--- Traefik Recent Logs ---"
+          docker logs --tail 40 edge-traefik 2>&1 || true
+          echo ""
           REMOTE
 
       - name: Execute recovery-only reconciliation
