@@ -8,10 +8,13 @@ COPY web/ ./
 RUN bunx --bun tsc --noEmit && bunx --bun vite build
 
 FROM nginxinc/nginx-unprivileged:1.31.6-alpine3.24 AS frontend
+ARG RELEASE_COMMIT
 USER root
 RUN apk update && apk upgrade --no-cache
 COPY deploy/frontend-nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=web-builder /src/web/dist /usr/share/nginx/html
+RUN printf '%s' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' && \
+    printf '%s\n' "$RELEASE_COMMIT" > /usr/share/nginx/html/__release
 USER 101:101
 
 FROM golang:1.27.1-bookworm AS go-base

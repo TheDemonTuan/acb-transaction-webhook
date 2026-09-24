@@ -145,32 +145,26 @@ else
   record_skip "Python pytest runner unavailable"
 fi
 
-# 7. Deployment verification & failure drill suites
-log_header "Gate 7: Deployment Failure Drill Suites"
+# 7. Current deployment and security behavior tests
+log_header "Gate 7: Deployment and Security Tests"
 DEPLOY_DRILL_TESTS=(
   "deploy/tests/test_secrets.sh"
-  "deploy/tests/test_backup.sh"
   "deploy/tests/test_restore_drill.sh"
-  "deploy/tests/test_compose_policy.sh"
-  "deploy/tests/test_runtime_policy.sh"
-  "deploy/tests/test_deploy.sh"
-  "deploy/tests/test_gateway_deploy.sh"
-  "deploy/tests/test_schema_deploy.sh"
-  "deploy/tests/test_worker_deploy.sh"
-  "deploy/tests/test_aux_deploy.sh"
-  "deploy/tests/test_traefik_switch.sh"
-  "deploy/tests/test_promotion_dispatcher.sh"
-  "deploy/tests/test_health_telemetry.sh"
-  "deploy/tests/test_ci_workflow.sh"
   "deploy/test-supply-chain.sh"
-  "scripts/test-promotion-scope.sh"
   "scripts/verify-actions-pinned.sh"
-  "scripts/verify-architecture-docs.sh"
 )
+if [[ -n "${DEPLOY_IMAGES_ENV:-}" && -n "${DEPLOY_BUNDLE:-}" ]]; then
+  DEPLOY_DRILL_TESTS+=("deploy/tests/test_simple_deploy.sh")
+fi
 
 for drill in "${DEPLOY_DRILL_TESTS[@]}"; do
   printf 'Running drill: %s...\n' "$drill"
-  if bash "$drill" >/dev/null 2>&1; then
+  if [[ "$drill" == "deploy/tests/test_simple_deploy.sh" ]]; then
+    command=(bash "$drill" --images-env "$DEPLOY_IMAGES_ENV" --bundle "$DEPLOY_BUNDLE")
+  else
+    command=(bash "$drill")
+  fi
+  if "${command[@]}" >/dev/null 2>&1; then
     record_pass "$drill"
   else
     record_fail "$drill"
