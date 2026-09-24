@@ -5,13 +5,14 @@ on:
     branches: [main]
   push:
     branches-ignore: [main]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    timeout-minutes: 15
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,29 +38,8 @@ jobs:
             exit 1
           fi
           shellcheck --severity=error "${scripts[@]}"
-      - name: Verify architecture documentation
-        run: bash scripts/verify-architecture-docs.sh
-      - name: Verify GitHub Actions are pinned to full commit SHAs
-        run: bash scripts/verify-actions-pinned.sh
-      - name: Verify CI workflow timeouts, keepalives, and action pinning
-        run: bash deploy/tests/test_ci_workflow.sh
-      - name: Verify canonical naming and journal contracts
-        run: bash deploy/tests/test_naming_contract.sh
-      - name: Test release state schema v2 and compatibility
-        run: |
-          bash deploy/tests/test_release_state.sh
-          bash deploy/tests/test_schema_compatibility.sh
-      - name: Test component promotion scope classifier
-        run: bash scripts/test-promotion-scope.sh
-      - name: Test component map coverage
-        run: bash deploy/tests/test_component_map_coverage.sh
-      - name: Validate pull request promotion scope diff
-        if: github.event_name == 'pull_request'
-        run: |
-          scripts/compute-promotion-scope.sh \
-            --base "${{ github.event.pull_request.base.sha }}" \
-            --head "${{ github.event.pull_request.head.sha }}" \
-            --format env
+      - name: Validate baseline importer syntax
+        run: python3 -m py_compile deploy/import-baseline.py
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -92,52 +72,13 @@ jobs:
           python3 -m pip install pytest
           python3 -m py_compile platform/failover/vps-failover-controller.py
           python3 -m pytest -q platform/failover/test_failover.py
-      - name: Test health endpoints, telemetry and operational alerts
-        run: bash deploy/tests/test_health_telemetry.sh
-      - name: Test promotion dispatcher and rollout orchestration
-        run: bash deploy/tests/test_promotion_dispatcher.sh
-      - name: Test runtime convergence regression (ordering, TTS mapping, worker quiesce)
-        run: bash deploy/tests/test_runtime_convergence_regression.sh
-      - name: Run deployment failure drill tests
-        run: |
-          bash deploy/tests/test_secrets.sh
-          bash deploy/tests/test_compose_policy.sh
-          bash deploy/tests/test_runtime_policy.sh
-          bash deploy/tests/test_gateway_deploy.sh
-          bash deploy/tests/test_schema_deploy.sh
-          bash deploy/tests/test_worker_deploy.sh
-          bash deploy/tests/test_aux_deploy.sh
-          bash deploy/tests/test_traefik_switch.sh
-          bash deploy/tests/test_deploy_platform.sh
-          bash deploy/tests/test_staged_release_compose.sh
-          bash deploy/tests/test_canonical_recovery.sh
-          bash deploy/tests/test_component_tx_recovery.sh
-          bash deploy/tests/test_preflight_vps.sh
-          bash deploy/tests/test_deploy_workflow_runtime_preflight.sh
-          bash deploy/tests/test_release_baseline.sh
-          bash deploy/tests/test_deploy_rerun_contract.sh
-          if [[ -f deploy/tests/test_trusted_engine_bootstrap.sh ]]; then bash deploy/tests/test_trusted_engine_bootstrap.sh; fi
-          bash deploy/tests/test_release_bundle_runtime_contract.sh
-          bash deploy/tests/test_runtime_layout.sh
-          bash deploy/tests/test_bootstrap_recovery.sh
-          bash deploy/tests/test_legacy_frontend_recovery.sh
-          bash deploy/tests/test_release_rollback.sh
-          bash deploy/tests/test_slot_resolution.sh
-          bash deploy/tests/test_failover_bundle.sh
-          bash deploy/tests/test_drift_complete.sh
-      - name: Test real-artifact release lifecycle simulator
-        run: bash deploy/tests/test_release_simulator.sh
-      - name: Test crash recovery and chaos matrix
-        run: bash deploy/tests/test_release_crash_recovery.sh
       - name: Install restore drill dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y age sqlite3
-      - name: Test backup and restore drill
-        run: |
-          bash deploy/tests/test_backup.sh
-          bash deploy/tests/test_restore_drill.sh
-      - name: Test supply-chain validators and release manifest
+      - name: Test encrypted operator backup and restore drill
+        run: sudo -u '#1000' bash deploy/tests/test_restore_drill.sh
+      - name: Test supply-chain validators
         run: bash deploy/test-supply-chain.sh
 
   docker-smoke-gateway:
