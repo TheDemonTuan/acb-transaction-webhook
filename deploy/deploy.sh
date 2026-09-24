@@ -234,8 +234,12 @@ restore_previous() {
     local ref="$IMAGE_REF_BLUE" slot="${svc##*-}"
     case "$svc" in gateway-green) ref="$IMAGE_REF_GREEN";; frontend-blue) ref="$FRONTEND_IMAGE_REF_BLUE";; frontend-green) ref="$FRONTEND_IMAGE_REF_GREEN";; esac
     if [[ "$svc" == frontend-* && -f "$prev_bundle/baseline-frontend.sha256" ]]; then
-      container_image_check "acb-$svc" "$ref"
-      [[ "$(docker inspect -f '{{.State.Health.Status}}' "acb-$svc")" == healthy ]] || return 1
+      container_image_check "acb-$svc" "$ref" || return 1
+      local health_deadline=$((SECONDS+120))
+      until [[ "$(docker inspect -f '{{.State.Health.Status}}' "acb-$svc" 2>/dev/null)" == healthy ]]; do
+        if (( SECONDS >= health_deadline )); then log_error "restored $svc did not become healthy"; return 1; fi
+        sleep 1
+      done
     else
       EXPECTED_IMAGE_REF="$ref" EXPECTED_SLOT="$slot" EXPECTED_RELEASE_SHA="$prev_sha" "$HERE/healthcheck.sh" container "acb-$svc" 120
     fi
