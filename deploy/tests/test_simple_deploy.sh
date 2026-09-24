@@ -169,7 +169,10 @@ docker compose --project-name acb --project-directory "$legacy" --env-file "$roo
 for service in gateway-blue frontend-blue worker auth-browser tts-gateway bark; do
   deadline=$((SECONDS+120))
   until [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "acb-$service")" == healthy ]]; do
-    (( SECONDS < deadline )) || fail "Baseline service acb-$service never became healthy"
+    if (( SECONDS >= deadline )); then
+      docker inspect -f 'fixture status={{.State.Status}} exit={{.State.ExitCode}} health={{.State.Health.Status}} health-exit={{(index .State.Health.Log 0).ExitCode}}' "acb-$service" >&2
+      fail "Baseline service acb-$service never became healthy"
+    fi
     sleep 1
   done
 done
