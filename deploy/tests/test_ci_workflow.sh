@@ -57,18 +57,23 @@ printf "========================================================\n\n"
 deploy_yml="$REPO_ROOT/.github/workflows/deploy.yml"
 ci_yml="$REPO_ROOT/.github/workflows/ci.yml"
 codacy_yml="$REPO_ROOT/.github/workflows/codacy.yml"
+reconcile_yml="$REPO_ROOT/.github/workflows/reconcile.yml"
 
 # 1. Workflow YAML existence and syntax
 printf "1. Testing Workflow File Existence...\n"
 [[ -f "$deploy_yml" ]] && assert_eq "true" "true" ".github/workflows/deploy.yml exists"
 [[ -f "$ci_yml" ]] && assert_eq "true" "true" ".github/workflows/ci.yml exists"
 [[ -f "$codacy_yml" ]] && assert_eq "true" "true" ".github/workflows/codacy.yml exists"
+[[ -f "$reconcile_yml" ]] && assert_eq "true" "true" ".github/workflows/reconcile.yml exists"
 
 # 2. Concurrency Safety
 printf "\n2. Testing Concurrency Protection & Non-Cancellation...\n"
 deploy_content="$(cat "$deploy_yml")"
 assert_contains "$deploy_content" "group: acb-transaction-webhook-production" "Deploy concurrency group is acb-transaction-webhook-production"
 assert_contains "$deploy_content" "cancel-in-progress: false" "Deploy concurrency cancel-in-progress is false (never cancels in flight)"
+reconcile_content="$(cat "$reconcile_yml")"
+assert_contains "$reconcile_content" "group: acb-transaction-webhook-production" "Reconcile concurrency group is acb-transaction-webhook-production"
+assert_contains "$reconcile_content" "cancel-in-progress: false" "Reconcile concurrency cancel-in-progress is false (never cancels in flight)"
 assert_contains "$deploy_content" "bark_basic_auth_user|bark_basic_auth_password) ;;" "Workflow preserves runtime group access for Bark secrets"
 if grep -q 'find .*secrets.*chmod 600' "$deploy_yml"; then
   printf 'FAIL: deploy workflow still forces every secret to mode 0600\n' >&2
@@ -159,6 +164,7 @@ check_job_timeout "$ci_yml" "verify"
 check_job_timeout "$ci_yml" "docker-smoke-gateway"
 check_job_timeout "$ci_yml" "docker-smoke-auth-browser"
 check_job_timeout "$ci_yml" "docker-smoke-tts-gateway"
+check_job_timeout "$reconcile_yml" "reconcile"
 
 scan_checkout_context="$(grep -A 25 '^  scan-and-attest:' "$deploy_yml" || true)"
 assert_contains "$scan_checkout_context" "fetch-depth: 0" "Scan and attest job fetches full history for promotion scope"

@@ -1,0 +1,103 @@
+name: Reconcile production runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type "reconcile" to confirm converging VPS runtime to canonical release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acb-transaction-webhook-production
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile VPS runtime
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - name: Validate confirmation
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.confirm }}" != "reconcile" ]]; then
+            echo "Confirmation mismatch. Expected 'reconcile', got '${{ inputs.confirm }}'" >&2
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          printf 'Host *\n  ServerAliveInterval 15\n  ServerAliveCountMax 10\n  TCPKeepAlive yes\n  ConnectTimeout 15\n' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Audit pre-reconciliation runtime and edge configs
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid DEPLOY_PATH" >&2; exit 1; }
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          echo "=== Canonical Release State ==="
+          cat "$DEPLOY_PATH/state/current-release.json" 2>/dev/null || true
+          echo ""
+
+          canonical_release="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["release_dir"])' "$DEPLOY_PATH/state/current-release.json" 2>/dev/null || echo "")"
+          echo "Canonical release dir: $canonical_release"
+
+          dyn_dir="/opt/platform/edge/dynamic"
+          echo "=== Edge Dynamic Configuration Audit ==="
+          if [[ -d "$dyn_dir" ]]; then
+            for f in middlewares.yml portfolio.yml bark.yml; do
+              if [[ -f "$dyn_dir/$f" ]]; then
+                echo "--- File: $dyn_dir/$f (sha256: $(sha256sum "$dyn_dir/$f" | cut -d' ' -f1)) ---"
+                cat "$dyn_dir/$f"
+                echo ""
+                if [[ -n "$canonical_release" && -f "$canonical_release/edge/dynamic/$f" ]]; then
+                  echo "--- Diff vs Canonical ($canonical_release/edge/dynamic/$f) ---"
+                  diff -u "$canonical_release/edge/dynamic/$f" "$dyn_dir/$f" || true
+                  echo ""
+                fi
+              fi
+            done
+          fi
+          REMOTE
+
+      - name: Execute recovery-only reconciliation
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "bash '$DEPLOY_PATH/deploy/reconcile-release.sh' --runtime-root '$DEPLOY_PATH' --recovery-only"
+
+      - name: Verify runtime after reconciliation
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/acb-transaction-webhook' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" "bash '$DEPLOY_PATH/deploy/verify-runtime-drift.sh' --state '$DEPLOY_PATH/state/current-release.json'"
