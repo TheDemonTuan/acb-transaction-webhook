@@ -171,6 +171,17 @@ for service in gateway-blue frontend-blue worker auth-browser tts-gateway bark; 
   until [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "acb-$service")" == healthy ]]; do
     if (( SECONDS >= deadline )); then
       docker inspect -f 'fixture status={{.State.Status}} exit={{.State.ExitCode}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "acb-$service" >&2
+      if [[ "$service" == bark ]]; then
+        python3 - "$root/deploy/secrets" <<'PY' >&2
+import pathlib, subprocess, sys
+result = subprocess.run(['docker', 'logs', '--tail', '20', 'acb-bark'], capture_output=True, text=True)
+text = result.stdout + result.stderr
+secrets = pathlib.Path(sys.argv[1])
+for path in secrets.iterdir():
+    text = text.replace(path.read_text().strip(), '[redacted]')
+print(text)
+PY
+      fi
       fail "Baseline service acb-$service never became healthy"
     fi
     sleep 1
