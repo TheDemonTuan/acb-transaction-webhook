@@ -223,14 +223,14 @@ restore_previous() {
   for svc in worker auth-browser tts-gateway bark; do
     local ref
     case "$svc" in worker) ref="$WORKER_IMAGE_REF";; auth-browser) ref="$BROWSER_IMAGE_REF";; tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
-    if ! container_image_check "acb-$svc" "$ref" >/dev/null 2>&1; then
+    if ! container_image_check "acb-$svc" "$ref" >/dev/null 2>&1 || [[ "$(docker inspect -f '{{.State.Health.Status}}' "acb-$svc" 2>/dev/null)" != healthy ]]; then
       if [[ "$svc" == worker ]]; then
         if [[ "$(docker inspect -f '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' acb-worker 2>/dev/null)" == 'true healthy' ]]; then quiesce_worker "$(container_ref acb-worker)" "$ref"; fi
         docker stop -t 30 acb-worker >/dev/null || return 1
         QUIESCED=0
       fi
       renew
-      compose "$prev_bundle" up -d --no-deps "$svc"
+      compose "$prev_bundle" up -d --no-deps --force-recreate "$svc"
     fi
     EXPECTED_IMAGE_REF="$ref" "$HERE/healthcheck.sh" container "acb-$svc" 120
     container_image_check "acb-$svc" "$ref"
@@ -435,11 +435,12 @@ compose "$RELEASE" config --quiet
 compose "$RELEASE" pull worker auth-browser tts-gateway bark "gateway-$next_gw" "frontend-$next_fe" dbtool
 load_runtime "$previous"
 for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || docker pull "$ref"; done
-mkdir "$PENDING"
-cat "$STATE" | atomic_write_file "$PENDING/previous-state.env" 600
-cat "$ROUTE" | atomic_write_file "$PENDING/previous-acb.yml" 600
-printf 'RELEASE_SHA=%s\nGATEWAY_SLOT=%s\nFRONTEND_SLOT=%s\n' "$sha" "$next_gw" "$next_fe" | atomic_write_file "$PENDING/target-state.env" 600
-printf '%s\n' "$previous" | atomic_write_file "$PENDING/previous-release" 600
+snapshot="$(mktemp -d "$DEPLOY_PATH/.deploy-snapshot.XXXXXXXX")"
+cat "$STATE" | atomic_write_file "$snapshot/previous-state.env" 600
+cat "$ROUTE" | atomic_write_file "$snapshot/previous-acb.yml" 600
+printf 'RELEASE_SHA=%s\nGATEWAY_SLOT=%s\nFRONTEND_SLOT=%s\n' "$sha" "$next_gw" "$next_fe" | atomic_write_file "$snapshot/target-state.env" 600
+printf '%s\n' "$previous" | atomic_write_file "$snapshot/previous-release" 600
+mv "$snapshot" "$PENDING"
 GATE_OWNER="deploy-$sha-$$"; GATE_TOKEN=''; QUIESCED=0; MUTATING=1; DEADLINE=$((SECONDS+600))
 load_runtime "$RELEASE"
 DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"

@@ -77,7 +77,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y age sqlite3
       - name: Test encrypted operator backup and restore drill
-        run: sudo -u '#1000' bash deploy/tests/test_restore_drill.sh
+        run: |
+          set -euo pipefail
+          path="$GITHUB_WORKSPACE"
+          while [[ "$path" != / ]]; do chmod a+x "$path"; path="$(dirname "$path")"; done
+          chmod a+rx deploy deploy/tests scripts scripts/ops
+          sudo -u '#1000' bash deploy/tests/test_restore_drill.sh
       - name: Test supply-chain validators
         run: bash deploy/test-supply-chain.sh
 
