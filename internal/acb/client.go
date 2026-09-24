@@ -200,19 +200,54 @@ func (c *Client) BootstrapForDate(ctx context.Context, date string) (Response, e
 	return c.bootstrapForDate(ctx, date)
 }
 
+func isAuthChallengeKind(kind PageKind) bool {
+	return kind == LoginPage || kind == OTPChallenge || kind == CaptchaPage
+}
+
+func (c *Client) probeAuthLocked(ctx context.Context) (Response, bool, error) {
+	probeResp, getErr := c.getLocked(ctx, "/acbib/Request")
+	if getErr != nil {
+		return probeResp, false, getErr
+	}
+	if probeResp.StatusCode == http.StatusUnauthorized || probeResp.StatusCode == http.StatusForbidden || isAuthChallengeKind(probeResp.Kind) {
+		return probeResp, false, &AuthFailure{Kind: probeResp.Kind, Reason: probeResp.ClassifierReason}
+	}
+	if probeResp.StatusCode >= 500 || probeResp.StatusCode == http.StatusTooManyRequests || probeResp.Kind == MaintenancePage || probeResp.Kind == UnknownPage {
+		return probeResp, false, ErrInconclusiveAuth
+	}
+	if probeResp.Kind == AccountDetailPage || probeResp.Kind == HistoryPage {
+		form, extractErr := ExtractHistoryForm(probeResp.Body)
+		if extractErr != nil || form.Fields["dse_sessionId"] == "" || form.Fields["dse_processorState"] == "" {
+			return probeResp, false, ErrInconclusiveAuth
+		}
+		action, actErr := c.endpoint(form.Action)
+		if actErr != nil {
+			return probeResp, false, ErrInconclusiveAuth
+		}
+		c.bootstrap = action
+		c.bootstrapFields = cloneFields(form.Fields)
+		return probeResp, true, nil
+	}
+	return probeResp, false, ErrInconclusiveAuth
+}
+
 func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
-		refreshResp, err := c.getLocked(ctx, "/acbib/Request")
+		probeResp, resynced, err := c.probeAuthLocked(ctx)
 		if err != nil {
+			var authFail *AuthFailure
+			if errors.As(err, &authFail) {
+				return probeResp, err
+			}
 			return Response{}, ErrAuthenticatedFormStateUnavailable
 		}
-		if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
-			if date != "" && refreshResp.Kind == HistoryPage {
+		if !resynced {
+			if date != "" && probeResp.Kind == HistoryPage {
 				return Response{}, ErrAuthenticatedFormStateUnavailable
 			}
-			return refreshResp, nil
+			return probeResp, nil
 		}
 	}
 	var fields map[string]string
@@ -239,12 +274,20 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
-	if resp.Kind == LoginPage {
-		refreshResp, refreshErr := c.getLocked(ctx, "/acbib/Request")
-		if refreshErr == nil && (refreshResp.Kind == AccountDetailPage || refreshResp.Kind == HistoryPage) {
-			slog.Info("ACB session state resynchronized after conversational token rejected", "classifier_reason", refreshResp.ClassifierReason)
-			return refreshResp, nil
+	if isAuthChallengeKind(resp.Kind) {
+		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
+		if probeErr != nil {
+			var authFail *AuthFailure
+			if errors.As(probeErr, &authFail) {
+				return probeResp, probeErr
+			}
+			return resp, probeErr
 		}
+		if !resynced {
+			return resp, ErrInconclusiveAuth
+		}
+		slog.Info("ACB session state resynchronized after conversational token rejected", "classifier_reason", probeResp.ClassifierReason)
+		return probeResp, nil
 	}
 	return resp, nil
 }
@@ -264,6 +307,7 @@ func (c *Client) HistoryForDate(ctx context.Context, endpoint string, fields map
 func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map[string]string, date string) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	isContinuation := fields != nil && fields["_raw"] == "true"
 	var hFields map[string]string
 	var err error
 	if date != "" {
@@ -288,7 +332,61 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return c.do(req)
+	resp, err := c.do(req)
+	if err != nil {
+		return Response{}, err
+	}
+	if isAuthChallengeKind(resp.Kind) {
+		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
+		if probeErr != nil {
+			var authFail *AuthFailure
+			if errors.As(probeErr, &authFail) {
+				return probeResp, probeErr
+			}
+			return resp, probeErr
+		}
+		if !resynced {
+			return resp, ErrInconclusiveAuth
+		}
+		slog.Info("ACB session state resynchronized after conversational token rejected in history", "classifier_reason", probeResp.ClassifierReason)
+		if isContinuation {
+			return probeResp, ErrConversationReset
+		}
+		// Page 1 replay: reuse target account and dates from fields
+		if fields != nil && fields["AccountNbr"] != "" && c.bootstrapFields != nil {
+			c.bootstrapFields["AccountNbr"] = fields["AccountNbr"]
+		}
+		var replayFields map[string]string
+		if date != "" {
+			replayFields, err = PrepareHistoryFieldsForDate(c.bootstrapFields, date)
+		} else if fields != nil && fields["_explicitRange"] == "true" && fields["FromDate"] != "" && fields["ToDate"] != "" {
+			replayFields, err = PrepareHistoryFieldsWithRange(c.bootstrapFields, fields["FromDate"], fields["ToDate"])
+		} else {
+			replayFields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
+		}
+		if err != nil {
+			return probeResp, nil
+		}
+		replayVals := url.Values{}
+		for k, v := range replayFields {
+			replayVals.Set(k, v)
+		}
+		replayURL := c.bootstrap
+		if replayURL == nil {
+			replayURL = requestURL
+		}
+		replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
+		if err != nil {
+			return probeResp, nil
+		}
+		replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		replayResp, replayErr := c.do(replayReq)
+		if replayErr != nil {
+			return Response{}, replayErr
+		}
+		return replayResp, nil
+	}
+	return resp, nil
 }
 
 func (c *Client) CloseIdleConnections() {

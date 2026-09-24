@@ -152,6 +152,10 @@ func ClassifyOutcome(err error, resp *acb.Response) StepOutcome {
 		if errors.As(err, &aErr) {
 			return OutcomeAuth
 		}
+		var authFail *acb.AuthFailure
+		if errors.As(err, &authFail) {
+			return OutcomeAuth
+		}
 		var fErr *FatalError
 		if errors.As(err, &fErr) {
 			return OutcomeFatal

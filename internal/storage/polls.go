@@ -7,17 +7,18 @@ import (
 )
 
 type PollRun struct {
-	ID           string `json:"id"`
-	ConnectionID string `json:"connectionId"`
-	Generation   int64  `json:"generation"`
-	Status       string `json:"status"`
-	Classifier   string `json:"classifier,omitempty"`
-	HTTPStatus   int    `json:"httpStatus,omitempty"`
-	Pages        int    `json:"pages"`
-	RowsSeen     int    `json:"rowsSeen"`
-	Error        string `json:"error,omitempty"`
-	StartedAt    string `json:"startedAt"`
-	FinishedAt   string `json:"finishedAt,omitempty"`
+	ID            string `json:"id"`
+	ConnectionID  string `json:"connectionId"`
+	Generation    int64  `json:"generation"`
+	Status        string `json:"status"`
+	Classifier    string `json:"classifier,omitempty"`
+	HTTPStatus    int    `json:"httpStatus,omitempty"`
+	Pages         int    `json:"pages"`
+	RowsSeen      int    `json:"rowsSeen"`
+	Error         string `json:"error,omitempty"`
+	StartedAt     string `json:"startedAt"`
+	FinishedAt    string `json:"finishedAt,omitempty"`
+	AuthConfirmed bool   `json:"-"`
 }
 
 func (s *Store) LastSuccessfulPoll(ctx context.Context, connectionID string) (PollRun, error) {
@@ -53,6 +54,9 @@ func (s *Store) FinishPoll(ctx context.Context, poll PollRun) error {
 	if poll.Status != "SUCCEEDED" && poll.Status != "FAILED" && poll.Status != "AUTH_REQUIRED" && poll.Status != "PROTOCOL_CHANGED" && poll.Status != "PARTIAL" {
 		return errors.New("invalid poll status")
 	}
+	if poll.Status == "AUTH_REQUIRED" && !poll.AuthConfirmed {
+		return errors.New("cannot finish poll as AUTH_REQUIRED without confirmed auth proof")
+	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE poll_runs SET status=?,classifier=?,http_status=?,pages=?,rows_seen=?,sanitized_error=?,finished_at=? WHERE id=? AND status='RUNNING'`, poll.Status, poll.Classifier, poll.HTTPStatus, poll.Pages, poll.RowsSeen, poll.Error, now(), poll.ID)
 		if err != nil {
@@ -69,18 +73,18 @@ func (s *Store) FinishPoll(ctx context.Context, poll PollRun) error {
 			}
 			changed, err = result.RowsAffected()
 			if err != nil || changed != 1 {
-				return sql.ErrNoRows
+				return ErrGenerationFenceMismatch
 			}
 			return nil
 		}
 		if poll.Status == "AUTH_REQUIRED" {
-			result, err = tx.ExecContext(ctx, `UPDATE connections SET state=?,generation=generation+1,updated_at=? WHERE id=? AND generation=?`, poll.Status, now(), poll.ConnectionID, poll.Generation)
+			result, err = tx.ExecContext(ctx, `UPDATE connections SET state=?,generation=generation+1,updated_at=? WHERE id=? AND generation=? AND state='MONITORING'`, poll.Status, now(), poll.ConnectionID, poll.Generation)
 			if err != nil {
 				return err
 			}
 			changed, err = result.RowsAffected()
 			if err != nil || changed != 1 {
-				return sql.ErrNoRows
+				return ErrGenerationFenceMismatch
 			}
 			return nil
 		}

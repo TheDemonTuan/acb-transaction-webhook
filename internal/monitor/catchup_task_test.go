@@ -149,38 +149,39 @@ func TestCatchUpTask_CheckpointAdvancesOnlyAfterFullDay(t *testing.T) {
 	conn, _ := store.ConfigureConnection(ctx, "***1234")
 	_, _ = store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'")
 
-	// Set initial checkpoint and coverage to 2 days ago
+	// Set initial checkpoint and coverage to 3 days ago, so there are 2 days to catch up: twoDaysAgo and oneDayAgo
+	threeDaysAgo := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -3).Format("2006-01-02")
 	twoDaysAgo := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -2).Format("2006-01-02")
 	oneDayAgo := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("2006-01-02")
 	_ = store.SaveCheckpoint(ctx, storage.Checkpoint{
 		ConnectionID: conn.ID,
 		ScanID:       "init",
-		CoverageFrom: twoDaysAgo,
-		CoverageTo:   twoDaysAgo,
+		CoverageFrom: threeDaysAgo,
+		CoverageTo:   threeDaysAgo,
 	})
-	_ = store.RecordCoveragePerDay(ctx, conn.ID, map[string]int{twoDaysAgo: 1})
+	_ = store.RecordCoveragePerDay(ctx, conn.ID, map[string]int{threeDaysAgo: 1})
 
 	client := &catchUpInterleaveMockClient{}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
 
 	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
 
-	// Step 1: Page 1 of yesterday (returns HasNext=true so quantum yields)
+	// Step 1: Processes full day of twoDaysAgo (2 pages) and completes twoDaysAgo.
 	res1, err := task.Step(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res1.Done {
-		t.Fatal("expected quantum yield (Done=false), got Done=true")
+		t.Fatal("expected quantum yield at day boundary (Done=false), got Done=true")
 	}
 
-	// Checkpoint MUST NOT have advanced to oneDayAgo yet!
+	// Checkpoint MUST have advanced to twoDaysAgo, but NOT to oneDayAgo yet!
 	cp1, _ := store.GetCheckpoint(ctx, conn.ID)
 	if cp1.CoverageTo != twoDaysAgo {
-		t.Fatalf("checkpoint advanced prematurely before day completed! got %s, expected %s", cp1.CoverageTo, twoDaysAgo)
+		t.Fatalf("checkpoint should have advanced to twoDaysAgo %s, got %s", twoDaysAgo, cp1.CoverageTo)
 	}
 
-	// Step 2: Page 2 of yesterday (last page for yesterday, so day finishes)
+	// Step 2: Processes full day of oneDayAgo (2 pages) and completes oneDayAgo.
 	res2, err := task.Step(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -411,9 +412,7 @@ func TestCatchUpTaskPinsContinuationWithoutMutatingPaginationFields(t *testing.T
 	mon := New(store, client, 5*time.Second, 5*time.Second)
 	mon.now = fixedRealtimeTime
 	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
-	if _, err := task.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Step 1 processes day 1 atomically across all its pages (page 1 and continuation page 2)
 	if _, err := task.Step(ctx); err != nil {
 		t.Fatal(err)
 	}
