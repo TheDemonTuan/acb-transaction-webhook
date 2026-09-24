@@ -85,6 +85,7 @@ else
 fi
 cp "$root/deploy/compose/"*.yaml "$legacy/compose/"
 cp "$root/deploy/bark-entrypoint.sh" "$root/deploy/seccomp-auth-browser.json" "$legacy/"
+chmod 644 "$legacy/bark-entrypoint.sh"
 # Bundle must execute from releases/<sha>, not from a staging directory.
 release_sha="$(python3 - "$images_env" <<'PY'
 import re,sys
