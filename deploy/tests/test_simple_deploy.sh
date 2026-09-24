@@ -286,20 +286,20 @@ case "${DOCKER_FAULT_MODE:-}" in
       args=("$@")
       for ((i=0; i<${#args[@]}; i++)); do
         if [[ "${args[i]}" == up ]]; then
+          printf '%s\n' wrong-frontend > "${IDENTITY_FAULT_MARKER:?}"
           exec "$REAL_DOCKER" "${args[@]:0:i}" -f "${WRONG_FRONTEND_OVERRIDE:?}" "${args[@]:i}"
         fi
       done
     fi ;;
   wrong-gateway)
     if [[ " $* " == *' up -d --no-deps gateway-green '* ]]; then
-      python3 - "${WRONG_GATEWAY_RUNTIME:?}" "${WRONG_GATEWAY_SHA:?}" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); lines=p.read_text().splitlines()
-assert sum(s.startswith('RELEASE_COMMIT_GREEN=') for s in lines)==1
-p.write_text('\n'.join('RELEASE_COMMIT_GREEN='+sys.argv[2] if s.startswith('RELEASE_COMMIT_GREEN=') else s for s in lines)+'\n')
-PY
-      "$REAL_DOCKER" "$@"
-      exit 0
+      args=("$@")
+      for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[i]}" == up ]]; then
+          printf '%s\n' wrong-gateway > "${IDENTITY_FAULT_MARKER:?}"
+          exec "$REAL_DOCKER" "${args[@]:0:i}" -f "${WRONG_GATEWAY_OVERRIDE:?}" "${args[@]:i}"
+        fi
+      done
     fi ;;
   corrupt-backup)
     if [[ " $* " == *' -backup-to /backup/gateway.db '* ]]; then
@@ -474,9 +474,12 @@ for mode in corrupt-backup quiesce-timeout unhealthy-worker wrong-frontend wrong
     chmod 644 "$root/wrong-release"
     printf 'services:\n  frontend-green:\n    volumes:\n      - %s:/usr/share/nginx/html/__release:ro\n' "$root/wrong-release" > "$root/wrong-frontend.yaml"
   fi
+  if [[ "$mode" == wrong-gateway ]]; then
+    printf 'services:\n  gateway-green:\n    environment:\n      RELEASE_COMMIT: %s\n' "$base_sha" > "$root/wrong-gateway.yaml"
+  fi
   fault_rc=0
   fault_started=$SECONDS
-  DOCKER_FAULT_MODE="$mode" WRONG_FRONTEND_OVERRIDE="$root/wrong-frontend.yaml" WRONG_GATEWAY_RUNTIME="$target/runtime.env" WRONG_GATEWAY_SHA="$base_sha" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
+  DOCKER_FAULT_MODE="$mode" WRONG_FRONTEND_OVERRIDE="$root/wrong-frontend.yaml" WRONG_GATEWAY_OVERRIDE="$root/wrong-gateway.yaml" IDENTITY_FAULT_MARKER="$root/$mode.injected" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
     timeout 480 bash "$target/deploy.sh" "$release_sha" >"$root/$mode.log" 2>&1 || fault_rc=$?
   if [[ "$fault_rc" == 124 && $((SECONDS-fault_started)) -ge 480 ]]; then
     python3 - "$root/$mode.log" <<'PY'
@@ -488,14 +491,8 @@ PY
     fail "$mode exceeded outer deployment deadline"
   fi
   [[ "$fault_rc" != 0 ]] || fail "$mode unexpectedly succeeded"
+  if [[ "$mode" == wrong-frontend || "$mode" == wrong-gateway ]]; then [[ -f "$root/$mode.injected" ]] || fail "$mode never reached candidate service"; fi
   if [[ "$mode" == stale-service ]]; then [[ -f "$root/stale-service-applied" ]] || fail 'Stale service fault never reached Traefik ACK'; fi
-  if [[ "$mode" == wrong-gateway ]]; then
-    python3 - "$target/runtime.env" "$release_sha" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); lines=p.read_text().splitlines()
-p.write_text('\n'.join('RELEASE_COMMIT_GREEN='+sys.argv[2] if s.startswith('RELEASE_COMMIT_GREEN=') else s for s in lines)+'\n')
-PY
-  fi
   if [[ "$mode" == corrupt-backup ]]; then
     [[ "$(docker inspect -f '{{.Id}}' acb-auth-browser acb-tts-gateway acb-bark)" == "$aux_before" ]] || fail 'Backup corruption restarted auxiliaries'
   fi
