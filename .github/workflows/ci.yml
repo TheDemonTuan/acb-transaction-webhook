@@ -80,7 +80,10 @@ jobs:
         run: |
           set -euo pipefail
           path="$GITHUB_WORKSPACE"
-          while [[ "$path" != / ]]; do chmod a+x "$path"; path="$(dirname "$path")"; done
+          while [[ "$path" != / ]]; do
+            sudo -u '#1000' test -x "$path" || sudo chmod a+x "$path"
+            path="$(dirname "$path")"
+          done
           chmod a+rx deploy deploy/tests scripts scripts/ops
           sudo -u '#1000' bash deploy/tests/test_restore_drill.sh
       - name: Test supply-chain validators

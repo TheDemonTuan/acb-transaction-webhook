@@ -315,6 +315,7 @@ jobs:
           set -euo pipefail
           target="$DEPLOY_PATH/releases/$SHA"
           (cd "$STAGE" && sha256sum -c SHA256SUMS)
+          chmod 700 "$STAGE"/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,bark-entrypoint.sh}
           if [[ -e "$target" ]]; then
             (cd "$target" && sha256sum -c "$STAGE/SHA256SUMS")
             cmp "$target/SHA256SUMS" "$STAGE/SHA256SUMS"

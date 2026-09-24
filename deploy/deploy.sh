@@ -45,7 +45,7 @@ validate_bundle() {
 }
 preflight() {
   local path component
-  for component in docker python3 sqlite3 flock; do command -v "$component" >/dev/null || fail "missing $component"; done
+  for component in docker python3 sqlite3 flock timeout; do command -v "$component" >/dev/null || fail "missing $component"; done
   python3 -c 'import yaml' || fail 'PyYAML required'
   for path in edge-acb acb-core acb-egress; do docker network inspect "$path" >/dev/null || fail "missing network $path"; done
   for path in bank-event-gateway_gateway_data bank-event-gateway_bark_data; do docker volume inspect "$path" >/dev/null || fail "missing volume $path"; done
@@ -220,9 +220,14 @@ restore_previous() {
   prev_sha="$RELEASE_SHA"; prev_gw="$GATEWAY_SLOT"; prev_fe="$FRONTEND_SLOT"
   prev_bundle="$DEPLOY_PATH/releases/$prev_sha"
   load_runtime "$prev_bundle"
+  DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
   for svc in worker auth-browser tts-gateway bark; do
     local ref
     case "$svc" in worker) ref="$WORKER_IMAGE_REF";; auth-browser) ref="$BROWSER_IMAGE_REF";; tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
+    if [[ "$svc" == worker ]] && container_image_check acb-worker "$ref" >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Health.Status}}' acb-worker 2>/dev/null)" == healthy ]]; then
+      docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -resume >/dev/null || return 1
+      if EXPECTED_IMAGE_REF="$ref" "$HERE/healthcheck.sh" container acb-worker 30; then continue; fi
+    fi
     if ! container_image_check "acb-$svc" "$ref" >/dev/null 2>&1 || [[ "$(docker inspect -f '{{.State.Health.Status}}' "acb-$svc" 2>/dev/null)" != healthy ]]; then
       if [[ "$svc" == worker ]]; then
         if [[ "$(docker inspect -f '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' acb-worker 2>/dev/null)" == 'true healthy' ]]; then quiesce_worker "$(container_ref acb-worker)" "$ref"; fi
@@ -265,6 +270,7 @@ cleanup() {
   local code=$?
   trap - EXIT HUP INT TERM
   if (( code != 0 )) && [[ "${MUTATING:-0}" == 1 && "${COMMITTED:-0}" == 0 ]]; then
+    DEADLINE=$((SECONDS+600))
     log_error "deploy failed ($code); restoring previous runtime"
     if ! restore_previous "$PENDING"; then
       log_error 'ROLLBACK_FAILED: retain both HTTP slots and pending evidence'
@@ -302,6 +308,7 @@ if [[ "$mode" == rollback ]]; then
   previous="$DEPLOY_PATH/releases/$RELEASE_SHA"
   [[ -f "$previous/runtime.env" ]] || fail 'rollback bundle missing'
   load_runtime "$previous"
+  DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
   for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || docker pull "$ref"; done
   auth="$(dbtool ro -readonly -active-auth-count)"
   [[ "$(printf '%s' "$auth" | json_field activeCount)" == 0 ]] || fail 'active authentication blocks rollback'
@@ -363,6 +370,12 @@ if [[ -d "$PENDING" ]]; then
     validate_state "$STATE"
     check_running "$DEPLOY_PATH/releases/$RELEASE_SHA" "$GATEWAY_SLOT" "$FRONTEND_SLOT" "$RELEASE_SHA"
     public_smoke
+    if [[ -f "$PENDING/gate-lease" ]]; then
+      { IFS= read -r GATE_OWNER; IFS= read -r GATE_TOKEN; } < "$PENDING/gate-lease"
+      load_runtime "$DEPLOY_PATH/releases/$RELEASE_SHA"
+      DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
+      release_gate
+    fi
     COMMITTED=1
   elif cmp -s "$STATE" "$PENDING/previous-state.env"; then
     if [[ -f "$PENDING/gate-lease" ]]; then
@@ -453,10 +466,12 @@ printf '%s\n%s\n' "$GATE_OWNER" "$GATE_TOKEN" | atomic_write_file "$PENDING/gate
 dbtool ro -readonly -gate-check -owner "$GATE_OWNER" >/dev/null
 dbtool ro -readonly -check >/dev/null
 renew
-receipt="$(RELEASE_COMMIT="$sha" DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF" bash "$HERE/backup-db.sh" --snapshot)"
+remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'snapshot deadline expired'
+receipt="$(timeout --foreground --signal=TERM --kill-after=5s "$remaining" env RELEASE_COMMIT="$sha" DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF" bash "$HERE/backup-db.sh" --snapshot)"
 printf '%s\n' "$receipt" | atomic_write_file "$RELEASE/backup-receipt-path" 600
 renew
-dbtool rw -migrate >/dev/null
+remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'migration deadline expired'
+DBTOOL_TIMEOUT_SEC="$remaining" dbtool rw -migrate >/dev/null
 dbtool ro -readonly -schema-compat -min-version 11 >/dev/null
 dbtool ro -readonly -check >/dev/null
 for svc in auth-browser tts-gateway bark; do
@@ -480,9 +495,9 @@ renew
 check_running "$RELEASE" "$next_gw" "$next_fe" "$sha"
 renew
 public_smoke
-release_gate
 cat "$PENDING/target-state.env" | atomic_write_file "$STATE" 600
 COMMITTED=1; MUTATING=0
+release_gate
 for svc in "gateway-$gateway_slot" "frontend-$frontend_slot"; do docker stop "acb-$svc" >/dev/null; done
 [[ ! -d "$ROLLBACK" ]] || mv "$ROLLBACK" "$DEPLOY_PATH/data/rollback-$(date -u +%Y%m%d%H%M%S)-$$"
 mv "$PENDING" "$ROLLBACK"

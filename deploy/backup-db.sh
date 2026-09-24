@@ -29,12 +29,12 @@ if [[ "${1:-}" == --snapshot && $# == 1 ]]; then
   snapshot_dir="$(mktemp -d "$BACKUP_DIR/${ts}-${RELEASE_COMMIT}-XXXXXXXX")"
   chmod 700 "$snapshot_dir"
   snapshot_ok=0
-  snapshot_cleanup() { if (( ! snapshot_ok )); then rm -rf -- "$snapshot_dir"; fi; }
+  snapshot_cleanup() { if (( ! snapshot_ok )); then docker rm -f "acb-deploy-backup-$$" >/dev/null 2>&1 || true; rm -rf -- "$snapshot_dir"; fi; }
   trap snapshot_cleanup EXIT
   [[ "$(stat -c '%a:%u:%g' "$snapshot_dir")" == '700:1000:1000' ]] || { log_error 'Snapshot directory must be mode 0700 owner 1000:1000'; exit 1; }
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  docker run --rm --network none --user 1000:1000 \
+  docker run --rm --name "acb-deploy-backup-$$" --network none --user 1000:1000 \
     -v "${DATA_VOLUME_NAME}:/data:rw" -v "${snapshot_dir}:/backup:rw" \
     "$DBTOOL_IMAGE" -path /data/gateway.db -backup-to /backup/gateway.db >&2
   snapshot_file="$snapshot_dir/gateway.db"
