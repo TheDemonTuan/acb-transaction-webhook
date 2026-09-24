@@ -473,8 +473,8 @@ printf '%s\n' "$receipt" | atomic_write_file "$RELEASE/backup-receipt-path" 600
 renew
 remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'migration deadline expired'
 DBTOOL_TIMEOUT_SEC="$remaining" dbtool rw -migrate
-dbtool ro -readonly -schema-compat -min-version 11 >/dev/null
-dbtool ro -readonly -check >/dev/null
+dbtool ro -readonly -schema-compat -min-version 11
+dbtool ro -readonly -check
 for svc in auth-browser tts-gateway bark; do
   renew; compose "$RELEASE" up -d --no-deps "$svc"
   case "$svc" in auth-browser) ref="$BROWSER_IMAGE_REF";; tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
