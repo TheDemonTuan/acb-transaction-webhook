@@ -311,11 +311,62 @@ jobs:
       - name: Check generated source and whitespace
         run: git diff --check
 
+  preflight-scan:
+    name: Preflight scan pinned production images
+    timeout-minutes: 10
+    needs: production-state
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      security_rebuild_frontend: ${{ steps.scan.outputs.security_rebuild_frontend }}
+      security_rebuild_gateway: ${{ steps.scan.outputs.security_rebuild_gateway }}
+      security_rebuild_worker: ${{ steps.scan.outputs.security_rebuild_worker }}
+      security_rebuild_schema: ${{ steps.scan.outputs.security_rebuild_schema }}
+      security_rebuild_auth_browser: ${{ steps.scan.outputs.security_rebuild_auth_browser }}
+      security_rebuild_tts: ${{ steps.scan.outputs.security_rebuild_tts }}
+      bark_status: ${{ steps.scan.outputs.bark_status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download production state
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: production-state
+          path: .production-state
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: 0.74.0
+        run: |
+          set -euo pipefail
+          archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl --fail --location --retry 3 --output "$archive" "$base/$archive"
+          curl --fail --location --retry 3 --output trivy-checksums.txt "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep "  $archive$" trivy-checksums.txt | sha256sum --check -
+          tar -xzf "$archive" trivy
+          install -m 0755 trivy "$RUNNER_TEMP/trivy"
+          printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run production image preflight scanner
+        id: scan
+        run: bash deploy/preflight-scan-images.sh --state .production-state/production-state.env
+      - name: Upload preflight scan reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preflight-security-reports
+          path: preflight-reports/
+
   build-frontend-image:
     name: Build frontend GHCR image
     timeout-minutes: 15
-    needs: [production-state, verify]
-    if: needs.verify.outputs.frontend == 'true'
+    needs: [production-state, verify, preflight-scan]
+    if: needs.verify.outputs.frontend == 'true' || needs.preflight-scan.outputs.security_rebuild_frontend == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -339,15 +390,34 @@ jobs:
           set -euo pipefail
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-frontend" >> "$GITHUB_OUTPUT"
+      - name: Resolve build cache policy
+        id: cache_policy
+        env:
+          SECURITY_REBUILD: ${{ needs.preflight-scan.outputs.security_rebuild_frontend }}
+        run: |
+          set -euo pipefail
+          if [[ "$SECURITY_REBUILD" == "true" ]]; then
+            echo "no_cache=true" >> "$GITHUB_OUTPUT"
+            echo "pull=true" >> "$GITHUB_OUTPUT"
+            echo "cache_from=" >> "$GITHUB_OUTPUT"
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_cache=false" >> "$GITHUB_OUTPUT"
+            echo "pull=false" >> "$GITHUB_OUTPUT"
+            echo "cache_from=type=gha,scope=frontend" >> "$GITHUB_OUTPUT"
+            echo "cache_to=type=gha,mode=max,scope=frontend" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           target: frontend
           push: true
+          pull: ${{ steps.cache_policy.outputs.pull == 'true' }}
+          no-cache: ${{ steps.cache_policy.outputs.no_cache == 'true' }}
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
+          cache-from: ${{ steps.cache_policy.outputs.cache_from }}
+          cache-to: ${{ steps.cache_policy.outputs.cache_to }}
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -358,8 +428,8 @@ jobs:
   build-gateway-image:
     name: Build gateway GHCR image
     timeout-minutes: 15
-    needs: [production-state, verify]
-    if: needs.verify.outputs.gateway == 'true'
+    needs: [production-state, verify, preflight-scan]
+    if: needs.verify.outputs.gateway == 'true' || needs.preflight-scan.outputs.security_rebuild_gateway == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -383,15 +453,34 @@ jobs:
           set -euo pipefail
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
+      - name: Resolve build cache policy
+        id: cache_policy
+        env:
+          SECURITY_REBUILD: ${{ needs.preflight-scan.outputs.security_rebuild_gateway }}
+        run: |
+          set -euo pipefail
+          if [[ "$SECURITY_REBUILD" == "true" ]]; then
+            echo "no_cache=true" >> "$GITHUB_OUTPUT"
+            echo "pull=true" >> "$GITHUB_OUTPUT"
+            echo "cache_from=" >> "$GITHUB_OUTPUT"
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_cache=false" >> "$GITHUB_OUTPUT"
+            echo "pull=false" >> "$GITHUB_OUTPUT"
+            echo "cache_from=type=gha,scope=gateway" >> "$GITHUB_OUTPUT"
+            echo "cache_to=type=gha,mode=max,scope=gateway" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           target: gateway
           push: true
+          pull: ${{ steps.cache_policy.outputs.pull == 'true' }}
+          no-cache: ${{ steps.cache_policy.outputs.no_cache == 'true' }}
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          cache-from: type=gha,scope=gateway
-          cache-to: type=gha,mode=max,scope=gateway
+          cache-from: ${{ steps.cache_policy.outputs.cache_from }}
+          cache-to: ${{ steps.cache_policy.outputs.cache_to }}
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -402,8 +491,8 @@ jobs:
   build-worker-image:
     name: Build worker GHCR image
     timeout-minutes: 15
-    needs: [production-state, verify]
-    if: needs.verify.outputs.worker == 'true'
+    needs: [production-state, verify, preflight-scan]
+    if: needs.verify.outputs.worker == 'true' || needs.preflight-scan.outputs.security_rebuild_worker == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -427,15 +516,34 @@ jobs:
           set -euo pipefail
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-worker" >> "$GITHUB_OUTPUT"
+      - name: Resolve build cache policy
+        id: cache_policy
+        env:
+          SECURITY_REBUILD: ${{ needs.preflight-scan.outputs.security_rebuild_worker }}
+        run: |
+          set -euo pipefail
+          if [[ "$SECURITY_REBUILD" == "true" ]]; then
+            echo "no_cache=true" >> "$GITHUB_OUTPUT"
+            echo "pull=true" >> "$GITHUB_OUTPUT"
+            echo "cache_from=" >> "$GITHUB_OUTPUT"
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_cache=false" >> "$GITHUB_OUTPUT"
+            echo "pull=false" >> "$GITHUB_OUTPUT"
+            echo "cache_from=type=gha,scope=worker" >> "$GITHUB_OUTPUT"
+            echo "cache_to=type=gha,mode=max,scope=worker" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           target: worker
           push: true
+          pull: ${{ steps.cache_policy.outputs.pull == 'true' }}
+          no-cache: ${{ steps.cache_policy.outputs.no_cache == 'true' }}
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
+          cache-from: ${{ steps.cache_policy.outputs.cache_from }}
+          cache-to: ${{ steps.cache_policy.outputs.cache_to }}
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -446,8 +554,8 @@ jobs:
   build-dbtool-image:
     name: Build dbtool GHCR image
     timeout-minutes: 15
-    needs: [production-state, verify]
-    if: needs.verify.outputs.schema == 'true'
+    needs: [production-state, verify, preflight-scan]
+    if: needs.verify.outputs.schema == 'true' || needs.preflight-scan.outputs.security_rebuild_schema == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -471,15 +579,34 @@ jobs:
           set -euo pipefail
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-dbtool" >> "$GITHUB_OUTPUT"
+      - name: Resolve build cache policy
+        id: cache_policy
+        env:
+          SECURITY_REBUILD: ${{ needs.preflight-scan.outputs.security_rebuild_schema }}
+        run: |
+          set -euo pipefail
+          if [[ "$SECURITY_REBUILD" == "true" ]]; then
+            echo "no_cache=true" >> "$GITHUB_OUTPUT"
+            echo "pull=true" >> "$GITHUB_OUTPUT"
+            echo "cache_from=" >> "$GITHUB_OUTPUT"
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_cache=false" >> "$GITHUB_OUTPUT"
+            echo "pull=false" >> "$GITHUB_OUTPUT"
+            echo "cache_from=type=gha,scope=dbtool" >> "$GITHUB_OUTPUT"
+            echo "cache_to=type=gha,mode=max,scope=dbtool" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           target: dbtool
           push: true
+          pull: ${{ steps.cache_policy.outputs.pull == 'true' }}
+          no-cache: ${{ steps.cache_policy.outputs.no_cache == 'true' }}
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          cache-from: type=gha,scope=dbtool
-          cache-to: type=gha,mode=max,scope=dbtool
+          cache-from: ${{ steps.cache_policy.outputs.cache_from }}
+          cache-to: ${{ steps.cache_policy.outputs.cache_to }}
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -490,8 +617,8 @@ jobs:
   build-auth-browser-image:
     name: Build auth-browser GHCR image
     timeout-minutes: 15
-    needs: [production-state, verify]
-    if: needs.verify.outputs.auth_browser == 'true'
+    needs: [production-state, verify, preflight-scan]
+    if: needs.verify.outputs.auth_browser == 'true' || needs.preflight-scan.outputs.security_rebuild_auth_browser == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -515,15 +642,34 @@ jobs:
           set -euo pipefail
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-auth-browser" >> "$GITHUB_OUTPUT"
+      - name: Resolve build cache policy
+        id: cache_policy
+        env:
+          SECURITY_REBUILD: ${{ needs.preflight-scan.outputs.security_rebuild_auth_browser }}
+        run: |
+          set -euo pipefail
+          if [[ "$SECURITY_REBUILD" == "true" ]]; then
+            echo "no_cache=true" >> "$GITHUB_OUTPUT"
+            echo "pull=true" >> "$GITHUB_OUTPUT"
+            echo "cache_from=" >> "$GITHUB_OUTPUT"
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_cache=false" >> "$GITHUB_OUTPUT"
+            echo "pull=false" >> "$GITHUB_OUTPUT"
+            echo "cache_from=type=gha,scope=auth-browser" >> "$GITHUB_OUTPUT"
+            echo "cache_to=type=gha,mode=max,scope=auth-browser" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           file: Dockerfile.auth-browser
           push: true
+          pull: ${{ steps.cache_policy.outputs.pull == 'true' }}
+          no-cache: ${{ steps.cache_policy.outputs.no_cache == 'true' }}
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          cache-from: type=gha,scope=auth-browser
-          cache-to: type=gha,mode=max,scope=auth-browser
+          cache-from: ${{ steps.cache_policy.outputs.cache_from }}
+          cache-to: ${{ steps.cache_policy.outputs.cache_to }}
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -538,8 +684,8 @@ jobs:
   build-tts-gateway-image:
     name: Build tts-gateway GHCR image
     timeout-minutes: 15
-    needs: [production-state, verify]
-    if: needs.verify.outputs.tts == 'true'
+    needs: [production-state, verify, preflight-scan]
+    if: needs.verify.outputs.tts == 'true' || needs.preflight-scan.outputs.security_rebuild_tts == 'true'
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
@@ -563,14 +709,33 @@ jobs:
           set -euo pipefail
           repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${repo_lc}-tts-gateway" >> "$GITHUB_OUTPUT"
+      - name: Resolve build cache policy
+        id: cache_policy
+        env:
+          SECURITY_REBUILD: ${{ needs.preflight-scan.outputs.security_rebuild_tts }}
+        run: |
+          set -euo pipefail
+          if [[ "$SECURITY_REBUILD" == "true" ]]; then
+            echo "no_cache=true" >> "$GITHUB_OUTPUT"
+            echo "pull=true" >> "$GITHUB_OUTPUT"
+            echo "cache_from=" >> "$GITHUB_OUTPUT"
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_cache=false" >> "$GITHUB_OUTPUT"
+            echo "pull=false" >> "$GITHUB_OUTPUT"
+            echo "cache_from=type=gha,scope=tts-gateway" >> "$GITHUB_OUTPUT"
+            echo "cache_to=type=gha,mode=max,scope=tts-gateway" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: ./tts-gateway
           push: true
+          pull: ${{ steps.cache_policy.outputs.pull == 'true' }}
+          no-cache: ${{ steps.cache_policy.outputs.no_cache == 'true' }}
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          cache-from: type=gha,scope=tts-gateway
-          cache-to: type=gha,mode=max,scope=tts-gateway
+          cache-from: ${{ steps.cache_policy.outputs.cache_from }}
+          cache-to: ${{ steps.cache_policy.outputs.cache_to }}
           tags: |
             ${{ steps.meta.outputs.image }}:sha-${{ github.sha }}
             ${{ steps.meta.outputs.image }}:latest
@@ -589,6 +754,7 @@ jobs:
     needs:
       - production-state
       - verify
+      - preflight-scan
       - build-frontend-image
       - build-gateway-image
       - build-worker-image
@@ -694,6 +860,15 @@ jobs:
           names=(frontend gateway worker dbtool)
           images=("$FRONTEND_IMAGE" "$GATEWAY_IMAGE" "$WORKER_IMAGE" "$DBTOOL_IMAGE")
 
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo "### Core Images Security Gate Summary"
+              echo ""
+              echo "| Component | Image Digest | CVE | Installed | Fixed In | Status |"
+              echo "|---|---|---|---|---|---|"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           failed=0
           for i in "${!names[@]}"; do
             name="${names[$i]}"
@@ -714,6 +889,41 @@ jobs:
               --format cyclonedx \
               --output "sbom-artifacts/sbom-${name}.cdx.json" \
               "$img"
+
+            node - "security-reports/trivy-${name}.json" ".trivyignore-${name}" "$name" "$img" <<'JSEOF' >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            const fs = require('fs');
+            const [,, reportPath, ignorePath, name, img] = process.argv;
+            try {
+              let ignored = new Set();
+              if (fs.existsSync(ignorePath)) {
+                for (const l of fs.readFileSync(ignorePath, 'utf8').split('\n')) {
+                  const t = l.trim();
+                  if (t && !t.startsWith('#')) ignored.add(t);
+                }
+              }
+              const data = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              const vulns = [];
+              if (data.Results) {
+                for (const r of data.Results) {
+                  if (r.Vulnerabilities) {
+                    for (const v of r.Vulnerabilities) {
+                      if ((v.Severity === 'HIGH' || v.Severity === 'CRITICAL') && !ignored.has(v.VulnerabilityID)) {
+                        vulns.push(v);
+                      }
+                    }
+                  }
+                }
+              }
+              const digest = (img.split('@')[1] || img).substring(0, 19) + '...';
+              if (vulns.length === 0) {
+                console.log(`| ${name} | \`${digest}\` | - | - | - | ✅ CLEAN (0 HIGH/CRITICAL) |`);
+              } else {
+                for (const v of vulns) {
+                  console.log(`| ${name} | \`${digest}\` | ${v.VulnerabilityID} | ${v.PkgName} ${v.InstalledVersion || ''} | ${v.FixedVersion || 'none'} | ❌ ${v.Severity} BLOCKED |`);
+                }
+              }
+            } catch (e) {}
+            JSEOF
 
             # Core first-party policy: zero-tolerance on HIGH/CRITICAL unless in allowlist
             if ! trivy image \
@@ -758,6 +968,41 @@ jobs:
               --format cyclonedx \
               --output "sbom-artifacts/sbom-${name}.cdx.json" \
               "$img"
+
+            node - "security-reports/trivy-${name}.json" ".trivyignore-${name}" "$name" "$img" <<'JSEOF' >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            const fs = require('fs');
+            const [,, reportPath, ignorePath, name, img] = process.argv;
+            try {
+              let ignored = new Set();
+              if (fs.existsSync(ignorePath)) {
+                for (const l of fs.readFileSync(ignorePath, 'utf8').split('\n')) {
+                  const t = l.trim();
+                  if (t && !t.startsWith('#')) ignored.add(t);
+                }
+              }
+              const data = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              const vulns = [];
+              if (data.Results) {
+                for (const r of data.Results) {
+                  if (r.Vulnerabilities) {
+                    for (const v of r.Vulnerabilities) {
+                      if ((v.Severity === 'HIGH' || v.Severity === 'CRITICAL') && !ignored.has(v.VulnerabilityID)) {
+                        vulns.push(v);
+                      }
+                    }
+                  }
+                }
+              }
+              const digest = (img.split('@')[1] || img).substring(0, 19) + '...';
+              if (vulns.length === 0) {
+                console.log(`| ${name} | \`${digest}\` | - | - | - | ✅ CLEAN (0 HIGH/CRITICAL) |`);
+              } else {
+                for (const v of vulns) {
+                  console.log(`| ${name} | \`${digest}\` | ${v.VulnerabilityID} | ${v.PkgName} ${v.InstalledVersion || ''} | ${v.FixedVersion || 'none'} | ❌ ${v.Severity} BLOCKED |`);
+                }
+              }
+            } catch (e) {}
+            JSEOF
 
             # Sidecar policy: CRITICAL and HIGH release-blocking unless documented in allowlist
             if ! trivy image \

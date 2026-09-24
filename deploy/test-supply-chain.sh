@@ -414,6 +414,131 @@ assert_success "Compose immutability policy tests pass (test_compose_policy.sh)"
 assert_success "Compose runtime isolation policy tests pass (test_runtime_policy.sh)" \
   bash "$script_dir/tests/test_runtime_policy.sh"
 
+printf "\n"
+
+# ----------------------------------------------------
+# 6. Production Image Preflight Scan Tests (Security Drift)
+# ----------------------------------------------------
+printf "6. Testing Production Image Preflight Scanner (preflight-scan-images.sh)...\n"
+
+# 6.1 Missing state file fails closed
+assert_failure "preflight-scan-images.sh fails when state file is missing" \
+  bash "$script_dir/preflight-scan-images.sh" --state "$test_tmp/nonexistent.env"
+
+# 6.2 Malformed non-immutable digest fails closed
+cat <<'EOF' > "$test_tmp/bad-digest.env"
+frontend_image=ghcr.io/org/frontend:latest
+gateway_image=ghcr.io/org/gateway@sha256:1111111111111111111111111111111111111111111111111111111111111111
+worker_image=ghcr.io/org/worker@sha256:2222222222222222222222222222222222222222222222222222222222222222
+dbtool_image=ghcr.io/org/dbtool@sha256:3333333333333333333333333333333333333333333333333333333333333333
+auth_browser_image=ghcr.io/org/auth-browser@sha256:4444444444444444444444444444444444444444444444444444444444444444
+tts_image=ghcr.io/org/tts-gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555
+bark_image=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
+EOF
+assert_failure "preflight-scan-images.sh fails on mutable image tag" \
+  bash "$script_dir/preflight-scan-images.sh" --state "$test_tmp/bad-digest.env"
+
+# 6.3 Mock clean Trivy returns zero rebuilds and exit 0
+mock_bin_dir="$test_tmp/mock-bin"
+mkdir -p "$mock_bin_dir"
+cat <<'EOF' > "$mock_bin_dir/trivy"
+#!/usr/bin/env bash
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$out" ]]; then
+  echo '{"Results":[{"Target":"img","Vulnerabilities":[]}]}' > "$out"
+fi
+exit 0
+EOF
+chmod +x "$mock_bin_dir/trivy"
+
+cat <<'EOF' > "$test_tmp/valid-state.env"
+frontend_image=ghcr.io/org/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000001
+gateway_image=ghcr.io/org/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000002
+worker_image=ghcr.io/org/worker@sha256:0000000000000000000000000000000000000000000000000000000000000003
+dbtool_image=ghcr.io/org/dbtool@sha256:0000000000000000000000000000000000000000000000000000000000000004
+auth_browser_image=ghcr.io/org/auth-browser@sha256:0000000000000000000000000000000000000000000000000000000000000005
+tts_image=ghcr.io/org/tts-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000006
+bark_image=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
+EOF
+
+output_env="$test_tmp/gh_output.env"
+rm -f "$output_env"
+PATH="$mock_bin_dir:$PATH" GITHUB_OUTPUT="$output_env" assert_success "Clean production images pass with no rebuilds triggered" \
+  bash "$script_dir/preflight-scan-images.sh" --state "$test_tmp/valid-state.env" --output-dir "$test_tmp/reports-clean"
+
+assert_success "Preflight clean output has security_rebuild_frontend=false" \
+  grep -q "security_rebuild_frontend=false" "$output_env"
+assert_success "Preflight clean output has bark_status=clean" \
+  grep -q "bark_status=clean" "$output_env"
+
+# 6.4 Mock finding CVE with fix in frontend triggers security_rebuild_frontend=true
+cat <<'EOF' > "$mock_bin_dir/trivy"
+#!/usr/bin/env bash
+out=""
+target=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --*) shift ;;
+    *) target="$1"; shift ;;
+  esac
+done
+if [[ -n "$out" ]]; then
+  if [[ "$target" =~ frontend ]]; then
+    echo '{"Results":[{"Target":"img","Vulnerabilities":[{"VulnerabilityID":"CVE-2026-93990","PkgName":"libexpat","InstalledVersion":"2.8.4-r0","FixedVersion":"2.8.5-r0","Severity":"HIGH"}]}]}' > "$out"
+  else
+    echo '{"Results":[{"Target":"img","Vulnerabilities":[]}]}' > "$out"
+  fi
+fi
+exit 0
+EOF
+chmod +x "$mock_bin_dir/trivy"
+
+rm -f "$output_env"
+PATH="$mock_bin_dir:$PATH" GITHUB_OUTPUT="$output_env" assert_success "Vulnerable frontend triggers auto-rebuild without failing preflight" \
+  bash "$script_dir/preflight-scan-images.sh" --state "$test_tmp/valid-state.env" --output-dir "$test_tmp/reports-drift"
+
+assert_success "Preflight drift output sets security_rebuild_frontend=true" \
+  grep -q "security_rebuild_frontend=true" "$output_env"
+assert_success "Preflight drift output keeps security_rebuild_gateway=false" \
+  grep -q "security_rebuild_gateway=false" "$output_env"
+
+# 6.5 Mock finding unfixable CRITICAL in Bark blocks deployment
+cat <<'EOF' > "$mock_bin_dir/trivy"
+#!/usr/bin/env bash
+out=""
+target=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --*) shift ;;
+    *) target="$1"; shift ;;
+  esac
+done
+if [[ -n "$out" ]]; then
+  if [[ "$target" =~ bark ]]; then
+    echo '{"Results":[{"Target":"img","Vulnerabilities":[{"VulnerabilityID":"CVE-2026-99999","PkgName":"critical-lib","InstalledVersion":"1.0","FixedVersion":"","Severity":"CRITICAL"}]}]}' > "$out"
+  else
+    echo '{"Results":[{"Target":"img","Vulnerabilities":[]}]}' > "$out"
+  fi
+fi
+exit 0
+EOF
+chmod +x "$mock_bin_dir/trivy"
+
+rm -f "$output_env"
+PATH="$mock_bin_dir:$PATH" GITHUB_OUTPUT="$output_env" assert_failure "Unfixable CRITICAL in third-party Bark blocks preflight with exit code 1" \
+  bash "$script_dir/preflight-scan-images.sh" --state "$test_tmp/valid-state.env" --output-dir "$test_tmp/reports-bark-vuln"
+
+assert_success "Bark critical failure outputs bark_status=vulnerable" \
+  grep -q "bark_status=vulnerable" "$output_env"
+
 printf "\n========================================\n"
 printf "Results: %d passed, %d failed\n" "$pass_count" "$fail_count"
 printf "========================================\n"

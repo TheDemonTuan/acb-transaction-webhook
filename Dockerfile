@@ -7,7 +7,7 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bunx --bun tsc --noEmit && bunx --bun vite build
 
-FROM nginxinc/nginx-unprivileged:1.29.4-alpine AS frontend
+FROM nginxinc/nginx-unprivileged:1.31.6-alpine3.24 AS frontend
 USER root
 RUN apk update && apk upgrade --no-cache
 COPY deploy/frontend-nginx.conf /etc/nginx/conf.d/default.conf

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -541,7 +543,173 @@ func TestRealtimeTask_Page2FailedIngestDoesNotPublishPage2Event(t *testing.T) {
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("expected 1 poll run, got %v (err: %v)", len(runs), err)
 	}
-	if runs[0].Status != "PARTIAL" {
-		t.Fatalf("expected PARTIAL poll status, got %s", runs[0].Status)
+		if runs[0].Status != "PARTIAL" {
+			t.Fatalf("expected PARTIAL poll status, got %s", runs[0].Status)
+		}
+	}
+
+func TestRealtimeTask_FinishPollUnconfirmedAuthRejected(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_unconfirmed_auth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+
+	mon := New(store, nil, 5*time.Second, 15*time.Second)
+	task := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
+	task.started = true
+	poll, err := store.StartPoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.poll = poll
+
+	// Calling finishPoll with AUTH_REQUIRED without AuthConfirmed proof MUST fail
+	res, err := task.finishPoll(ctx, "AUTH_REQUIRED", "unconfirmed auth")
+	if err == nil {
+		t.Fatal("expected finishPoll to fail when AuthConfirmed is false")
+	}
+	if res.Done {
+		t.Fatal("expected task result Done=false on transient storage error")
+	}
+
+	connAfter, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connAfter.State != "MONITORING" {
+		t.Fatalf("expected connection to remain MONITORING, got: %s", connAfter.State)
+	}
+	if connAfter.Generation != conn.Generation {
+		t.Fatalf("expected generation %d, got %d", conn.Generation, connAfter.Generation)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_resync_recovery.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+
+	var requestCount atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		count := requestCount.Add(1)
+		switch count {
+		case 1:
+			// Poll 1: Bootstrap probe
+			body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"><input name="AccountNbr" value="***1234"></form>`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 2:
+			// Poll 1: History request -> returns valid transactions
+			body := `
+			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"><input name="AccountNbr" value="***1234"></form>
+			<table>
+				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+				<tr><td>TXN_1</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
+				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
+			</table>`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 3:
+			// Poll 2: Stale conversational state in history POST -> returns LoginPage
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		case 4:
+			// Poll 2: Probe GET /acbib/Request confirms session still alive! Returns fresh tokens
+			body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 5:
+			// Poll 2: Replayed POST history with resynced token2 -> returns valid transactions
+			body := `
+			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>
+			<table>
+				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+				<tr><td>TXN_2</td><td>14/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
+				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
+			</table>`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 6:
+			// Poll 3: History request with fresh token2 -> succeeds
+			body := `
+			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>
+			<table>
+				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+				<tr><td>TXN_3</td><td>14/09/2026</td><td>0</td><td>300,000</td><td>1,500,000</td><td>Transfer 3</td></tr>
+				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
+			</table>`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		default:
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}
+	})
+
+	acbClient, err := acb.NewClient("https://online.acb.com.vn", transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mon := New(store, acbClient, 5*time.Second, 15*time.Second)
+
+	// Poll 1
+	task1 := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
+	res1, err := task1.Step(ctx)
+	if err != nil || !res1.Done || res1.Outcome != scheduler.OutcomeSuccess {
+		t.Fatalf("poll 1 failed: res=%+v err=%v", res1, err)
+	}
+
+	// Poll 2: Stale conversational state triggered resync and transparent replay
+	task2 := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
+	res2, err := task2.Step(ctx)
+	if err != nil || !res2.Done || res2.Outcome != scheduler.OutcomeSuccess {
+		t.Fatalf("poll 2 with resync failed: res=%+v err=%v", res2, err)
+	}
+
+	// Poll 3: Next poll succeeds directly
+	task3 := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
+	res3, err := task3.Step(ctx)
+	if err != nil || !res3.Done || res3.Outcome != scheduler.OutcomeSuccess {
+		t.Fatalf("poll 3 failed: res=%+v err=%v", res3, err)
+	}
+
+	// Verify invariant: State remains MONITORING, Generation is strictly UNCHANGED
+	connFinal, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connFinal.State != "MONITORING" {
+		t.Fatalf("expected state to remain MONITORING, got: %s", connFinal.State)
+	}
+	if connFinal.Generation != conn.Generation {
+		t.Fatalf("expected generation %d, got %d", conn.Generation, connFinal.Generation)
+	}
+
+	// Verify all 3 transactions were ingested
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 3 {
+		t.Fatalf("expected 3 transactions ingested, got %d (err: %v)", len(txns), err)
 	}
 }

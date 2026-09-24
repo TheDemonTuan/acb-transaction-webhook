@@ -14,8 +14,8 @@ import (
 )
 
 // CatchUpTask executes a preemptible multi-day history scan following startup or downtime.
-// Invariant: Step executes AT MOST ONE ACB page request per quantum, then yields to allow
-// higher-priority realtime polls to run before subsequent catch-up pages.
+// Invariant: Step processes an entire day atomically up to catchUpMaxPages per quantum,
+// then yields between days to allow higher-priority realtime polls to run before subsequent days.
 const (
 	catchUpMaxDays  = 7
 	catchUpMaxPages = 20
@@ -521,9 +521,9 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 					t.finishDone(pinErr)
 					return scheduler.TaskStepResult{Done: true, Error: pinErr, Outcome: scheduler.OutcomeFatal}, pinErr
 				}
-				pinned["_raw"] = "true"
-				t.nextAction = t.cursor.Action
-				t.nextFields = pinned
+					pinned["_raw"] = "true"
+					t.nextAction = t.cursor.Action
+					t.nextFields = pinned
 			}
 		}
 

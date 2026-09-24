@@ -442,6 +442,29 @@ PY
 )"
 assert_eq "SUCCESS" "$prepull_test_output" "Candidate pre-pull follows signed manifest contract, accepts list promotion_scope, includes Bark, and fails closed on malformed scope"
 
+# 12. Preflight Security Drift Scan Invariants
+printf "\n12. Testing Preflight Security Drift Scan Invariants...\n"
+assert_contains "$deploy_content" "  preflight-scan:" "Deploy workflow defines preflight-scan job"
+check_job_timeout "$deploy_yml" "preflight-scan"
+assert_contains "$deploy_content" "needs: production-state" "Preflight scan job depends on production-state"
+assert_contains "$deploy_content" "preflight-scan-images.sh" "Preflight scan invokes preflight-scan-images.sh"
+
+for comp in frontend gateway worker auth-browser; do
+  assert_contains "$deploy_content" "needs.preflight-scan.outputs.security_rebuild_${comp//-/_}" "Build job build-${comp}-image checks preflight security rebuild output"
+done
+assert_contains "$deploy_content" "needs.preflight-scan.outputs.security_rebuild_schema" "Build job build-dbtool-image checks preflight security rebuild schema output"
+assert_contains "$deploy_content" "needs.preflight-scan.outputs.security_rebuild_tts" "Build job build-tts-gateway-image checks preflight security rebuild tts output"
+
+assert_contains "$deploy_content" "no_cache=true" "Security rebuild forces no_cache=true"
+assert_contains "$deploy_content" "pull=true" "Security rebuild forces pull=true"
+assert_contains "$deploy_content" "cache_from=" "Security rebuild clears cache-from"
+
+scan_needs="$(grep -A 15 '^  scan-and-attest:' "$deploy_yml" || true)"
+assert_contains "$scan_needs" "preflight-scan" "Scan-and-attest job requires preflight-scan"
+
+component_map_content="$(cat "$REPO_ROOT/deploy/component-map.json")"
+assert_contains "$component_map_content" "preflight-scan-images" "deploy/component-map.json maps preflight-scan-images to platform scope"
+
 printf "\n========================================================\n"
 printf "Results: %d passed, %d failed\n" "$TESTS_PASSED" "$TESTS_FAILED"
 printf "========================================================\n"

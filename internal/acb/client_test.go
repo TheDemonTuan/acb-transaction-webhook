@@ -537,8 +537,84 @@ func TestHistoryLoginPageProbeTransportErrorDoesNotConfirmAuth(t *testing.T) {
 	if errors.As(err, &authFail) {
 		t.Fatalf("probe network failure must not be classified as AuthFailure: %v", err)
 	}
+		if err == nil {
+			t.Fatal("expected transport error, got nil")
+		}
+	}
+
+func TestHistoryReplayErrorPropagated(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		if len(requests) == 1 {
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		}
+		// Probe returns valid account page but with conflicting internal pagination flags that cause replay prep to error
+		freshAccountBody := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh_token"><input name="dse_sessionId" value="fresh_sess"><input name="AccountNbr" value="12345678"><input name="_raw" value="true"><input name="_explicitRange" value="true"></form>`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(freshAccountBody)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fields := map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "stale_token",
+		"dse_sessionId":      "sess",
+		"AccountNbr":         "12345678",
+		"_explicitRange":     "true",
+		"FromDate":           "10/09/2026",
+		"ToDate":             "10/09/2026",
+	}
+
+	_, err = client.HistoryForDate(context.Background(), "/acbib/Request", fields, "10/09/2026")
 	if err == nil {
-		t.Fatal("expected transport error, got nil")
+		t.Fatal("expected error from invalid form state during replay, got nil")
+	}
+	if !strings.Contains(err.Error(), "prepare history replay after conversation resync") {
+		t.Fatalf("expected error to contain resync context, got: %v", err)
+	}
+}
+
+func TestHistoryReplayAuthChallengeReturnsAuthFailure(t *testing.T) {
+	var requests []*http.Request
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r)
+		if len(requests) == 1 {
+			// Request 1: POST history returns LoginPage
+			loginBody := `<input name="username"><input type="password" name="password">`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+		} else if len(requests) == 2 {
+			// Request 2: Probe GET /acbib/Request returns clean AccountDetailPage
+			freshAccountBody := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh_token"><input name="dse_sessionId" value="fresh_sess"><input name="AccountNbr" value="12345678"></form>`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(freshAccountBody)), Request: r}, nil
+		}
+		// Request 3: Replayed POST also returns LoginPage (auth challenged again)
+		loginBody := `<input name="username"><input type="password" name="password">`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fields := map[string]string{
+		"dse_operationName":  "ibkacctDetailProc",
+		"dse_processorState": "stale_token",
+		"dse_sessionId":      "sess",
+		"AccountNbr":         "12345678",
+		"_explicitRange":     "true",
+		"FromDate":           "10/09/2026",
+		"ToDate":             "10/09/2026",
+	}
+
+	_, err = client.History(context.Background(), "/acbib/Request", fields)
+	var authFail *AuthFailure
+	if !errors.As(err, &authFail) {
+		t.Fatalf("expected AuthFailure when replayed request is auth challenged, got: %v", err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(requests))
 	}
 }
 
