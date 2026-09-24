@@ -17,6 +17,7 @@ RELEASE_COMMIT="${RELEASE_COMMIT:-${RELEASE_SHA:-unknown}}"
 DBTOOL_IMAGE="${DBTOOL_IMAGE_REF:-}"
 
 if [[ "${1:-}" == --snapshot && $# == 1 ]]; then
+  trap 'code=$?; log_error "snapshot command failed at line $LINENO (exit $code)"' ERR
   [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { log_error 'RELEASE_COMMIT must be a lowercase 40-character SHA'; exit 1; }
   [[ "$DATA_VOLUME_NAME" == bank-event-gateway_gateway_data ]] || { log_error 'Snapshot requires bank-event-gateway_gateway_data volume'; exit 1; }
   validate_digest "$DBTOOL_IMAGE" dbtool
