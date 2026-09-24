@@ -372,14 +372,24 @@ func TestScheduler_Cancellation(t *testing.T) {
 	sched := New(nil)
 	ctx := context.Background()
 	sched.Start(ctx)
-
-	t1 := &mockTask{id: "task_to_cancel", priority: PriorityHistory}
-	_ = sched.Enqueue(t1)
-
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if err := sched.Enqueue(&mockTask{id: "blocking", priority: PriorityHistory, stepFn: func(context.Context) (TaskStepResult, error) {
+		close(started)
+		<-release
+		return TaskStepResult{Done: true, Outcome: OutcomeSuccess}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := sched.Enqueue(&mockTask{id: "task_to_cancel", priority: PriorityHistory}); err != nil {
+		t.Fatal(err)
+	}
 	// Cancel queued task
 	if !sched.CancelTask("task_to_cancel") {
 		t.Fatal("expected CancelTask to return true for queued task")
 	}
+	close(release)
 
 	// Stop scheduler cleanly
 	if err := sched.Stop(); err != nil {
