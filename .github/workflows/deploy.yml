@@ -84,7 +84,7 @@ jobs:
             [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$repo@$digest")" == "$GITHUB_SHA" ]] || { echo "Existing tag has wrong revision" >&2; exit 1; }
             echo "digest=$digest" >> "$GITHUB_OUTPUT"
             echo 'reuse=true' >> "$GITHUB_OUTPUT"
-          elif grep -Eiq 'manifest unknown|manifest not found|name unknown|not found: manifest' "$RUNNER_TEMP/inspect.err"; then
+          elif grep -Fxq "ERROR: $tag: not found" "$RUNNER_TEMP/inspect.err" || grep -Eiq 'manifest unknown|manifest not found|name unknown|not found: manifest' "$RUNNER_TEMP/inspect.err"; then
             echo 'reuse=false' >> "$GITHUB_OUTPUT"
           else
             cat "$RUNNER_TEMP/inspect.err" >&2
