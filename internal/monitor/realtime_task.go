@@ -93,14 +93,6 @@ func classifyRealtimeResponse(resp *acb.Response) {
 	}
 }
 
-func realtimeAuthResponse(resp acb.Response) (string, bool) {
-	classifyRealtimeResponse(&resp)
-	if resp.Kind == acb.LoginPage || resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
-		return "SESSION_EXPIRED", true
-	}
-	return "", false
-}
-
 func sameRealtimeCursor(action string, fields map[string]string, nextAction string, nextFields map[string]string) bool {
 	return action == nextAction && maps.Equal(fields, nextFields)
 }
@@ -114,9 +106,6 @@ func (t *RealtimeTask) finishPoll(ctx context.Context, status, pollErr string) (
 	t.poll.RowsSeen = t.rowsSeen
 	if pollErr != "" {
 		t.poll.Error = pollErr
-	}
-	if status == "AUTH_REQUIRED" {
-		t.poll.AuthConfirmed = true
 	}
 	if err := t.m.finishPoll(ctx, t.poll, t.totalInserted); err != nil {
 		return scheduler.TaskStepResult{Done: false, RequeueAt: time.Now().Add(time.Second), Error: err, Outcome: scheduler.OutcomeTransient}, err

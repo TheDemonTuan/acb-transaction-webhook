@@ -3,6 +3,7 @@ package acb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -364,27 +365,30 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		} else {
 			replayFields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
 		}
-		if err != nil {
-			return probeResp, nil
-		}
-		replayVals := url.Values{}
-		for k, v := range replayFields {
-			replayVals.Set(k, v)
-		}
-		replayURL := c.bootstrap
-		if replayURL == nil {
-			replayURL = requestURL
-		}
-		replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
-		if err != nil {
-			return probeResp, nil
-		}
-		replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		replayResp, replayErr := c.do(replayReq)
-		if replayErr != nil {
-			return Response{}, replayErr
-		}
-		return replayResp, nil
+			if err != nil {
+				return probeResp, fmt.Errorf("prepare history replay after conversation resync: %w", err)
+			}
+			replayVals := url.Values{}
+			for k, v := range replayFields {
+				replayVals.Set(k, v)
+			}
+			replayURL := c.bootstrap
+			if replayURL == nil {
+				replayURL = requestURL
+			}
+			replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
+			if err != nil {
+				return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
+			}
+			replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			replayResp, replayErr := c.do(replayReq)
+			if replayErr != nil {
+				return Response{}, replayErr
+			}
+			if isAuthChallengeKind(replayResp.Kind) {
+				return replayResp, &AuthFailure{Kind: replayResp.Kind, Reason: replayResp.ClassifierReason}
+			}
+			return replayResp, nil
 	}
 	return resp, nil
 }

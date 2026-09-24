@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,16 +37,24 @@ func (m *catchUpInterleaveMockClient) Bootstrap(ctx context.Context) (acb.Respon
 
 func (m *catchUpInterleaveMockClient) History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
 	call := int(m.historyCalls.Add(1))
-	label := fmt.Sprintf("call_%d_%s", call, fields["FromDate"])
+	isPage2 := fields["dse_nextEventName"] == "nextPage"
+	page := "page1"
+	if isPage2 {
+		page = "page2"
+	}
+	var kind string
+	if fields["_explicitRange"] == "true" || (fields["_raw"] == "true" && (call == 2 || call == 5)) {
+		kind = "catchup"
+	} else {
+		kind = "realtime"
+	}
+	label := fmt.Sprintf("%s_%s_%s", kind, fields["FromDate"], page)
 	m.historyLogMu.Lock()
 	m.historyLog = append(m.historyLog, label)
 	m.historyLogMu.Unlock()
 
-	// If fields["_explicitRange"] == "true", it's catch-up
-	// Check if this is page 1 or page 2
-	isPage2 := fields["dse_nextEventName"] == "nextPage"
 	var navRow string
-	if !isPage2 {
+	if kind == "catchup" && !isPage2 {
 		navRow = `<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>`
 	} else {
 		navRow = `<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>`
@@ -67,7 +76,7 @@ func (m *catchUpInterleaveMockClient) History(ctx context.Context, endpoint stri
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
 }
 
-func TestCatchUpTask_YieldsAfterOnePageAndPreemptedByRealtime(t *testing.T) {
+func TestCatchUpTask_DayAtomicAndPreemptedAtDayBoundary(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cu_yield.db"))
 	if err != nil {
@@ -91,17 +100,17 @@ func TestCatchUpTask_YieldsAfterOnePageAndPreemptedByRealtime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait until page 1 of catch-up has executed
+	// Wait until Day 1 catch-up has started
 	deadline := time.Now().Add(2 * time.Second)
 	for client.historyCalls.Load() < 1 {
 		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for catch-up page 1")
+			t.Fatal("timed out waiting for catch-up day 1 to begin")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Enqueue RealtimeTask (priority 80) immediately while CatchUp yields
-	rtExecuted := make(chan struct{})
+	// Enqueue RealtimeTask (priority 80) while Day 1 is executing or right as it yields
+	rtExecuted := make(chan struct{}, 1)
 	mon.WithEventNotifier(func(events []storage.EventNotification) {
 		select {
 		case rtExecuted <- struct{}{}:
@@ -117,15 +126,15 @@ func TestCatchUpTask_YieldsAfterOnePageAndPreemptedByRealtime(t *testing.T) {
 	// Realtime poll must execute before catch-up finishes completely
 	select {
 	case <-rtExecuted:
-	case <-time.After(2 * time.Second):
-		// Poll runs and commits
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for realtime poll preemption")
 	}
 
 	// Wait for queue to drain
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for sched.TotalQueueDepth() > 0 || sched.IsBusy() {
 		if time.Now().After(deadline) {
-			break
+			t.Fatal("timed out waiting for scheduler queue to drain")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -133,8 +142,28 @@ func TestCatchUpTask_YieldsAfterOnePageAndPreemptedByRealtime(t *testing.T) {
 	client.historyLogMu.Lock()
 	defer client.historyLogMu.Unlock()
 
-	if len(client.historyLog) < 2 {
-		t.Fatalf("expected at least 2 history calls, got %d", len(client.historyLog))
+	// Verification of atomic day processing and preemption:
+	// Day 1 must complete both page1 and page2 atomically before realtime poll runs.
+	// Realtime poll must run between Day 1 and Day 2.
+	// Day 2 must then complete page1 and page2.
+	if len(client.historyLog) != 5 {
+		t.Fatalf("expected exactly 5 history calls (day1 p1, day1 p2, rt p1, day2 p1, day2 p2), got %d: %v",
+			len(client.historyLog), client.historyLog)
+	}
+	if !strings.HasPrefix(client.historyLog[0], "catchup_") || !strings.HasSuffix(client.historyLog[0], "_page1") {
+		t.Fatalf("call 0 should be day 1 page 1 catchup, got %s", client.historyLog[0])
+	}
+	if !strings.HasPrefix(client.historyLog[1], "catchup_") || !strings.HasSuffix(client.historyLog[1], "_page2") {
+		t.Fatalf("call 1 should be day 1 page 2 catchup, got %s", client.historyLog[1])
+	}
+	if !strings.HasPrefix(client.historyLog[2], "realtime_") {
+		t.Fatalf("call 2 should be realtime preemption, got %s", client.historyLog[2])
+	}
+	if !strings.HasPrefix(client.historyLog[3], "catchup_") || !strings.HasSuffix(client.historyLog[3], "_page1") {
+		t.Fatalf("call 3 should be day 2 page 1 catchup, got %s", client.historyLog[3])
+	}
+	if !strings.HasPrefix(client.historyLog[4], "catchup_") || !strings.HasSuffix(client.historyLog[4], "_page2") {
+		t.Fatalf("call 4 should be day 2 page 2 catchup, got %s", client.historyLog[4])
 	}
 }
 
