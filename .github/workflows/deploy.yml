@@ -245,6 +245,7 @@ jobs:
           done
           # Harness switches to app UID 1000; keep .git credentials private.
           chmod a+r bundle/* deploy/tests/test_simple_deploy.sh platform/edge/dynamic/acb.yml
+          chmod a+x bundle/{deploy.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,bark-entrypoint.sh}
           chmod a+rx bundle deploy deploy/tests platform platform/edge platform/edge/dynamic
           path="$GITHUB_WORKSPACE"
           while [[ "$path" != / ]]; do
