@@ -92,33 +92,22 @@ load_runtime() {
 }
 compose() { compose_release "$1" "$1/runtime.env" "${@:2}"; }
 write_runtime() {
-  local dest="$1" gw="$2" fe="$3" previous="$4" prevgw="$5" prevfe="$6"
-  load_runtime "$previous"
+  local dest="$1" gw="$2" fe="$3" previous="$4" candidate_gateway="$GATEWAY_IMAGE_REF" candidate_frontend="$FRONTEND_IMAGE_REF"
+  local candidate_worker="$WORKER_IMAGE_REF" candidate_browser="$BROWSER_IMAGE_REF" candidate_tts="$TTS_IMAGE_REF" candidate_bark="$BARK_IMAGE_REF" candidate_dbtool="$DBTOOL_IMAGE_REF"
   [[ "$gw" == blue || "$gw" == green ]] || return 1
   [[ "$fe" == blue || "$fe" == green ]] || return 1
+  load_runtime "$previous"
   local -A ref=([blue]="$IMAGE_REF_BLUE" [green]="$IMAGE_REF_GREEN")
   local -A fe_ref=([blue]="$FRONTEND_IMAGE_REF_BLUE" [green]="$FRONTEND_IMAGE_REF_GREEN")
   local -A commit=([blue]="$RELEASE_COMMIT_BLUE" [green]="$RELEASE_COMMIT_GREEN")
+  ref[$gw]="$candidate_gateway"; fe_ref[$fe]="$candidate_frontend"; commit[$gw]="$sha"
   {
     printf 'IMAGE_REF_BLUE=%s\nIMAGE_REF_GREEN=%s\n' "${ref[blue]}" "${ref[green]}"
     printf 'FRONTEND_IMAGE_REF_BLUE=%s\nFRONTEND_IMAGE_REF_GREEN=%s\n' "${fe_ref[blue]}" "${fe_ref[green]}"
     printf 'RELEASE_COMMIT_BLUE=%s\nRELEASE_COMMIT_GREEN=%s\n' "${commit[blue]}" "${commit[green]}"
-    for key in WORKER_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF DBTOOL_IMAGE_REF; do printf '%s=%s\n' "$key" "${!key}"; done
-    printf 'WORKER_RELEASE_COMMIT=%s\nENV_FILE=%s\nSECRETS_DIR=%s\nBARK_SECRET_GROUP=1000\n' "$WORKER_RELEASE_COMMIT" "$DEPLOY_PATH/deploy/.env.production" "$DEPLOY_PATH/deploy/secrets"
+    printf 'WORKER_IMAGE_REF=%s\nBROWSER_IMAGE_REF=%s\nTTS_IMAGE_REF=%s\nBARK_IMAGE_REF=%s\nDBTOOL_IMAGE_REF=%s\n' "$candidate_worker" "$candidate_browser" "$candidate_tts" "$candidate_bark" "$candidate_dbtool"
+    printf 'WORKER_RELEASE_COMMIT=%s\nENV_FILE=%s\nSECRETS_DIR=%s\nBARK_SECRET_GROUP=1000\n' "$sha" "$DEPLOY_PATH/deploy/.env.production" "$DEPLOY_PATH/deploy/secrets"
   } | atomic_write_file "$dest/runtime.env" 600
-  # Replace inactive refs only; old slot metadata must not be touched.
-  python3 - "$dest/runtime.env" "$gw" "$fe" "$sha" "$GATEWAY_IMAGE_REF" "$FRONTEND_IMAGE_REF" "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF" "$DBTOOL_IMAGE_REF" <<'PY'
-import os,sys,tempfile
-p,gw,fe,sha,g,f,w,b,t,ba,d=sys.argv[1:]
-a=dict(x.rstrip('\n').split('=',1) for x in open(p))
-a['IMAGE_REF_'+gw.upper()]=g; a['FRONTEND_IMAGE_REF_'+fe.upper()]=f
-a['RELEASE_COMMIT_'+gw.upper()]=sha
-a.update(WORKER_IMAGE_REF=w,BROWSER_IMAGE_REF=b,TTS_IMAGE_REF=t,BARK_IMAGE_REF=ba,DBTOOL_IMAGE_REF=d,WORKER_RELEASE_COMMIT=sha)
-fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix='.acb-',suffix='.tmp')
-with os.fdopen(fd,'w') as out:
-    out.writelines(k+'='+v+'\n' for k,v in a.items());out.flush();os.fsync(out.fileno())
-os.chmod(tmp,0o600);os.replace(tmp,p)
-PY
 }
 route_replace() {
   local src="$1"
