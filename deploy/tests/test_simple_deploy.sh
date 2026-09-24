@@ -162,7 +162,7 @@ docker run --rm --network none -v bank-event-gateway_gateway_data:/data busybox:
 docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data "$DBTOOL_IMAGE_REF" -path /data/gateway.db -migrate
 docker pull python:3.13-alpine >/dev/null
 docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine \
-  python -c 'import sqlite3; db=sqlite3.connect("/data/gateway.db"); db.execute("CREATE TABLE rehearsal_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); db.execute("INSERT INTO rehearsal_sentinel VALUES (1, ?)", ("retain-after-migrate",)); db.commit()'
+  python -c 'import sqlite3; db=sqlite3.connect("/data/gateway.db"); db.execute("CREATE TABLE rehearsal_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); db.execute("INSERT INTO rehearsal_sentinel VALUES (1, ?)", ("retain-after-migrate",)); db.execute("INSERT INTO connections(id,state,created_at,updated_at) VALUES (?,?,?,?)", ("rehearsal-connection","UNCONFIGURED","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z")); db.commit()'
 docker compose --project-name acb --project-directory "$legacy" --env-file "$root/deploy/.env.production" --env-file "$legacy/.release.env" \
   -f "$legacy/compose/base.yaml" -f "$legacy/compose/gateway.yaml" -f "$legacy/compose/frontend.yaml" \
   -f "$legacy/compose/worker.yaml" -f "$legacy/compose/auth-browser.yaml" -f "$legacy/compose/tts.yaml" \
