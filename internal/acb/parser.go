@@ -109,8 +109,17 @@ func ParseHistoryPage(markup string) (HistoryPageResult, error) {
 	}
 
 	if len(parsedTransactions) == 0 {
-		if recognized && emptyHistory {
+		hasNext, nextAction, nextFields, totalRows := detectPagination(doc, markup)
+		// ponytail: allow recognized history table when totalRows indicates 0 records; require strict row parser once bank format changes
+		if recognized && (emptyHistory || (totalRows == 0 && (strings.Contains(strings.ToLower(markup), "tổng số dòng: 0") || strings.Contains(strings.ToLower(markup), "tổng số bản ghi: 0") || strings.Contains(strings.ToLower(markup), "tổng số giao dịch: 0") || strings.Contains(strings.ToLower(markup), "total rows: 0")))) {
 			parsedTransactions = []Transaction{}
+			return HistoryPageResult{
+				Transactions: parsedTransactions,
+				HasNext:      hasNext,
+				NextAction:   nextAction,
+				NextFields:   nextFields,
+				TotalRows:    totalRows,
+			}, nil
 		} else if recognized {
 			return HistoryPageResult{}, errors.New("ACB history table has no transactions and no recognized empty-state marker")
 		} else {

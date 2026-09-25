@@ -221,6 +221,11 @@ export const ActivityPage: React.FC = () => {
                         >
                           {pollStatus.label}
                         </span>
+                        {p.classifier && (
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 border border-stone-200 uppercase tracking-wider">
+                            {p.classifier}
+                          </span>
+                        )}
                         <span className="text-xs text-stone-500 flex items-center gap-1 font-mono">
                           <Clock className="w-3 h-3" />
                           {new Date(p.startedAt).toLocaleString('vi-VN')}

@@ -122,7 +122,7 @@ export const RealtimeDomainBridge: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.status });
       queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
 
-      if (data && (data.insertedCount ?? 0) > 0) {
+      if (data && ((data.insertedCount ?? 0) > 0 || data.classifier === 'RECOVERY' || data.classifier === 'CATCH_UP')) {
         queryClient.invalidateQueries({ queryKey: queryKeys.transactions() });
         queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
       }
