@@ -7,8 +7,11 @@ import (
 
 var ErrHistoryDayMismatch = errors.New("ACB history response contains transactions outside requested day")
 
-// FilterHistoryTransactionDay accepts only a scoped effective-date response and
-// returns the transactions whose transaction date matches the requested day.
+// FilterHistoryTransactionDay returns transactions whose transaction date matches
+// the requested day. Responses from ACB often include adjacent transactions due
+// to business-day or effective-date query behavior; those rows are safely
+// excluded from ingestion rather than failing the poll. Unparseable dates
+// continue to fail closed.
 func FilterHistoryTransactionDay(transactions []Transaction, requested string) ([]Transaction, error) {
 	if err := validateHistoryDateRange(requested, requested); err != nil {
 		return nil, err
@@ -20,12 +23,9 @@ func FilterHistoryTransactionDay(transactions []Transaction, requested string) (
 			return nil, ErrHistoryDayMismatch
 		}
 		if transaction.EffectiveDate != "" {
-			effective, err := NormalizeDate(transaction.EffectiveDate, nil)
-			if err != nil || effective.Time.Format(historyDateLayout) != requested {
+			if _, err := NormalizeDate(transaction.EffectiveDate, nil); err != nil {
 				return nil, ErrHistoryDayMismatch
 			}
-		} else if day.Time.Format(historyDateLayout) != requested {
-			return nil, ErrHistoryDayMismatch
 		}
 		if day.Time.Format(historyDateLayout) == requested {
 			filtered = append(filtered, transaction)
