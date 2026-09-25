@@ -156,3 +156,89 @@ func TestParseHistoryRejectsInvalidMoney(t *testing.T) {
 		t.Fatal("accepted invalid money")
 	}
 }
+
+func TestParseHistoryRejectsScriptContainingTotalRowsZero(t *testing.T) {
+	html := `
+	<script>
+		var status = "Tổng số dòng: 0";
+	</script>
+	<table>
+		<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+	</table>`
+	_, err := ParseHistory(html)
+	if err == nil {
+		t.Fatal("expected failure closed for script containing 'Tổng số dòng: 0', but parsing succeeded")
+	}
+	_, errPage := ParseHistoryPage(html)
+	if errPage == nil {
+		t.Fatal("expected failure closed in ParseHistoryPage for script tag, but succeeded")
+	}
+}
+
+func TestParseHistoryRejectsContradictoryNextLinkWithEmptyState(t *testing.T) {
+	// Case 1: Total rows is 0, but next link is present
+	html1 := `
+	<div><span>Tổng số dòng: 0</span></div>
+	<table>
+		<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+	</table>
+	<a href="/acbib/Request" onclick="submitEvent('nextPage')">Trang sau</a>`
+	_, err1 := ParseHistoryPage(html1)
+	if err1 == nil {
+		t.Fatal("expected contradictory next link with totalRows=0 to fail closed")
+	}
+
+	// Case 2: Empty marker in table, but next link is present
+	html2 := `
+	<table>
+		<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+		<tr><td colspan="4">Không có giao dịch</td></tr>
+	</table>
+	<a href="/acbib/Request" onclick="submitEvent('nextPage')">Trang sau</a>`
+	_, err2 := ParseHistoryPage(html2)
+	if err2 == nil {
+		t.Fatal("expected contradictory next link with empty marker to fail closed")
+	}
+
+	// Case 3: Transactions parsed, but DOM text says total rows is 0
+	html3 := `
+	<div><span>Tổng số dòng: 0</span></div>
+	<table>
+		<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+		<tr><td>12/09/2026</td><td>TX1</td><td>0</td><td>10.000</td></tr>
+	</table>`
+	_, err3 := ParseHistoryPage(html3)
+	if err3 == nil {
+		t.Fatal("expected contradictory totalRows=0 with non-empty transactions to fail closed")
+	}
+}
+
+func TestParseHistoryValidZeroRowsLegitimateEmptyState(t *testing.T) {
+	// Subcase A: DOM text explicitly has total rows 0
+	htmlA := `
+	<div><span>Tổng số dòng: 0</span></div>
+	<table>
+		<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+	</table>`
+	pageA, errA := ParseHistoryPage(htmlA)
+	if errA != nil {
+		t.Fatalf("expected valid empty state with DOM totalRows=0 to pass, got: %v", errA)
+	}
+	if len(pageA.Transactions) != 0 || pageA.TotalRows != 0 || pageA.HasNext {
+		t.Fatalf("unexpected page result for empty state: %+v", pageA)
+	}
+
+	// Subcase B: Empty marker row inside table
+	htmlB := `
+	<table>
+		<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
+		<tr><td colspan="4">Không có giao dịch</td></tr>
+	</table>`
+	pageB, errB := ParseHistoryPage(htmlB)
+	if errB != nil {
+		t.Fatalf("expected valid empty state with empty marker to pass, got: %v", errB)
+	}
+	if len(pageB.Transactions) != 0 || pageB.HasNext {
+		t.Fatalf("unexpected page result for empty marker: %+v", pageB)
+	}
+}

@@ -219,11 +219,16 @@ jobs:
 
   rehearsal:
     needs: scan
+    name: Rehearsal (${{ matrix.suite }})
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [lifecycle, fault-matrix]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -237,7 +242,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Rehearse real deploy and rollback on isolated runner
+      - name: Rehearse real deploy and rollback on isolated runner (${{ matrix.suite }})
         run: |
           set -euo pipefail
           for file in deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py compose.prod.yaml seccomp-auth-browser.json bark-entrypoint.sh; do
@@ -252,7 +257,34 @@ jobs:
             sudo -u '#1000' test -x "$path" || sudo chmod a+x "$path"
             path="$(dirname "$path")"
           done
-          bash deploy/tests/test_simple_deploy.sh --images-env "$PWD/bundle/images.env" --bundle "$PWD/bundle"
+          bash deploy/tests/test_simple_deploy.sh --images-env "$PWD/bundle/images.env" --bundle "$PWD/bundle" --suite "${{ matrix.suite }}"
+
+  verified-bundle:
+    needs: [scan, rehearsal]
+    if: needs.rehearsal.result == 'success'
+    name: Package verified bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Require all rehearsal shards success
+        env:
+          RESULT: ${{ needs.rehearsal.result }}
+        run: test "$RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-images
+          path: bundle
+      - name: Assemble verified bundle
+        run: |
+          set -euo pipefail
+          for file in deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py compose.prod.yaml seccomp-auth-browser.json bark-entrypoint.sh; do
+            cp "deploy/$file" "bundle/$file"
+          done
+          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py}
+          chmod 644 bundle/{bark-entrypoint.sh,compose.prod.yaml,seccomp-auth-browser.json,images.env}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-bundle
@@ -261,7 +293,7 @@ jobs:
           retention-days: 3
 
   deploy:
-    needs: [verify, build, scan, rehearsal]
+    needs: [verify, build, scan, rehearsal, verified-bundle]
     if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true
     name: Deploy to VPS
     runs-on: ubuntu-latest

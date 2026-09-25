@@ -319,6 +319,22 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 	if err != nil {
 		return Response{}, err
 	}
+	if fields != nil && fields["AccountNbr"] != "" {
+		if c.bootstrapFields != nil {
+			c.bootstrapFields["AccountNbr"] = fields["AccountNbr"]
+		}
+	} else if c.bootstrapFields != nil && c.bootstrapFields["AccountNbr"] != "" {
+		if hFields["AccountNbr"] == "" {
+			hFields["AccountNbr"] = c.bootstrapFields["AccountNbr"]
+		}
+	}
+	if !isContinuation || hFields["dse_nextEventName"] == "" {
+		hFields["dse_nextEventName"] = "byDate"
+	}
+	hFields["activeDatetimeYN"] = "N"
+	delete(hFields, "activeDatetimeByMonth")
+	delete(hFields, "MonthCurr")
+	delete(hFields, "YearCurr")
 	requestURL, err := c.endpoint(endpoint)
 	if err != nil {
 		return Response{}, err
@@ -365,10 +381,18 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		} else {
 			replayFields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
 		}
-			if err != nil {
-				return probeResp, fmt.Errorf("prepare history replay after conversation resync: %w", err)
-			}
-			replayVals := url.Values{}
+				if err != nil {
+					return probeResp, fmt.Errorf("prepare history replay after conversation resync: %w", err)
+				}
+				if c.bootstrapFields != nil && c.bootstrapFields["AccountNbr"] != "" && replayFields["AccountNbr"] == "" {
+					replayFields["AccountNbr"] = c.bootstrapFields["AccountNbr"]
+				}
+				replayFields["dse_nextEventName"] = "byDate"
+				replayFields["activeDatetimeYN"] = "N"
+				delete(replayFields, "activeDatetimeByMonth")
+				delete(replayFields, "MonthCurr")
+				delete(replayFields, "YearCurr")
+				replayVals := url.Values{}
 			for k, v := range replayFields {
 				replayVals.Set(k, v)
 			}
