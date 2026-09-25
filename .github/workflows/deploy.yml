@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy to production (main only)
+        description: Deploy to production (manual confirmation required)
         type: boolean
         required: true
         default: false
@@ -262,7 +262,7 @@ jobs:
 
   deploy:
     needs: [verify, build, scan, rehearsal]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.deploy == true)
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true
     name: Deploy to VPS
     runs-on: ubuntu-latest
     timeout-minutes: 30
