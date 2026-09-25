@@ -113,7 +113,17 @@ func ParseHistoryPage(markup string) (HistoryPageResult, error) {
 		if hasNext {
 			return HistoryPageResult{}, errors.New("ACB history table has contradictory next link with empty transactions")
 		}
-		isLegitEmpty := emptyHistory || (totalRowsFound && totalRows == 0)
+		fullDomText := strings.ToLower(domVisibleText(doc))
+		domEmptyMarker := containsAny(fullDomText,
+			"khong co giao dich", "không có giao dịch",
+			"khong co phat sinh giao dich", "không có phát sinh giao dịch",
+			"khong phat sinh giao dich", "không phát sinh giao dịch",
+			"khong tim thay du lieu", "không tìm thấy dữ liệu",
+			"khong tim thay giao dich", "không tìm thấy giao dịch",
+			"khong co du lieu", "không có dữ liệu",
+			"no transaction", "chua co giao dich", "chưa có giao dịch",
+		)
+		isLegitEmpty := emptyHistory || domEmptyMarker || (totalRowsFound && totalRows == 0)
 		if recognized && isLegitEmpty {
 			parsedTransactions = []Transaction{}
 			return HistoryPageResult{
