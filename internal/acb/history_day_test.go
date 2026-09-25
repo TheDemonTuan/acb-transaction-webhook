@@ -27,21 +27,23 @@ func TestHistoryDayDiagnosticsDoNotIncludeTransactionContents(t *testing.T) {
 
 func TestFilterHistoryTransactionDay(t *testing.T) {
 	transactions := []Transaction{
-		{TransactionAt: "24/09/2026 23:00:00", EffectiveDate: "25/09/2026", Number: "prior"},
-		{TransactionAt: "25/09/2026 08:00:00", EffectiveDate: "25/09/2026", Number: "today"},
+		{TransactionAt: "24/09/2026 23:00:00", EffectiveDate: "25/09/2026", Number: "prior_txn"},
+		{TransactionAt: "25/09/2026 08:00:00", EffectiveDate: "25/09/2026", Number: "today_1"},
+		{TransactionAt: "25/09/2026 19:30:00", EffectiveDate: "26/09/2026", Number: "today_next_effective"},
 	}
 	filtered, err := FilterHistoryTransactionDay(transactions, "25/09/2026")
-	if err != nil || len(filtered) != 1 || filtered[0].Number != "today" {
-		t.Fatalf("expected only today's transaction: count=%d err=%v", len(filtered), err)
+	if err != nil {
+		t.Fatalf("unexpected filter error: %v", err)
+	}
+	if len(filtered) != 2 || filtered[0].Number != "today_1" || filtered[1].Number != "today_next_effective" {
+		t.Fatalf("expected both today transactions regardless of effective day: %+v", filtered)
 	}
 	for _, invalid := range []Transaction{
-		{TransactionAt: "25/09/2026", EffectiveDate: "24/09/2026"},
 		{TransactionAt: "25/09/2026", EffectiveDate: "invalid"},
 		{TransactionAt: "invalid", EffectiveDate: "25/09/2026"},
-		{TransactionAt: "24/09/2026"},
 	} {
 		if _, err := FilterHistoryTransactionDay([]Transaction{invalid}, "25/09/2026"); !errors.Is(err, ErrHistoryDayMismatch) {
-			t.Fatalf("expected scoped response rejection: %v", err)
+			t.Fatalf("expected malformed date rejection: %v", err)
 		}
 	}
 }
