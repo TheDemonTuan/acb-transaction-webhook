@@ -801,43 +801,59 @@ func (m *Monitor) Run(ctx context.Context) {
 	m.reconcileOpenRecovery(ctx)
 
 	timer := time.NewTimer(100 * time.Millisecond)
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
 	defer timer.Stop()
 	recoveryTicker := time.NewTicker(5 * time.Second)
 	defer recoveryTicker.Stop()
 
-	for {
-		schedule := storage.ResolveSchedule(time.Now(), &m.cachedSettings)
+	var deadline time.Time
 
-		// Schedule resume is realtime-only. Historical recovery is admitted separately
-		// by an authenticated recovery intent, never by the clock mode transition.
-		if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && schedule.Mode == storage.ModeRealtime {
-			conn, err := m.store.Connection(ctx)
-			if err == nil && conn.State == "MONITORING" {
-				openRun, recErr := m.openRecoveryRun(ctx, conn.ID, conn.Generation)
-				if recErr == nil && openRun == nil {
-					if s := m.Scheduler(); s != nil {
-						_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+	for {
+		now := time.Now()
+		if m != nil && m.now != nil {
+			now = m.now()
+		}
+
+		if deadline.IsZero() {
+			schedule := storage.ResolveSchedule(now, &m.cachedSettings)
+
+			// Schedule resume is realtime-only. Historical recovery is admitted separately
+			// by an authenticated recovery intent, never by the clock mode transition.
+			if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && schedule.Mode == storage.ModeRealtime {
+				conn, err := m.store.Connection(ctx)
+				if err == nil && conn.State == "MONITORING" {
+					openRun, recErr := m.openRecoveryRun(ctx, conn.ID, conn.Generation)
+					if recErr == nil && openRun == nil {
+						if s := m.Scheduler(); s != nil {
+							_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+						}
 					}
 				}
 			}
-		}
-		m.lastMode = schedule.Mode
+			m.lastMode = schedule.Mode
 
-		wait := m.nextInterval(schedule.MinInterval, schedule.MaxInterval)
-		if schedule.Mode == storage.ModePaused {
-			wait = 10 * time.Minute
-		}
-
-		boostStatus := m.PaymentBoostStatus()
-		if boostStatus.Active && schedule.Mode != storage.ModePaused {
-			wait = m.nextInterval(time.Duration(boostStatus.MinSeconds)*time.Second, time.Duration(boostStatus.MaxSeconds)*time.Second)
-		} else {
-			untilTrans := time.Until(schedule.NextTransition)
-			if untilTrans > 0 && untilTrans < wait {
-				wait = untilTrans
+			wait := m.nextInterval(schedule.MinInterval, schedule.MaxInterval)
+			if schedule.Mode == storage.ModePaused {
+				wait = 10 * time.Minute
 			}
+
+			boostStatus := m.PaymentBoostStatus()
+			if boostStatus.Active && schedule.Mode != storage.ModePaused {
+				wait = m.nextInterval(time.Duration(boostStatus.MinSeconds)*time.Second, time.Duration(boostStatus.MaxSeconds)*time.Second)
+			} else {
+				untilTrans := schedule.NextTransition.Sub(now)
+				if untilTrans > 0 && untilTrans < wait {
+					wait = untilTrans
+				}
+			}
+			deadline = now.Add(wait)
+			timer.Reset(wait)
 		}
-		timer.Reset(wait)
 
 		select {
 		case <-ctx.Done():
@@ -854,6 +870,7 @@ func (m *Monitor) Run(ctx context.Context) {
 				default:
 				}
 			}
+			deadline = time.Time{}
 			conn, err := m.store.Connection(ctx)
 			if err == nil && conn.State == "MONITORING" {
 				if s := m.Scheduler(); s != nil {
@@ -870,6 +887,7 @@ func (m *Monitor) Run(ctx context.Context) {
 				default:
 				}
 			}
+			deadline = time.Time{}
 			if s, err := m.store.GetMonitorSettings(ctx); err == nil {
 				m.cachedSettings = s
 				slog.Info("monitor schedule hot-reloaded", "revision", s.Revision, "enabled", s.Enabled)
@@ -877,7 +895,13 @@ func (m *Monitor) Run(ctx context.Context) {
 			continue
 
 		case <-timer.C:
-			schedule = storage.ResolveSchedule(time.Now(), &m.cachedSettings)
+			deadline = time.Time{}
+			now = time.Now()
+			if m != nil && m.now != nil {
+				now = m.now()
+			}
+			schedule := storage.ResolveSchedule(now, &m.cachedSettings)
+			m.lastMode = schedule.Mode
 			conn, err := m.store.Connection(ctx)
 			if err != nil || conn.State != "MONITORING" {
 				continue

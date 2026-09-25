@@ -96,6 +96,18 @@ func TestParseHistoryAcceptsRecognizedEmptyMarker(t *testing.T) {
 	}
 }
 
+func TestParseHistoryAcceptsTotalRowsZeroWithoutDataRows(t *testing.T) {
+	html := `<div><span>Tổng số dòng: 0</span></div>
+	<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr></table>`
+	page, err := ParseHistoryPage(html)
+	if err != nil {
+		t.Fatalf("expected empty page success with totalRows=0, got error: %v", err)
+	}
+	if len(page.Transactions) != 0 || page.TotalRows != 0 {
+		t.Fatalf("unexpected page result: %+v", page)
+	}
+}
+
 func TestParseHistoryAcceptsNoDataMarker(t *testing.T) {
 	transactions, err := ParseHistory(`<table>
 	<tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr>
