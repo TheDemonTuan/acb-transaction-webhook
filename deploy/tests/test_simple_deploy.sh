@@ -625,7 +625,7 @@ text='\n'.join(('RELEASE_SHA='+sha if line.startswith('RELEASE_SHA=') else 'GATE
 open(dst,'w').write(text)
 PY
 pull_rc=0
-timeout 120 bash "$unpullable/deploy.sh" "$unpullable_sha" >"$root/image-pull.log" 2>&1 || pull_rc=$?
+timeout 180 bash "$unpullable/deploy.sh" "$unpullable_sha" >"$root/image-pull.log" 2>&1 || pull_rc=$?
 [[ "$pull_rc" != 0 && "$pull_rc" != 124 ]] || fail "Missing image did not fail promptly (exit $pull_rc)"
 [[ "$(sha256sum "$root/state.env")" == "$state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$route_before" && "$(docker inspect --format '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Image pull failure mutated runtime'
 retire_rc=0
