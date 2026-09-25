@@ -575,6 +575,9 @@ done
 docker start edge-traefik >/dev/null
 bash "$target/deploy.sh" --rollback >"$root/postcommit-rollback.log" 2>&1
 verify_baseline 'post-commit recovery'
+state_before="$(sha256sum "$root/state.env")"
+route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
+worker_before="$(docker inspect --format '{{.Id}}' acb-worker)"
 docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
 import datetime,sqlite3
 db=sqlite3.connect("/data/gateway.db")
