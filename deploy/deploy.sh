@@ -439,9 +439,9 @@ next_fe=blue; [[ "$frontend_slot" == blue ]] && next_fe=green
 write_runtime "$RELEASE" "$next_gw" "$next_fe" "$previous" "$gateway_slot" "$frontend_slot"
 compose "$RELEASE" config --quiet
 # Pull only services that may change. Rollback images must already be recoverable.
-compose "$RELEASE" pull worker auth-browser tts-gateway bark "gateway-$next_gw" "frontend-$next_fe" dbtool
+timeout 90 compose "$RELEASE" pull worker auth-browser tts-gateway bark "gateway-$next_gw" "frontend-$next_fe" dbtool
 load_runtime "$previous"
-for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || docker pull "$ref"; done
+for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || timeout 90 docker pull "$ref"; done
 snapshot="$(mktemp -d "$DEPLOY_PATH/.deploy-snapshot.XXXXXXXX")"
 cat "$STATE" | atomic_write_file "$snapshot/previous-state.env" 600
 cat "$ROUTE" | atomic_write_file "$snapshot/previous-acb.yml" 600
