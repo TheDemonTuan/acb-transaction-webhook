@@ -55,9 +55,17 @@ type HistoryDayCount struct {
 
 // HistoryDayCounts exposes only dates and row counts, never transaction contents.
 func HistoryDayCounts(transactions []Transaction) []HistoryDayCount {
+	return historyDayCounts(transactions, func(tx Transaction) string { return tx.TransactionAt })
+}
+
+func HistoryEffectiveDayCounts(transactions []Transaction) []HistoryDayCount {
+	return historyDayCounts(transactions, func(tx Transaction) string { return tx.EffectiveDate })
+}
+
+func historyDayCounts(transactions []Transaction, date func(Transaction) string) []HistoryDayCount {
 	counts := make(map[string]int)
 	for _, transaction := range transactions {
-		day, err := NormalizeDate(transaction.TransactionAt, nil)
+		day, err := NormalizeDate(date(transaction), nil)
 		if err != nil {
 			counts["INVALID"]++
 			continue
