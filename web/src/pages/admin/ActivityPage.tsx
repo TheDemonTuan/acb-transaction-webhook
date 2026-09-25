@@ -234,6 +234,12 @@ export const ActivityPage: React.FC = () => {
                       {p.error && (
                         <p className="text-xs text-rose-600 font-mono mt-0.5">{p.error}</p>
                       )}
+                      {p.status === 'SUCCEEDED' && p.pages === 0 && p.rowsSeen === 0 && (
+                        <div className="mt-1 text-xs text-stone-500">
+                          <p className="font-medium">Chưa quét lịch sử giao dịch</p>
+                          <p>Lượt này không quét lịch sử; giữ phiên thành công không có nghĩa là đã đồng bộ giao dịch.</p>
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-4 text-xs text-stone-600 font-mono">

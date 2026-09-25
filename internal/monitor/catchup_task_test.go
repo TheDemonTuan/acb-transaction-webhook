@@ -76,40 +76,89 @@ func (m *catchUpInterleaveMockClient) History(ctx context.Context, endpoint stri
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
 }
 
-func TestCatchUpTaskRejectsWrongDayWithoutCoverage(t *testing.T) {
+func TestCatchUpTaskFiltersAdjacentDaysAcrossPages(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "wrong_recovery_day.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, conn, _ := setupRecoveryTestEnv(t, "mixed_recovery.db")
 	defer store.Close()
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
-		t.Fatal(err)
-	}
-	day := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("2006-01-02")
-	today := time.Now().In(acb.DefaultLocation).Format("02/01/2006")
-	client := &mockBankClient{
-		getResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: `<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="current"><input name="dse_sessionId" value="s1"></form>`},
-		historyResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: fmt.Sprintf(`<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="next"><input name="dse_sessionId" value="s1"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>WRONG_DAY</td><td>%s</td><td>0</td><td>100</td></tr></table>`, today)},
+	client := newRecoveryMockBankClient()
+	client.pages["25/09/2026"] = []string{
+		buildHistoryHTML([]acb.Transaction{{Number: "A", TransactionAt: "24/09/2026 20:00:00", Credit: 100}}, true),
+		buildHistoryHTML([]acb.Transaction{{Number: "B", TransactionAt: "25/09/2026 08:00:00", Credit: 100}, {Number: "C", TransactionAt: "25/09/2026 09:00:00", Credit: 100}}, false),
 	}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
 	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
-	task.fromDate, task.toDate = day, day
-	_, err = task.Step(ctx)
-	if err != acb.ErrHistoryDayMismatch {
-		t.Fatalf("expected wrong-day response to fail closed: %v", err)
+	task.fromDate, task.toDate = "2026-09-25", "2026-09-25"
+	task.currentDay, _ = time.Parse("2006-01-02", task.fromDate)
+	task.initialized = true
+	res, err := task.Step(ctx)
+	if err != nil || !res.Done {
+		t.Fatalf("mixed-day recovery: done=%v err=%v", res.Done, err)
 	}
-	covered, err := store.CheckRangeCoverage(ctx, conn.ID, day, day)
-	if err != nil || covered {
-		t.Fatalf("wrong day marked covered: covered=%t err=%v", covered, err)
+	if len(client.historyCalls) != 2 {
+		t.Fatalf("page without matching rows must advance pagination: %d requests", len(client.historyCalls))
 	}
 	txns, err := store.ListTransactions(ctx, 10)
-	if err != nil || len(txns) != 0 {
-		t.Fatalf("wrong-day recovery ingested rows: count=%d err=%v", len(txns), err)
+	if err != nil || len(txns) != 2 {
+		t.Fatalf("expected two matched transactions: count=%d err=%v", len(txns), err)
+	}
+	for _, txn := range txns {
+		if !strings.HasPrefix(txn.TransactionAt, "2026-09-25") {
+			t.Fatalf("wrong transaction day ingested: %s", txn.TransactionAt)
+		}
+	}
+	var rows int
+	if err := store.DB().QueryRowContext(ctx, "SELECT rows_seen FROM history_coverage WHERE connection_id=? AND day=?", conn.ID, "2026-09-25").Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("coverage must count matched rows: rows=%d err=%v", rows, err)
+	}
+	runs, err := store.ListPollRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || runs[0].Pages != 2 || runs[0].RowsSeen != 3 {
+		t.Fatalf("poll must count original pages/rows: runs=%+v err=%v", runs, err)
+	}
+}
+
+func TestCatchUpTaskMixedDayBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, lastPage string
+		wantError      bool
+	}{
+		{name: "only adjacent days", lastPage: buildHistoryHTML([]acb.Transaction{{Number: "A2", TransactionAt: "24/09/2026", Credit: 100}}, false)},
+		{name: "malformed final page", lastPage: buildHistoryHTML([]acb.Transaction{{Number: "BAD", TransactionAt: "invalid", Credit: 100}}, false), wantError: true},
+		{name: "explicitly empty day", lastPage: `<form action="/history"><input name="dse_operationName" value="op1"><input name="dse_processorState" value="done"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr><tr><td colspan="6">Không có giao dịch</td></tr></table>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, conn, _ := setupRecoveryTestEnv(t, "boundary.db")
+			defer store.Close()
+			client := newRecoveryMockBankClient()
+			if tc.name == "explicitly empty day" {
+				client.pages["25/09/2026"] = []string{tc.lastPage}
+			} else {
+				client.pages["25/09/2026"] = []string{buildHistoryHTML([]acb.Transaction{{Number: "A", TransactionAt: "24/09/2026", Credit: 100}}, true), tc.lastPage}
+			}
+			task := newTestCatchUpTask(New(store, client, 5*time.Second, 15*time.Second), conn.ID, conn.Generation)
+			task.fromDate, task.toDate = "2026-09-25", "2026-09-25"
+			task.currentDay, _ = time.Parse("2006-01-02", task.fromDate)
+			task.initialized = true
+			_, err := task.Step(ctx)
+			if tc.wantError != (err != nil) {
+				t.Fatalf("unexpected recovery error: %v", err)
+			}
+			var coverage, transactions int
+			err = store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM history_coverage WHERE connection_id=? AND day=? AND status='COMPLETE' AND rows_seen=0", conn.ID, "2026-09-25").Scan(&coverage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions").Scan(&transactions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if transactions != 0 || (coverage == 1) == tc.wantError {
+				t.Fatalf("invalid day durability: coverage=%d transactions=%d", coverage, transactions)
+			}
+			if tc.name == "only adjacent days" && len(client.historyCalls) != 2 {
+				t.Fatalf("expected both pages, got %d", len(client.historyCalls))
+			}
+		})
 	}
 }
 
