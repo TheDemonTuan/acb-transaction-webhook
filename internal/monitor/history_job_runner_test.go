@@ -729,3 +729,55 @@ func TestHistoryJobRunner_ErrorClassification(t *testing.T) {
 		}
 	})
 }
+
+func TestHistoryJobRunnerFiltersAdjacentDaysAcrossPages(t *testing.T) {
+	ctx := context.Background()
+	store, connID := setupTestDB(t, "mixed_history.db")
+	defer store.Close()
+	client := newFake31DayClient()
+	client.customHistoryFn = func(_ context.Context, _ string, fields map[string]string) (acb.Response, error) {
+		page2 := client.historyCalls.Load() == 2
+		rows, nav := `<tr><td>24/09/2026 20:00:00</td><td>A</td><td>0</td><td>100</td><td>1000</td><td>Prior</td></tr>`, `<a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a>`
+		if page2 {
+			rows, nav = `<tr><td>25/09/2026 08:00:00</td><td>B</td><td>0</td><td>100</td><td>1100</td><td>Today</td></tr><tr><td>25/09/2026 09:00:00</td><td>C</td><td>0</td><td>100</td><td>1200</td><td>Today</td></tr>`, `<span class="disabled">Trang sau</span>`
+		}
+		body := fmt.Sprintf(`<form action="/history" method="POST"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="page"></form><table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>%s<tr><td colspan="6">%s</td></tr></table>`, rows, nav)
+		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+	}
+	job, _, err := store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2026-09-25", "2026-09-25")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.ClaimNextHistorySyncJob(ctx, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	conn, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := monitor.NewHistoryJobTask(monitor.NewHistoryJobRunner(store, client, nil, nil), claimed, conn).Step(ctx)
+	if err != nil || !res.Done {
+		t.Fatalf("history job: done=%v err=%v", res.Done, err)
+	}
+	finished, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil || finished.Status != storage.HistoryJobStatusCompleted || finished.PagesDone != 2 || finished.RowsSeen != 3 || client.historyCalls.Load() != 2 {
+		t.Fatalf("raw pagination and completion: job=%+v calls=%d err=%v", finished, client.historyCalls.Load(), err)
+	}
+	var matched, events, deliveries int
+	if err := store.DB().QueryRowContext(ctx, "SELECT rows_seen FROM history_coverage WHERE connection_id=? AND day=?", connID, "2026-09-25").Scan(&matched); err != nil || matched != 2 {
+		t.Fatalf("coverage: %d %v", matched, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions WHERE transaction_day=?", "2026-09-25").Scan(&matched); err != nil || matched != 2 {
+		t.Fatalf("matched transactions: %d %v", matched, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions").Scan(&matched); err != nil || matched != 2 {
+		t.Fatalf("adjacent-day row ingested: count=%d err=%v", matched, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&events); err != nil || events != 0 {
+		t.Fatalf("events: %d %v", events, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM deliveries").Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("deliveries: %d %v", deliveries, err)
+	}
+}

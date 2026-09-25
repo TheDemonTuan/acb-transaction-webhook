@@ -654,13 +654,14 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			return scheduler.TaskStepResult{Done: true, Error: pErr, Outcome: scheduler.OutcomeFatal}, pErr
 		}
 
-		if err := acb.ValidateHistoryTransactionDay(pageResult.Transactions, t.curDay.Format("02/01/2006")); err != nil {
+		dayTransactions, err := acb.FilterHistoryTransactionDay(pageResult.Transactions, t.curDay.Format("02/01/2006"))
+		if err != nil {
 			_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "DATE_MISMATCH", err.Error())
 			t.finish(err)
 			return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 		}
 		var pageItems []storage.BatchTransactionItem
-		for _, txn := range pageResult.Transactions {
+		for _, txn := range dayTransactions {
 			pageItems = append(pageItems, storage.BatchTransactionItem{
 				Number:        txn.Number,
 				Credit:        txn.Credit,
@@ -682,7 +683,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		}
 
 		t.pagesDone++
-		t.rowsSeen += len(pageItems)
+		t.rowsSeen += len(pageResult.Transactions)
 		t.dayPageCount++
 		t.dayTxns = append(t.dayTxns, pageItems...)
 

@@ -601,7 +601,8 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			t.finishDone(parseErr)
 			return scheduler.TaskStepResult{Done: true, Error: parseErr, Outcome: scheduler.OutcomeFatal}, parseErr
 		}
-		if err := acb.ValidateHistoryTransactionDay(pageResult.Transactions, t.currentDay.Format("02/01/2006")); err != nil {
+		dayTransactions, err := acb.FilterHistoryTransactionDay(pageResult.Transactions, t.currentDay.Format("02/01/2006"))
+		if err != nil {
 			_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "DATE_MISMATCH", err.Error())
 			_ = t.finishPoll(ctx, "FAILED", err.Error())
 			t.finishDone(err)
@@ -610,7 +611,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		t.totalRowsSeen += len(pageResult.Transactions)
 
 		var pageItems []storage.BatchTransactionItem
-		for _, txn := range pageResult.Transactions {
+		for _, txn := range dayTransactions {
 			pageItems = append(pageItems, storage.BatchTransactionItem{
 				Number:        txn.Number,
 				Credit:        txn.Credit,
