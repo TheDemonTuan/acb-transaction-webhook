@@ -415,7 +415,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return t.finishPoll(ctx, "PARTIAL", parseErr.Error())
 	}
 
-	if err := acb.ValidateHistoryTransactionDay(pageResult.Transactions, t.today); err != nil {
+	todayTransactions, err := acb.FilterHistoryTransactionDay(pageResult.Transactions, t.today)
+	if err != nil {
 		slog.Warn("ACB history day mismatch", "phase", "realtime_history", "requested_day", t.today, "response_days", acb.HistoryDayCounts(pageResult.Transactions), "response_rows", len(pageResult.Transactions), "bootstrap_form_date_matches", form.Fields["FromDate"] == t.today && form.Fields["ToDate"] == t.today, "response_form_date_matches", acb.HistoryFormDateMatches(historyMarkup, t.today), "response_structure", acb.DiagnosePageStructure(historyMarkup))
 		return t.finishPoll(ctx, "PARTIAL", err.Error())
 	}
@@ -469,7 +470,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return result, err
 	}
 
-	inserted, err := ingestAndNotify(pageResult.Transactions)
+	inserted, err := ingestAndNotify(todayTransactions)
 	if err != nil {
 		return failIngest(err)
 	}
@@ -554,13 +555,14 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 					pollErr = err
 					break
 				}
-				if err := acb.ValidateHistoryTransactionDay(nextPage.Transactions, t.today); err != nil {
+				todayTransactions, err := acb.FilterHistoryTransactionDay(nextPage.Transactions, t.today)
+				if err != nil {
 					isPartial = true
 					pollErr = err
 					break
 				}
 				rowsSeen += len(nextPage.Transactions)
-				nextInserted, nextIngestErr := ingestAndNotify(nextPage.Transactions)
+				nextInserted, nextIngestErr := ingestAndNotify(todayTransactions)
 				if nextIngestErr != nil {
 					return failIngest(nextIngestErr)
 				}
@@ -688,11 +690,12 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 		return t.finishPoll(ctx, "PARTIAL", err.Error())
 	}
 
-	if err := acb.ValidateHistoryTransactionDay(page.Transactions, t.today); err != nil {
+	todayTransactions, err := acb.FilterHistoryTransactionDay(page.Transactions, t.today)
+	if err != nil {
 		return t.finishPoll(ctx, "PARTIAL", err.Error())
 	}
-	items := make([]storage.BatchTransactionItem, 0, len(page.Transactions))
-	for _, txn := range page.Transactions {
+	items := make([]storage.BatchTransactionItem, 0, len(todayTransactions))
+	for _, txn := range todayTransactions {
 		items = append(items, storage.BatchTransactionItem{
 			Number: txn.Number, Credit: txn.Credit, Debit: txn.Debit, Balance: txn.Balance,
 			TransactionAt: txn.TransactionAt, EffectiveAt: txn.EffectiveDate, Description: txn.Description,
