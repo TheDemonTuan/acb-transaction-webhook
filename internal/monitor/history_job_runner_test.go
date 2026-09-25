@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -139,39 +143,39 @@ func TestHistoryJobRunner_31DaysMultiPage_SinglePageQuanta(t *testing.T) {
 	conn, _ := store.Connection(ctx)
 	task := monitor.NewHistoryJobTask(runner, claimedJob, conn)
 
-		// Execute step-by-step and prove:
-		// - each Step executes AT MOST ONE day's pagination atomically (2 ACB calls per day here).
-		// - exactly 31 days = 31 steps to completion (yielding across days).
-		steps := 0
-		for {
-			callsBefore := client.historyCalls.Load()
-			res, err := task.Step(ctx)
-			callsAfter := client.historyCalls.Load()
+	// Execute step-by-step and prove:
+	// - each Step executes AT MOST ONE day's pagination atomically (2 ACB calls per day here).
+	// - exactly 31 days = 31 steps to completion (yielding across days).
+	steps := 0
+	for {
+		callsBefore := client.historyCalls.Load()
+		res, err := task.Step(ctx)
+		callsAfter := client.historyCalls.Load()
 
-			callsInStep := callsAfter - callsBefore
-			if callsInStep > 2 {
-				t.Fatalf("step %d violated bounded quantum invariant: made %d ACB calls, max 2 allowed", steps+1, callsInStep)
-			}
-			if err != nil {
-				t.Fatalf("step %d failed: %v", steps+1, err)
-			}
-
-			steps++
-			if res.Done {
-				break
-			}
-			if steps > 100 {
-				t.Fatal("infinite loop detected in task step execution")
-			}
+		callsInStep := callsAfter - callsBefore
+		if callsInStep > 2 {
+			t.Fatalf("step %d violated bounded quantum invariant: made %d ACB calls, max 2 allowed", steps+1, callsInStep)
+		}
+		if err != nil {
+			t.Fatalf("step %d failed: %v", steps+1, err)
 		}
 
-		// 31 days with 2 pages each = exactly 31 steps (one step per day)
-		if steps != 31 {
-			t.Fatalf("expected 31 steps for 31 days with 2 pages each, got %d", steps)
+		steps++
+		if res.Done {
+			break
 		}
-		if client.historyCalls.Load() != 62 {
-			t.Fatalf("expected 62 ACB history calls, got %d", client.historyCalls.Load())
+		if steps > 100 {
+			t.Fatal("infinite loop detected in task step execution")
 		}
+	}
+
+	// 31 days with 2 pages each = exactly 31 steps (one step per day)
+	if steps != 31 {
+		t.Fatalf("expected 31 steps for 31 days with 2 pages each, got %d", steps)
+	}
+	if client.historyCalls.Load() != 62 {
+		t.Fatalf("expected 62 ACB history calls, got %d", client.historyCalls.Load())
+	}
 
 	// Verify terminal state in storage
 	finishedJob, err := store.GetHistorySyncJob(ctx, job.ID)
@@ -205,11 +209,13 @@ type mockRealtimeTask struct {
 	stepCalled atomic.Bool
 }
 
-func (m *mockRealtimeTask) ID() string                          { return m.id }
-func (m *mockRealtimeTask) Kind() string                        { return "REALTIME_POLL" }
-func (m *mockRealtimeTask) Priority() scheduler.UpstreamPriority { return scheduler.PriorityRealtimePoll }
-func (m *mockRealtimeTask) Generation() int64                   { return 1 }
-func (m *mockRealtimeTask) CoalesceKey() string                 { return m.id }
+func (m *mockRealtimeTask) ID() string   { return m.id }
+func (m *mockRealtimeTask) Kind() string { return "REALTIME_POLL" }
+func (m *mockRealtimeTask) Priority() scheduler.UpstreamPriority {
+	return scheduler.PriorityRealtimePoll
+}
+func (m *mockRealtimeTask) Generation() int64   { return 1 }
+func (m *mockRealtimeTask) CoalesceKey() string { return m.id }
 func (m *mockRealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
 	m.executedAt = time.Now()
 	m.stepCalled.Store(true)
@@ -474,20 +480,20 @@ func TestHistoryJobRunner_CrashRecovery_ResumesWithoutDuplicates(t *testing.T) {
 	conn, _ := store.Connection(ctx)
 	task1 := monitor.NewHistoryJobTask(runner1, claimedJob, conn)
 
-		// Step 1: Day 1 (both pages of Day 1 completed, coverage recorded)
-		res, err := task1.Step(ctx)
-		if err != nil || res.Done {
-			t.Fatalf("step 1 failed: %v", err)
-		}
+	// Step 1: Day 1 (both pages of Day 1 completed, coverage recorded)
+	res, err := task1.Step(ctx)
+	if err != nil || res.Done {
+		t.Fatalf("step 1 failed: %v", err)
+	}
 
-		// Step 2: Day 2 begins. Page 1 ingests transactions, then page 2 fails with transport error simulating mid-day crash
-		client.customHistoryFn = func(ctx context.Context, action string, fields map[string]string) (acb.Response, error) {
-			isPage2 := fields["dse_nextEventName"] == "nextPage"
-			fromDate := fields["FromDate"]
-			if fromDate == "02/09/2026" && isPage2 {
-				return acb.Response{}, errors.New("simulated worker crash/transport failure")
-			}
-			body := fmt.Sprintf(`<form action="/history" method="POST">
+	// Step 2: Day 2 begins. Page 1 ingests transactions, then page 2 fails with transport error simulating mid-day crash
+	client.customHistoryFn = func(ctx context.Context, action string, fields map[string]string) (acb.Response, error) {
+		isPage2 := fields["dse_nextEventName"] == "nextPage"
+		fromDate := fields["FromDate"]
+		if fromDate == "02/09/2026" && isPage2 {
+			return acb.Response{}, errors.New("simulated worker crash/transport failure")
+		}
+		body := fmt.Sprintf(`<form action="/history" method="POST">
 				<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
 				<input type="hidden" name="dse_processorState" value="next" />
 				<input type="hidden" name="FromDate" value="%s" />
@@ -499,22 +505,22 @@ func TestHistoryJobRunner_CrashRecovery_ResumesWithoutDuplicates(t *testing.T) {
 				<tr><td>%s</td><td>TXN_%s_P1_2</td><td>0</td><td>25.000</td><td>125.000</td><td>Transfer 2</td></tr>
 				<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
 			</table>`, fromDate, fromDate, fromDate, fromDate, fromDate, fromDate)
-			return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
-		}
+		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+	}
 
-		_, _ = task1.Step(ctx) // Fails on page 2 after page 1 has been ingested
-		client.customHistoryFn = nil
+	_, _ = task1.Step(ctx) // Fails on page 2 after page 1 has been ingested
+	client.customHistoryFn = nil
 
-		// SIMULATE HARD WORKER CRASH:
-		// Worker process terminates abruptly. The job remains in RUNNING in DB with old heartbeat.
-		staleTime := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano)
-		if _, err := store.DB().ExecContext(ctx, `
+	// SIMULATE HARD WORKER CRASH:
+	// Worker process terminates abruptly. The job remains in RUNNING in DB with old heartbeat.
+	staleTime := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().ExecContext(ctx, `
 			UPDATE history_sync_jobs
 			SET status = 'RUNNING', heartbeat_at = ?, started_at = ?
 			WHERE id = ?
 		`, staleTime, staleTime, job.ID); err != nil {
-			t.Fatalf("simulate stale heartbeat: %v", err)
-		}
+		t.Fatalf("simulate stale heartbeat: %v", err)
+	}
 
 	// SIMULATE WORKER RESTART:
 	// New worker process boots up with new HistoryJobRunner
@@ -627,13 +633,13 @@ func TestHistoryJobRunner_ErrorClassification(t *testing.T) {
 			t.Fatalf("expected OutcomeTransient, got %s, err: %v", res.Outcome, err)
 		}
 
-			dbJob, _ := store.GetHistorySyncJob(ctx, job.ID)
-			if dbJob.Status == storage.HistoryJobStatusFailed {
-				t.Fatalf("expected job NOT to fail with unconfirmed login, got status %s", dbJob.Status)
-			}
-		})
+		dbJob, _ := store.GetHistorySyncJob(ctx, job.ID)
+		if dbJob.Status == storage.HistoryJobStatusFailed {
+			t.Fatalf("expected job NOT to fail with unconfirmed login, got status %s", dbJob.Status)
+		}
+	})
 
-		// 7.2 Terminal Parse Error
+	// 7.2 Terminal Parse Error
 	t.Run("Terminal_ParseError", func(t *testing.T) {
 		store, connID := setupTestDB(t, "test_parse_err.db")
 		defer store.Close()
@@ -779,5 +785,131 @@ func TestHistoryJobRunnerFiltersAdjacentDaysAcrossPages(t *testing.T) {
 	}
 	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM deliveries").Scan(&deliveries); err != nil || deliveries != 0 {
 		t.Fatalf("deliveries: %d %v", deliveries, err)
+	}
+}
+
+func TestHistoryJobRunnerPreservesRequestedDayAcrossPages(t *testing.T) {
+	ctx := context.Background()
+	store, connID := setupTestDB(t, "day_pin.db")
+	defer store.Close()
+	const form = `<form action="/history" method="POST"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_sessionId" value="session-fixture"><input name="dse_processorState" value="page-state-2"><input name="AccountNbr" value="123456"><input name="FromDate" value="26/09/2020"><input name="ToDate" value="26/09/2020"></form>`
+	const header = `<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>`
+	historyRequests := 0
+	client, err := acb.NewClient("https://online.acb.com.vn", historyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := form
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/acbib/Request":
+		case req.Method == http.MethodPost && req.URL.Path == "/acbib/history":
+			values, err := url.ParseQuery(readRequestBody(t, req))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if historyRequests > 0 && (values.Get("FromDate") != "25/09/2020" || values.Get("ToDate") != "25/09/2020" || values.Get("activeDatetimeYN") != "N") {
+				t.Errorf("POST %d dates/selector: from=%q to=%q active=%q", historyRequests+1, values.Get("FromDate"), values.Get("ToDate"), values.Get("activeDatetimeYN"))
+			}
+			if values.Has("_raw") || values.Has("_explicitRange") {
+				t.Errorf("internal fields leaked into POST %d", historyRequests+1)
+			}
+			historyRequests++
+			switch historyRequests {
+			case 1: // Bootstrap account-detail request.
+			case 2:
+				body += header + `<tr><td>25/09/2020 08:00:00</td><td>B</td><td>0</td><td>100</td><td>1100</td><td>One</td></tr><tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr></table>`
+			case 3:
+				if values.Get("dse_nextEventName") != "nextPage" || values.Get("dse_processorState") != "page-state-2" {
+					t.Errorf("page 2 lost cursor: event=%q state=%q", values.Get("dse_nextEventName"), values.Get("dse_processorState"))
+				}
+				body += header + `<tr><td>25/09/2020 09:00:00</td><td>C</td><td>0</td><td>100</td><td>1200</td><td>Two</td></tr><tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr></table><p>Total rows: 2</p>`
+			default:
+				t.Fatalf("unexpected history request %d", historyRequests)
+			}
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err := store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2020-09-25", "2020-09-25")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.ClaimNextHistorySyncJob(ctx, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	conn, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := monitor.NewHistoryJobTask(monitor.NewHistoryJobRunner(store, client, nil, nil), claimed, conn).Step(ctx)
+	if err != nil || !result.Done {
+		t.Fatalf("Step: done=%v err=%v", result.Done, err)
+	}
+	finished, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil || finished.Status != storage.HistoryJobStatusCompleted || finished.PagesDone != 2 || finished.RowsSeen != 2 || historyRequests != 3 {
+		t.Fatalf("job=%+v requests=%d err=%v", finished, historyRequests, err)
+	}
+	var count int
+	for _, query := range []string{
+		"SELECT COUNT(*) FROM transactions WHERE transaction_day='2020-09-25' AND ingest_source='FILTER_SYNC'",
+		"SELECT rows_seen FROM history_coverage WHERE day='2020-09-25'",
+	} {
+		if err := store.DB().QueryRowContext(ctx, query).Scan(&count); err != nil || count != 2 {
+			t.Fatalf("query %q: count=%d err=%v", query, count, err)
+		}
+	}
+	for _, table := range []string{"events", "deliveries"} {
+		if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count=%d err=%v", table, count, err)
+		}
+	}
+}
+
+func readRequestBody(t *testing.T, req *http.Request) string {
+	t.Helper()
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+type historyRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f historyRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestHistoryJobRunnerRejectsMissingPaginationCursor(t *testing.T) {
+	ctx := context.Background()
+	store, connID := setupTestDB(t, "missing_cursor.db")
+	defer store.Close()
+	client := newFake31DayClient()
+	client.customHistoryFn = func(_ context.Context, _ string, _ map[string]string) (acb.Response, error) {
+		return acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: `<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th></tr><tr><td>25/09/2020 08:00:00</td><td>B</td><td>0</td><td>100</td><td>1100</td></tr><tr><td colspan="5"><a href="/history?page=2">Trang sau</a></td></tr></table>`}, nil
+	}
+	job, _, err := store.CreateOrGetHistorySyncJob(ctx, connID, 1, "2020-09-25", "2020-09-25")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.ClaimNextHistorySyncJob(ctx, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	conn, err := store.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := monitor.NewHistoryJobTask(monitor.NewHistoryJobRunner(store, client, nil, nil), claimed, conn).Step(ctx)
+	if err == nil || !result.Done {
+		t.Fatalf("missing cursor: result=%+v err=%v", result, err)
+	}
+	finished, err := store.GetHistorySyncJob(ctx, job.ID)
+	if err != nil || finished.Status != storage.HistoryJobStatusFailed || finished.ErrorCode != "TRUNCATED_HISTORY" {
+		t.Fatalf("job=%+v err=%v", finished, err)
+	}
+	var coverage int
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM history_coverage WHERE day='2020-09-25'").Scan(&coverage); err != nil || coverage != 0 {
+		t.Fatalf("coverage=%d err=%v", coverage, err)
 	}
 }

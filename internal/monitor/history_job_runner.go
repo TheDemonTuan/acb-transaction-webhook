@@ -696,13 +696,18 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			break
 		}
 
-		if t.cursor.HasNext && t.dayPageCount < t.maxDayPages && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) {
-			t.nextAction = t.cursor.Action
-			t.nextFields = t.cursor.Fields
-			if t.nextFields == nil {
-				t.nextFields = make(map[string]string)
+		if t.dayPageCount < t.maxDayPages {
+			day := t.curDay.Format("02/01/2006")
+			pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, day)
+			if err != nil {
+				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "FORM_INVALID", err.Error())
+				t.finish(err)
+				return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 			}
-			t.nextFields["_raw"] = "true"
+			pinned["_raw"] = "true"
+			pinned["_explicitRange"] = "true"
+			t.nextAction = t.cursor.Action
+			t.nextFields = pinned
 		}
 	}
 
