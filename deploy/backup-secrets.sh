@@ -5,8 +5,28 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=deploy/lib.sh
-source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=deploy/simple-lib.sh
+source "$SCRIPT_DIR/simple-lib.sh"
+
+check_required_secrets() {
+  if [[ ! -d "$SECRETS_DIR" ]]; then
+    log_error "Secrets directory '$SECRETS_DIR' does not exist."
+    return 1
+  fi
+  local required_secrets=(app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password)
+  local missing=()
+  for s in "${required_secrets[@]}"; do
+    local s_file="$SECRETS_DIR/$s"
+    if [[ ! -f "$s_file" || ! -s "$s_file" ]]; then
+      missing+=("$s")
+    fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log_error "Missing or empty required production secrets: [${missing[*]}]"
+    return 1
+  fi
+  return 0
+}
 
 BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/data/backups}"
 BACKUP_AGE_RECIPIENT="${BACKUP_AGE_RECIPIENT:-}"

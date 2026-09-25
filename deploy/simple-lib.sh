@@ -42,6 +42,32 @@ compose_release() {
   docker compose --project-name acb --project-directory "$release" --env-file "$DEPLOY_PATH/deploy/.env.production" --env-file "$runtime" -f "$release/compose.prod.yaml" "$@"
 }
 # Actual file ownership is significant: do not silently chmod live secrets.
+check_secret_permissions() {
+  local target_path="$1"
+  [[ -e "$target_path" ]] || return 0
+  [[ "$(uname -s 2>/dev/null)" =~ MINGW|MSYS|CYGWIN ]] && return 0
+  if command -v stat >/dev/null 2>&1; then
+    local mode
+    mode="$(stat -c '%a' "$target_path" 2>/dev/null || stat -f '%Lp' "$target_path" 2>/dev/null || true)"
+    if [[ -n "$mode" ]]; then
+      local last_two="${mode: -2}"
+      local base_name
+      base_name="$(basename "$target_path")"
+      if [[ "$base_name" == "bark_basic_auth_user" || "$base_name" == "bark_basic_auth_password" ]]; then
+        if [[ "${mode: -1}" != "0" ]]; then
+          fail "Secret file $target_path has unsafe world permissions (mode $mode)"
+          return 1
+        fi
+      else
+        if [[ "$last_two" != "00" ]]; then
+          fail "Secret file $target_path has unsafe permissions (mode $mode, expected ending in 00)"
+          return 1
+        fi
+      fi
+    fi
+  fi
+  return 0
+}
 validate_permissions() {
   python3 - "$DEPLOY_PATH/deploy" "$DEPLOY_PATH/data/backups" <<'PY'
 import os,stat,sys
