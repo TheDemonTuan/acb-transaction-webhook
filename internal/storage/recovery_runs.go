@@ -22,6 +22,13 @@ const (
 	RecoveryRunStatusCancelled RecoveryRunStatus = RecoveryRunStatusCanceled // compatibility alias
 )
 
+const (
+	RecoveryReasonInitialAuth = "INITIAL_AUTH_BOOTSTRAP"
+	RecoveryReasonReauth      = "SESSION_REAUTH_CATCHUP"
+	RecoveryReasonStartup     = "WORKER_STARTUP"
+	RecoveryReasonAuthLegacy  = "SESSION_AUTHENTICATED" // compatibility alias
+)
+
 var (
 	ErrRecoveryRunTerminal     = errors.New("recovery run is already terminal")
 	ErrRecoveryRunInvalidState = errors.New("invalid recovery run state")

@@ -443,11 +443,29 @@ func (s *Store) CompleteAuthSession(ctx context.Context, attemptID string, sessi
 		if _, err := tx.ExecContext(ctx, `UPDATE auth_attempts SET status='VERIFIED',finished_at=? WHERE id=?`, nowString, attemptID); err != nil {
 			return err
 		}
+		var hasBaseline bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM transactions WHERE connection_id = ?
+				UNION ALL
+				SELECT 1 FROM poll_runs WHERE connection_id = ? AND status = 'SUCCEEDED'
+				UNION ALL
+				SELECT 1 FROM recovery_runs WHERE connection_id = ? AND status = 'COMPLETED'
+				UNION ALL
+				SELECT 1 FROM history_coverage WHERE connection_id = ? AND status = 'COMPLETE'
+			)
+		`, connectionID, connectionID, connectionID, connectionID).Scan(&hasBaseline); err != nil {
+			return err
+		}
+		recoveryReason := RecoveryReasonInitialAuth
+		if hasBaseline {
+			recoveryReason = RecoveryReasonReauth
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO recovery_runs(id, connection_id, generation, event_key, reason, status, progress_json, created_at, updated_at)
-			VALUES(?,?,?,?, 'SESSION_AUTHENTICATED', 'PENDING', '{}', ?, ?)
+			VALUES(?,?,?,?, ?, 'PENDING', '{}', ?, ?)
 			ON CONFLICT(connection_id, generation, event_key) DO NOTHING
-		`, id("recovery"), connectionID, generation, attemptID, nowString, nowString); err != nil {
+		`, id("recovery"), connectionID, generation, attemptID, recoveryReason, nowString, nowString); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(connection_id,generation,envelope,key_id,verified_at,updated_at) VALUES(?,?,?,'k1',?,?) ON CONFLICT(connection_id) DO UPDATE SET generation=excluded.generation,envelope=excluded.envelope,verified_at=excluded.verified_at,updated_at=excluded.updated_at`, connectionID, generation, sessionEnvelope, nowString, nowString); err != nil {

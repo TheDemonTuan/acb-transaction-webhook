@@ -502,6 +502,11 @@ func (m *Monitor) RequestSync(ctx context.Context) error {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
 
+	openRun, err := m.openRecoveryRun(ctx, conn.ID, conn.Generation)
+	if err != nil || openRun != nil {
+		return ErrSyncUnavailable
+	}
+
 	if m.syncReq != nil && m.syncReq.connectionID == conn.ID && m.syncReq.generation == conn.Generation {
 		return nil
 	}
@@ -604,23 +609,30 @@ func (m *Monitor) pollKeepalive(ctx context.Context) error {
 func (m *Monitor) recoveryPlan(ctx context.Context, connectionID string, generation int64, reason string) (storage.RecoveryRunPlan, error) {
 	nowLocal := m.now().In(acb.DefaultLocation)
 	today := nowLocal.Format("2006-01-02")
-	from := nowLocal.AddDate(0, 0, -1)
-	if reason == "WORKER_STARTUP" {
-		from = nowLocal.AddDate(0, 0, -(catchUpMaxDays - 1))
-	}
-	cp, err := m.store.GetCheckpoint(ctx, connectionID)
-	if err != nil {
-		return storage.RecoveryRunPlan{}, fmt.Errorf("load recovery checkpoint: %w", err)
-	}
-	if cp != nil && cp.CoverageTo != "" {
-		checkpointTo, parseErr := time.ParseInLocation("2006-01-02", cp.CoverageTo, acb.DefaultLocation)
-		if parseErr != nil || checkpointTo.After(nowLocal) {
-			slog.Warn("invalid or future recovery checkpoint; using bounded fallback", "connection_id", connectionID, "generation", generation, "coverage_to", cp.CoverageTo)
-		} else {
-			from = checkpointTo
-		}
-	}
 	oldest := nowLocal.AddDate(0, 0, -(catchUpMaxDays - 1))
+	from := oldest
+
+	if reason == storage.RecoveryReasonStartup || reason == "WORKER_STARTUP" {
+		from = oldest
+		cp, err := m.store.GetCheckpoint(ctx, connectionID)
+		if err != nil {
+			return storage.RecoveryRunPlan{}, fmt.Errorf("load recovery checkpoint: %w", err)
+		}
+		if cp != nil && cp.CoverageTo != "" {
+			checkpointTo, parseErr := time.ParseInLocation("2006-01-02", cp.CoverageTo, acb.DefaultLocation)
+			if parseErr != nil || checkpointTo.After(nowLocal) {
+				slog.Warn("invalid or future recovery checkpoint; using bounded fallback", "connection_id", connectionID, "generation", generation, "coverage_to", cp.CoverageTo)
+			} else {
+				from = checkpointTo
+			}
+		}
+	} else {
+		// Post-auth recovery (INITIAL_AUTH_BOOTSTRAP, SESSION_REAUTH_CATCHUP, SESSION_AUTHENTICATED):
+		// always inspect the bounded 7-day window [today-6, today].
+		// checkpoints.coverage_to must not shrink the recovery window for a new session.
+		from = oldest
+	}
+
 	if from.Before(oldest) {
 		from = oldest
 	}
@@ -628,6 +640,7 @@ func (m *Monitor) recoveryPlan(ctx context.Context, connectionID string, generat
 		from = nowLocal
 	}
 	fromDate := from.Format("2006-01-02")
+	slog.Info("computed recovery plan", "connection_id", connectionID, "generation", generation, "reason", reason, "from", fromDate, "to", today)
 	return storage.RecoveryRunPlan{Reason: reason, RangeFrom: fromDate, RangeTo: today, NextDay: fromDate}, nil
 }
 
@@ -645,7 +658,11 @@ func (m *Monitor) ScheduleRecovery(ctx context.Context, connectionID string, gen
 	if conn.ID != connectionID || conn.Generation != generation || conn.State != "MONITORING" {
 		return fmt.Errorf("stale recovery request: connection is %s at generation %d in state %s", conn.ID, conn.Generation, conn.State)
 	}
-	plan, err := m.recoveryPlan(ctx, connectionID, generation, "SESSION_AUTHENTICATED")
+	reason := storage.RecoveryReasonReauth
+	if existingRun, err := m.store.GetRecoveryRunByEvent(ctx, connectionID, generation, eventKey); err == nil && existingRun.Reason != "" {
+		reason = existingRun.Reason
+	}
+	plan, err := m.recoveryPlan(ctx, connectionID, generation, reason)
 	if err != nil {
 		return err
 	}
@@ -660,7 +677,7 @@ func (m *Monitor) ScheduleRecovery(ctx context.Context, connectionID string, gen
 	if sched == nil || !sched.IsRunning() {
 		return errors.New("recovery scheduler is not running")
 	}
-	return sched.Enqueue(NewRecoveryCatchUpTask(m, connectionID, generation, "SESSION_AUTHENTICATED", run.ID))
+	return sched.Enqueue(NewRecoveryCatchUpTask(m, connectionID, generation, reason, run.ID))
 }
 
 func (m *Monitor) admitStartupRecovery(ctx context.Context) {
@@ -755,6 +772,20 @@ func (m *Monitor) reconcileOpenRecovery(ctx context.Context) {
 	}
 }
 
+func (m *Monitor) openRecoveryRun(ctx context.Context, connectionID string, generation int64) (*storage.RecoveryRun, error) {
+	if m == nil || m.store == nil || connectionID == "" || generation <= 0 {
+		return nil, nil
+	}
+	runs, err := m.store.ListOpenRecoveryRuns(ctx, connectionID, generation)
+	if err != nil {
+		return nil, err
+	}
+	if len(runs) == 0 {
+		return nil, nil
+	}
+	return &runs[0], nil
+}
+
 func (m *Monitor) Run(ctx context.Context) {
 	sched := m.Scheduler()
 	if sched != nil {
@@ -782,8 +813,11 @@ func (m *Monitor) Run(ctx context.Context) {
 		if (m.lastMode == storage.ModeKeepaliveOnly || m.lastMode == storage.ModePaused || m.lastMode == "") && schedule.Mode == storage.ModeRealtime {
 			conn, err := m.store.Connection(ctx)
 			if err == nil && conn.State == "MONITORING" {
-				if s := m.Scheduler(); s != nil {
-					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+				openRun, recErr := m.openRecoveryRun(ctx, conn.ID, conn.Generation)
+				if recErr == nil && openRun == nil {
+					if s := m.Scheduler(); s != nil {
+						_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
+					}
 				}
 			}
 		}
@@ -854,6 +888,15 @@ func (m *Monitor) Run(ctx context.Context) {
 				if curBoost.Active && schedule.Mode != storage.ModePaused {
 					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
 				} else {
+					openRun, recErr := m.openRecoveryRun(ctx, conn.ID, conn.Generation)
+					if recErr != nil {
+						slog.Warn("check open recovery failed, deferring realtime poll", "connection_id", conn.ID, "error", recErr)
+						continue
+					}
+					if openRun != nil {
+						// Post-auth catch-up in progress; idle polling resumes once catch-up is completed.
+						continue
+					}
 					switch schedule.Mode {
 					case storage.ModeRealtime:
 						_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
