@@ -832,6 +832,55 @@ func TestRealtimeTask_QueriesTodayEvenWhenBootstrapHasOlderTransactions(t *testi
 	}
 }
 
+func TestRealtimeTask_FiltersPriorTransactionDayWithCurrentEffectiveDay(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "effective_day.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+	today := time.Now().In(acb.DefaultLocation).Format("02/01/2006")
+	prior := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("02/01/2006")
+	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="ps1"><input name="dse_sessionId" value="s1"></form>`
+	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := form
+		if req.Method == http.MethodPost {
+			payload, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			values, parseErr := url.ParseQuery(string(payload))
+			if parseErr != nil || values.Get("FromDate") != today || values.Get("ToDate") != today {
+				t.Fatal("history request did not target today")
+			}
+			body += fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>PRIOR</td><td>%s</td><td>%s</td><td>0</td><td>100</td></tr><tr><td>TODAY</td><td>%s</td><td>%s</td><td>0</td><td>100</td></tr></table>`, today, prior, today, today)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewRealtimeTask(New(store, client, 5*time.Second, 15*time.Second), PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
+	if err != nil || !res.Done {
+		t.Fatalf("poll did not finish: result=%+v err=%v", res, err)
+	}
+	runs, err := store.ListPollRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || runs[0].Status != "SUCCEEDED" || runs[0].RowsSeen != 2 {
+		t.Fatalf("expected complete scoped poll with two scanned rows: runs=%+v err=%v", runs, err)
+	}
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 1 || txns[0].TransactionDay != time.Now().In(acb.DefaultLocation).Format("2006-01-02") {
+		t.Fatalf("expected only today's transaction: count=%d err=%v", len(txns), err)
+	}
+}
+
 func TestRealtimeTask_RejectsOutOfDayResponseBeforeIngest(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_reject_wrong_day.db"))

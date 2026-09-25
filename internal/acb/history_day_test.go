@@ -21,6 +21,27 @@ func TestHistoryDayDiagnosticsDoNotIncludeTransactionContents(t *testing.T) {
 	}
 }
 
+func TestFilterHistoryTransactionDay(t *testing.T) {
+	transactions := []Transaction{
+		{TransactionAt: "24/09/2026 23:00:00", EffectiveDate: "25/09/2026", Number: "prior"},
+		{TransactionAt: "25/09/2026 08:00:00", EffectiveDate: "25/09/2026", Number: "today"},
+	}
+	filtered, err := FilterHistoryTransactionDay(transactions, "25/09/2026")
+	if err != nil || len(filtered) != 1 || filtered[0].Number != "today" {
+		t.Fatalf("expected only today's transaction: count=%d err=%v", len(filtered), err)
+	}
+	for _, invalid := range []Transaction{
+		{TransactionAt: "25/09/2026", EffectiveDate: "24/09/2026"},
+		{TransactionAt: "25/09/2026", EffectiveDate: "invalid"},
+		{TransactionAt: "invalid", EffectiveDate: "25/09/2026"},
+		{TransactionAt: "24/09/2026"},
+	} {
+		if _, err := FilterHistoryTransactionDay([]Transaction{invalid}, "25/09/2026"); !errors.Is(err, ErrHistoryDayMismatch) {
+			t.Fatalf("expected scoped response rejection: %v", err)
+		}
+	}
+}
+
 func TestValidateHistoryTransactionDay(t *testing.T) {
 	for _, test := range []struct {
 		name string
