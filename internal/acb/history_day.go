@@ -1,6 +1,9 @@
 package acb
 
-import "errors"
+import (
+	"errors"
+	"sort"
+)
 
 var ErrHistoryDayMismatch = errors.New("ACB history response contains transactions outside requested day")
 
@@ -16,4 +19,34 @@ func ValidateHistoryTransactionDay(transactions []Transaction, requested string)
 		}
 	}
 	return nil
+}
+
+type HistoryDayCount struct {
+	Day  string `json:"day"`
+	Rows int    `json:"rows"`
+}
+
+// HistoryDayCounts exposes only dates and row counts, never transaction contents.
+func HistoryDayCounts(transactions []Transaction) []HistoryDayCount {
+	counts := make(map[string]int)
+	for _, transaction := range transactions {
+		day, err := NormalizeDate(transaction.TransactionAt, nil)
+		if err != nil {
+			counts["INVALID"]++
+			continue
+		}
+		counts[day.TransactionDay]++
+	}
+	result := make([]HistoryDayCount, 0, len(counts))
+	for day, rows := range counts {
+		result = append(result, HistoryDayCount{Day: day, Rows: rows})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Day < result[j].Day })
+	return result
+}
+
+// HistoryFormDateMatches checks only whether the returned form mirrors the requested range.
+func HistoryFormDateMatches(markup, requested string) bool {
+	form, err := ExtractHistoryForm(markup)
+	return err == nil && form.Fields["FromDate"] == requested && form.Fields["ToDate"] == requested
 }
