@@ -416,6 +416,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	}
 
 	if err := acb.ValidateHistoryTransactionDay(pageResult.Transactions, t.today); err != nil {
+		slog.Warn("ACB history day mismatch", "phase", "realtime_history", "requested_day", t.today, "response_days", acb.HistoryDayCounts(pageResult.Transactions), "response_rows", len(pageResult.Transactions), "bootstrap_form_date_matches", form.Fields["FromDate"] == t.today && form.Fields["ToDate"] == t.today, "response_form_date_matches", acb.HistoryFormDateMatches(historyMarkup, t.today), "response_structure", acb.DiagnosePageStructure(historyMarkup))
 		return t.finishPoll(ctx, "PARTIAL", err.Error())
 	}
 	rowsSeen := len(pageResult.Transactions)
