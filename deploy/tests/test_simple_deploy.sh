@@ -30,6 +30,7 @@ log_test_note() {
   printf '[%s] [TEST-NOTE] %s\n' "$(log_ts)" "$*"
 }
 
+orig_args=("$@")
 images_env=""
 bundle=""
 target_suite="all"
@@ -100,7 +101,7 @@ if (( EUID != 1000 )); then
   sudo install -m 600 -o 1000 -g 1000 "$registry_config" "$auth_dir/config.json"
   export DOCKER_CONFIG="$auth_dir"
   uid_rc=0
-  sudo -E -u "$account" -g '#1000' bash "$0" "$@" || uid_rc=$?
+  sudo -E -u "$account" -g '#1000' bash "$0" "${orig_args[@]}" || uid_rc=$?
   rm -rf -- "$archive_dir"
   sudo rm -rf -- "$auth_dir"
   exit "$uid_rc"
