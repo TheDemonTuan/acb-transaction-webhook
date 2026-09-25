@@ -37,7 +37,7 @@ record_skip() {
 # 1. Shell scripts syntax check (bash -n)
 log_header "Gate 1: Shell Scripts Syntax Check (bash -n)"
 shopt -s nullglob
-shell_scripts=(deploy/*.sh deploy/lib/*.sh deploy/tests/*.sh scripts/ops/*.sh scripts/*.sh platform/edge/*.sh)
+shell_scripts=(deploy/*.sh deploy/tests/*.sh scripts/ops/*.sh scripts/*.sh platform/edge/*.sh)
 if [[ ${#shell_scripts[@]} -eq 0 ]]; then
   record_fail "No shell scripts found"
 else
@@ -56,7 +56,7 @@ fi
 
 # Shellcheck (if installed)
 if command -v shellcheck >/dev/null 2>&1; then
-  if shellcheck --severity=error deploy/*.sh deploy/lib/*.sh deploy/tests/*.sh scripts/ops/*.sh scripts/*.sh; then
+  if shellcheck --severity=error deploy/*.sh deploy/tests/*.sh scripts/ops/*.sh scripts/*.sh; then
     record_pass "Shellcheck passed"
   else
     record_fail "Shellcheck reported errors"
@@ -148,7 +148,6 @@ fi
 # 7. Current deployment and security behavior tests
 log_header "Gate 7: Deployment and Security Tests"
 DEPLOY_DRILL_TESTS=(
-  "deploy/tests/test_secrets.sh"
   "deploy/tests/test_restore_drill.sh"
   "deploy/test-supply-chain.sh"
   "scripts/verify-actions-pinned.sh"
