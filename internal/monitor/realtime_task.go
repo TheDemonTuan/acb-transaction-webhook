@@ -44,13 +44,16 @@ type RealtimeTask struct {
 }
 
 func (t *RealtimeTask) pinToday(fields map[string]string) map[string]string {
-	pinned := make(map[string]string, len(fields)+3)
+	pinned := make(map[string]string, len(fields)+4)
 	for key, value := range fields {
 		pinned[key] = value
 	}
 	pinned["FromDate"] = t.today
 	pinned["ToDate"] = t.today
 	pinned["activeDatetimeYN"] = "N"
+	if pinned["dse_nextEventName"] == "" {
+		pinned["dse_nextEventName"] = "byDate"
+	}
 	delete(pinned, "activeDatetimeByMonth")
 	delete(pinned, "MonthCurr")
 	delete(pinned, "YearCurr")
@@ -101,8 +104,12 @@ func (t *RealtimeTask) finishPoll(ctx context.Context, status, pollErr string) (
 	if t.finished {
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
+	pages := t.pages
+	if pages == 0 && t.started {
+		pages = 1
+	}
 	t.poll.Status = status
-	t.poll.Pages = t.pages
+	t.poll.Pages = pages
 	t.poll.RowsSeen = t.rowsSeen
 	if pollErr != "" {
 		t.poll.Error = pollErr
@@ -348,11 +355,13 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 				return t.finishPoll(ctx, "PARTIAL", formErr.Error())
 			}
 
-			if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-				form.Fields["AccountNbr"] = conn.AccountMasked
-			}
-			slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
-			histResp, histErr := t.history(ctx, form.Action, t.pinToday(form.Fields))
+				if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
+					form.Fields["AccountNbr"] = conn.AccountMasked
+				}
+				form.Fields["dse_nextEventName"] = "byDate"
+				form.Fields["activeDatetimeYN"] = "N"
+				slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
+				histResp, histErr := t.history(ctx, form.Action, t.pinToday(form.Fields))
 
 			if histErr != nil {
 				var authFail *acb.AuthFailure
@@ -396,14 +405,16 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	// Any complete non-authenticated response proves the transport recovered.
 	t.m.ClearBackoff()
 
-	// Parse transaction history
-	pageResult, parseErr := acb.ParseHistoryPage(historyMarkup)
-	if parseErr != nil {
-		return t.finishPoll(ctx, "PARTIAL", parseErr.Error())
-	}
+		pagesCount := 1
+		t.pages = pagesCount
 
-	pagesCount := 1
-	rowsSeen := len(pageResult.Transactions)
+		// Parse transaction history
+		pageResult, parseErr := acb.ParseHistoryPage(historyMarkup)
+		if parseErr != nil {
+			return t.finishPoll(ctx, "PARTIAL", parseErr.Error())
+		}
+
+		rowsSeen := len(pageResult.Transactions)
 	totalInserted := 0
 	var pollErr error
 	isPartial := false
@@ -529,8 +540,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 						t.m.SetBackoff(60 * time.Second)
 						return t.finishPoll(ctx, "PARTIAL", "ACB_MAINTENANCE")
 					}
-					pagesCount++
-					nextPage, err := acb.ParseHistoryPage(nextResp.Body)
+						pagesCount++
+						t.pages = pagesCount
+						nextPage, err := acb.ParseHistoryPage(nextResp.Body)
 					if err != nil {
 						slog.Warn("realtime poll next page parse error", "page", pagesCount, "error", err)
 						isPartial = true
@@ -660,10 +672,11 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 		t.m.SetBackoff(60 * time.Second)
 		return t.finishPoll(ctx, "PARTIAL", "ACB_MAINTENANCE")
 	}
-	page, err := acb.ParseHistoryPage(resp.Body)
-	if err != nil {
-		return t.finishPoll(ctx, "PARTIAL", err.Error())
-	}
+		t.pages++
+		page, err := acb.ParseHistoryPage(resp.Body)
+		if err != nil {
+			return t.finishPoll(ctx, "PARTIAL", err.Error())
+		}
 
 	items := make([]storage.BatchTransactionItem, 0, len(page.Transactions))
 	for _, txn := range page.Transactions {

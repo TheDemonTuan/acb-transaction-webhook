@@ -109,13 +109,16 @@ func ParseHistoryPage(markup string) (HistoryPageResult, error) {
 	}
 
 	if len(parsedTransactions) == 0 {
-		hasNext, nextAction, nextFields, totalRows := detectPagination(doc, markup)
-		// ponytail: allow recognized history table when totalRows indicates 0 records; require strict row parser once bank format changes
-		if recognized && (emptyHistory || (totalRows == 0 && (strings.Contains(strings.ToLower(markup), "tổng số dòng: 0") || strings.Contains(strings.ToLower(markup), "tổng số bản ghi: 0") || strings.Contains(strings.ToLower(markup), "tổng số giao dịch: 0") || strings.Contains(strings.ToLower(markup), "total rows: 0")))) {
+		hasNext, nextAction, nextFields, totalRows, totalRowsFound := detectPagination(doc, markup)
+		if hasNext {
+			return HistoryPageResult{}, errors.New("ACB history table has contradictory next link with empty transactions")
+		}
+		isLegitEmpty := emptyHistory || (totalRowsFound && totalRows == 0)
+		if recognized && isLegitEmpty {
 			parsedTransactions = []Transaction{}
 			return HistoryPageResult{
 				Transactions: parsedTransactions,
-				HasNext:      hasNext,
+				HasNext:      false,
 				NextAction:   nextAction,
 				NextFields:   nextFields,
 				TotalRows:    totalRows,
@@ -127,7 +130,10 @@ func ParseHistoryPage(markup string) (HistoryPageResult, error) {
 		}
 	}
 
-	hasNext, nextAction, nextFields, totalRows := detectPagination(doc, markup)
+	hasNext, nextAction, nextFields, totalRows, totalRowsFound := detectPagination(doc, markup)
+	if totalRowsFound && totalRows == 0 {
+		return HistoryPageResult{}, errors.New("ACB history table has contradictory total rows: 0 with non-empty transactions")
+	}
 	return HistoryPageResult{
 		Transactions: parsedTransactions,
 		HasNext:      hasNext,
@@ -282,14 +288,36 @@ func walk(node *html.Node, visit func(*html.Node)) {
 	}
 }
 
-func text(node *html.Node) string {
-	var values []string
-	walk(node, func(current *html.Node) {
-		if current.Type == html.TextNode {
-			values = append(values, current.Data)
+func isIgnoredTextTag(data string) bool {
+	switch strings.ToLower(data) {
+	case "script", "style", "noscript", "template":
+		return true
+	default:
+		return false
+	}
+}
+
+func domVisibleText(root *html.Node) string {
+	var sb strings.Builder
+	var walkVisible func(*html.Node)
+	walkVisible = func(n *html.Node) {
+		if n.Type == html.ElementNode && isIgnoredTextTag(n.Data) {
+			return
 		}
-	})
-	return strings.Join(values, " ")
+		if n.Type == html.TextNode {
+			sb.WriteString(n.Data)
+			sb.WriteString(" ")
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walkVisible(c)
+		}
+	}
+	walkVisible(root)
+	return strings.TrimSpace(sb.String())
+}
+
+func text(node *html.Node) string {
+	return domVisibleText(node)
 }
 
 func allBlank(values []string) bool {
@@ -319,16 +347,17 @@ func normalized(value string) string {
 	return strings.ReplaceAll(out.String(), " ", "")
 }
 
-func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction string, nextFields map[string]string, totalRows int) {
-	var docTextBuilder strings.Builder
+func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction string, nextFields map[string]string, totalRows int, totalRowsFound bool) {
+	fullText := domVisibleText(doc)
+	totalRows, totalRowsFound = extractTotalRows(fullText)
+
 	var nextCandidates []*html.Node
 	var nextDisabled bool
 
 	var visit func(*html.Node)
 	visit = func(n *html.Node) {
-		if n.Type == html.TextNode {
-			docTextBuilder.WriteString(n.Data)
-			docTextBuilder.WriteString(" ")
+		if n.Type == html.ElementNode && isIgnoredTextTag(n.Data) {
+			return
 		}
 		if n.Type == html.ElementNode {
 			name := strings.ToLower(strings.TrimSpace(attrVal(n, "name")))
@@ -362,7 +391,7 @@ func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction s
 	visit(doc)
 
 	if nextDisabled {
-		return false, "", nil, extractTotalRows(docTextBuilder.String())
+		return false, "", nil, totalRows, totalRowsFound
 	}
 
 	for _, n := range nextCandidates {
@@ -406,26 +435,11 @@ func detectPagination(doc *html.Node, markup string) (hasNext bool, nextAction s
 		break
 	}
 
-	fullText := docTextBuilder.String()
-	totalRows = extractTotalRows(fullText)
-
 	return
 }
 
 func nodeText(n *html.Node) string {
-	var b strings.Builder
-	var walkText func(*html.Node)
-	walkText = func(curr *html.Node) {
-		if curr.Type == html.TextNode {
-			b.WriteString(curr.Data)
-			b.WriteString(" ")
-		}
-		for c := curr.FirstChild; c != nil; c = c.NextSibling {
-			walkText(c)
-		}
-	}
-	walkText(n)
-	return strings.TrimSpace(b.String())
+	return domVisibleText(n)
 }
 
 func attrVal(n *html.Node, key string) string {
@@ -475,7 +489,7 @@ func extractEventName(s string) string {
 	return ""
 }
 
-func extractTotalRows(text string) int {
+func extractTotalRows(text string) (int, bool) {
 	normalized := strings.ToLower(text)
 	indicators := []string{"tổng số dòng:", "tổng số bản ghi:", "tổng số giao dịch:", "total rows:", "total records:"}
 	for _, ind := range indicators {
@@ -490,10 +504,10 @@ func extractTotalRows(text string) int {
 					break
 				}
 			}
-			if num, err := strconv.Atoi(numStr); err == nil && num > 0 {
-				return num
+			if num, err := strconv.Atoi(numStr); err == nil && num >= 0 {
+				return num, true
 			}
 		}
 	}
-	return 0
+	return 0, false
 }

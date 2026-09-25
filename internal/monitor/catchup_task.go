@@ -104,8 +104,12 @@ func (t *CatchUpTask) finishPoll(ctx context.Context, status, pollErr string) er
 	if t.pollFinished || t.poll.ID == "" || t.m == nil {
 		return nil
 	}
+	pages := t.totalPages
+	if pages == 0 && (t.dayPageCount > 0 || t.currentResp.Body != "") {
+		pages = 1
+	}
 	t.poll.Status = status
-	t.poll.Pages = t.totalPages
+	t.poll.Pages = pages
 	t.poll.RowsSeen = t.totalRowsSeen
 	if pollErr != "" {
 		t.poll.Error = pollErr
@@ -466,23 +470,28 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 
 		// Prepare form navigation for this day if page 0
 		if t.dayPageCount == 0 {
-			form, formErr := acb.ExtractHistoryForm(t.currentResp.Body)
-			if formErr != nil {
-				formErr = fmt.Errorf("extract recovery catch-up form for %s: %w", dayStr, formErr)
-				_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "FORM_INVALID", formErr.Error())
-				_ = t.finishPoll(ctx, "FAILED", formErr.Error())
-				t.finishDone(formErr)
-				return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
-			}
-			if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-				form.Fields["AccountNbr"] = conn.AccountMasked
-			}
-			fromT, _ := time.Parse("2006-01-02", dayStr)
-			form.Fields["FromDate"] = fromT.Format("02/01/2006")
-			form.Fields["ToDate"] = fromT.Format("02/01/2006")
-			form.Fields["_explicitRange"] = "true"
-			t.nextAction = form.Action
-			t.nextFields = form.Fields
+				form, formErr := acb.ExtractHistoryForm(t.currentResp.Body)
+				if formErr != nil {
+					if t.totalPages == 0 {
+						t.totalPages = 1
+					}
+					formErr = fmt.Errorf("extract recovery catch-up form for %s: %w", dayStr, formErr)
+					_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "FORM_INVALID", formErr.Error())
+					_ = t.finishPoll(ctx, "FAILED", formErr.Error())
+					t.finishDone(formErr)
+					return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
+				}
+				if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
+					form.Fields["AccountNbr"] = conn.AccountMasked
+				}
+				fromT, _ := time.Parse("2006-01-02", dayStr)
+				form.Fields["FromDate"] = fromT.Format("02/01/2006")
+				form.Fields["ToDate"] = fromT.Format("02/01/2006")
+				form.Fields["dse_nextEventName"] = "byDate"
+				form.Fields["activeDatetimeYN"] = "N"
+				form.Fields["_explicitRange"] = "true"
+				t.nextAction = form.Action
+				t.nextFields = form.Fields
 		}
 
 		var dayResets int
@@ -522,15 +531,17 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 							t.finishDone(formErr)
 							return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
 						}
-						if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-							form.Fields["AccountNbr"] = conn.AccountMasked
-						}
-						fromT, _ := time.Parse("2006-01-02", dayStr)
-						form.Fields["FromDate"] = fromT.Format("02/01/2006")
-						form.Fields["ToDate"] = fromT.Format("02/01/2006")
-						form.Fields["_explicitRange"] = "true"
-						t.nextAction = form.Action
-						t.nextFields = form.Fields
+							if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
+								form.Fields["AccountNbr"] = conn.AccountMasked
+							}
+							fromT, _ := time.Parse("2006-01-02", dayStr)
+							form.Fields["FromDate"] = fromT.Format("02/01/2006")
+							form.Fields["ToDate"] = fromT.Format("02/01/2006")
+							form.Fields["dse_nextEventName"] = "byDate"
+							form.Fields["activeDatetimeYN"] = "N"
+							form.Fields["_explicitRange"] = "true"
+							t.nextAction = form.Action
+							t.nextFields = form.Fields
 						continue
 					}
 					resetErr := fmt.Errorf("conversational token rejected repeatedly for %s: %w", dayStr, histErr)
