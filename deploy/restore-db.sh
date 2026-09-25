@@ -5,8 +5,8 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=deploy/lib.sh
-source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=deploy/simple-lib.sh
+source "$SCRIPT_DIR/simple-lib.sh"
 
 IDENTITY_FILE=""
 BACKUP_FILE=""
