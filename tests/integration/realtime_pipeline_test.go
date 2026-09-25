@@ -85,7 +85,7 @@ func (c *blockedACBClient) Bootstrap(context.Context) (acb.Response, error) {
 	return acb.Response{StatusCode: http.StatusOK, Kind: acb.AccountDetailPage, Body: `<form action="/history" method="POST"><input type="hidden" name="dse_operationName" value="op1"/><input type="hidden" name="dse_processorState" value="ps1"/><input type="hidden" name="AccountNbr" value="123456"/></form>`}, nil
 }
 
-func (c *blockedACBClient) History(ctx context.Context, _ string, _ map[string]string) (acb.Response, error) {
+func (c *blockedACBClient) History(ctx context.Context, _ string, fields map[string]string) (acb.Response, error) {
 	c.page++
 	if c.page == 2 {
 		c.once.Do(func() { close(c.page2Started) })
@@ -99,7 +99,7 @@ func (c *blockedACBClient) History(ctx context.Context, _ string, _ map[string]s
 	if c.page == 1 {
 		next = `<a href="/history?page=next" onclick="submitEvent('nextPage')">Trang sau</a>`
 	}
-	body := fmt.Sprintf(`<form action="/history" method="POST"><input type="hidden" name="dse_operationName" value="op1"/><input type="hidden" name="dse_processorState" value="ps%d"/><input type="hidden" name="AccountNbr" value="123456"/></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr><tr><td>PIPELINE_PAGE_%d</td><td>15/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Pipeline %d</td></tr><tr><td colspan="6">%s</td></tr></table>`, c.page, c.page, c.page, next)
+	body := fmt.Sprintf(`<form action="/history" method="POST"><input type="hidden" name="dse_operationName" value="op1"/><input type="hidden" name="dse_processorState" value="ps%d"/><input type="hidden" name="AccountNbr" value="123456"/></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr><tr><td>PIPELINE_PAGE_%d</td><td>%s</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Pipeline %d</td></tr><tr><td colspan="6">%s</td></tr></table>`, c.page, c.page, fields["FromDate"], c.page, next)
 	return acb.Response{StatusCode: http.StatusOK, Kind: acb.HistoryPage, Body: body}, nil
 }
 

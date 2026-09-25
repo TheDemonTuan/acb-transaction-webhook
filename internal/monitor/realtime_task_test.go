@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -54,10 +55,10 @@ func (m *multiPageMockClient) History(ctx context.Context, endpoint string, fiel
 	</form>
 	<table>
 		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-		<tr><td>TXN_%d</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer %d</td></tr>
+		<tr><td>TXN_%d</td><td>%s</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer %d</td></tr>
 		%s
 	</table>
-	`, curr, curr, curr, navRow)
+		`, curr, curr, fields["FromDate"], curr, navRow)
 
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
 }
@@ -212,7 +213,7 @@ func (m *blockingMultiPageMockClient) History(ctx context.Context, endpoint stri
 		</form>
 		<table>
 			<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-			<tr><td>TXN_PAGE1</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
+			<tr><td>TXN_PAGE1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
 			<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
 		</table>`
 		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
@@ -241,7 +242,7 @@ func (m *blockingMultiPageMockClient) History(ctx context.Context, endpoint stri
 	</form>
 	<table>
 		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-		<tr><td>TXN_PAGE2</td><td>14/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
+		<tr><td>TXN_PAGE2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
 		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 	</table>`
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
@@ -384,7 +385,7 @@ func (m *fenceFailureMockClient) History(ctx context.Context, endpoint string, f
 	</form>
 	<table>
 		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-		<tr><td>TXN_FAIL</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer Fail</td></tr>
+		<tr><td>TXN_FAIL</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer Fail</td></tr>
 		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 	</table>`
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
@@ -469,7 +470,7 @@ func (m *page2FenceFailureMockClient) History(ctx context.Context, endpoint stri
 		</form>
 		<table>
 			<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-			<tr><td>TXN_PAGE1</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
+			<tr><td>TXN_PAGE1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
 			<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
 		</table>`
 		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
@@ -486,7 +487,7 @@ func (m *page2FenceFailureMockClient) History(ctx context.Context, endpoint stri
 	</form>
 	<table>
 		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-		<tr><td>TXN_PAGE2</td><td>14/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
+		<tr><td>TXN_PAGE2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
 		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 	</table>`
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
@@ -543,10 +544,10 @@ func TestRealtimeTask_Page2FailedIngestDoesNotPublishPage2Event(t *testing.T) {
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("expected 1 poll run, got %v (err: %v)", len(runs), err)
 	}
-		if runs[0].Status != "PARTIAL" {
-			t.Fatalf("expected PARTIAL poll status, got %s", runs[0].Status)
-		}
+	if runs[0].Status != "PARTIAL" {
+		t.Fatalf("expected PARTIAL poll status, got %s", runs[0].Status)
 	}
+}
 
 func TestRealtimeTask_FinishPollUnconfirmedAuthRejected(t *testing.T) {
 	ctx := context.Background()
@@ -630,40 +631,49 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"><input name="AccountNbr" value="***1234"></form>
 			<table>
 				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-				<tr><td>TXN_1</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
+				<tr><td>TXN_1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
 				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 			</table>`
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 		case 3:
-			// Poll 2: Stale conversational state in history POST -> returns LoginPage
+			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_1</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 4:
+			// Poll 2: Bootstrap with stale state -> returns LoginPage
 			loginBody := `<input name="username"><input type="password" name="password">`
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
-		case 4:
-			// Poll 2: Probe GET /acbib/Request confirms session still alive! Returns fresh tokens
+		case 5:
+			// Poll 2: Probe confirms session still alive and returns fresh tokens.
 			body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>`
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		case 5:
-			// Poll 2: Replayed POST history with resynced token2 -> returns valid transactions
+		case 6:
+			// Poll 2: Bootstrap query with fresh token2 -> returns current form
 			body := `
 			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>
 			<table>
 				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-				<tr><td>TXN_2</td><td>14/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
+				<tr><td>TXN_2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
 				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 			</table>`
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		case 6:
-			// Poll 3: History request with fresh token2 -> succeeds
+		case 7:
+			// Poll 2: Explicit query with fresh token2 -> succeeds
 			body := `
 			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>
 			<table>
 				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-				<tr><td>TXN_3</td><td>14/09/2026</td><td>0</td><td>300,000</td><td>1,500,000</td><td>Transfer 3</td></tr>
+				<tr><td>TXN_3</td><td>25/09/2026</td><td>0</td><td>300,000</td><td>1,500,000</td><td>Transfer 3</td></tr>
 				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 			</table>`
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 8:
+			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token3"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_3</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		case 9:
+			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token4"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_4</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 		default:
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+			return nil, fmt.Errorf("unexpected request %d", count)
 		}
 	})
 
@@ -707,12 +717,12 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 		t.Fatalf("expected generation %d, got %d", conn.Generation, connFinal.Generation)
 	}
 
-		// Verify all 3 transactions were ingested
-		txns, err := store.ListTransactions(ctx, 10)
-		if err != nil || len(txns) != 3 {
-			t.Fatalf("expected 3 transactions ingested, got %d (err: %v)", len(txns), err)
-		}
+	// Verify all 3 transactions were ingested
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 3 {
+		t.Fatalf("expected 3 transactions ingested, got %d (err: %v)", len(txns), err)
 	}
+}
 
 func TestRealtimeTask_BootstrapClassifiedAsHistoryPageSubmitsHistoryQuery(t *testing.T) {
 	ctx := context.Background()
@@ -768,6 +778,101 @@ func TestRealtimeTask_BootstrapClassifiedAsHistoryPageSubmitsHistoryQuery(t *tes
 	}
 }
 
+func TestRealtimeTask_QueriesTodayEvenWhenBootstrapHasOlderTransactions(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_scoped_day.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+
+	today := time.Now().In(acb.DefaultLocation).Format("02/01/2006")
+	older := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("02/01/2006")
+	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="ps1"><input name="dse_sessionId" value="session1"><input name="AccountNbr" value="***1234"></form>`
+	var queries int
+	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		if req.Method == http.MethodGet {
+			body = form + fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>OLD</td><td>%s</td><td>0</td><td>100</td></tr></table>`, older)
+		} else {
+			queries++
+			payload, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			values, parseErr := url.ParseQuery(string(payload))
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			if values.Get("FromDate") != today || values.Get("ToDate") != today || values.Get("dse_nextEventName") != "byDate" || values.Get("CheckRef") != "false" || values.Get("CheckDoiUng") != "false" {
+				t.Fatalf("wrong date-query controls (values redacted): from_today=%t to_today=%t by_date=%t check_ref=%t check_doi_ung=%t", values.Get("FromDate") == today, values.Get("ToDate") == today, values.Get("dse_nextEventName") == "byDate", values.Get("CheckRef") == "false", values.Get("CheckDoiUng") == "false")
+			}
+			body = form + fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TODAY</td><td>%s</td><td>0</td><td>100</td></tr></table>`, today)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	res, err := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
+	if err != nil || !res.Done || res.Outcome != scheduler.OutcomeSuccess || queries != 2 {
+		t.Fatalf("poll must query today after bootstrap: result=%+v err=%v posts=%d", res, err, queries)
+	}
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 1 || txns[0].TransactionDay != time.Now().In(acb.DefaultLocation).Format("2006-01-02") {
+		t.Fatalf("expected only today's transaction, count=%d err=%v", len(txns), err)
+	}
+}
+
+func TestRealtimeTask_RejectsOutOfDayResponseBeforeIngest(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_reject_wrong_day.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("02/01/2006")
+	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="ps1"><input name="dse_sessionId" value="s1"></form>`
+	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := form
+		if req.Method == http.MethodPost {
+			body += fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>OLDER</td><td>%s</td><td>0</td><td>100</td></tr></table>`, old)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	res, err := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
+	if err != nil || !res.Done {
+		t.Fatalf("poll did not finish: result=%+v err=%v", res, err)
+	}
+	runs, err := store.ListPollRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || runs[0].Status != "PARTIAL" || runs[0].Error != acb.ErrHistoryDayMismatch.Error() {
+		t.Fatalf("expected fail-closed out-of-day poll, runs=%+v err=%v", runs, err)
+	}
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 0 {
+		t.Fatalf("out-of-day transaction ingested: count=%d err=%v", len(txns), err)
+	}
+}
+
 type bootstrapHistoryPageMockClient struct {
 	bootstrapCalls atomic.Int32
 	historyCalls   atomic.Int32
@@ -815,5 +920,3 @@ func (m *bootstrapHistoryPageMockClient) History(ctx context.Context, endpoint s
 		Kind:       acb.HistoryPage,
 	}, nil
 }
-
-
