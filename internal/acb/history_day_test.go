@@ -15,6 +15,10 @@ func TestHistoryDayDiagnosticsDoNotIncludeTransactionContents(t *testing.T) {
 	if len(counts) != 3 || counts[0] != (HistoryDayCount{Day: "2026-09-24", Rows: 1}) || counts[1] != (HistoryDayCount{Day: "2026-09-25", Rows: 2}) || counts[2] != (HistoryDayCount{Day: "INVALID", Rows: 1}) {
 		t.Fatalf("unexpected safe day counts: %+v", counts)
 	}
+	effectiveCounts := HistoryEffectiveDayCounts([]Transaction{{EffectiveDate: "25/09/2026", Number: "SENSITIVE", Description: "private"}, {EffectiveDate: "invalid"}})
+	if len(effectiveCounts) != 2 || effectiveCounts[0] != (HistoryDayCount{Day: "2026-09-25", Rows: 1}) || effectiveCounts[1] != (HistoryDayCount{Day: "INVALID", Rows: 1}) {
+		t.Fatalf("unexpected safe effective day counts: %+v", effectiveCounts)
+	}
 	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="opaque"><input name="FromDate" value="25/09/2026"><input name="ToDate" value="25/09/2026"></form>`
 	if !HistoryFormDateMatches(form, "25/09/2026") || HistoryFormDateMatches(form, "20/09/2026") {
 		t.Fatal("response form date comparison failed")
