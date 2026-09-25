@@ -1,7 +1,0 @@
-{
-  "app": "worker",
-  "workload_class": "singleton",
-  "container_name": "acb-worker",
-  "max_restarts": 3,
-  "cooldown_seconds": 60
-}
