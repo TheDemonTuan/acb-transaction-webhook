@@ -255,39 +255,48 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	}
 
 	// Skip covered historical days before today.
-	for !t.currentDay.After(toT) && t.currentDay.Before(toT) && t.dayPageCount == 0 {
-		dayStr := t.currentDay.Format("2006-01-02")
-		covered, coverageErr := t.m.store.CheckRangeCoverage(ctx, conn.ID, dayStr, dayStr)
-		if coverageErr != nil {
-			coverageErr = fmt.Errorf("check catch-up coverage for %s: %w", dayStr, coverageErr)
-			t.finishDone(coverageErr)
-			return scheduler.TaskStepResult{Done: true, Error: coverageErr, Outcome: scheduler.OutcomeFatal}, coverageErr
-		}
-		if !covered {
-			break
-		}
-		if t.explicitRecovery && t.runID != "" {
-			nextDay := t.currentDay.AddDate(0, 0, 1).Format("2006-01-02")
-			if _, err := t.m.store.AdvanceRecoveryDay(ctx, storage.RecoveryDayAdvance{RunID: t.runID, ConnectionID: conn.ID, Generation: conn.Generation, Day: dayStr, NextDay: nextDay, ScanID: t.scanID(), CoverageFrom: t.fromDate}); err != nil {
-				checkpointErr := fmt.Errorf("advance covered recovery day %s: %w", dayStr, err)
+	// Post-auth recovery (INITIAL_AUTH_BOOTSTRAP, SESSION_REAUTH_CATCHUP, SESSION_AUTHENTICATED)
+	// must scan every day in the bounded window [today-6, today] to detect any missed transactions,
+	// rather than skipping days because an old session recorded coverage earlier.
+	// For startup and general catch-up, covered days can be skipped.
+	isPostAuthRecovery := t.reason == storage.RecoveryReasonReauth ||
+		t.reason == storage.RecoveryReasonInitialAuth ||
+		t.reason == storage.RecoveryReasonAuthLegacy
+	if !isPostAuthRecovery {
+		for !t.currentDay.After(toT) && t.currentDay.Before(toT) && t.dayPageCount == 0 {
+			dayStr := t.currentDay.Format("2006-01-02")
+			covered, coverageErr := t.m.store.CheckRangeCoverage(ctx, conn.ID, dayStr, dayStr)
+			if coverageErr != nil {
+				coverageErr = fmt.Errorf("check catch-up coverage for %s: %w", dayStr, coverageErr)
+				t.finishDone(coverageErr)
+				return scheduler.TaskStepResult{Done: true, Error: coverageErr, Outcome: scheduler.OutcomeFatal}, coverageErr
+			}
+			if !covered {
+				break
+			}
+			if t.explicitRecovery && t.runID != "" {
+				nextDay := t.currentDay.AddDate(0, 0, 1).Format("2006-01-02")
+				if _, err := t.m.store.AdvanceRecoveryDay(ctx, storage.RecoveryDayAdvance{RunID: t.runID, ConnectionID: conn.ID, Generation: conn.Generation, Day: dayStr, NextDay: nextDay, ScanID: t.scanID(), CoverageFrom: t.fromDate}); err != nil {
+					checkpointErr := fmt.Errorf("advance covered recovery day %s: %w", dayStr, err)
+					t.finishDone(checkpointErr)
+					return scheduler.TaskStepResult{Done: true, Error: checkpointErr, Outcome: scheduler.OutcomeFatal}, checkpointErr
+				}
+			} else if err := t.m.store.SaveCheckpoint(ctx, storage.Checkpoint{
+				ConnectionID: conn.ID,
+				ScanID:       t.scanID(),
+				CoverageFrom: t.fromDate,
+				CoverageTo:   dayStr,
+			}); err != nil {
+				checkpointErr := fmt.Errorf("save catch-up checkpoint for covered day %s: %w", dayStr, err)
+
 				t.finishDone(checkpointErr)
 				return scheduler.TaskStepResult{Done: true, Error: checkpointErr, Outcome: scheduler.OutcomeFatal}, checkpointErr
 			}
-		} else if err := t.m.store.SaveCheckpoint(ctx, storage.Checkpoint{
-			ConnectionID: conn.ID,
-			ScanID:       t.scanID(),
-			CoverageFrom: t.fromDate,
-			CoverageTo:   dayStr,
-		}); err != nil {
-			checkpointErr := fmt.Errorf("save catch-up checkpoint for covered day %s: %w", dayStr, err)
-
-			t.finishDone(checkpointErr)
-			return scheduler.TaskStepResult{Done: true, Error: checkpointErr, Outcome: scheduler.OutcomeFatal}, checkpointErr
-		}
-		t.currentDay = t.currentDay.AddDate(0, 0, 1)
-		if err := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusRunning, "", ""); err != nil {
-			t.finishDone(err)
-			return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+			t.currentDay = t.currentDay.AddDate(0, 0, 1)
+			if err := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusRunning, "", ""); err != nil {
+				t.finishDone(err)
+				return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+			}
 		}
 	}
 
@@ -474,73 +483,81 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 				return scheduler.TaskStepResult{Done: true, Error: parseErr, Outcome: scheduler.OutcomeFatal}, parseErr
 			}
 
-			var pageItems []storage.BatchTransactionItem
-			for _, txn := range pageResult.Transactions {
-				pageItems = append(pageItems, storage.BatchTransactionItem{
-					Number:        txn.Number,
-					Credit:        txn.Credit,
-					Debit:         txn.Debit,
-					Balance:       txn.Balance,
-					TransactionAt: txn.TransactionAt,
-					EffectiveAt:   txn.EffectiveDate,
-					Description:   txn.Description,
-				})
-			}
-
-			res, ingestErr := t.m.store.IngestTransactionsBatchWithSource(ctx, conn.ID, conn.Generation, conn.AccountMasked, pageItems, false, "CATCH_UP")
-			if ingestErr != nil {
-				if errors.Is(ingestErr, storage.ErrGenerationFenceMismatch) {
-					t.finishDone(nil)
-					return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+				var pageItems []storage.BatchTransactionItem
+				for _, txn := range pageResult.Transactions {
+					pageItems = append(pageItems, storage.BatchTransactionItem{
+						Number:        txn.Number,
+						Credit:        txn.Credit,
+						Debit:         txn.Debit,
+						Balance:       txn.Balance,
+						TransactionAt: txn.TransactionAt,
+						EffectiveAt:   txn.EffectiveDate,
+						Description:   txn.Description,
+					})
 				}
-				ingestErr = fmt.Errorf("ingest recovery catch-up page for %s: %w", dayStr, ingestErr)
-				_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "INGEST_FAILED", ingestErr.Error())
-				t.finishDone(ingestErr)
-				return scheduler.TaskStepResult{Done: true, Error: ingestErr, Outcome: scheduler.OutcomeFatal}, ingestErr
-			}
-			t.m.notifyNewEvents(res.NewEvents)
-			t.dayTxns = append(t.dayTxns, pageItems...)
+				t.dayTxns = append(t.dayTxns, pageItems...)
 
-			if t.cursor == nil {
-				t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
-			}
-			t.cursor.Step(pageResult, len(pageResult.Transactions))
+				if t.cursor == nil {
+					t.cursor = acb.NewPaginationCursor(t.nextAction, t.nextFields)
+				}
+				t.cursor.Step(pageResult, len(pageResult.Transactions))
 
-			if !t.cursor.HasNext {
-				break
-			}
+				if !t.cursor.HasNext {
+					break
+				}
 
-			if t.cursor.HasNext && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) && t.dayPageCount < catchUpMaxPages {
-				day := t.currentDay.Format("02/01/2006")
-				pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, day)
-				if err != nil {
-					pinErr := fmt.Errorf("pin recovery pagination for %s: %w", dayStr, err)
-					if progressErr := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "FORM_INVALID", pinErr.Error()); progressErr != nil {
-						pinErr = errors.Join(pinErr, progressErr)
+				if t.cursor.HasNext && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) && t.dayPageCount < catchUpMaxPages {
+					day := t.currentDay.Format("02/01/2006")
+					pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, day)
+					if err != nil {
+						pinErr := fmt.Errorf("pin recovery pagination for %s: %w", dayStr, err)
+						if progressErr := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "FORM_INVALID", pinErr.Error()); progressErr != nil {
+							pinErr = errors.Join(pinErr, progressErr)
+						}
+						t.finishDone(pinErr)
+						return scheduler.TaskStepResult{Done: true, Error: pinErr, Outcome: scheduler.OutcomeFatal}, pinErr
 					}
-					t.finishDone(pinErr)
-					return scheduler.TaskStepResult{Done: true, Error: pinErr, Outcome: scheduler.OutcomeFatal}, pinErr
+						pinned["_raw"] = "true"
+						t.nextAction = t.cursor.Action
+						t.nextFields = pinned
 				}
-					pinned["_raw"] = "true"
-					t.nextAction = t.cursor.Action
-					t.nextFields = pinned
 			}
-		}
 
-		// Fail closed on deterministic pagination truncation. Do not requeue forever.
-		if t.cursor != nil && (t.cursor.Truncated || (t.cursor.HasNext && t.dayPageCount >= catchUpMaxPages)) {
-			truncErr := fmt.Errorf("catch-up pagination truncated for day %s: seen %d of %d rows (pages: %d)",
-				dayStr, t.cursor.CumulativeRows, t.cursor.TotalRowsSeen, t.dayPageCount)
-			slog.Warn("catch-up day truncated, failing closed without advancing coverage", "day", dayStr,
-				"reason", t.reason, "run_id", t.runID, "error", truncErr)
-			if progressErr := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "TRUNCATED_HISTORY", truncErr.Error()); progressErr != nil {
-				truncErr = errors.Join(truncErr, progressErr)
+			// Fail closed on deterministic pagination truncation. Do not requeue forever.
+			if t.cursor != nil && (t.cursor.Truncated || (t.cursor.HasNext && t.dayPageCount >= catchUpMaxPages)) {
+				truncErr := fmt.Errorf("catch-up pagination truncated for day %s: seen %d of %d rows (pages: %d)",
+					dayStr, t.cursor.CumulativeRows, t.cursor.TotalRowsSeen, t.dayPageCount)
+				slog.Warn("catch-up day truncated, failing closed without advancing coverage", "day", dayStr,
+					"reason", t.reason, "run_id", t.runID, "error", truncErr)
+				if progressErr := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "TRUNCATED_HISTORY", truncErr.Error()); progressErr != nil {
+					truncErr = errors.Join(truncErr, progressErr)
+				}
+				t.finishDone(truncErr)
+				return scheduler.TaskStepResult{Done: true, Error: truncErr, Outcome: scheduler.OutcomeFatal}, truncErr
 			}
-			t.finishDone(truncErr)
-			return scheduler.TaskStepResult{Done: true, Error: truncErr, Outcome: scheduler.OutcomeFatal}, truncErr
-		}
 
-		// Day is complete: commit coverage, checkpoint, and recovery cursor atomically.
+			// Day pagination is complete and valid: ingest all transactions for this day atomically.
+			isBaseline := t.reason == storage.RecoveryReasonInitialAuth
+			source := "CATCH_UP"
+			if isBaseline {
+				source = "BOOTSTRAP"
+			}
+			if len(t.dayTxns) > 0 {
+				res, ingestErr := t.m.store.IngestTransactionsBatchWithSource(ctx, conn.ID, conn.Generation, conn.AccountMasked, t.dayTxns, isBaseline, source)
+				if ingestErr != nil {
+					if errors.Is(ingestErr, storage.ErrGenerationFenceMismatch) {
+						t.finishDone(nil)
+						return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+					}
+					ingestErr = fmt.Errorf("ingest recovery catch-up day for %s: %w", dayStr, ingestErr)
+					_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "INGEST_FAILED", ingestErr.Error())
+					t.finishDone(ingestErr)
+					return scheduler.TaskStepResult{Done: true, Error: ingestErr, Outcome: scheduler.OutcomeFatal}, ingestErr
+				}
+				t.m.notifyNewEvents(res.NewEvents)
+			}
+
+			// Day is complete: commit coverage, checkpoint, and recovery cursor atomically.
 	nextDay := t.currentDay.AddDate(0, 0, 1).Format("2006-01-02")
 	if t.explicitRecovery && t.runID != "" {
 		if _, err := t.m.store.CommitRecoveryDay(ctx, storage.RecoveryDayCommit{RunID: t.runID, ConnectionID: conn.ID, Generation: conn.Generation, Day: dayStr, NextDay: nextDay, RowsSeen: len(t.dayTxns), ScanID: t.scanID(), CoverageFrom: t.fromDate}); err != nil {

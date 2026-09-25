@@ -220,16 +220,45 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		t.finishDone(checkErr)
 		return scheduler.TaskStepResult{Done: true, Error: checkErr, Outcome: scheduler.OutcomeFatal}, checkErr
 	}
-	if hasActiveAttempt {
-		slog.Info("skipping poll: browser authentication in progress", "connection_id", conn.ID)
-		if t.started && t.poll.ID != "" && !t.finished {
-			return t.finishPoll(ctx, "PARTIAL", "AUTH_IN_PROGRESS")
+		if hasActiveAttempt {
+			slog.Info("skipping poll: browser authentication in progress", "connection_id", conn.ID)
+			if t.started && t.poll.ID != "" && !t.finished {
+				return t.finishPoll(ctx, "PARTIAL", "AUTH_IN_PROGRESS")
+			}
+			t.m.clearSyncRequest(t.connectionID, t.generation)
+			t.m.notifyPollWaiters(nil)
+			t.finishDone(nil)
+			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 		}
-		t.m.clearSyncRequest(t.connectionID, t.generation)
-		t.m.notifyPollWaiters(nil)
-		t.finishDone(nil)
-		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
-	}
+
+		openRun, err := t.m.openRecoveryRun(ctx, conn.ID, conn.Generation)
+		if err != nil {
+			slog.Warn("check open recovery in realtime task failed", "connection_id", conn.ID, "error", err)
+			return scheduler.TaskStepResult{Done: false, RequeueAt: time.Now().Add(2 * time.Second), Outcome: scheduler.OutcomeTransient}, nil
+		}
+		if openRun != nil {
+			if openRun.Reason == storage.RecoveryReasonInitialAuth {
+				slog.Info("suppressing realtime task: initial bootstrap in progress", "connection_id", conn.ID, "generation", conn.Generation)
+				if t.started && t.poll.ID != "" && !t.finished {
+					return t.finishPoll(ctx, "PARTIAL", "INITIAL_BOOTSTRAP_IN_PROGRESS")
+				}
+				t.m.clearSyncRequest(t.connectionID, t.generation)
+				t.m.notifyPollWaiters(nil)
+				t.finishDone(nil)
+				return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+			}
+			curBoost := t.m.PaymentBoostStatus()
+			if !curBoost.Active && t.priority == PriorityRealtimePoll {
+				slog.Info("suppressing normal realtime poll: recovery catch-up in progress", "connection_id", conn.ID, "generation", conn.Generation)
+				if t.started && t.poll.ID != "" && !t.finished {
+					return t.finishPoll(ctx, "PARTIAL", "RECOVERY_IN_PROGRESS")
+				}
+				t.m.clearSyncRequest(t.connectionID, t.generation)
+				t.m.notifyPollWaiters(nil)
+				t.finishDone(nil)
+				return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+			}
+		}
 
 	if t.m.client == nil {
 		clientErr := errors.New("bank client not configured")
