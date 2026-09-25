@@ -65,31 +65,55 @@ func DiagnosePageStructure(markup string) PageStructureDiagnostic {
 				if len(row) == 0 || allBlank(row) {
 					continue
 				}
-				rowText := strings.ToLower(strings.Join(row, " "))
-				if containsAny(rowText, "khong co giao dich", "không có giao dịch", "khong co du lieu", "không có dữ liệu", "no transaction", "chua co giao dich", "chưa có giao dịch") {
-					diag.EmptyMarkerPresent = true
-					continue
+					rowText := strings.ToLower(strings.Join(row, " "))
+					if containsAny(rowText,
+						"khong co giao dich", "không có giao dịch",
+						"khong co phat sinh giao dich", "không có phát sinh giao dịch",
+						"khong phat sinh giao dich", "không phát sinh giao dịch",
+						"khong tim thay du lieu", "không tìm thấy dữ liệu",
+						"khong tim thay giao dich", "không tìm thấy giao dịch",
+						"khong co du lieu", "không có dữ liệu",
+						"no transaction", "chua co giao dich", "chưa có giao dịch",
+					) {
+						diag.EmptyMarkerPresent = true
+						continue
+					}
+					if isTableFooter(rowText) {
+						continue
+					}
+					diag.BodyRowCount++
 				}
-				if isTableFooter(rowText) {
-					continue
-				}
-				diag.BodyRowCount++
-			}
-		} else {
-			for _, r := range rows {
-				rowText := strings.ToLower(strings.Join(r, " "))
-				if containsAny(rowText, "khong co giao dich", "không có giao dịch", "khong co du lieu", "không có dữ liệu", "no transaction", "chua co giao dich", "chưa có giao dịch") {
-					diag.EmptyMarkerPresent = true
+			} else {
+				for _, r := range rows {
+					rowText := strings.ToLower(strings.Join(r, " "))
+					if containsAny(rowText,
+						"khong co giao dich", "không có giao dịch",
+						"khong co phat sinh giao dich", "không có phát sinh giao dịch",
+						"khong phat sinh giao dich", "không phát sinh giao dịch",
+						"khong tim thay du lieu", "không tìm thấy dữ liệu",
+						"khong tim thay giao dich", "không tìm thấy giao dịch",
+						"khong co du lieu", "không có dữ liệu",
+						"no transaction", "chua co giao dich", "chưa có giao dịch",
+					) {
+						diag.EmptyMarkerPresent = true
+					}
 				}
 			}
 		}
-	}
 
-	domText := domVisibleText(doc)
-	normDomText := strings.ToLower(domText)
-	if !diag.EmptyMarkerPresent && containsAny(normDomText, "khong co giao dich", "không có giao dịch", "khong co du lieu", "không có dữ liệu", "no transaction", "chua co giao dich", "chưa có giao dịch") {
-		diag.EmptyMarkerPresent = true
-	}
+		domText := domVisibleText(doc)
+		normDomText := strings.ToLower(domText)
+		if !diag.EmptyMarkerPresent && containsAny(normDomText,
+			"khong co giao dich", "không có giao dịch",
+			"khong co phat sinh giao dich", "không có phát sinh giao dịch",
+			"khong phat sinh giao dich", "không phát sinh giao dịch",
+			"khong tim thay du lieu", "không tìm thấy dữ liệu",
+			"khong tim thay giao dich", "không tìm thấy giao dịch",
+			"khong co du lieu", "không có dữ liệu",
+			"no transaction", "chua co giao dich", "chưa có giao dịch",
+		) {
+			diag.EmptyMarkerPresent = true
+		}
 
 	totalRows, found := extractTotalRows(domText)
 	diag.TotalRowsExtracted = totalRows

@@ -707,9 +707,113 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 		t.Fatalf("expected generation %d, got %d", conn.Generation, connFinal.Generation)
 	}
 
-	// Verify all 3 transactions were ingested
+		// Verify all 3 transactions were ingested
+		txns, err := store.ListTransactions(ctx, 10)
+		if err != nil || len(txns) != 3 {
+			t.Fatalf("expected 3 transactions ingested, got %d (err: %v)", len(txns), err)
+		}
+	}
+
+func TestRealtimeTask_BootstrapClassifiedAsHistoryPageSubmitsHistoryQuery(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_bootstrap_history_kind.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+
+	todayVN := time.Now().In(time.FixedZone("Asia/Ho_Chi_Minh", 7*3600)).Format("02/01/2006")
+
+	// Custom mock client where Bootstrap returns a page classified as HistoryPage
+	// (matching real ACB bootstrap page with ibkacctDetailProc and table headers but no data).
+	mockClient := &bootstrapHistoryPageMockClient{
+		todayVN: todayVN,
+	}
+
+	mon := New(store, mockClient, 5*time.Second, 15*time.Second)
+	task := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
+
+	res, err := task.Step(ctx)
+	if err != nil {
+		t.Fatalf("unexpected step error: %v", err)
+	}
+	runsList, _ := store.ListPollRuns(ctx, 1)
+	if len(runsList) > 0 {
+		t.Logf("poll run status: %s, error: %s, classifier: %s", runsList[0].Status, runsList[0].Error, runsList[0].Classifier)
+	}
+	if !res.Done || res.Outcome != scheduler.OutcomeSuccess {
+		t.Fatalf("expected poll to succeed, got res=%+v", res)
+	}
+
+	if mockClient.historyCalls.Load() != 1 {
+		t.Fatalf("expected 1 history call, got %d", mockClient.historyCalls.Load())
+	}
+
+	runs, err := store.ListPollRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || runs[0].Status != "SUCCEEDED" {
+		t.Fatalf("expected SUCCEEDED poll run, got %+v (err: %v)", runs, err)
+	}
+
 	txns, err := store.ListTransactions(ctx, 10)
-	if err != nil || len(txns) != 3 {
-		t.Fatalf("expected 3 transactions ingested, got %d (err: %v)", len(txns), err)
+	if err != nil || len(txns) != 1 || txns[0].Description != "Realtime payment" {
+		t.Fatalf("expected 1 transaction ingested, got %+v (err: %v)", txns, err)
 	}
 }
+
+type bootstrapHistoryPageMockClient struct {
+	bootstrapCalls atomic.Int32
+	historyCalls   atomic.Int32
+	todayVN        string
+}
+
+func (m *bootstrapHistoryPageMockClient) Bootstrap(ctx context.Context) (acb.Response, error) {
+	m.bootstrapCalls.Add(1)
+	body := `
+	<form action="/acbib/Request" method="POST">
+		<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+		<input type="hidden" name="dse_processorState" value="ps1" />
+		<input type="hidden" name="dse_sessionId" value="sess1" />
+		<input type="hidden" name="AccountNbr" value="" />
+	</form>
+	<table>
+		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+	</table>`
+	return acb.Response{
+		StatusCode: 200,
+		URL:        "https://online.acb.com.vn/acbib/Request",
+		Body:       body,
+		Kind:       acb.HistoryPage,
+	}, nil
+}
+
+func (m *bootstrapHistoryPageMockClient) History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
+	m.historyCalls.Add(1)
+	body := fmt.Sprintf(`
+	<form action="/acbib/Request" method="POST">
+		<input type="hidden" name="dse_operationName" value="ibkacctDetailProc" />
+		<input type="hidden" name="dse_processorState" value="ps2" />
+		<input type="hidden" name="dse_sessionId" value="sess1" />
+		<input type="hidden" name="AccountNbr" value="***1234" />
+	</form>
+	<table>
+		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+		<tr><td>TXN_RT_1</td><td>%s</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Realtime payment</td></tr>
+		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
+	</table>`, m.todayVN)
+	return acb.Response{
+		StatusCode: 200,
+		URL:        "https://online.acb.com.vn/acbib/Request",
+		Body:       body,
+		Kind:       acb.HistoryPage,
+	}, nil
+}
+
+

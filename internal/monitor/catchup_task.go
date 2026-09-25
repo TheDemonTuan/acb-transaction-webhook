@@ -590,15 +590,17 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 				t.currentResp = histResp
 			}
 
-			t.m.ClearBackoff()
-			pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
-			if parseErr != nil {
-				parseErr = fmt.Errorf("parse recovery catch-up history for %s: %w", dayStr, parseErr)
-				_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "PARSE_FAILED", parseErr.Error())
-				_ = t.finishPoll(ctx, "FAILED", parseErr.Error())
-				t.finishDone(parseErr)
-				return scheduler.TaskStepResult{Done: true, Error: parseErr, Outcome: scheduler.OutcomeFatal}, parseErr
-			}
+				t.m.ClearBackoff()
+				pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
+				if parseErr != nil {
+					diag := acb.DiagnosePageStructure(histResp.Body)
+					slog.Warn("ACB history parse failed", "phase", "catchup_history_parse", "day", dayStr, "page", t.dayPageCount, "status", histResp.StatusCode, "diagnostic", diag, "error", parseErr)
+					parseErr = fmt.Errorf("parse recovery catch-up history for %s: %w", dayStr, parseErr)
+					_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "PARSE_FAILED", parseErr.Error())
+					_ = t.finishPoll(ctx, "FAILED", parseErr.Error())
+					t.finishDone(parseErr)
+					return scheduler.TaskStepResult{Done: true, Error: parseErr, Outcome: scheduler.OutcomeFatal}, parseErr
+				}
 			t.totalRowsSeen += len(pageResult.Transactions)
 
 			var pageItems []storage.BatchTransactionItem
@@ -704,13 +706,14 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			}
 		}
 
-		// Reset day-level state and advance to next day
-		t.dayPageCount = 0
-		t.dayTxns = nil
-		t.nextAction = ""
-		t.nextFields = nil
-		t.cursor = nil
-		t.currentDay = t.currentDay.AddDate(0, 0, 1)
+			// Reset day-level state and advance to next day
+			t.dayPageCount = 0
+			t.dayTxns = nil
+			t.nextAction = ""
+			t.nextFields = nil
+			t.cursor = nil
+			t.currentResp = acb.Response{}
+			t.currentDay = t.currentDay.AddDate(0, 0, 1)
 
 		if t.currentDay.After(toT) {
 			if s := t.m.SessionLoader(); s != nil {

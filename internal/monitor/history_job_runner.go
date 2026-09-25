@@ -644,13 +644,15 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 				mon.ClearBackoff()
 			}
 
-			pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
-			if parseErr != nil {
-				pErr := fmt.Errorf("parse ACB history page for %s: %w", dayStr, parseErr)
-				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "PARSE_ERROR", pErr.Error())
-				t.finish(pErr)
-				return scheduler.TaskStepResult{Done: true, Error: pErr, Outcome: scheduler.OutcomeFatal}, pErr
-			}
+				pageResult, parseErr := acb.ParseHistoryPage(histResp.Body)
+				if parseErr != nil {
+					diag := acb.DiagnosePageStructure(histResp.Body)
+					slog.Warn("ACB history parse failed", "phase", "history_job_parse", "job_id", t.job.ID, "day", dayStr, "page", t.dayPageCount, "status", histResp.StatusCode, "diagnostic", diag, "error", parseErr)
+					pErr := fmt.Errorf("parse ACB history page for %s: %w", dayStr, parseErr)
+					_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "PARSE_ERROR", pErr.Error())
+					t.finish(pErr)
+					return scheduler.TaskStepResult{Done: true, Error: pErr, Outcome: scheduler.OutcomeFatal}, pErr
+				}
 
 			var pageItems []storage.BatchTransactionItem
 			for _, txn := range pageResult.Transactions {

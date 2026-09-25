@@ -347,21 +347,28 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 			return t.finishPoll(ctx, "FAILED", "ACB_MAINTENANCE")
 		}
 
-		// If the page is not HistoryPage directly, try extracting form state
 		historyMarkup := resp.Body
-		if resp.Kind != acb.HistoryPage {
+		firstPageResult, firstParseErr := acb.ParseHistoryPage(resp.Body)
+		if firstParseErr != nil || len(firstPageResult.Transactions) == 0 {
 			form, formErr := acb.ExtractHistoryForm(resp.Body)
 			if formErr != nil {
+				diag := acb.DiagnosePageStructure(resp.Body)
+				slog.Warn("ACB history parse and form extraction failed", "task", t.Kind(), "task_id", t.id, "connection_id", conn.ID, "generation", conn.Generation, "today", t.today, "status", t.poll.HTTPStatus, "diagnostic", diag, "error", firstParseErr)
+				if firstParseErr != nil {
+					return t.finishPoll(ctx, "PARTIAL", firstParseErr.Error())
+				}
 				return t.finishPoll(ctx, "PARTIAL", formErr.Error())
 			}
 
-				if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-					form.Fields["AccountNbr"] = conn.AccountMasked
-				}
-				form.Fields["dse_nextEventName"] = "byDate"
-				form.Fields["activeDatetimeYN"] = "N"
-				slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
-				histResp, histErr := t.history(ctx, form.Action, t.pinToday(form.Fields))
+			if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
+				form.Fields["AccountNbr"] = conn.AccountMasked
+			}
+			form.Fields["FromDate"] = t.today
+			form.Fields["ToDate"] = t.today
+			form.Fields["dse_nextEventName"] = "byDate"
+			form.Fields["activeDatetimeYN"] = "N"
+			slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
+			histResp, histErr := t.history(ctx, form.Action, form.Fields)
 
 			if histErr != nil {
 				var authFail *acb.AuthFailure
@@ -399,11 +406,10 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 				t.m.SetBackoff(60 * time.Second)
 				return t.finishPoll(ctx, "FAILED", "ACB_MAINTENANCE")
 			}
-
 		}
 
-	// Any complete non-authenticated response proves the transport recovered.
-	t.m.ClearBackoff()
+		// Any complete non-authenticated response proves the transport recovered.
+		t.m.ClearBackoff()
 
 		pagesCount := 1
 		t.pages = pagesCount
@@ -411,6 +417,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		// Parse transaction history
 		pageResult, parseErr := acb.ParseHistoryPage(historyMarkup)
 		if parseErr != nil {
+			diag := acb.DiagnosePageStructure(historyMarkup)
+			slog.Warn("ACB history parse failed", "phase", "realtime_history_parse", "connection_id", conn.ID, "generation", conn.Generation, "today", t.today, "status", t.poll.HTTPStatus, "diagnostic", diag, "error", parseErr)
 			return t.finishPoll(ctx, "PARTIAL", parseErr.Error())
 		}
 
