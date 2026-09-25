@@ -621,7 +621,7 @@ python3 - "$target/images.env" "$unpullable/images.env" "$unpullable_sha" <<'PY'
 import sys
 src,dst,sha=sys.argv[1:]
 text=open(src).read()
-text='\n'.join(('RELEASE_SHA='+sha if line.startswith('RELEASE_SHA=') else 'GATEWAY_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook@sha256:'+'f'*64 if line.startswith('GATEWAY_IMAGE_REF=') else line) for line in text.splitlines())+'\n'
+text='\n'.join(('RELEASE_SHA='+sha if line.startswith('RELEASE_SHA=') else 'WORKER_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:'+'f'*64 if line.startswith('WORKER_IMAGE_REF=') else line) for line in text.splitlines())+'\n'
 open(dst,'w').write(text)
 PY
 pull_rc=0
