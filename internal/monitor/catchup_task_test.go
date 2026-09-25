@@ -68,12 +68,81 @@ func (m *catchUpInterleaveMockClient) History(ctx context.Context, endpoint stri
 	</form>
 	<table>
 		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-		<tr><td>TXN_%d</td><td>14/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer %d</td></tr>
+		<tr><td>TXN_%d</td><td>%s</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer %d</td></tr>
 		%s
 	</table>
-	`, call, call, navRow)
+		`, call, fields["FromDate"], call, navRow)
 
 	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+}
+
+func TestCatchUpTaskRejectsWrongDayWithoutCoverage(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "wrong_recovery_day.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("2006-01-02")
+	today := time.Now().In(acb.DefaultLocation).Format("02/01/2006")
+	client := &mockBankClient{
+		getResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: `<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="current"><input name="dse_sessionId" value="s1"></form>`},
+		historyResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: fmt.Sprintf(`<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="next"><input name="dse_sessionId" value="s1"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>WRONG_DAY</td><td>%s</td><td>0</td><td>100</td></tr></table>`, today)},
+	}
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
+	task.fromDate, task.toDate = day, day
+	_, err = task.Step(ctx)
+	if err != acb.ErrHistoryDayMismatch {
+		t.Fatalf("expected wrong-day response to fail closed: %v", err)
+	}
+	covered, err := store.CheckRangeCoverage(ctx, conn.ID, day, day)
+	if err != nil || covered {
+		t.Fatalf("wrong day marked covered: covered=%t err=%v", covered, err)
+	}
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 0 {
+		t.Fatalf("wrong-day recovery ingested rows: count=%d err=%v", len(txns), err)
+	}
+}
+
+func TestCatchUpTaskRejectsAmbiguousEmptyDayWithoutCoverage(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "ambiguous_day.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conn, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("2006-01-02")
+	client := &mockBankClient{
+		getResp:     acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: `<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="current"><input name="dse_sessionId" value="s1"></form>`},
+		historyResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: `<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="next"><input name="dse_sessionId" value="s1"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td colspan="4"><span class="disabled">Trang sau</span></td></tr></table>`},
+	}
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	task := newTestCatchUpTask(mon, conn.ID, conn.Generation)
+	task.fromDate, task.toDate = day, day
+	_, err = task.Step(ctx)
+	if err == nil || !strings.Contains(err.Error(), "empty transactions") {
+		t.Fatalf("ambiguous day must fail closed: %v", err)
+	}
+	covered, err := store.CheckRangeCoverage(ctx, conn.ID, day, day)
+	if err != nil || covered {
+		t.Fatalf("ambiguous day marked covered: covered=%t err=%v", covered, err)
+	}
 }
 
 func TestCatchUpTask_DayAtomicAndPreemptedAtDayBoundary(t *testing.T) {

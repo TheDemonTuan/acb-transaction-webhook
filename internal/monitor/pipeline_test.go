@@ -57,9 +57,10 @@ func TestE2ERealtimeEventDrivenPipeline(t *testing.T) {
 	go dispatcher.Run(ctx)
 
 	mockHTML := `
+<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fixture-state"><input name="dse_sessionId" value="fixture-session"></form>
 <table>
   <tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-  <tr><td>12/09/2026</td><td>9988</td><td>-</td><td>200.000</td><td>5.000.000</td><td>Tien Luong</td></tr>
+  <tr><td>25/09/2026</td><td>9988</td><td>-</td><td>200.000</td><td>5.000.000</td><td>Tien Luong</td></tr>
 </table>`
 
 	mockClient := &mockBankClient{
@@ -68,6 +69,7 @@ func TestE2ERealtimeEventDrivenPipeline(t *testing.T) {
 			Kind:       acb.HistoryPage,
 			Body:       mockHTML,
 		},
+		historyResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: mockHTML},
 	}
 
 	m := New(store, mockClient, 10*time.Second, 10*time.Second)

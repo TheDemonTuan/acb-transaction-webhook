@@ -236,6 +236,7 @@ func TestRealtimePollPartialOnPage2Failure(t *testing.T) {
 
 	client := &pagedMockClient{failOnPage2: true}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	mon.now = func() time.Time { return time.Date(2026, 9, 12, 12, 0, 0, 0, acb.DefaultLocation) }
 
 	var finishedPoll storage.PollRun
 	mon.WithPollNotifier(func(poll storage.PollRun, insertedCount int) {
@@ -293,6 +294,7 @@ func TestRealtimePollPartialWhenHasNextWithEmptyNavigation(t *testing.T) {
 
 	client := &emptyNavMockClient{}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	mon.now = func() time.Time { return time.Date(2026, 9, 12, 12, 0, 0, 0, acb.DefaultLocation) }
 
 	var finishedPoll storage.PollRun
 	mon.WithPollNotifier(func(poll storage.PollRun, insertedCount int) {

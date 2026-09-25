@@ -40,6 +40,11 @@ func (m *mockBankClient) History(ctx context.Context, endpoint string, fields ma
 	if m.historyErr != nil {
 		return m.historyResp, m.historyErr
 	}
+	if m.historyResp.Body == "" && (m.getResp.Body == mockHistoryHTML || m.getResp.Body == "ibkacctDetailProc dse_processorState AccountNbr Số GD Ghi nợ Ghi có\n"+mockHistoryHTML) {
+		resp := m.getResp
+		resp.Body = mockHistoryHTML
+		return resp, nil
+	}
 	if !m.allowUnconfirmed && (m.historyResp.Kind == acb.LoginPage || m.historyResp.Kind == acb.OTPChallenge || m.historyResp.Kind == acb.CaptchaPage) {
 		return m.historyResp, &acb.AuthFailure{Kind: m.historyResp.Kind, Reason: "SESSION_EXPIRED"}
 	}
@@ -47,6 +52,7 @@ func (m *mockBankClient) History(ctx context.Context, endpoint string, fields ma
 }
 
 const mockHistoryHTML = `
+<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fixture-state"><input name="dse_sessionId" value="fixture-session"></form>
 <table>
   <tr>
     <th>Ngày hiệu lực</th>
@@ -58,8 +64,8 @@ const mockHistoryHTML = `
     <th>Nội dung giao dịch</th>
   </tr>
   <tr>
-    <td>10/09/2026</td>
-    <td>10/09/2026</td>
+    <td>25/09/2026</td>
+    <td>25/09/2026</td>
     <td>7788</td>
     <td>-</td>
     <td>150.000</td>
