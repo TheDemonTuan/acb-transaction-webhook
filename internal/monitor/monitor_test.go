@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,7 +52,7 @@ func (m *mockBankClient) History(ctx context.Context, endpoint string, fields ma
 	return m.historyResp, nil
 }
 
-const mockHistoryHTML = `
+var mockHistoryHTML = strings.ReplaceAll(`
 <form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fixture-state"><input name="dse_sessionId" value="fixture-session"></form>
 <table>
   <tr>
@@ -73,7 +74,7 @@ const mockHistoryHTML = `
     <td>Test Nap Tien</td>
   </tr>
 </table>
-`
+`, "25/09/2026", time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
 
 func TestTransportFailureKeepsMonitoringGeneration(t *testing.T) {
 	ctx := context.Background()

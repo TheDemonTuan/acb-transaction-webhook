@@ -146,10 +146,10 @@ func TestPostAuth_FirstAuth_BaselineBootstrap7Days_NoSpamBark(t *testing.T) {
 	threeDaysAgoStr := nowLocal.AddDate(0, 0, -3).Format("02/01/2006")
 
 	mockClient.txnsByDate[threeDaysAgoStr] = []acb.Transaction{
-		{Number: "OLD_CREDIT_1", TransactionAt: "22/09/2026 10:00:00", Credit: 200000, Debit: 0, Description: "Old Payment"},
+		{Number: "OLD_CREDIT_1", TransactionAt: threeDaysAgoStr + " 10:00:00", Credit: 200000, Debit: 0, Description: "Old Payment"},
 	}
 	mockClient.txnsByDate[todayStr] = []acb.Transaction{
-		{Number: "TODAY_CREDIT_1", TransactionAt: "25/09/2026 09:00:00", Credit: 500000, Debit: 0, Description: "Today Payment"},
+		{Number: "TODAY_CREDIT_1", TransactionAt: todayStr + " 09:00:00", Credit: 500000, Debit: 0, Description: "Today Payment"},
 	}
 
 	mon := New(store, mockClient, 5*time.Second, 15*time.Second)

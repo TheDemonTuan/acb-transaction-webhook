@@ -216,7 +216,7 @@ func (m *blockingMultiPageMockClient) History(ctx context.Context, endpoint stri
 			<tr><td>TXN_PAGE1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
 			<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
 		</table>`
-		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+		return acb.Response{StatusCode: 200, Body: historyFixtureToday(body), Kind: acb.HistoryPage}, nil
 	}
 
 	if m.page2Started != nil {
@@ -245,7 +245,7 @@ func (m *blockingMultiPageMockClient) History(ctx context.Context, endpoint stri
 		<tr><td>TXN_PAGE2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
 		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 	</table>`
-	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+	return acb.Response{StatusCode: 200, Body: historyFixtureToday(body), Kind: acb.HistoryPage}, nil
 }
 
 func TestRealtimeTask_Page1EventBeforeBlockedPage2(t *testing.T) {
@@ -388,7 +388,7 @@ func (m *fenceFailureMockClient) History(ctx context.Context, endpoint string, f
 		<tr><td>TXN_FAIL</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer Fail</td></tr>
 		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 	</table>`
-	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+	return acb.Response{StatusCode: 200, Body: historyFixtureToday(body), Kind: acb.HistoryPage}, nil
 }
 
 func TestRealtimeTask_NoPublishOnFailedIngest(t *testing.T) {
@@ -473,7 +473,7 @@ func (m *page2FenceFailureMockClient) History(ctx context.Context, endpoint stri
 			<tr><td>TXN_PAGE1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
 			<tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>
 		</table>`
-		return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+		return acb.Response{StatusCode: 200, Body: historyFixtureToday(body), Kind: acb.HistoryPage}, nil
 	}
 
 	// Mutate generation right before page 2 ingest
@@ -490,7 +490,7 @@ func (m *page2FenceFailureMockClient) History(ctx context.Context, endpoint stri
 		<tr><td>TXN_PAGE2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
 		<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 	</table>`
-	return acb.Response{StatusCode: 200, Body: body, Kind: acb.HistoryPage}, nil
+	return acb.Response{StatusCode: 200, Body: historyFixtureToday(body), Kind: acb.HistoryPage}, nil
 }
 
 func TestRealtimeTask_Page2FailedIngestDoesNotPublishPage2Event(t *testing.T) {
@@ -601,6 +601,10 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+func historyFixtureToday(body string) string {
+	return strings.ReplaceAll(body, "25/09/2026", time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
+}
+
 func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_resync_recovery.db"))
@@ -634,7 +638,7 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 				<tr><td>TXN_1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
 				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 			</table>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyFixtureToday(body))), Request: r}, nil
 		case 3:
 			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_1</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
@@ -655,7 +659,7 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 				<tr><td>TXN_2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
 				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 			</table>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyFixtureToday(body))), Request: r}, nil
 		case 7:
 			// Poll 2: Explicit query with fresh token2 -> succeeds
 			body := `
@@ -665,7 +669,7 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 				<tr><td>TXN_3</td><td>25/09/2026</td><td>0</td><td>300,000</td><td>1,500,000</td><td>Transfer 3</td></tr>
 				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
 			</table>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyFixtureToday(body))), Request: r}, nil
 		case 8:
 			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token3"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_3</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
