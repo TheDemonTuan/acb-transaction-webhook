@@ -276,7 +276,7 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
-	c.logHistoryContract(fields, resp)
+	c.logHistoryContract("bootstrap", fields, resp)
 	if isAuthChallengeKind(resp.Kind) {
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 		if probeErr != nil {
@@ -355,7 +355,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 	if err != nil {
 		return Response{}, err
 	}
-	c.logHistoryContract(hFields, resp)
+	c.logHistoryContract("history", hFields, resp)
 	if isAuthChallengeKind(resp.Kind) {
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 		if probeErr != nil {
@@ -412,7 +412,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 			if replayErr != nil {
 				return Response{}, replayErr
 			}
-			c.logHistoryContract(replayFields, replayResp)
+			c.logHistoryContract("replay", replayFields, replayResp)
 			if isAuthChallengeKind(replayResp.Kind) {
 				return replayResp, &AuthFailure{Kind: replayResp.Kind, Reason: replayResp.ClassifierReason}
 			}
