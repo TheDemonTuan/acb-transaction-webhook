@@ -788,12 +788,12 @@ func TestHistoryJobRunnerFiltersAdjacentDaysAcrossPages(t *testing.T) {
 	}
 }
 
-func TestHistoryJobRunnerPreservesRequestedDayAcrossPages(t *testing.T) {
+func TestHistoryJobRunnerScansSettlementWindowAcrossPages(t *testing.T) {
 	ctx := context.Background()
 	store, connID := setupTestDB(t, "day_pin.db")
 	defer store.Close()
 	const form = `<form action="/history" method="POST"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_sessionId" value="session-fixture"><input name="dse_processorState" value="page-state-2"><input name="AccountNbr" value="123456"><input name="FromDate" value="26/09/2020"><input name="ToDate" value="26/09/2020"></form>`
-	const header = `<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>`
+	const header = `<table><tr><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>`
 	historyRequests := 0
 	client, err := acb.NewClient("https://online.acb.com.vn", historyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body := form
@@ -804,7 +804,7 @@ func TestHistoryJobRunnerPreservesRequestedDayAcrossPages(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if historyRequests > 0 && (values.Get("FromDate") != "25/09/2020" || values.Get("ToDate") != "25/09/2020" || values.Get("activeDatetimeYN") != "N") {
+			if historyRequests > 0 && (values.Get("FromDate") != "25/09/2020" || values.Get("ToDate") != "27/09/2020" || values.Get("activeDatetimeYN") != "N") {
 				t.Errorf("POST %d dates/selector: from=%q to=%q active=%q", historyRequests+1, values.Get("FromDate"), values.Get("ToDate"), values.Get("activeDatetimeYN"))
 			}
 			if values.Has("_raw") || values.Has("_explicitRange") {
@@ -814,12 +814,12 @@ func TestHistoryJobRunnerPreservesRequestedDayAcrossPages(t *testing.T) {
 			switch historyRequests {
 			case 1: // Bootstrap account-detail request.
 			case 2:
-				body += header + `<tr><td>25/09/2020 08:00:00</td><td>B</td><td>0</td><td>100</td><td>1100</td><td>One</td></tr><tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr></table>`
+				body += header + `<tr><td>26/09/2020</td><td>25/09/2020 08:00:00</td><td>B</td><td>0</td><td>100</td><td>1100</td><td>One</td></tr><tr><td colspan="7"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr></table>`
 			case 3:
 				if values.Get("dse_nextEventName") != "nextPage" || values.Get("dse_processorState") != "page-state-2" {
 					t.Errorf("page 2 lost cursor: event=%q state=%q", values.Get("dse_nextEventName"), values.Get("dse_processorState"))
 				}
-				body += header + `<tr><td>25/09/2020 09:00:00</td><td>C</td><td>0</td><td>100</td><td>1200</td><td>Two</td></tr><tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr></table><p>Total rows: 2</p>`
+				body += header + `<tr><td>26/09/2020</td><td>25/09/2020 09:00:00</td><td>C</td><td>0</td><td>100</td><td>1200</td><td>Two</td></tr><tr><td>26/09/2020</td><td>26/09/2020 10:00:00</td><td>D</td><td>0</td><td>100</td><td>1300</td><td>Other day</td></tr><tr><td colspan="7"><span class="disabled">Trang sau</span></td></tr></table><p>Total rows: 3</p>`
 			default:
 				t.Fatalf("unexpected history request %d", historyRequests)
 			}
@@ -848,7 +848,7 @@ func TestHistoryJobRunnerPreservesRequestedDayAcrossPages(t *testing.T) {
 		t.Fatalf("Step: done=%v err=%v", result.Done, err)
 	}
 	finished, err := store.GetHistorySyncJob(ctx, job.ID)
-	if err != nil || finished.Status != storage.HistoryJobStatusCompleted || finished.PagesDone != 2 || finished.RowsSeen != 2 || historyRequests != 3 {
+	if err != nil || finished.Status != storage.HistoryJobStatusCompleted || finished.PagesDone != 2 || finished.RowsSeen != 3 || historyRequests != 3 {
 		t.Fatalf("job=%+v requests=%d err=%v", finished, historyRequests, err)
 	}
 	var count int

@@ -3,6 +3,9 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -576,15 +579,79 @@ func TestCatchUpTaskPinsContinuationWithoutMutatingPaginationFields(t *testing.T
 	if second["dse_processorState"] != "page-1" || second["dse_sessionId"] != "session-1" || second["dse_nextEventName"] != "nextPage" {
 		t.Fatalf("continuation fields were not preserved: %#v", second)
 	}
-	if second["FromDate"] != "21/09/2026" || second["ToDate"] != "21/09/2026" || second["_raw"] != "true" {
+	if second["FromDate"] != "21/09/2026" || second["ToDate"] != "22/09/2026" || second["_raw"] != "true" || second["_explicitRange"] != "true" {
 		t.Fatalf("continuation date pinning is incorrect: %#v", second)
 	}
-	for _, key := range []string{"_explicitRange", "activeDatetimeByMonth", "MonthCurr", "YearCurr"} {
+	for _, key := range []string{"activeDatetimeByMonth", "MonthCurr", "YearCurr"} {
 		if _, ok := second[key]; ok {
 			t.Fatalf("continuation retained forbidden field %q: %#v", key, second)
 		}
 	}
-	if first["FromDate"] != "21/09/2026" || first["ToDate"] != "21/09/2026" || first["_explicitRange"] != "true" {
+	if first["FromDate"] != "21/09/2026" || first["ToDate"] != "22/09/2026" || first["_explicitRange"] != "true" {
 		t.Fatalf("first-page fields were mutated after continuation: %#v", first)
+	}
+}
+
+func TestCatchUpTaskScansEffectiveDateSpillover(t *testing.T) {
+	ctx := context.Background()
+	store, conn, _ := setupRecoveryTestEnv(t, "effective_spillover.db")
+	defer store.Close()
+	const form = `<form action="/history"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="page-2"><input name="dse_sessionId" value="session-test"><input name="AccountNbr" value="123456"></form>`
+	const header = `<table><tr><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th></tr>`
+	page := 0
+	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := form
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/acbib/Request":
+		case req.Method == http.MethodPost && req.URL.Path == "/acbib/history":
+			data, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			fields, parseErr := url.ParseQuery(string(data))
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			page++
+			if page == 1 { // Bootstrap uses the current date, never count it as the requested history.
+				break
+			}
+			if fields.Get("FromDate") != "20/09/2020" || fields.Get("ToDate") != "22/09/2020" || fields.Get("activeDatetimeYN") != "N" || fields.Has("_raw") || fields.Has("_explicitRange") {
+				body += header + `</table>` // Actual ACB page one on 20/09: ambiguous header only.
+				break
+			}
+			if page == 2 {
+				body += header + `<tr><td>21/09/2020</td><td>20/09/2020 10:00:00</td><td>B</td><td>100</td><td>0</td><td>900</td></tr><tr><td colspan="6"><a href="/history?page=2" onclick="submitEvent('nextPage')">Trang sau</a></td></tr></table>`
+			} else {
+				if fields.Get("dse_nextEventName") != "nextPage" || fields.Get("dse_processorState") != "page-2" {
+					t.Errorf("pagination state lost: event=%q state=%q", fields.Get("dse_nextEventName"), fields.Get("dse_processorState"))
+				}
+				body += header + `<tr><td>21/09/2020</td><td>21/09/2020 11:00:00</td><td>C</td><td>100</td><td>0</td><td>800</td></tr><tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr></table><p>Total rows: 2</p>`
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := newTestCatchUpTask(New(store, client, 5*time.Second, 15*time.Second), conn.ID, conn.Generation)
+	task.fromDate, task.toDate = "2020-09-20", "2020-09-20"
+	task.currentDay, _ = time.Parse("2006-01-02", task.fromDate)
+	task.initialized = true
+	result, err := task.Step(ctx)
+	if err != nil || !result.Done || page != 3 {
+		t.Fatalf("catch-up stopped before effective-day page 2: result=%+v pages=%d err=%v", result, page, err)
+	}
+	var matched, total, raw, pages int
+	if err := store.DB().QueryRowContext(ctx, "SELECT rows_seen FROM history_coverage WHERE connection_id=? AND day='2020-09-20'", conn.ID).Scan(&matched); err != nil || matched != 1 {
+		t.Fatalf("coverage: %d %v", matched, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions").Scan(&total); err != nil || total != 1 {
+		t.Fatalf("wrong-day transaction persisted: total=%d err=%v", total, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, "SELECT rows_seen,pages FROM poll_runs ORDER BY started_at DESC LIMIT 1").Scan(&raw, &pages); err != nil || raw != 2 || pages != 2 {
+		t.Fatalf("raw pagination: rows=%d pages=%d err=%v", raw, pages, err)
 	}
 }
