@@ -32,6 +32,7 @@ type Client struct {
 	mu              sync.Mutex
 	now             func() time.Time
 	location        *time.Location
+	historyDiagnostics map[string]int
 }
 
 type Response struct {
@@ -275,6 +276,7 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
+	c.logHistoryContract(fields, resp)
 	if isAuthChallengeKind(resp.Kind) {
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 		if probeErr != nil {
@@ -353,6 +355,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 	if err != nil {
 		return Response{}, err
 	}
+	c.logHistoryContract(hFields, resp)
 	if isAuthChallengeKind(resp.Kind) {
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 		if probeErr != nil {
@@ -409,6 +412,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 			if replayErr != nil {
 				return Response{}, replayErr
 			}
+			c.logHistoryContract(replayFields, replayResp)
 			if isAuthChallengeKind(replayResp.Kind) {
 				return replayResp, &AuthFailure{Kind: replayResp.Kind, Reason: replayResp.ClassifierReason}
 			}
