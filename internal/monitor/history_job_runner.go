@@ -547,7 +547,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			form.Fields["AccountNbr"] = conn.AccountMasked
 		}
 		form.Fields["FromDate"] = t.curDay.Format("02/01/2006")
-		form.Fields["ToDate"] = t.curDay.Format("02/01/2006")
+		form.Fields["ToDate"] = historyEffectiveToDate(t.curDay, time.Now())
 		form.Fields["_explicitRange"] = "true"
 
 		t.nextAction = form.Action
@@ -598,7 +598,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 						form.Fields["AccountNbr"] = conn.AccountMasked
 					}
 					form.Fields["FromDate"] = t.curDay.Format("02/01/2006")
-					form.Fields["ToDate"] = t.curDay.Format("02/01/2006")
+					form.Fields["ToDate"] = historyEffectiveToDate(t.curDay, time.Now())
 					form.Fields["_explicitRange"] = "true"
 					t.nextAction = form.Action
 					t.nextFields = form.Fields
@@ -698,7 +698,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 
 		if t.dayPageCount < t.maxDayPages {
 			day := t.curDay.Format("02/01/2006")
-			pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, day)
+			pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, historyEffectiveToDate(t.curDay, time.Now()))
 			if err != nil {
 				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "FORM_INVALID", err.Error())
 				t.finish(err)

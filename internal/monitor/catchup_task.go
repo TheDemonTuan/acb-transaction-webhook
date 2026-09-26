@@ -128,11 +128,14 @@ func (t *CatchUpTask) finishPoll(ctx context.Context, status, pollErr string) er
 	return nil
 }
 
-func (t *CatchUpTask) history(ctx context.Context, endpoint string, fields map[string]string, date string) (acb.Response, error) {
-	if client, ok := t.m.client.(realtimeDateBankClient); ok {
-		return client.HistoryForDate(ctx, endpoint, fields, date)
+// historyEffectiveToDate includes next-day settlements without querying future dates.
+// ponytail: Two days cover observed weekend settlement; extend only with bank evidence.
+func historyEffectiveToDate(day, now time.Time) string {
+	end := day.AddDate(0, 0, 2)
+	if today := now.In(acb.DefaultLocation); end.After(today) {
+		end = today
 	}
-	return t.m.client.History(ctx, endpoint, fields)
+	return end.Format("02/01/2006")
 }
 
 func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
@@ -484,9 +487,8 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
 			form.Fields["AccountNbr"] = conn.AccountMasked
 		}
-		fromT, _ := time.Parse("2006-01-02", dayStr)
-		form.Fields["FromDate"] = fromT.Format("02/01/2006")
-		form.Fields["ToDate"] = fromT.Format("02/01/2006")
+		form.Fields["FromDate"] = t.currentDay.Format("02/01/2006")
+		form.Fields["ToDate"] = historyEffectiveToDate(t.currentDay, t.m.now())
 		form.Fields["dse_nextEventName"] = "byDate"
 		form.Fields["activeDatetimeYN"] = "N"
 		form.Fields["_explicitRange"] = "true"
@@ -501,7 +503,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			return scheduler.TaskStepResult{Done: false, Error: err, Outcome: scheduler.OutcomeTransient}, err
 		}
 
-		histResp, histErr := t.history(ctx, t.nextAction, t.nextFields, t.currentDay.Format("02/01/2006"))
+		histResp, histErr := t.m.client.History(ctx, t.nextAction, t.nextFields)
 		if histErr != nil {
 			var authFail *acb.AuthFailure
 			if errors.As(histErr, &authFail) {
@@ -534,9 +536,8 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 					if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
 						form.Fields["AccountNbr"] = conn.AccountMasked
 					}
-					fromT, _ := time.Parse("2006-01-02", dayStr)
-					form.Fields["FromDate"] = fromT.Format("02/01/2006")
-					form.Fields["ToDate"] = fromT.Format("02/01/2006")
+					form.Fields["FromDate"] = t.currentDay.Format("02/01/2006")
+					form.Fields["ToDate"] = historyEffectiveToDate(t.currentDay, t.m.now())
 					form.Fields["dse_nextEventName"] = "byDate"
 					form.Fields["activeDatetimeYN"] = "N"
 					form.Fields["_explicitRange"] = "true"
@@ -634,8 +635,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		}
 
 		if t.cursor.HasNext && (t.cursor.Action != "" || len(t.cursor.Fields) > 0) && t.dayPageCount < catchUpMaxPages {
-			day := t.currentDay.Format("02/01/2006")
-			pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, day, day)
+			pinned, err := acb.PinDateRangePreservingPagination(t.cursor.Fields, t.currentDay.Format("02/01/2006"), historyEffectiveToDate(t.currentDay, t.m.now()))
 			if err != nil {
 				pinErr := fmt.Errorf("pin recovery pagination for %s: %w", dayStr, err)
 				if progressErr := t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "FORM_INVALID", pinErr.Error()); progressErr != nil {
@@ -646,6 +646,7 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 				return scheduler.TaskStepResult{Done: true, Error: pinErr, Outcome: scheduler.OutcomeFatal}, pinErr
 			}
 			pinned["_raw"] = "true"
+			pinned["_explicitRange"] = "true"
 			t.nextAction = t.cursor.Action
 			t.nextFields = pinned
 		}
