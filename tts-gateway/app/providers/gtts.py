@@ -1,16 +1,17 @@
 """Google TTS (gTTS) fallback provider."""
 import asyncio
 import io
-import re
 
 from gtts import gTTS
 
 
 async def _apply_rate(audio: bytes, rate: str, timeout_seconds: float) -> bytes:
-    match = re.fullmatch(r"[+-]?\d+%", rate)
-    if match is None or not -50 <= int(rate[:-1]) <= 100:
+    digits = rate[:-1]
+    if not (rate.endswith("%") and 2 <= len(rate) <= 5 and (digits.isdigit() or (digits[0] in "+-" and digits[1:].isdigit()))):
         raise ValueError(f"GTTS_RATE_PROCESSING_FAILED: invalid rate {rate!r}")
-    percent = int(rate[:-1])
+    percent = int(digits)
+    if not -50 <= percent <= 100:
+        raise ValueError(f"GTTS_RATE_PROCESSING_FAILED: invalid rate {rate!r}")
     if percent == 0:
         return audio
 

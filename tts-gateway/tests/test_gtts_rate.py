@@ -1,3 +1,4 @@
+# pylint: disable=import-error,too-many-locals,unused-argument
 import asyncio
 from array import array
 from math import cos, pi, sin
@@ -7,8 +8,9 @@ import sys
 
 import pytest
 from httpx import AsyncClient, ASGITransport
-from app.main import app, edge_provider, edge_circuit
 
+from app.config import config
+from app.main import app, edge_provider, edge_circuit
 from app.providers.gtts import GTTSProvider, _apply_rate
 
 
@@ -60,16 +62,19 @@ async def test_invalid_rate_and_failed_transcode():
 
 @pytest.mark.asyncio
 async def test_empty_transport_rejected(monkeypatch):
+
     class EmptyTTS:
-        def __init__(self, **kwargs):
+
+        def __init__(self, **_kwargs):
             pass
 
-        def write_to_fp(self, fp):
+        def write_to_fp(self, _fp):
             pass
 
     monkeypatch.setattr("app.providers.gtts.gTTS", EmptyTTS)
     with pytest.raises(ValueError, match="GTTS_NO_AUDIO"):
         await GTTSProvider().synthesize("test", rate="+25%")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
@@ -77,7 +82,7 @@ async def test_tempo_stops_child_on_timeout_or_cancel(monkeypatch, cancel):
     spawn = asyncio.create_subprocess_exec
     children = []
 
-    async def blocked_encoder(*args, **kwargs):
+    async def blocked_encoder(*_args, **kwargs):
         child = await spawn(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
         children.append(child)
         return child
@@ -95,6 +100,7 @@ async def test_tempo_stops_child_on_timeout_or_cancel(monkeypatch, cancel):
             await _apply_rate(b"audio", "+25%", 0.1)
     assert children and children[0].returncode is not None
 
+
 @pytest.mark.asyncio
 async def test_fallback_endpoints_cache_tempo_and_initial_timeout(monkeypatch):
     if not shutil.which("ffmpeg"):
@@ -103,6 +109,7 @@ async def test_fallback_endpoints_cache_tempo_and_initial_timeout(monkeypatch):
     calls = []
 
     class ToneTTS:
+
         def __init__(self, **kwargs):
             calls.append(kwargs)
 
@@ -127,11 +134,10 @@ async def test_fallback_endpoints_cache_tempo_and_initial_timeout(monkeypatch):
 
         monkeypatch.setattr(edge_circuit, "can_attempt", lambda: True)
 
-        async def delayed_edge(**kwargs):
+        async def delayed_edge(**_kwargs):
             await asyncio.sleep(0.2)
             yield source
 
-        from app.config import config
         monkeypatch.setattr(config, "edge_stream_initial_timeout", 0.01)
         monkeypatch.setattr(edge_provider, "stream", delayed_edge)
         response = await client.post("/synthesize/stream", json={
@@ -140,7 +146,8 @@ async def test_fallback_endpoints_cache_tempo_and_initial_timeout(monkeypatch):
         assert response.status_code == 200
         assert response.headers["x-tts-provider"] == "gtts"
         assert abs(len(decoded_samples(response.content)) / 8000 - 1) < 0.12
-        async def synthesized_edge(**kwargs):
+
+        async def synthesized_edge(**_kwargs):
             return source
 
         monkeypatch.setattr(edge_provider, "synthesize", synthesized_edge)
