@@ -2,6 +2,27 @@ import { speakVnd } from './money-to-vietnamese';
 
 export const DEFAULT_ANNOUNCEMENT_TEMPLATE = 'Đa tạ quý khách vì {amount}.';
 
+export const ANNOUNCEMENT_TEMPLATES = [
+  DEFAULT_ANNOUNCEMENT_TEMPLATE,
+  'Ting ting, nhận {amount}, vui cả ngày!',
+  'Đã nhận {amount}, ví cười tươi rồi!',
+  '{amount} đã về, quá là xịn!',
+  'Cảm ơn {amount}, lên tinh thần nào!',
+  'Nhận {amount}, hôm nay có lộc!',
+] as const;
+
+export function selectAnnouncementTemplate(template: string | undefined, transactionId: string): string {
+  const selected = template?.trim();
+  if (selected && selected !== DEFAULT_ANNOUNCEMENT_TEMPLATE) return selected;
+  if (!transactionId) return DEFAULT_ANNOUNCEMENT_TEMPLATE;
+
+  let hash = 2166136261;
+  for (const byte of new TextEncoder().encode(transactionId)) {
+    hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+  }
+  return ANNOUNCEMENT_TEMPLATES[hash % ANNOUNCEMENT_TEMPLATES.length];
+}
+
 export interface BuildAnnouncementOptions {
   includeDescription?: boolean;
   maxDescriptionLength?: number;

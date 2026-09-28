@@ -102,7 +102,7 @@ export class TransactionAudioEngine implements VoiceEngine {
             throw new Error('VOICE_CANCELLED');
           }
           if (onlineErr?.playbackStarted || onlineErr?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-            return;
+            throw onlineErr;
           }
           await this.browserFallback.speak(message);
           return;
@@ -135,7 +135,7 @@ export class TransactionAudioEngine implements VoiceEngine {
               throw new Error('VOICE_CANCELLED');
             }
             if (onlineError?.playbackStarted || onlineError?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-              return;
+              throw onlineError;
             }
             throw browserError;
           }
@@ -157,7 +157,7 @@ export class TransactionAudioEngine implements VoiceEngine {
         throw new Error('VOICE_CANCELLED');
       }
       if (onlineError?.playbackStarted || onlineError?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-        return;
+        throw onlineError;
       }
       // Fallback to BrowserSpeechEngine with strict Vietnamese voice ONLY if not cancelled
       try {
@@ -266,7 +266,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       throw new Error('VOICE_CANCELLED');
     }
 
-    await this.playAudioBuffer(audioData, message.volume ?? 1, message);
+    await this.playAudioBuffer(audioData, message.volume ?? 1, message, signal);
   }
 
   private playAudioStream(
@@ -297,33 +297,31 @@ export class TransactionAudioEngine implements VoiceEngine {
         return err;
       };
 
-      const cleanup = () => {
-        if (this.currentAudioElement === audio) {
-          this.currentAudioElement = null;
-        }
+      const cleanup = (stop = false) => {
+        audio.removeEventListener?.('playing', onPlaying);
+        audio.removeEventListener?.('ended', onEnded);
+        audio.removeEventListener?.('error', onError);
         signal?.removeEventListener('abort', onAbort);
-      };
-
-      const onAbort = () => {
-        if (!settled) {
-          settled = true;
+        if (stop) {
           try {
             audio.pause();
             audio.removeAttribute('src');
             audio.load?.();
           } catch {}
-          cleanup();
+        }
+        if (this.currentAudioElement === audio) this.currentAudioElement = null;
+      };
+
+      const onAbort = () => {
+        if (!settled) {
+          settled = true;
+          cleanup(true);
           reject(new Error('VOICE_CANCELLED'));
         }
       };
 
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-      signal?.addEventListener('abort', onAbort);
 
-      audio.addEventListener?.('playing', () => {
+      const onPlaying = () => {
         playbackStarted = true;
         if (startedOnce) return;
         startedOnce = true;
@@ -345,26 +343,38 @@ export class TransactionAudioEngine implements VoiceEngine {
           }
         }
         message?.onStart?.(message.telemetry);
-      });
+      };
 
-      audio.addEventListener?.('ended', () => {
+      const onEnded = () => {
         if (!settled) {
           settled = true;
           cleanup();
           resolve();
         }
-      });
+      };
 
-      audio.addEventListener?.('error', () => {
+      const onError = () => {
         if (!settled) {
           settled = true;
-          cleanup();
           const msg = playbackStarted
             ? `AUDIO_STREAM_INTERRUPTED: ${audio.error?.message || 'unknown'}`
             : `AUDIO_PLAYBACK_ERROR: ${audio.error?.message || 'unknown'}`;
+          cleanup(true);
           reject(createError(msg));
         }
-      });
+      };
+      audio.addEventListener?.('playing', onPlaying);
+      audio.addEventListener?.('ended', onEnded);
+      audio.addEventListener?.('error', onError);
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort);
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
 
       try {
         const playPromise = audio.play();
@@ -372,7 +382,7 @@ export class TransactionAudioEngine implements VoiceEngine {
           playPromise.catch((err: any) => {
             if (!settled) {
               settled = true;
-              cleanup();
+              cleanup(true);
               if (err && typeof err === 'object') {
                 err.playbackStarted = playbackStarted;
               }
@@ -383,7 +393,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       } catch (err: any) {
         if (!settled) {
           settled = true;
-          cleanup();
+          cleanup(true);
           if (err && typeof err === 'object') {
             err.playbackStarted = playbackStarted;
           }
@@ -396,7 +406,8 @@ export class TransactionAudioEngine implements VoiceEngine {
   private async playAudioBuffer(
     arrayBuffer: ArrayBuffer,
     volume: number,
-    message?: VoiceMessage
+    message?: VoiceMessage,
+    signal?: AbortSignal
   ): Promise<void> {
     const ctx = this.initAudioContext();
     if (!ctx) {
@@ -412,9 +423,11 @@ export class TransactionAudioEngine implements VoiceEngine {
     }
 
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    if (signal?.aborted) throw new Error('VOICE_CANCELLED');
 
     return new Promise((resolve, reject) => {
       try {
+        if (signal?.aborted) throw new Error('VOICE_CANCELLED');
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
 
@@ -453,6 +466,7 @@ export class TransactionAudioEngine implements VoiceEngine {
           }
         }
         message?.onStart?.(message.telemetry);
+        if (signal?.aborted) throw new Error('VOICE_CANCELLED');
         source.start(0);
       } catch (err) {
         reject(err);

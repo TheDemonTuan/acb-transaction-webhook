@@ -88,7 +88,7 @@ test.describe('Voice Announcements & Realtime Features', () => {
     await page.waitForFunction(() => (window as any).__spokenUtterances.length > 0);
     const spoken = await page.evaluate(() => (window as any).__spokenUtterances);
     expect(spoken.length).toBeGreaterThanOrEqual(1);
-    expect(spoken[0].text).toContain('Đa tạ quý khách vì');
+    expect(spoken[0].text).toContain('năm trăm nghìn đồng');
     expect(spoken[0].lang).toBe('vi-VN');
   });
 
@@ -144,7 +144,7 @@ test.describe('Voice Announcements & Realtime Features', () => {
 
     const spokenFirst = await page.evaluate(() => (window as any).__spokenUtterances);
     expect(spokenFirst.length).toBe(1);
-    expect(spokenFirst[0].text).toBe('Đa tạ quý khách vì năm trăm nghìn đồng.');
+    expect(spokenFirst[0].text.match(/năm trăm nghìn đồng/g)).toHaveLength(1);
     expect(spokenFirst[0].lang).toBe('vi-VN');
 
     // 4. Assert transaction immediately appeared in the transaction list

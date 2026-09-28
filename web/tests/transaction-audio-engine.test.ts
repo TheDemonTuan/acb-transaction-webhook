@@ -470,6 +470,40 @@ describe('TransactionAudioEngine public fallback & template propagation', () => 
     );
   });
 
+  it('does not start decoded audio after cancellation', async () => {
+    const { promise: decoded, resolve: finishDecode } = (Promise as PromiseConstructor & {
+      withResolvers<T>(): { promise: Promise<T>; resolve(value: T): void };
+    }).withResolvers<any>();
+    const start = vi.fn();
+    const decode = vi.fn(() => decoded);
+    class FailingAudio {
+      addEventListener(event: string, handler: () => void) {
+        if (event === 'error') queueMicrotask(handler);
+      }
+      removeEventListener() {}
+      play() { return Promise.resolve(); }
+      pause() {}
+      removeAttribute() {}
+      load() {}
+    }
+    class AudioContextFixture {
+      state = 'running';
+      destination = {};
+      createGain() { return { connect: vi.fn(), gain: { setValueAtTime: vi.fn() } }; }
+      createBufferSource() { return { connect: vi.fn(), start }; }
+      decodeAudioData() { return decode(); }
+    }
+    (globalThis as any).window = { Audio: FailingAudio, AudioContext: AudioContextFixture };
+    vi.spyOn(apiModule, 'apiAudio').mockResolvedValue({ data: new ArrayBuffer(8) } as any);
+    const engine = new TransactionAudioEngine({ isPublic: false });
+    const speaking = engine.speak({ text: 'transaction', transactionId: 'decode_cancel' });
+    await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    engine.cancel();
+    finishDecode({ duration: 1 });
+    await expect(speaking).rejects.toThrow('VOICE_CANCELLED');
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it('mid-stream failure after playing event terminates without falling back to buffered replay', async () => {
     let playingListener: any = null;
     let errorListener: any = null;
@@ -510,10 +544,10 @@ describe('TransactionAudioEngine public fallback & template propagation', () => 
     const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
     const engine = new TransactionAudioEngine({ isPublic: false });
 
-    await engine.speak({
+    await expect(engine.speak({
       text: 'Test no duplicate on midstream error',
       transactionId: 'tx_midstream_fail',
-    });
+    })).rejects.toMatchObject({ playbackStarted: true });
 
     // Mid-stream failure must NOT fall back to buffered replay (prevents hearing audio twice)
     expect(apiAudioSpy).not.toHaveBeenCalled();

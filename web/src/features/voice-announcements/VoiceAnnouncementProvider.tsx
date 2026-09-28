@@ -11,6 +11,7 @@ import {
 } from './voice-settings';
 import {
   buildSingleTransactionPhrase,
+  selectAnnouncementTemplate,
 } from './voice-copy';
 import type { BankTransactionCreditData, RealtimeEnvelope } from '../../realtime/realtime.types';
 
@@ -180,9 +181,10 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       sseToQueueMs: Math.max(0, now - sseReceivedAt),
     };
 
+    const template = selectAnnouncementTemplate(settings.announcementTemplate, data.transactionId);
     const text = buildSingleTransactionPhrase(amountBigInt.toString(), data.description || '', {
       includeDescription: settings.includeDescription,
-      template: settings.announcementTemplate,
+      template,
     });
     queue.enqueue({
       text,
@@ -192,7 +194,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       voiceURI: settings.voiceURI,
       transactionId: dedupeOpts.transactionId || undefined,
       includeDescription: settings.includeDescription,
-      template: settings.announcementTemplate,
+      template,
       telemetry,
       onStart: (t) => {
         if (t) setLastTelemetry({ ...t });
@@ -200,19 +202,24 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       onSuccess: () => {
         dedupe.commit(dedupeOpts);
       },
-      onError: () => {
-        dedupe.release(dedupeOpts);
+      onError: (error) => {
+        if ((error as { playbackStarted?: boolean })?.playbackStarted) {
+          dedupe.commit(dedupeOpts);
+        } else {
+          dedupe.release(dedupeOpts);
+        }
       },
     });
   };
 
   const testVoice = async (customPhrase?: string) => {
     queue.cancel();
+    const template = selectAnnouncementTemplate(settings.announcementTemplate, '');
     const testText =
       customPhrase ||
       buildSingleTransactionPhrase('500000', 'Ung ho quy', {
         includeDescription: settings.includeDescription,
-        template: settings.announcementTemplate,
+        template,
       });
 
     return new Promise<void>((resolve, reject) => {
@@ -222,7 +229,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         rate: settings.rate,
         pitch: settings.pitch,
         voiceURI: settings.voiceURI,
-        template: settings.announcementTemplate,
+        template,
         includeDescription: settings.includeDescription,
         isTest: true,
         onSuccess: () => resolve(),
@@ -243,7 +250,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         transactionId,
         isReplay: true,
         includeDescription: settings.includeDescription,
-        template: settings.announcementTemplate,
+        template: selectAnnouncementTemplate(settings.announcementTemplate, transactionId),
         onSuccess: () => resolve(),
         onError: (err) => reject(err),
       });

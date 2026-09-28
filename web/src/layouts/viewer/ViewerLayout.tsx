@@ -2,6 +2,7 @@ import React from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { ViewerHeader } from './ViewerHeader';
 import { isPublicViewerHost } from '../../app/runtime-mode';
+import { ROUTES } from '../../app/routes';
 
 export const ViewerLayout: React.FC = () => {
   const navigate = useNavigate();
@@ -40,7 +41,7 @@ export const ViewerLayout: React.FC = () => {
             <button
               type="button"
               role="button"
-              onClick={() => navigate('/transactions')}
+              onClick={() => navigate(ROUTES.transactions())}
               className="text-emerald-700 font-semibold cursor-pointer"
             >
               Giao dịch

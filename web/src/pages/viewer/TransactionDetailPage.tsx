@@ -21,6 +21,7 @@ import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import { useVoiceAnnouncements } from '../../features/voice-announcements/VoiceAnnouncementProvider';
 import { buildSingleTransactionPhrase } from '../../features/voice-announcements/voice-copy';
 import { isPublicViewerHost } from '../../app/runtime-mode';
+import { ROUTES } from '../../app/routes';
 
 export const TransactionDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -51,7 +52,7 @@ export const TransactionDetailPage: React.FC = () => {
           Giao dịch mang mã <span className="font-mono font-semibold">{id}</span> không tồn tại hoặc đã được lưu trữ ở trang cũ.
         </p>
         <Link
-          to="/transactions"
+          to={ROUTES.transactions()}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white hover:bg-stone-800 transition"
         >
           <ArrowLeft className="w-4 h-4" />
@@ -102,7 +103,7 @@ export const TransactionDetailPage: React.FC = () => {
       <div className="flex items-center justify-between">
         <button
           type="button"
-          onClick={() => navigate('/transactions')}
+          onClick={() => navigate(ROUTES.transactions())}
           className="inline-flex items-center gap-2 text-xs font-semibold text-stone-600 hover:text-stone-900 transition cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4" />
