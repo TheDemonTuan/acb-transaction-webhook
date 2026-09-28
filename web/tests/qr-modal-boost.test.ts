@@ -4,6 +4,10 @@ import {
   computeBoostPhase,
   isCreditMatch,
   evaluateCanStartPayment,
+  canStartBoostSession,
+  reconcileIncomingCredit,
+  type PaymentSlot,
+  type LiveCreditAlert,
 } from '../src/features/payment-qr/ReceivingQRModal';
 import { getDynamicPaymentQRURL } from '../src/shared/api/queries';
 
@@ -358,6 +362,184 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
 
       sim.triggerEnter();
       expect(sim.wasBoostInitiated()).toBe(true);
+    });
+  });
+
+  describe('canStartBoostSession & Decoupled QR Display Fallback', () => {
+    it('canStartBoostSession matches evaluateCanStartPayment contract', () => {
+      expect(canStartBoostSession(false, null)).toBe(true);
+      expect(canStartBoostSession(true, { ready: true, status: 'READY' })).toBe(true);
+      expect(canStartBoostSession(true, { ready: false, status: 'DISCONNECTED' })).toBe(false);
+    });
+
+    it('allows generating and viewing QR code even when boost cannot start (degraded mode)', () => {
+      function simulateSessionStart({
+        isPublic,
+        paymentReadiness,
+        amountVnd,
+      }: {
+        isPublic: boolean;
+        paymentReadiness?: { ready: boolean; status?: string } | null;
+        amountVnd: number;
+      }) {
+        const canBoost = canStartBoostSession(isPublic, paymentReadiness);
+        const firstSlot: PaymentSlot = {
+          id: 'slot-1',
+          name: 'Khách 1',
+          amountVnd,
+          status: 'pending',
+          createdAt: Date.now(),
+        };
+        const modalState = 'active';
+        const boostDegraded = !canBoost;
+
+        return {
+          modalState,
+          slots: [firstSlot],
+          boostDegraded,
+          isQrDisplayed: true,
+        };
+      }
+
+      // When public and readiness is disconnected / not ready
+      const degradedResult = simulateSessionStart({
+        isPublic: true,
+        paymentReadiness: { ready: false, status: 'DISCONNECTED' },
+        amountVnd: 50_000,
+      });
+
+      expect(degradedResult.modalState).toBe('active');
+      expect(degradedResult.isQrDisplayed).toBe(true);
+      expect(degradedResult.boostDegraded).toBe(true);
+      expect(degradedResult.slots[0].amountVnd).toBe(50_000);
+    });
+  });
+
+  describe('reconcileIncomingCredit (Multi-Slot Reconciliation)', () => {
+    const sampleTxAlert: LiveCreditAlert = {
+      id: 'tx-123',
+      transactionNumber: 'ACB998877',
+      amount: 120_000,
+      description: 'Khach tra tien ban 2',
+      timestamp: Date.now(),
+      timeStr: '14:30:00',
+    };
+
+    it('returns original slots when no pending slots exist', () => {
+      const completedSlots: PaymentSlot[] = [
+        {
+          id: 'slot-1',
+          name: 'Khách 1',
+          amountVnd: 120_000,
+          status: 'completed',
+          createdAt: Date.now() - 5000,
+        },
+      ];
+      const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(completedSlots, 120_000, sampleTxAlert);
+      expect(matchedSlotId).toBeNull();
+      expect(updatedSlots).toEqual(completedSlots);
+    });
+
+    it('prioritizes exact amount match over open amount (0 vnd)', () => {
+      const slots: PaymentSlot[] = [
+        {
+          id: 'slot-open',
+          name: 'Khách 1',
+          amountVnd: 0,
+          status: 'pending',
+          createdAt: Date.now() - 10000,
+        },
+        {
+          id: 'slot-exact',
+          name: 'Khách 2',
+          amountVnd: 120_000,
+          status: 'pending',
+          createdAt: Date.now() - 5000,
+        },
+      ];
+
+      const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(slots, 120_000, sampleTxAlert);
+      expect(matchedSlotId).toBe('slot-exact');
+      expect(updatedSlots.find((s) => s.id === 'slot-exact')?.status).toBe('completed');
+      expect(updatedSlots.find((s) => s.id === 'slot-exact')?.completedTx?.transactionNumber).toBe('ACB998877');
+      // Other slot remains pending
+      expect(updatedSlots.find((s) => s.id === 'slot-open')?.status).toBe('pending');
+    });
+
+    it('falls back to open amount slot when no exact amount matches', () => {
+      const slots: PaymentSlot[] = [
+        {
+          id: 'slot-50k',
+          name: 'Khách 1',
+          amountVnd: 50_000,
+          status: 'pending',
+          createdAt: Date.now() - 10000,
+        },
+        {
+          id: 'slot-open',
+          name: 'Khách 2',
+          amountVnd: 0,
+          status: 'pending',
+          createdAt: Date.now() - 5000,
+        },
+      ];
+
+      const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(slots, 120_000, sampleTxAlert);
+      expect(matchedSlotId).toBe('slot-open');
+      expect(updatedSlots.find((s) => s.id === 'slot-open')?.status).toBe('completed');
+      expect(updatedSlots.find((s) => s.id === 'slot-50k')?.status).toBe('pending');
+    });
+
+    it('returns null matchedSlotId if amount does not match and no open slot exists', () => {
+      const slots: PaymentSlot[] = [
+        {
+          id: 'slot-50k',
+          name: 'Khách 1',
+          amountVnd: 50_000,
+          status: 'pending',
+          createdAt: Date.now() - 10000,
+        },
+      ];
+
+      const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(slots, 120_000, sampleTxAlert);
+      expect(matchedSlotId).toBeNull();
+      expect(updatedSlots.find((s) => s.id === 'slot-50k')?.status).toBe('pending');
+    });
+
+    it('keeps other pending slots active in 3-customer scenario until all are paid', () => {
+      let currentSlots: PaymentSlot[] = [
+        { id: 's1', name: 'Khách 1', amountVnd: 50_000, status: 'pending', createdAt: 1 },
+        { id: 's2', name: 'Khách 2', amountVnd: 120_000, status: 'pending', createdAt: 2 },
+        { id: 's3', name: 'Khách 3', amountVnd: 35_000, status: 'pending', createdAt: 3 },
+      ];
+
+      // Customer 2 pays 120k
+      const step1 = reconcileIncomingCredit(currentSlots, 120_000, sampleTxAlert);
+      expect(step1.matchedSlotId).toBe('s2');
+      currentSlots = step1.updatedSlots;
+      expect(currentSlots.some((s) => s.status === 'pending')).toBe(true);
+
+      // Customer 1 pays 50k
+      const step2 = reconcileIncomingCredit(currentSlots, 50_000, {
+        ...sampleTxAlert,
+        id: 'tx-124',
+        amount: 50_000,
+      });
+      expect(step2.matchedSlotId).toBe('s1');
+      currentSlots = step2.updatedSlots;
+      expect(currentSlots.some((s) => s.status === 'pending')).toBe(true);
+
+      // Customer 3 pays 35k
+      const step3 = reconcileIncomingCredit(currentSlots, 35_000, {
+        ...sampleTxAlert,
+        id: 'tx-125',
+        amount: 35_000,
+      });
+      expect(step3.matchedSlotId).toBe('s3');
+      currentSlots = step3.updatedSlots;
+
+      // All completed!
+      expect(currentSlots.every((s) => s.status === 'completed')).toBe(true);
     });
   });
 });
