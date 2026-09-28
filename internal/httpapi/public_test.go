@@ -134,6 +134,60 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /api/public/v1/transactions returns only credit and blocks debit transactions", func(t *testing.T) {
+		// Seed a debit transaction
+		debitItem := []storage.BatchTransactionItem{
+			{
+				Number:        "TXN_PUBLIC_DEBIT_001",
+				Credit:        0,
+				Debit:         20000,
+				TransactionAt: "12/09/2026",
+				EffectiveAt:   "12/09/2026",
+				Description:   "Public withdrawal test",
+			},
+		}
+		debitRes, err := store.IngestTransactionsBatch(ctx, connID, 1, "123***789", debitItem, false)
+		if err != nil {
+			t.Fatalf("ingest debit transaction: %v", err)
+		}
+		var debitTxID string
+		err = store.DB().QueryRowContext(ctx, "SELECT id FROM transactions WHERE semantic_key = 'ACB:TXN_PUBLIC_DEBIT_001'").Scan(&debitTxID)
+		if err != nil {
+			t.Fatalf("query debit transaction id: %v", err)
+		}
+		_ = debitRes
+
+		// 1. List query should NOT include the debit transaction
+		reqList, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/public/v1/transactions", nil)
+		respList, err := client.Do(reqList)
+		if err != nil {
+			t.Fatalf("request list failed: %v", err)
+		}
+		defer respList.Body.Close()
+		var listPage map[string]any
+		_ = json.NewDecoder(respList.Body).Decode(&listPage)
+		items := listPage["items"].([]any)
+		for _, it := range items {
+			m := it.(map[string]any)
+			if m["id"] == debitTxID {
+				t.Errorf("SECURITY LEAK: debit transaction %s found in public transaction list", debitTxID)
+			}
+			if m["debit"] != float64(0) {
+				t.Errorf("SECURITY LEAK: transaction with debit > 0 found: %v", m)
+			}
+		}
+
+		// 2. Detail query for debit transaction must return 404 Not Found
+		reqDetail, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/public/v1/transactions/%s", ts.URL, debitTxID), nil)
+		respDetail, err := client.Do(reqDetail)
+		if err != nil {
+			t.Fatalf("request detail failed: %v", err)
+		}
+		defer respDetail.Body.Close()
+		if respDetail.StatusCode != http.StatusNotFound {
+			t.Errorf("expected 404 Not Found for debit transaction on public endpoint, got %d", respDetail.StatusCode)
+		}
+	})
 	t.Run("GET /api/public/v1/transactions/{id} leaks NO balance", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/public/v1/transactions/%s", ts.URL, seededTxID), nil)
 		resp, err := client.Do(req)
