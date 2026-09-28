@@ -46,6 +46,7 @@ import type {
   RealtimeEnvelope,
 } from '../../realtime/realtime.types';
 import { formatVndCurrency } from '../../shared/formatters/money';
+import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import { isPublicViewerHost } from '../../app/runtime-mode';
 import {
   buildWifiQRString,
@@ -521,6 +522,29 @@ export const ReceivingQRModal: React.FC<{
     }
   };
 
+  // Reset / extend boost timer
+  const handleResetBoostTimer = async () => {
+    if (isStartingBoostRef.current || !canBoost) return;
+    isStartingBoostRef.current = true;
+    setIsStartingBoost(true);
+    try {
+      const activePending = slots.find((s) => s.status === 'pending');
+      const amt = activePending ? activePending.amountVnd : targetAmountVnd;
+      const status = await startPaymentActivity({ amountVnd: amt });
+      if (status && status.active) {
+        setBoostSessionId(status.sessionId || null);
+        boostSessionIdRef.current = status.sessionId || null;
+        setBoostRemainingSec(status.expiresIn || 180);
+        setBoostDegraded(false);
+      }
+    } catch {
+      // ignore
+    } finally {
+      isStartingBoostRef.current = false;
+      setIsStartingBoost(false);
+    }
+  };
+
   // Add another customer slot (up to 3 concurrent slots)
   const handleAddSlot = (amountVnd: number) => {
     if (slots.length >= 3) return;
@@ -537,12 +561,26 @@ export const ReceivingQRModal: React.FC<{
     setIsAddingSlot(false);
     setNewSlotAmountInput('');
 
-    // If boost was not active and conditions allow, attempt boost for new slot
-    if (canBoost && !boostSessionIdRef.current) {
-      void handleStartPaymentSession(amountVnd);
+    // If no boost session is running, start boost for the active customer
+    if (canBoost && !boostSessionIdRef.current && !isStartingBoostRef.current) {
+      isStartingBoostRef.current = true;
+      setIsStartingBoost(true);
+      startPaymentActivity({ amountVnd })
+        .then((status) => {
+          if (status && status.active) {
+            setBoostSessionId(status.sessionId || null);
+            boostSessionIdRef.current = status.sessionId || null;
+            setBoostRemainingSec(status.expiresIn || 180);
+            setBoostDegraded(false);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          isStartingBoostRef.current = false;
+          setIsStartingBoost(false);
+        });
     }
   };
-
   // Remove individual slot
   const handleRemoveSlot = (slotId: string) => {
     const nextSlots = slots.filter((s) => s.id !== slotId);
@@ -1274,17 +1312,37 @@ export const ReceivingQRModal: React.FC<{
                             Khay nhận tiền: <strong>{slots.length}/3 khách</strong>
                           </span>
                           {boostRemainingSec > 0 ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                              <Zap className="w-3 h-3 text-amber-600 fill-amber-600" />
-                              {boostRemainingSec}s
-                            </span>
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                              <Zap className="w-3 h-3 text-amber-600 fill-amber-600 animate-pulse" />
+                              <span>{boostRemainingSec}s</span>
+                              <button
+                                type="button"
+                                onClick={handleResetBoostTimer}
+                                title="Đặt lại thời gian kiểm tra nhanh (180s)"
+                                className="ml-1 text-amber-800 hover:text-amber-950 p-0.5 hover:bg-amber-200 rounded cursor-pointer transition"
+                              >
+                                <RefreshCw className={`w-3 h-3 ${isStartingBoost ? 'animate-spin' : ''}`} />
+                              </button>
+                            </div>
                           ) : (
-                            <span className="text-[11px] text-stone-400 font-medium hidden sm:inline">
-                              {boostPhase.label}
-                            </span>
+                            <div className="inline-flex items-center gap-1.5">
+                              <span className="text-[11px] text-stone-400 font-medium hidden sm:inline">
+                                {boostPhase.label}
+                              </span>
+                              {canBoost && (
+                                <button
+                                  type="button"
+                                  onClick={handleResetBoostTimer}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 cursor-pointer transition"
+                                  title="Bật lại tăng tốc kiểm tra 180s"
+                                >
+                                  <Zap className="w-3 h-3 text-amber-600" />
+                                  <span>Tăng tốc lại</span>
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
-
                         <button
                           type="button"
                           disabled={slots.length >= 3}
@@ -1695,7 +1753,7 @@ export const ReceivingQRModal: React.FC<{
                                 {item.description || 'Chuyển khoản'}
                               </p>
                               <p className="text-[11px] text-stone-400 font-mono">
-                                {item.transactionDate || ''}
+                                {formatDateTimeVN(item.transactionDate)}
                               </p>
                             </div>
                             <div className="text-right shrink-0">

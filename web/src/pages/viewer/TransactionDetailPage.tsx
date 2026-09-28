@@ -17,6 +17,7 @@ import {
 import { fetchTransactionDetail } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
+import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import { useVoiceAnnouncements } from '../../features/voice-announcements/VoiceAnnouncementProvider';
 import { buildSingleTransactionPhrase } from '../../features/voice-announcements/voice-copy';
 import { isPublicViewerHost } from '../../app/runtime-mode';
@@ -61,16 +62,8 @@ export const TransactionDetailPage: React.FC = () => {
   }
 
   const isCredit = transaction.credit > 0;
-  const formattedDate = transaction.transactionDate
-    ? new Date(transaction.transactionDate).toLocaleString('vi-VN', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-      })
-    : 'Chưa rõ thời gian';
+  const formattedDate = formatDateTimeVN(transaction.transactionDate || transaction.firstSeenAt) || 'Chưa rõ thời gian';
+  const isPublic = isPublicViewerHost();
 
   const handleCopy = () => {
     const summary = `${isCredit ? 'Tiền vào' : 'Tiền ra'}: ${formatVndCurrency(
@@ -193,7 +186,7 @@ export const TransactionDetailPage: React.FC = () => {
               </span>
               <p className="text-xs font-semibold text-stone-800">
                 {transaction.firstSeenAt
-                  ? new Date(transaction.firstSeenAt).toLocaleString('vi-VN')
+                  ? formatDateTimeVN(transaction.firstSeenAt)
                   : 'Ngay tức thì'}
               </p>
             </div>
@@ -205,7 +198,7 @@ export const TransactionDetailPage: React.FC = () => {
                   Số dư sau giao dịch
                 </span>
                 <p className="text-base font-bold text-stone-900">
-                  {formatVndCurrency(transaction.balance)}
+                  {isPublic ? '****** ₫' : formatVndCurrency(transaction.balance)}
                 </p>
               </div>
             )}

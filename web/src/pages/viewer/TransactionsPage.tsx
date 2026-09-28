@@ -25,6 +25,7 @@ import {
 import { isPublicViewerHost } from '../../app/runtime-mode';
 import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
+import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import type { Transaction, HistorySyncJob } from '../../realtime-types';
 import { useCursorPagination, PaginationControls } from '../../shared/ui/PaginationControls';
 
@@ -71,8 +72,10 @@ export const TransactionsPage: React.FC = () => {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const isPublic = isPublicViewerHost();
   const [filterType, setFilterType] = useState<'all' | 'credit' | 'debit'>('all');
-  const [dateRange, setDateRange] = useState<'today' | '7days' | 'all' | 'custom'>('all');
+  // Default filter to 'today' as requested by user
+  const [dateRange, setDateRange] = useState<'today' | '7days' | 'all' | 'custom'>('today');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
@@ -154,7 +157,6 @@ export const TransactionsPage: React.FC = () => {
   };
 
   // Active durable history sync job tracking (persisted across tab reloads)
-  const isPublic = isPublicViewerHost();
   const [activeJobId, setActiveJobId] = useState<string | null>(() => {
     if (isPublic) return null;
     try {
@@ -413,7 +415,7 @@ export const TransactionsPage: React.FC = () => {
               {dateRange === 'today' ? 'Tiền vào hôm nay' : 'Tổng tiền vào'}
             </p>
             <p className="text-2xl font-bold text-emerald-600 tracking-tight mt-0.5 truncate">
-              {formatVndCurrency(stats.incoming)}
+              {isPublic ? '****** ₫' : formatVndCurrency(stats.incoming)}
             </p>
           </div>
         </div>
@@ -428,7 +430,7 @@ export const TransactionsPage: React.FC = () => {
               {dateRange === 'today' ? 'Tiền ra hôm nay' : 'Tổng tiền ra'}
             </p>
             <p className="text-2xl font-bold text-rose-600 tracking-tight mt-0.5 truncate">
-              {formatVndCurrency(stats.outgoing)}
+              {isPublic ? '****** ₫' : formatVndCurrency(stats.outgoing)}
             </p>
           </div>
         </div>
@@ -586,8 +588,7 @@ export const TransactionsPage: React.FC = () => {
           <div className="divide-y divide-stone-100">
             {transactions.map((tx) => {
               const isCredit = tx.credit > 0;
-              const displayDate = tx.transactionDay || tx.transactionDate || tx.firstSeenAt;
-
+              const displayDate = formatDateTimeVN(tx.transactionDate || tx.transactionDay || tx.firstSeenAt);
               return (
                 <div
                   key={tx.id}
@@ -642,7 +643,7 @@ export const TransactionsPage: React.FC = () => {
                       </span>
                       {tx.balance !== undefined && tx.balance !== null && (
                         <span className="text-xs text-stone-600 font-mono">
-                          Số dư: {formatVndCurrency(tx.balance)}
+                          Số dư: {isPublic ? '****** ₫' : formatVndCurrency(tx.balance)}
                         </span>
                       )}
                     </div>
@@ -732,7 +733,7 @@ export const TransactionsPage: React.FC = () => {
                 <div className="flex justify-between py-1 border-b border-stone-200/50">
                   <span className="text-stone-600 font-medium">Thời gian giao dịch</span>
                   <span className="font-semibold text-stone-800">
-                    {selectedTx.transactionDate || selectedTx.transactionDay || selectedTx.firstSeenAt}
+                    {formatDateTimeVN(selectedTx.transactionDate || selectedTx.transactionDay || selectedTx.firstSeenAt)}
                   </span>
                 </div>
 
@@ -740,7 +741,7 @@ export const TransactionsPage: React.FC = () => {
                   <div className="flex justify-between py-1 border-b border-stone-200/50">
                     <span className="text-stone-600 font-medium">Số dư sau giao dịch</span>
                     <span className="font-mono font-semibold text-stone-800">
-                      {formatVndCurrency(selectedTx.balance)}
+                      {isPublic ? '****** ₫' : formatVndCurrency(selectedTx.balance)}
                     </span>
                   </div>
                 )}

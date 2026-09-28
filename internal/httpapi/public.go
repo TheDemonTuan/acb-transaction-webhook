@@ -62,10 +62,9 @@ func (s *Server) publicTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 	from := strings.TrimSpace(r.URL.Query().Get("from"))
 	to := strings.TrimSpace(r.URL.Query().Get("to"))
-	direction := strings.TrimSpace(r.URL.Query().Get("direction"))
-	if direction != "credit" && direction != "debit" {
-		direction = "all"
-	}
+	// Public endpoint strictly isolates and exposes ONLY credit (incoming) transactions.
+	// Debit (outgoing) transactions are filtered out and prohibited.
+	direction := "credit"
 	if from != "" {
 		if _, err := time.Parse("2006-01-02", from); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid from date: expected YYYY-MM-DD")
@@ -107,10 +106,18 @@ func (s *Server) publicTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Cache-Control", "no-store")
+	var sanitizedSummary *storage.TransactionSummary
+	if page.Summary != nil {
+		sanitizedSummary = &storage.TransactionSummary{
+			TotalCount: page.Summary.TotalCount,
+			Incoming:   page.Summary.Incoming,
+			Outgoing:   0,
+		}
+	}
 	writeJSON(w, http.StatusOK, publicTransactionsPage{
 		Items:      publicItems,
 		NextCursor: page.NextCursor,
-		Summary:    page.Summary,
+		Summary:    sanitizedSummary,
 	})
 }
 
@@ -127,6 +134,11 @@ func (s *Server) publicTransactionDetail(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to get transaction")
+		return
+	}
+	// Public viewers are strictly forbidden from viewing debit (money out) transactions
+	if txn.Debit > 0 || txn.Credit == 0 {
+		writeError(w, http.StatusNotFound, "transaction not found")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
