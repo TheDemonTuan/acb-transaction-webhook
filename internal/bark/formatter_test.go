@@ -73,6 +73,32 @@ func TestFormatTransactionNotificationRealtime(t *testing.T) {
 	}
 }
 
+func TestTransactionLinksRespectOrigin(t *testing.T) {
+	cfg := storage.DefaultBarkConfig()
+	cfg.DashboardLink = true
+	tests := []struct{ origin, id, want string }{
+		{"https://transactions.tuannguyenviet.site", "txn_123", "https://transactions.tuannguyenviet.site/t/txn_123"},
+		{"https://transactions.tuannguyenviet.site", "", "https://transactions.tuannguyenviet.site/"},
+		{"https://admin.example.com", "txn_123", "https://admin.example.com/transactions/txn_123"},
+		{"https://admin.example.com", "", "https://admin.example.com/transactions"},
+		{"https://admin.example.com", "a/b", "https://admin.example.com/transactions/a%2Fb"},
+		{"", "txn_123", ""},
+		{"not a URL", "txn_123", ""},
+		{"https://", "txn_123", ""},
+	}
+	for _, tc := range tests {
+		_, _, _, _, _, _, _, got := FormatTransactionNotification(map[string]any{"transactionId": tc.id}, cfg, tc.origin)
+		if got != tc.want {
+			t.Errorf("origin %q id %q: link = %q, want %q", tc.origin, tc.id, got, tc.want)
+		}
+	}
+	cfg.DashboardLink = false
+	_, _, _, _, _, _, _, got := FormatTransactionNotification(map[string]any{"transactionId": "txn_123"}, cfg, "https://transactions.tuannguyenviet.site")
+	if got != "" {
+		t.Errorf("disabled dashboard link = %q", got)
+	}
+}
+
 func TestFormatTransactionNotificationCatchUp(t *testing.T) {
 	eventData := map[string]any{
 		"transactionId":     "txn_cu_1",

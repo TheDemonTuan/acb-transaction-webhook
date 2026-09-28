@@ -5,6 +5,7 @@ import { ViewerRealtimeStatus } from './ViewerRealtimeStatus';
 import { VoiceToggle } from '../../features/voice-announcements/components/VoiceToggle';
 import { ReceivingQRModal } from '../../features/payment-qr/ReceivingQRModal';
 import { ADMIN_ORIGIN, isPublicViewerHost } from '../../app/runtime-mode';
+import { ROUTES } from '../../app/routes';
 
 export const ViewerHeader: React.FC = () => {
   const navigate = useNavigate();
@@ -22,7 +23,7 @@ export const ViewerHeader: React.FC = () => {
     <header className="bg-white border-b border-stone-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link to="/transactions" className="flex items-center gap-2.5 group">
+          <Link to={ROUTES.transactions()} className="flex items-center gap-2.5 group">
             <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-lg shadow-sm group-hover:bg-emerald-700 transition">
               A
             </div>

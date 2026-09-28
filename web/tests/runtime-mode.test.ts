@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createMemoryRouter } from 'react-router-dom';
 import { isPublicViewerHost, PUBLIC_VIEWER_HOST, ADMIN_ORIGIN } from '../src/app/runtime-mode';
 import { publicRoutes, adminRoutes } from '../src/app/router';
+import { ROUTES } from '../src/app/routes';
 import { api, apiAudio } from '../src/api';
 import { buildSingleTransactionPhrase } from '../src/features/voice-announcements/voice-copy';
 
@@ -34,6 +36,27 @@ describe('Runtime Mode & Public Isolation', () => {
 
     expect(findAdmin(publicRoutes)).toBe(false);
     expect(findAdmin(adminRoutes)).toBe(true);
+  });
+
+  it('resolves public index and detail directly, redirects old URL, preserves admin routes', async () => {
+    const publicRouter = createMemoryRouter(publicRoutes, { initialEntries: ['/'] });
+    expect(publicRouter.state.location.pathname).toBe('/');
+    expect(publicRouter.state.matches.at(-1)?.route.index).toBe(true);
+    await publicRouter.navigate('/t/txn_123');
+    expect(publicRouter.state.location.pathname).toBe('/t/txn_123');
+    expect(publicRouter.state.matches.at(-1)?.route.path).toBe('t/:id');
+    expect(publicRouter.state.matches.at(-1)?.params.id).toBe('txn_123');
+    expect(ROUTES.transactions(true)).toBe('/');
+    expect(ROUTES.transactionDetail('a/b', true)).toBe('/t/a%2Fb');
+    expect(ROUTES.transactionDetail('a/b', false)).toBe('/transactions/a%2Fb');
+    await publicRouter.navigate('/transactions');
+    expect(publicRouter.state.matches.at(-1)?.route.path).toBe('*');
+    const adminRouter = createMemoryRouter(adminRoutes, { initialEntries: ['/'] });
+    expect(adminRouter.state.matches.at(-1)?.route.index).toBe(true);
+    await adminRouter.navigate('/transactions');
+    expect(adminRouter.state.matches.at(-1)?.route.index).toBe(true);
+    publicRouter.dispose();
+    adminRouter.dispose();
   });
 
   describe('API behavior on public host', () => {

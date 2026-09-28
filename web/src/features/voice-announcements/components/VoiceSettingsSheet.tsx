@@ -160,6 +160,9 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                   <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{amount_raw}'}</code>
                   <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{description}'}</code>
                 </div>
+                {(!settings.announcementTemplate?.trim() || settings.announcementTemplate.trim() === DEFAULT_ANNOUNCEMENT_TEMPLATE) && (
+                  <p className="mt-1 text-xs text-stone-500">Mẫu mặc định tự đổi câu ngắn theo từng giao dịch; nghe thử dùng câu minh họa.</p>
+                )}
                 <div className="mt-2 p-2.5 rounded-lg bg-stone-50 border border-stone-200/80 text-xs text-stone-600">
                   <span className="font-medium text-stone-700 block mb-0.5">Xem trước câu đọc:</span>
                   <span className="italic text-emerald-800 font-medium">

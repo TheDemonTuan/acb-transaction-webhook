@@ -2,6 +2,7 @@ package bark
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -142,11 +143,19 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 	}
 
 	if cfg.DashboardLink && publicOrigin != "" {
-		txnID, _ := eventData["transactionId"].(string)
-		if txnID != "" {
-			linkURL = fmt.Sprintf("%s/transactions/%s", strings.TrimRight(publicOrigin, "/"), txnID)
-		} else {
-			linkURL = fmt.Sprintf("%s/transactions", strings.TrimRight(publicOrigin, "/"))
+		origin, err := url.Parse(publicOrigin)
+		if err == nil && (origin.Scheme == "https" || origin.Scheme == "http") && origin.Hostname() != "" && origin.User == nil {
+			base := origin.Scheme + "://" + origin.Host
+			list, detail := "/transactions", "/transactions/"
+			if strings.EqualFold(origin.Hostname(), "transactions.tuannguyenviet.site") {
+				list, detail = "/", "/t/"
+			}
+			txnID, _ := eventData["transactionId"].(string)
+			if txnID != "" {
+				linkURL = base + detail + url.PathEscape(txnID)
+			} else {
+				linkURL = base + list
+			}
 		}
 	}
 

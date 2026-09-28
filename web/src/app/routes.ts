@@ -1,7 +1,10 @@
+import { isPublicViewerHost } from './runtime-mode';
+
 export const ROUTES = {
   root: '/',
-  transactions: '/transactions',
-  transactionDetail: (id: string) => `/transactions/${id}`,
+  transactions: (isPublic = isPublicViewerHost()) => isPublic ? '/' : '/transactions',
+  transactionDetail: (id: string, isPublic = isPublicViewerHost()) =>
+    `${isPublic ? '/t' : '/transactions'}/${encodeURIComponent(id)}`,
   admin: '/admin',
   adminOverview: '/admin/overview',
   adminConnection: '/admin/connection',

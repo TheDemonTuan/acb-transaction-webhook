@@ -23,6 +23,7 @@ import {
   cancelHistorySyncJob,
 } from '../../shared/api/queries';
 import { isPublicViewerHost } from '../../app/runtime-mode';
+import { ROUTES } from '../../app/routes';
 import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { formatDateTimeVN } from '../../shared/formatters/datetime';
@@ -767,7 +768,7 @@ export const TransactionsPage: React.FC = () => {
             {/* Modal Footer */}
             <div className="px-5 py-3 bg-stone-50 border-t border-stone-100 flex items-center justify-between">
               <a
-                href={`/transactions/${selectedTx.id}`}
+                href={ROUTES.transactionDetail(selectedTx.id)}
                 className="text-stone-600 hover:text-stone-900 font-semibold text-xs"
               >
                 Mở trang riêng &rarr;

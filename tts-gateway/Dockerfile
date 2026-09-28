@@ -22,6 +22,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 
 RUN apk upgrade --no-cache && \
+    apk add --no-cache ffmpeg && \
     rm -rf /usr/local/bin/pip* \
       /usr/local/lib/python3.13/site-packages/pip* \
       /usr/local/lib/python3.13/site-packages/setuptools* && \

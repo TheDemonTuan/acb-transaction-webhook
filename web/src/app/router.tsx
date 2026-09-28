@@ -14,19 +14,15 @@ import { isPublicViewerHost } from './runtime-mode';
 export const publicRoutes = [
   {
     path: '/',
-    element: <Navigate to="/transactions" replace />,
-  },
-  {
-    path: '/transactions',
     element: <ViewerLayout />,
     children: [
       { index: true, element: <TransactionsPage /> },
-      { path: ':id', element: <TransactionDetailPage /> },
+      { path: 't/:id', element: <TransactionDetailPage /> },
     ],
   },
   {
     path: '*',
-    element: <Navigate to="/transactions" replace />,
+    element: <Navigate to="/" replace />,
   },
 ];
 
