@@ -542,4 +542,81 @@ describe('QR Modal Payment Boost and Workflow Helpers', () => {
       expect(currentSlots.every((s) => s.status === 'completed')).toBe(true);
     });
   });
+
+  describe('Payment Cycle Completion and Auto-Reset Rules', () => {
+    const sampleAlert: LiveCreditAlert = {
+      id: 'tx-cycle-1',
+      transactionNumber: 'TX1001',
+      amount: 50_000,
+      description: 'Chuyển khoản test',
+      timestamp: Date.now(),
+      timeStr: '12:00:00',
+    };
+
+    it('single slot: matching credit leaves no pending slots (triggers reset to idle)', () => {
+      const slots: PaymentSlot[] = [
+        { id: 's1', name: 'Khách 1', amountVnd: 50_000, status: 'pending', createdAt: Date.now() },
+      ];
+
+      const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(slots, 50_000, sampleAlert);
+      expect(matchedSlotId).toBe('s1');
+      const anyPending = updatedSlots.some((s) => s.status === 'pending');
+      expect(anyPending).toBe(false);
+    });
+
+    it('multi-slot: keeps active mode while slots are pending, resets to idle when last slot completes', () => {
+      let slots: PaymentSlot[] = [
+        { id: 's1', name: 'Khách 1', amountVnd: 50_000, status: 'pending', createdAt: 1 },
+        { id: 's2', name: 'Khách 2', amountVnd: 100_000, status: 'pending', createdAt: 2 },
+        { id: 's3', name: 'Khách 3', amountVnd: 150_000, status: 'pending', createdAt: 3 },
+      ];
+
+      // Customer 1 pays
+      const res1 = reconcileIncomingCredit(slots, 50_000, { ...sampleAlert, id: 'c1', amount: 50_000 });
+      expect(res1.matchedSlotId).toBe('s1');
+      slots = res1.updatedSlots;
+      expect(slots.some((s) => s.status === 'pending')).toBe(true);
+
+      // Customer 2 pays
+      const res2 = reconcileIncomingCredit(slots, 100_000, { ...sampleAlert, id: 'c2', amount: 100_000 });
+      expect(res2.matchedSlotId).toBe('s2');
+      slots = res2.updatedSlots;
+      expect(slots.some((s) => s.status === 'pending')).toBe(true);
+
+      // Customer 3 pays
+      const res3 = reconcileIncomingCredit(slots, 150_000, { ...sampleAlert, id: 'c3', amount: 150_000 });
+      expect(res3.matchedSlotId).toBe('s3');
+      slots = res3.updatedSlots;
+      const anyPending = slots.some((s) => s.status === 'pending');
+      expect(anyPending).toBe(false);
+    });
+
+    it('slot removal: triggers reset to idle when remaining slots have no pending items', () => {
+      const slots: PaymentSlot[] = [
+        { id: 's1', name: 'Khách 1', amountVnd: 50_000, status: 'completed', createdAt: 1 },
+        { id: 's2', name: 'Khách 2', amountVnd: 100_000, status: 'pending', createdAt: 2 },
+      ];
+
+      // Cashier cancels/removes the only remaining pending slot
+      const slotIdToRemove = 's2';
+      const nextSlots = slots.filter((s) => s.id !== slotIdToRemove);
+      const shouldResetToIdle = nextSlots.length === 0 || !nextSlots.some((s) => s.status === 'pending');
+      expect(shouldResetToIdle).toBe(true);
+    });
+
+    it('slot removal: stays active when other pending slots remain', () => {
+      const slots: PaymentSlot[] = [
+        { id: 's1', name: 'Khách 1', amountVnd: 50_000, status: 'completed', createdAt: 1 },
+        { id: 's2', name: 'Khách 2', amountVnd: 100_000, status: 'pending', createdAt: 2 },
+        { id: 's3', name: 'Khách 3', amountVnd: 150_000, status: 'pending', createdAt: 3 },
+      ];
+
+      // Cashier cancels pending slot s2, slot s3 is still pending
+      const slotIdToRemove = 's2';
+      const nextSlots = slots.filter((s) => s.id !== slotIdToRemove);
+      const shouldResetToIdle = nextSlots.length === 0 || !nextSlots.some((s) => s.status === 'pending');
+      expect(shouldResetToIdle).toBe(false);
+      expect(nextSlots.some((s) => s.status === 'pending')).toBe(true);
+    });
+  });
 });

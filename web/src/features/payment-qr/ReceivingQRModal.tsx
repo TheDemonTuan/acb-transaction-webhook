@@ -287,6 +287,10 @@ export const ReceivingQRModal: React.FC<{
   const amountInputRef = useRef<HTMLInputElement>(null);
   const modalStateRef = useRef<ModalWorkflowState>(modalState);
   modalStateRef.current = modalState;
+  const slotsRef = useRef<PaymentSlot[]>(slots);
+  slotsRef.current = slots;
+  const targetAmountRef = useRef<number>(targetAmountVnd);
+  targetAmountRef.current = targetAmountVnd;
 
   // WiFi QR states
   const [wifiSettings, setWifiSettings] = useState<WifiSettings>(loadWifiSettings);
@@ -584,19 +588,12 @@ export const ReceivingQRModal: React.FC<{
   // Remove individual slot
   const handleRemoveSlot = (slotId: string) => {
     const nextSlots = slots.filter((s) => s.id !== slotId);
-    if (nextSlots.length === 0) {
+    if (nextSlots.length === 0 || !nextSlots.some((s) => s.status === 'pending')) {
       handleResetToIdle();
     } else {
       setSlots(nextSlots);
       if (activeSlotId === slotId) {
         setActiveSlotId(nextSlots[0].id);
-      }
-      // If no pending slots remain, stop boost session
-      if (!nextSlots.some((s) => s.status === 'pending')) {
-        void stopPaymentActivity(boostSessionIdRef.current || undefined);
-        setBoostSessionId(null);
-        boostSessionIdRef.current = null;
-        setBoostRemainingSec(0);
       }
     }
   };
@@ -606,10 +603,13 @@ export const ReceivingQRModal: React.FC<{
     setBoostSessionId(null);
     boostSessionIdRef.current = null;
     setSlots([]);
+    slotsRef.current = [];
     setActiveSlotId(null);
     setModalState('idle');
+    modalStateRef.current = 'idle';
     setAmountInput('');
     setTargetAmountVnd(0);
+    targetAmountRef.current = 0;
     setBoostRemainingSec(0);
     setBoostDegraded(false);
     setIsAddingSlot(false);
@@ -620,7 +620,6 @@ export const ReceivingQRModal: React.FC<{
       amountInputRef.current?.focus();
     }, 50);
   };
-
   // Subscribe to live incoming payment events with multi-slot reconciliation
   useEffect(() => {
     if (!isOpen) return;
@@ -662,20 +661,18 @@ export const ReceivingQRModal: React.FC<{
 
           // Reconcile against multi-customer slots
           if (modalStateRef.current === 'active') {
-            setSlots((currentSlots) => {
-              const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(currentSlots, creditVal, alertItem);
-              if (matchedSlotId) {
-                // If all active slots are now completed, auto-stop boost
-                const anyPending = updatedSlots.some((s) => s.status === 'pending');
-                if (!anyPending) {
-                  void stopPaymentActivity(boostSessionIdRef.current || undefined);
-                  setBoostSessionId(null);
-                  boostSessionIdRef.current = null;
-                  setBoostRemainingSec(0);
-                }
+            const currentSlots = slotsRef.current;
+            const { updatedSlots, matchedSlotId } = reconcileIncomingCredit(currentSlots, creditVal, alertItem);
+            if (matchedSlotId) {
+              const anyPending = updatedSlots.some((s) => s.status === 'pending');
+              if (!anyPending) {
+                handleResetToIdle();
+              } else {
+                setSlots(updatedSlots);
               }
-              return updatedSlots;
-            });
+            } else if (currentSlots.length === 0 && isCreditMatch(targetAmountRef.current, creditVal)) {
+              handleResetToIdle();
+            }
           }
         }
       }
@@ -808,6 +805,11 @@ export const ReceivingQRModal: React.FC<{
           void handleStartPaymentSession(amountVnd);
           return;
         }
+        if (modalState === 'active' && activeModeTab === 'payment' && !slots.some((s) => s.status === 'pending')) {
+          e.preventDefault();
+          handleResetToIdle();
+          return;
+        }
       }
 
       // Auto-focus and prefill on digit keys (0-9 and Numpad)
@@ -829,6 +831,14 @@ export const ReceivingQRModal: React.FC<{
           });
         }
       } else if (modalState === 'active') {
+        if (!slots.some((s) => s.status === 'pending')) {
+          e.preventDefault();
+          handleResetToIdle();
+          const initialDigit = e.key === '0' ? '' : e.key;
+          setAmountInput(initialDigit);
+          setTimeout(() => amountInputRef.current?.focus(), 50);
+          return;
+        }
         if (!isAddingSlot && slots.length < 3 && !isInputFocused) {
           e.preventDefault();
           setIsAddingSlot(true);
@@ -850,7 +860,7 @@ export const ReceivingQRModal: React.FC<{
     amountInput,
     isAddingSlot,
     newSlotAmountInput,
-    slots.length,
+    slots,
     activeModeTab,
     isEditingWifi,
   ]);
