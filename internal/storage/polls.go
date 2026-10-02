@@ -86,7 +86,11 @@ func (s *Store) FinishPoll(ctx context.Context, poll PollRun) error {
 			if err != nil || changed != 1 {
 				return ErrGenerationFenceMismatch
 			}
-			return nil
+			if err := advanceRecoveryAfterAuthLossTx(ctx, tx, poll.ConnectionID, poll.Generation, "AUTH_REQUIRED"); err != nil {
+				return err
+			}
+			_, err = ensureRecoveryEpisodeTx(ctx, tx, poll.ConnectionID, poll.Generation+1)
+			return err
 		}
 		// FAILED or PROTOCOL_CHANGED do not invalidate the authenticated session; connection remains MONITORING
 		return nil

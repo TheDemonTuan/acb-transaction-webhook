@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/auth"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
@@ -1030,19 +1031,11 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"code": "AUTH_SESSION_NOT_FOUND", "error": "Không tìm thấy phiên đăng nhập ACB. Vui lòng mở phiên mới."})
 		return
 	}
+	attempt.OwnerSubject = identity.Email
 
 	switch attempt.Status {
 	case "VERIFIED":
-		conn, err := s.store.Connection(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "storage_error")
-			return
-		}
-		if conn.Generation != attempt.Generation || conn.State != "MONITORING" {
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng tải lại trạng thái kết nối."})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "MONITORING"})
+		s.completeBrowserAuth(w, r, attempt, false)
 		return
 	case "CANCELLED":
 		writeJSON(w, http.StatusOK, map[string]string{"status": "CANCELLED"})
@@ -1082,7 +1075,6 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if conn.Generation != attempt.Generation {
 		_ = s.browser.Cancel(r.Context(), attemptID)
-		_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
 		return
 	}
@@ -1090,7 +1082,7 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	session, err := s.browser.Status(r.Context(), attemptID)
 	if err != nil {
 		if authbrowser.IsHTTPStatus(err, http.StatusNotFound) {
-			slog.Warn("ACB browser session missing or ended upstream", "attempt_id", attemptID, "error", err)
+			slog.Warn("ACB browser session missing or ended upstream", "attempt_id", attemptID)
 			_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
 			writeJSON(w, http.StatusOK, map[string]string{
 				"status": "FAILED",
@@ -1109,7 +1101,6 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if latestConn.Generation != attempt.Generation {
 		_ = s.browser.Cancel(r.Context(), attemptID)
-		_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
 		return
 	}
@@ -1131,72 +1122,47 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if session.Status == "VERIFIED" {
-		if s.keyring == nil {
-			writeError(w, http.StatusServiceUnavailable, "session encryption is unavailable")
-			return
-		}
-		handoff, err := s.browser.Handoff(r.Context(), attemptID)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "ACB browser session handoff failed")
-			return
-		}
-		envelope, err := s.keyring.Encrypt([]byte(handoff), security.SessionAAD(attempt.ConnectionID, attempt.Generation))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "session encryption failed")
-			return
-		}
-		encrypted, err := json.Marshal(envelope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "session encoding failed")
-			return
-		}
-		if s.authVerifier == nil {
-			writeError(w, http.StatusServiceUnavailable, "ACB session verification is unavailable")
-			return
-		}
-		preVerifyConn, err := s.store.Connection(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if preVerifyConn.Generation != attempt.Generation {
-			_ = s.browser.Cancel(r.Context(), attemptID)
-			_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
-			return
-		}
-		if err := s.authVerifier.VerifySession(r.Context(), attempt.ConnectionID, attempt.Generation, encrypted); err != nil {
-			slog.Warn("ACB HTTP session verification pending or failed", "attempt_id", attemptID, "generation", attempt.Generation, "error", err)
-			writeJSON(w, http.StatusOK, map[string]string{
-				"status": "VERIFYING",
-				"error":  "Đã đăng nhập ACB thành công. Vui lòng bấm vào tài khoản thanh toán trên màn hình để kết nối lịch sử giao dịch.",
-			})
-			return
-		}
-		completedConn, err := s.store.CompleteAuthSession(r.Context(), attemptID, encrypted)
-		if err != nil {
-			_ = s.browser.Cancel(r.Context(), attemptID)
-			_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
-			return
-		}
-		if err := s.browser.Complete(r.Context(), attemptID); err != nil {
-			slog.Warn("complete ACB browser handoff", "attempt_id", attemptID, "error", err)
-		}
-		audit(s.store, r, "auth.verified", completedConn.ID)
-		s.publishStateEvent("connection.changed", completedConn.ID, completedConn)
-		if s.postAuthRecovery != nil {
-			if err := s.postAuthRecovery.ScheduleRecovery(r.Context(), completedConn.ID, completedConn.Generation, attemptID); err != nil {
-				slog.Warn("schedule post-auth recovery", "connection_id", completedConn.ID, "generation", completedConn.Generation, "error", err)
-			}
-		}
-
-		s.publishStateEvent("auth.changed", attemptID, map[string]any{"attemptId": attemptID, "status": "MONITORING"})
-		writeJSON(w, http.StatusOK, map[string]string{"status": "MONITORING"})
+		s.completeBrowserAuth(w, r, attempt, true)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": session.Status})
+}
+
+func (s *Server) completeBrowserAuth(w http.ResponseWriter, r *http.Request, attempt storage.AuthAttempt, publish bool) {
+	finalizer := authsession.NewFinalizer(authsession.Options{
+		Store: s.store, Browser: s.browser, Keyring: s.keyring,
+		Verifier: s.authVerifier, Scheduler: s.postAuthRecovery,
+	})
+	conn, err := finalizer.Complete(r.Context(), attempt)
+	if err != nil {
+		switch {
+		case errors.Is(err, authsession.ErrVerificationPending):
+			writeJSON(w, http.StatusOK, map[string]string{
+				"status": "VERIFYING",
+				"error":  "Đã đăng nhập ACB thành công. Vui lòng bấm vào tài khoản thanh toán trên màn hình để kết nối lịch sử giao dịch.",
+			})
+		case errors.Is(err, authsession.ErrConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng tải lại trạng thái kết nối."})
+		case errors.Is(err, authsession.ErrAttemptNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"code": "AUTH_SESSION_NOT_FOUND", "error": "Không tìm thấy phiên đăng nhập ACB. Vui lòng mở phiên mới."})
+		case errors.Is(err, authsession.ErrExpired):
+			writeJSON(w, http.StatusOK, map[string]string{"status": "EXPIRED", "error": "Phiên đăng nhập ACB đã hết hạn. Vui lòng mở phiên mới."})
+		case errors.Is(err, authsession.ErrUnavailable):
+			writeError(w, http.StatusServiceUnavailable, "ACB session finalization is unavailable")
+		case errors.Is(err, authsession.ErrHandoff):
+			writeError(w, http.StatusBadGateway, "ACB browser session handoff failed")
+		default:
+			writeError(w, http.StatusInternalServerError, "ACB session finalization failed")
+		}
+		return
+	}
+	if publish {
+		audit(s.store, r, "auth.verified", conn.ID)
+		s.publishStateEvent("connection.changed", conn.ID, conn)
+		s.publishStateEvent("auth.changed", attempt.ID, map[string]any{"attemptId": attempt.ID, "status": "MONITORING"})
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "MONITORING"})
 }
 
 func (s *Server) browserScreen(w http.ResponseWriter, r *http.Request) {

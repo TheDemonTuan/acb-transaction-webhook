@@ -30,13 +30,14 @@ type CatchUpTask struct {
 	reason       string
 	runID        string
 
-	recoveryReady    bool
-	explicitRecovery bool
-	recoveryPlan     storage.RecoveryRunPlan
-	initialized      bool
-	fromDate         string
-	toDate           string
-	currentDay       time.Time
+	recoveryReady     bool
+	explicitRecovery  bool
+	automaticRecovery bool
+	recoveryPlan      storage.RecoveryRunPlan
+	initialized       bool
+	fromDate          string
+	toDate            string
+	currentDay        time.Time
 
 	dayPageCount     int
 	totalPages       int
@@ -168,6 +169,11 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			t.finishDone(claimErr)
 			return scheduler.TaskStepResult{Done: true, Error: claimErr, Outcome: scheduler.OutcomeFatal}, claimErr
 		}
+		automatic, lookupErr := t.m.store.IsAutomaticRecoveryRun(ctx, t.runID)
+		if lookupErr != nil {
+			return scheduler.TaskStepResult{Done: false, RequeueAt: t.m.now().Add(5 * time.Second), Outcome: scheduler.OutcomeTransient}, nil
+		}
+		t.automaticRecovery = automatic
 		claimedRun, err := t.m.store.ClaimRecoveryRun(ctx, t.runID, conn.ID, conn.Generation)
 		if err != nil {
 
@@ -284,10 +290,12 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			return scheduler.TaskStepResult{Done: true, Error: dateErr, Outcome: scheduler.OutcomeFatal}, dateErr
 		}
 
-		// Seven inclusive calendar days: today-6 through today.
-		oldest := toT.AddDate(0, 0, -(catchUpMaxDays - 1))
-		if fromT.Before(oldest) {
-			fromT = oldest
+		// Only automatic outages may exceed the ordinary seven-day bank window.
+		if !t.automaticRecovery {
+			oldest := toT.AddDate(0, 0, -(catchUpMaxDays - 1))
+			if fromT.Before(oldest) {
+				fromT = oldest
+			}
 		}
 		if fromT.After(toT) {
 			fromT = toT
@@ -335,11 +343,10 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 	}
 
 	// Skip covered historical days before today.
-	// Post-auth recovery (INITIAL_AUTH_BOOTSTRAP, SESSION_REAUTH_CATCHUP, SESSION_AUTHENTICATED)
-	// must scan every day in the bounded window [today-6, today] to detect any missed transactions,
-	// rather than skipping days because an old session recorded coverage earlier.
+	// Post-auth recovery must scan every day in its immutable range, even
+	// when an old session recorded coverage before the outage.
 	// For startup and general catch-up, covered days can be skipped.
-	isPostAuthRecovery := t.reason == storage.RecoveryReasonReauth ||
+	isPostAuthRecovery := t.automaticRecovery || t.reason == storage.RecoveryReasonReauth ||
 		t.reason == storage.RecoveryReasonInitialAuth ||
 		t.reason == storage.RecoveryReasonAuthLegacy
 	if !isPostAuthRecovery {
@@ -581,6 +588,19 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			_ = t.finishPoll(ctx, "FAILED", inconclusiveErr.Error())
 			t.finishDone(inconclusiveErr)
 			return scheduler.TaskStepResult{Done: true, Error: inconclusiveErr, Outcome: scheduler.OutcomeTransient}, inconclusiveErr
+		}
+
+		if t.automaticRecovery {
+			// Empty tables and transaction dates alone cannot prove that the bank
+			// honored an old-day query. Require the returned form's exact range.
+			form, rangeErr := acb.ExtractHistoryForm(histResp.Body)
+			if rangeErr != nil || form.Fields["FromDate"] != t.currentDay.Format("02/01/2006") || form.Fields["ToDate"] != historyEffectiveToDate(t.currentDay, t.m.now()) {
+				rangeErr := errors.New("HISTORY_RANGE_UNAVAILABLE: bank did not confirm the requested history range")
+				_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "HISTORY_RANGE_UNAVAILABLE", rangeErr.Error())
+				_ = t.finishPoll(ctx, "FAILED", rangeErr.Error())
+				t.finishDone(rangeErr)
+				return scheduler.TaskStepResult{Done: true, Error: rangeErr, Outcome: scheduler.OutcomeFatal}, rangeErr
+			}
 		}
 
 		t.dayPageCount++

@@ -425,6 +425,18 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		t.finish(staleErr)
 		return scheduler.TaskStepResult{Done: true, Error: staleErr, Outcome: scheduler.OutcomeSuccess}, staleErr
 	}
+	blocked, gateErr := t.runner.store.HasBlockingAuthRecovery(ctx, conn.ID, conn.Generation)
+	if gateErr != nil || blocked {
+		// Keep the durable job retryable even when the controller is offline or
+		// the linked catch-up run has failed. No bank request or coverage advance.
+		retryAt := time.Now().Add(5 * time.Second)
+		if err := t.runner.store.RequeueHistorySyncJob(ctx, t.job.ID, "AUTOMATIC_RECOVERY_IN_PROGRESS", "Automatic session recovery has not completed", retryAt); err != nil {
+			t.finish(err)
+			return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeTransient}, err
+		}
+		t.finish(nil)
+		return scheduler.TaskStepResult{Done: true, RequeueAt: retryAt, Outcome: scheduler.OutcomeTransient}, nil
+	}
 
 	// 4. Circuit breaker / backoff check
 	if mon := t.runner.Monitor(); mon != nil && mon.IsBackoffActive() {

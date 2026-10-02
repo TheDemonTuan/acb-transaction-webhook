@@ -1,0 +1,6 @@
+<!doctype html><!-- Sanitized synthetic fixture derived from main_test.go login fields; NOT live ACB DOM. -->
+<html><body><form action="/acbib/Request?stage=login" method="post">
+<input name="username" autocomplete="off"><input type="password" name="password">
+<canvas id="captchaImage" width="160" height="50"></canvas><input name="captcha" maxlength="6" pattern="[A-Za-z0-9]{6}">
+<button id="loginBtn" type="submit">Đăng nhập</button></form>
+<script>const c=document.getElementById('captchaImage').getContext('2d');c.fillStyle='white';c.fillRect(0,0,160,50);c.fillStyle='black';c.font='24px sans-serif';c.fillText('AB12CD',10,32);</script></body></html>

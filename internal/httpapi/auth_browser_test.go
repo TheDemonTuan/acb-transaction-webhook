@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -133,8 +135,10 @@ func TestAuthBrowserStatusTerminalIdempotence(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	handoffs := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/handoff") {
+			handoffs++
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"session": "handoff-secret-data"})
 			return
@@ -163,9 +167,6 @@ func TestAuthBrowserStatusTerminalIdempotence(t *testing.T) {
 	if res1["status"] != "MONITORING" {
 		t.Fatalf("first poll status=%v, want MONITORING", res1["status"])
 	}
-	if recovery.calls != 1 || recovery.connectionID != attempt.ConnectionID || recovery.generation != attempt.Generation || recovery.eventKey != attempt.ID {
-		t.Fatalf("recovery hook = %+v, want one call for completed auth", recovery)
-	}
 
 	// Subsequent poll returns MONITORING idempotently (NOT 404!)
 	w2 := httptest.NewRecorder()
@@ -178,8 +179,12 @@ func TestAuthBrowserStatusTerminalIdempotence(t *testing.T) {
 	if res2["status"] != "MONITORING" {
 		t.Fatalf("second poll status=%v, want MONITORING", res2["status"])
 	}
-	if recovery.calls != 1 {
-		t.Fatalf("recovery hook called %d times after repeated status, want 1", recovery.calls)
+	if handoffs != 1 {
+		t.Fatalf("repeated status requested a second browser handoff: %d", handoffs)
+	}
+	run, err := store.GetRecoveryRunByEvent(ctx, attempt.ConnectionID, attempt.Generation, attempt.ID)
+	if err != nil || run.Status != storage.RecoveryRunStatusPending {
+		t.Fatalf("verified status lost durable catch-up intent: %+v %v", run, err)
 	}
 
 	// VNC screen access must be rejected after terminal status
@@ -226,12 +231,22 @@ func TestAuthBrowserVerificationFailureNeverEntersMonitoring(t *testing.T) {
 	}))
 	defer upstream.Close()
 	server := New(config.Config{Timezone: time.UTC, DevelopmentSubject: "owner", AuthBrowserURL: upstream.URL, MasterKeyFile: keyPath}, store).
-		WithAuthVerifier(rejectingAuthVerifier{err: errors.New("login page")})
+		WithAuthVerifier(rejectingAuthVerifier{err: errors.New("synthetic-password/001234/cookie/model-response/bot-token")})
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/connection/auth/"+attempt.ID+"/status", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"VERIFYING"`) {
 		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "synthetic-password") || strings.Contains(response.Body.String(), "001234") {
+		t.Fatal("verification response exposed sensitive transport error")
+	}
+	if strings.Contains(logs.String(), "synthetic-password") || strings.Contains(logs.String(), "001234") {
+		t.Fatal("verification logging exposed sensitive transport error")
 	}
 	connection, err := store.Connection(ctx)
 	if err != nil || connection.State == "MONITORING" {

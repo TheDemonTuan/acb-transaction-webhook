@@ -37,9 +37,52 @@ finally: os.close(fd)
 PY
   then rm -f "$tmp"; return 1; fi
 }
+# Legacy bundles never receive recovery profiles, overrides, or secret requirements.
+load_recovery_flags() {
+  local release="${1:-}" settings
+  settings="$(python3 - "$DEPLOY_PATH/deploy/.env.production" "$release" <<'PY'
+import sys
+env,release=sys.argv[1:]
+supported=True
+if release:
+    import yaml
+    supported='recovery-controller' in (yaml.safe_load(open(release+'/compose.prod.yaml')).get('services') or {})
+values={'AUTH_RECOVERY_ENABLED':'false','AI_CAPTCHA_ENABLED':'false'}
+seen=set()
+if supported:
+    for raw in open(env,encoding='utf-8'):
+        line=raw.strip()
+        if not line or line.startswith('#'): continue
+        key,sep,value=line.partition('=')
+        if key.strip() not in values: continue
+        if not sep or key!=key.strip() or key in seen or value not in ('true','false'):
+            raise SystemExit('invalid or duplicate recovery flag: '+key)
+        seen.add(key); values[key]=value
+    if release and values['AUTH_RECOVERY_ENABLED']=='true' and values['AI_CAPTCHA_ENABLED']=='true':
+        import os
+        if not os.path.isfile(release+'/compose.auth-recovery-ai.yaml'):
+            raise SystemExit('bundle-invalid: missing compose.auth-recovery-ai.yaml')
+print(str(supported).lower(),values['AUTH_RECOVERY_ENABLED'],values['AI_CAPTCHA_ENABLED'])
+PY
+)" || return 1
+  read -r RECOVERY_SERVICE_SUPPORTED AUTH_RECOVERY_ENABLED AI_CAPTCHA_ENABLED <<< "$settings"
+  export AUTH_RECOVERY_ENABLED AI_CAPTCHA_ENABLED
+}
+stop_recovery_controller() {
+  if docker inspect acb-recovery-controller >/dev/null 2>&1; then
+    docker stop -t 30 acb-recovery-controller >/dev/null || return 1
+    [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'recovery controller still running'
+  fi
+}
 compose_release() {
   local release="$1" runtime="$2"; shift 2
-  docker compose --project-name acb --project-directory "$release" --env-file "$DEPLOY_PATH/deploy/.env.production" --env-file "$runtime" -f "$release/compose.prod.yaml" "$@"
+  local -a recovery_args=()
+  load_recovery_flags "$release" || return 1
+  if [[ "$AUTH_RECOVERY_ENABLED" == true ]]; then
+    recovery_args+=(--profile auth-recovery)
+    if [[ "$AI_CAPTCHA_ENABLED" == true ]]; then recovery_args+=(-f "$release/compose.auth-recovery-ai.yaml"); fi
+  fi
+  docker compose --project-name acb --project-directory "$release" --env-file "$DEPLOY_PATH/deploy/.env.production" --env-file "$runtime" -f "$release/compose.prod.yaml" "${recovery_args[@]}" "$@"
 }
 # Actual file ownership is significant: do not silently chmod live secrets.
 check_secret_permissions() {
@@ -69,12 +112,16 @@ check_secret_permissions() {
   return 0
 }
 validate_permissions() {
-  python3 - "$DEPLOY_PATH/deploy" "$DEPLOY_PATH/data/backups" <<'PY'
+  load_recovery_flags "${1:-}" || return 1
+  python3 - "$DEPLOY_PATH/deploy" "$DEPLOY_PATH/data/backups" "$AUTH_RECOVERY_ENABLED" "$AI_CAPTCHA_ENABLED" <<'PY'
 import os,stat,sys
-root,backup=sys.argv[1:]
+root,backup,recovery,ai=sys.argv[1:]
 checks=[(root+'/.env.production',0o600,1000,1000),(root+'/secrets',0o700,1000,1000),(backup,0o700,1000,1000)]
 checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','auth_browser_internal_token','tts_internal_token')]
 checks += [(root+'/secrets/'+n,0o640,1000,1000) for n in ('bark_basic_auth_user','bark_basic_auth_password')]
+if recovery=='true':
+    checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('acb_username','acb_password','acb_account','telegram_bot_token')]
+    if ai=='true': checks.append((root+'/secrets/ninerouter_api_key',0o600,1000,1000))
 for path,mode,uid,gid in checks:
     st=os.stat(path)
     actual=(stat.S_IMODE(st.st_mode),st.st_uid,st.st_gid)

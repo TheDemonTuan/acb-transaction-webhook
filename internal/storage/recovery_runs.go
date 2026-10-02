@@ -410,6 +410,11 @@ func (s *Store) GetRecoveryRunByEvent(ctx context.Context, connectionID string, 
 	return scanRecoveryRun(s.db.QueryRowContext(ctx, `SELECT `+recoveryRunColumns+` FROM recovery_runs WHERE connection_id=? AND generation=? AND event_key=?`, connectionID, generation, eventKey))
 }
 
+// GetRecoveryRun reads only a current-generation intent by its durable ID.
+func (s *Store) GetRecoveryRun(ctx context.Context, runID string) (RecoveryRun, error) {
+	return scanRecoveryRun(s.db.QueryRowContext(ctx, `SELECT `+recoveryRunColumns+` FROM recovery_runs WHERE id=? AND EXISTS (SELECT 1 FROM connections c WHERE c.id=recovery_runs.connection_id AND c.generation=recovery_runs.generation)`, runID))
+}
+
 func sanitizeRecoveryErrorMessage(msg string) string {
 	return sanitizeStoredErrorMessage(msg)
 }
@@ -477,6 +482,11 @@ func (s *Store) UpdateRecoveryRunProgress(ctx context.Context, runID, connection
 		}
 		if changed != 1 {
 			return ErrGenerationFenceMismatch
+		}
+		if status == RecoveryRunStatusCompleted {
+			if err := completeAutomaticRecoveryRunTx(ctx, tx, run, time.Now()); err != nil {
+				return err
+			}
 		}
 		run, err = scanRecoveryRun(tx.QueryRowContext(ctx, `SELECT `+recoveryRunColumns+` FROM recovery_runs WHERE id=?`, runID))
 		return err

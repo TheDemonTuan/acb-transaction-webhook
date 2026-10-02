@@ -1,0 +1,10 @@
+services:
+  recovery-controller:
+    environment:
+      NINEROUTER_API_KEY_FILE: /run/secrets/ninerouter_api_key
+    secrets:
+      - ninerouter_api_key
+
+secrets:
+  ninerouter_api_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/ninerouter_api_key

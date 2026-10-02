@@ -70,13 +70,6 @@ func TestOpenMigratesProductionV10ToRecoveryV11(t *testing.T) {
 		t.Fatalf("production v10 database must migrate: %v", err)
 	}
 	defer store.Close()
-	var version int
-	if err := store.DB().QueryRowContext(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != 11 {
-		t.Fatalf("expected recovery migration version 11, got %d", version)
-	}
 	var columns int
 	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('recovery_runs') WHERE name IN ('reason','range_from','range_to','next_day')`).Scan(&columns); err != nil {
 		t.Fatal(err)

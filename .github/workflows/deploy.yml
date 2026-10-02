@@ -245,12 +245,16 @@ jobs:
       - name: Rehearse real deploy and rollback on isolated runner (${{ matrix.suite }})
         run: |
           set -euo pipefail
-          for file in deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py compose.prod.yaml seccomp-auth-browser.json bark-entrypoint.sh; do
-            cp "deploy/$file" "bundle/$file"
+          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
+          for file in "${files[@]}"; do
+            [[ "$file" == images.env ]] || cp "deploy/$file" "bundle/$file"
           done
           # Harness switches to app UID 1000; keep .git credentials private.
           chmod a+r bundle/* deploy/tests/test_simple_deploy.sh platform/edge/dynamic/acb.yml
-          chmod a+x bundle/{deploy.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,bark-entrypoint.sh}
+          chmod a+x bundle/{deploy.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,bark-entrypoint.sh}
+          chmod 644 bundle/{compose.prod.yaml,compose.auth-recovery-ai.yaml}
+          (cd bundle && sha256sum "${files[@]}" > SHA256SUMS)
+          chmod a+r bundle/SHA256SUMS
           chmod a+rx bundle deploy deploy/tests platform platform/edge platform/edge/dynamic
           path="$GITHUB_WORKSPACE"
           while [[ "$path" != / ]]; do
@@ -280,11 +284,13 @@ jobs:
       - name: Assemble verified bundle
         run: |
           set -euo pipefail
-          for file in deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py compose.prod.yaml seccomp-auth-browser.json bark-entrypoint.sh; do
-            cp "deploy/$file" "bundle/$file"
+          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
+          for file in "${files[@]}"; do
+            [[ "$file" == images.env ]] || cp "deploy/$file" "bundle/$file"
           done
-          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py}
-          chmod 644 bundle/{bark-entrypoint.sh,compose.prod.yaml,seccomp-auth-browser.json,images.env}
+          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py}
+          chmod 644 bundle/{bark-entrypoint.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,images.env}
+          (cd bundle && sha256sum "${files[@]}" > SHA256SUMS)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-bundle
@@ -323,10 +329,10 @@ jobs:
           mkdir -m 700 -p ~/.ssh
           (umask 077; printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519; printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts)
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
-          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py compose.prod.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
+          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
           for file in "${files[@]}"; do [[ -s "bundle/$file" ]] || { echo "Missing $file" >&2; exit 1; }; done
-          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,bark-entrypoint.sh}
-          (cd bundle && sha256sum "${files[@]}" > SHA256SUMS)
+          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,bark-entrypoint.sh}
+          (cd bundle && sha256sum -c SHA256SUMS)
       - name: Stage and deploy one immutable bundle
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/bank-event-gateway' }}
@@ -342,14 +348,14 @@ jobs:
           stage="$DEPLOY_PATH/releases/.stage-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ssh "${ssh_opts[@]}" "$remote" "umask 077; mkdir -p '$DEPLOY_PATH/releases' '$stage'"
           trap 'ssh "${ssh_opts[@]}" "$remote" "rm -rf '\''$stage'\''" || true' EXIT
-          scp -i "$HOME/.ssh/id_ed25519" -P "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,compose.prod.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,images.env,SHA256SUMS} "$remote:$stage/"
+          scp -i "$HOME/.ssh/id_ed25519" -P "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,images.env,SHA256SUMS} "$remote:$stage/"
           [[ "$DASHBOARD_OWNER_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { echo "Invalid dashboard owner email" >&2; exit 1; }
           { printf '%s\n' "$GH_TOKEN"; cat <<'REMOTE'
           set -euo pipefail
           target="$DEPLOY_PATH/releases/$SHA"
           (cd "$STAGE" && sha256sum -c SHA256SUMS)
-          chmod 700 "$STAGE"/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py}
-          chmod 644 "$STAGE/bark-entrypoint.sh"
+          chmod 700 "$STAGE"/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py}
+          chmod 644 "$STAGE"/{bark-entrypoint.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,images.env,SHA256SUMS}
           if [[ -e "$target" ]]; then
             (cd "$target" && sha256sum -c "$STAGE/SHA256SUMS")
             cmp "$target/SHA256SUMS" "$STAGE/SHA256SUMS"
@@ -362,11 +368,29 @@ jobs:
           printf '%s' "$GH_TOKEN" | DOCKER_CONFIG="$auth" docker login ghcr.io -u '${{ github.actor }}' --password-stdin
           unset GH_TOKEN
           DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" DASHBOARD_OWNER_EMAIL="$DASHBOARD_OWNER_EMAIL" bash "$target/deploy.sh" "$SHA"
+          # Fence publication against another deploy/rollback after deploy.sh releases its lock.
+          exec 9>"$DEPLOY_PATH/.deploy.lock"
+          flock -w 30 9 || { echo 'Setup publication lock unavailable' >&2; exit 1; }
           committed="$(sed -n 's/^RELEASE_SHA=//p' "$DEPLOY_PATH/state.env")"
           gateway="$(sed -n 's/^GATEWAY_SLOT=//p' "$DEPLOY_PATH/state.env")"
           frontend="$(sed -n 's/^FRONTEND_SLOT=//p' "$DEPLOY_PATH/state.env")"
           [[ "$committed" == "$SHA" && "$gateway" =~ ^(blue|green)$ && "$frontend" =~ ^(blue|green)$ ]] || { echo 'Commit postcondition failed' >&2; exit 1; }
           DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" bash "$target/healthcheck.sh" route "$gateway" "$SHA" "$SHA"
+          python3 - "$DEPLOY_PATH" "$target/setup-recovery.sh" <<'PY'
+          import os,secrets,sys
+          root,target=sys.argv[1:]
+          directory=os.path.join(root,'deploy')
+          temporary=os.path.join(directory,'.setup-recovery.'+secrets.token_hex(16)+'.tmp')
+          try:
+              os.symlink(target,temporary)
+              os.replace(temporary,os.path.join(directory,'setup-recovery.sh'))
+              fd=os.open(directory,os.O_DIRECTORY)
+              try: os.fsync(fd)
+              finally: os.close(fd)
+          finally:
+              if os.path.lexists(temporary): os.unlink(temporary)
+          PY
+          printf 'DEPLOY_SUMMARY: Recovery setup: sudo bash %s/deploy/setup-recovery.sh\n' "$DEPLOY_PATH"
           printf 'DEPLOY_SUMMARY: Requested SHA: %s\nDEPLOY_SUMMARY: Committed SHA: %s\nDEPLOY_SUMMARY: Gateway slot: %s\nDEPLOY_SUMMARY: Frontend slot: %s\n' "$SHA" "$committed" "$gateway" "$frontend"
           while IFS= read -r line; do
             [[ "$line" =~ ^(GATEWAY|FRONTEND|WORKER|DBTOOL|BROWSER|TTS|BARK)_IMAGE_REF=ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || continue

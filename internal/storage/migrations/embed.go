@@ -21,3 +21,8 @@ var MonitorIdleCadenceSQL string
 //
 //go:embed 011_recovery_runs.sql
 var RecoveryRunsSQL string
+
+// AuthRecoverySQL embeds schema version 12 automatic authentication recovery.
+//
+//go:embed 012_auth_recovery.sql
+var AuthRecoverySQL string

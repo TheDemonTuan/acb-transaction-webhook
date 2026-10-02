@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"strings"
+	"time"
 )
 
 type TransactionView struct {
@@ -482,7 +483,7 @@ func (s *Store) CompleteAuthSession(ctx context.Context, attemptID string, sessi
 		if changed != 1 {
 			return ErrGenerationFenceMismatch
 		}
-		return nil
+		return completeAutomaticSessionTx(ctx, tx, attemptID, connectionID, generation, time.Now())
 	})
 	if err != nil {
 		return Connection{}, err
