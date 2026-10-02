@@ -652,7 +652,16 @@ revision,envelope=rows[0]; assert revision==1
 assert b"fixture-password" not in envelope and b"fixture-operator" not in envelope
 assert db.execute("SELECT count(*) FROM auth_attempts").fetchone()[0]==0
 print(str(revision)+":"+hashlib.sha256(envelope).hexdigest())')"
-  docker inspect acb-recovery-controller | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert not any("/run/import" in m["Destination"] or m["Destination"].endswith(("acb_username","acb_password","acb_account")) for m in c["Mounts"])'
+  docker inspect acb-recovery-controller | python3 -c '
+import json,sys
+container=json.load(sys.stdin)[0]
+legacy_names={
+    "acb_username",
+    "acb_password",
+    "acb_account",
+}
+assert not any("/run/import" in mount["Destination"] or mount["Destination"].rsplit("/",1)[-1] in legacy_names for mount in container["Mounts"])
+'
   DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
   mkdir "$root/legacy-import-fixture"
   for name in acb_username acb_password acb_account; do mv "$root/deploy/secrets/$name" "$root/legacy-import-fixture/$name"; done

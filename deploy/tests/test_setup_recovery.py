@@ -25,6 +25,7 @@ class SetupTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / "deploy/secrets").mkdir(parents=True)
+        (self.root / "deploy/secrets").chmod(0o700)
         self.env = self.root / "deploy/.env.production"
         self.original = "PUBLIC_ORIGIN=https://bank.example\nAUTH_RECOVERY_ENABLED=false\nAI_CAPTCHA_ENABLED=false\n# preserved\nOTHER='value with spaces'\n"
         self.env.write_text(self.original)
@@ -389,8 +390,7 @@ class SetupTests(unittest.TestCase):
         for name, value in {"telegram_bot_token": "123:synthetic-token", "acb_username": "existing-user",
                             "acb_password": password, "acb_account": "001234"}.items():
             path = self.root / "deploy/secrets" / name
-            path.write_text(value + "\n")
-            path.chmod(0o600)
+            setup.atomic_private(path, value + "\n")
         self.driver.secret = lambda _: self.fail("existing secret unexpectedly requested")
         self.configure(activate=True)
         self.assertEqual((self.root / "deploy/secrets/acb_password").read_text(), password + "\n")

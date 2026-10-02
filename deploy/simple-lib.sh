@@ -144,7 +144,12 @@ import_recovery_credentials() {
   validate_recovery_controller_bundle "$release" || return 1
   available="$(python3 - "$DEPLOY_PATH/deploy/secrets" <<'PY'
 import os,stat,sys
-paths=[os.path.join(sys.argv[1],n) for n in ('acb_username','acb_password','acb_account')]
+names = [
+    'acb_username',
+    'acb_password',
+    'acb_account',
+]
+paths = [os.path.join(sys.argv[1], name) for name in names]
 missing=False
 for path in paths:
     try: st=os.lstat(path)
