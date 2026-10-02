@@ -20,6 +20,7 @@ type botFixture struct {
 	mu         sync.Mutex
 	requests   []string
 	messages   []map[string]json.RawMessage
+	edits      []map[string]json.RawMessage
 	updates    []Update
 	messageID  int64
 	webhook    string
@@ -43,6 +44,13 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 		result = map[string]any{"id": int64(42), "is_bot": true}
 	case "getWebhookInfo":
 		result = map[string]any{"url": f.webhook}
+	case "editMessageText":
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		f.edits = append(f.edits, body)
 	case "sendMessage":
 		var body map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -105,26 +113,26 @@ func callback(data string, messageID int64) Update {
 	return Update{ID: 20, Callback: &CallbackQuery{ID: "callback", From: User{ID: 456}, Message: &Message{ID: messageID, Chat: Chat{ID: -123, Type: "private"}, From: &User{ID: 42, IsBot: true}}, Data: data}}
 }
 
-func TestTelegramUnconfiguredConfirmationDoesNotBlockPolling(t *testing.T) {
+func TestTelegramUnconfiguredNavigationNeverCreatesConsent(t *testing.T) {
 	ctx, store, h, f, _ := testTelegram(t)
-	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='UNCONFIGURED',account_masked=''`); err != nil {
+	mustExec(t, store, `DELETE FROM connections`)
+	for _, data := range []string{"nav:menu", "nav:status", "nav:help", "nav:credentials", "nav:logout"} {
+		if err := h.HandleUpdate(ctx, callback(data, 100)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actions, attempts int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM telegram_auth_actions`).Scan(&actions); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.HandleUpdate(ctx, command("/acb_login")); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_attempts`).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	data, messageID := f.lastAction(t)
-	confirmation := callback(data, messageID)
-	confirmation.ID = 21
-	pause := command("/acb_pause")
-	pause.ID = 22
-	f.updates = []Update{confirmation, pause}
-	if err := h.Client.pollOnce(ctx, store, h); err != nil {
-		t.Fatal(err)
+	if actions != 0 || attempts != 0 {
+		t.Fatal("onboarding navigation granted bank authority")
 	}
-	state, err := store.TelegramAuthState(ctx, 42)
-	if err != nil || !state.Paused || state.NextUpdateID != 23 {
-		t.Fatal("rejected onboarding confirmation blocked subsequent operator commands")
+	if len(f.messages) != 5 {
+		t.Fatal("read-only navigation failed without connection")
 	}
 }
 
@@ -140,19 +148,6 @@ func (r *replyRecorder) HandleReply(_ context.Context, _, _, _ int64, text strin
 	return r.err
 }
 
-type cancelRecorder struct{ attempts []string }
-
-func (r *cancelRecorder) Cancel(_ context.Context, id string) error {
-	r.attempts = append(r.attempts, id)
-	return nil
-}
-
-type scheduleRecorder struct{ keys []string }
-
-func (r *scheduleRecorder) ScheduleRecovery(_ context.Context, _ string, _ int64, key string) error {
-	r.keys = append(r.keys, key)
-	return nil
-}
 func mustExec(t *testing.T, s *storage.Store, query string, args ...any) {
 	t.Helper()
 	if _, err := s.DB().Exec(query, args...); err != nil {
@@ -232,39 +227,6 @@ func TestTelegramOperatorCommands(t *testing.T) {
 			t.Fatal("resume reset circuit")
 		}
 	})
-	t.Run("confirmation TTL and wrong message", func(t *testing.T) {
-		ctx, s, h, f, _ := testTelegram(t)
-		if err := h.HandleUpdate(ctx, command("/acb_manual")); err != nil {
-			t.Fatal(err)
-		}
-		data, id := f.lastAction(t)
-		if err := h.HandleUpdate(ctx, callback(data, id+1)); err != nil {
-			t.Fatal(err)
-		}
-		state, _ := s.TelegramAuthState(ctx, 42)
-		if state.Paused {
-			t.Fatal("wrong originating message authorized action")
-		}
-		mustExec(t, s, `UPDATE telegram_auth_actions SET expires_at=? WHERE id=?`, time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano), strings.TrimPrefix(data, "ar:"))
-		if err := h.HandleUpdate(ctx, callback(data, id)); err != nil {
-			t.Fatal(err)
-		}
-		state, _ = s.TelegramAuthState(ctx, 42)
-		if state.Paused {
-			t.Fatal("expired confirmation authorized action")
-		}
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		answers := 0
-		for _, method := range f.requests {
-			if method == "answerCallbackQuery" {
-				answers++
-			}
-		}
-		if answers != 2 {
-			t.Fatal("stale callback spinner unanswered")
-		}
-	})
 	t.Run("offset failure restart never cancels twice", func(t *testing.T) {
 		ctx, s, h, f, path := testTelegram(t)
 		c, err := s.Connection(ctx)
@@ -275,12 +237,21 @@ func TestTelegramOperatorCommands(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+		action, err := s.CreateTelegramAuthAction(ctx, storage.TelegramAuthAction{BotID: 42, ChatID: -123, UserID: 456, EpisodeID: e.ID, ExpectedGeneration: e.Generation, Action: "LOGIN"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeliverTelegramAuthAction(ctx, action.ID, 100); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.ConsumeTelegramAuthAction(ctx, action.ID, 42, -123, 456, 100, time.Now()); err != nil {
+			t.Fatal(err)
+		}
 		a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
-		canceller := &cancelRecorder{}
-		h.Browser = canceller
 		if err := h.HandleUpdate(ctx, command("/acb_cancel")); err != nil {
 			t.Fatal(err)
 		}
@@ -294,8 +265,9 @@ func TestTelegramOperatorCommands(t *testing.T) {
 		if state.NextUpdateID != 0 {
 			t.Fatal("failed offset advanced")
 		}
-		if len(canceller.attempts) != 1 || canceller.attempts[0] != a.ID {
-			t.Fatal("wrong browser attempt cancelled")
+		var cancelled string
+		if err := s.DB().QueryRowContext(ctx, `SELECT status FROM auth_attempts WHERE id=?`, a.ID).Scan(&cancelled); err != nil || cancelled != "CANCELLED" {
+			t.Fatal("cancel was not durable before offset failure")
 		}
 		mustExec(t, s, `DROP TRIGGER crash_offset`)
 		restarted, err := storage.OpenRuntime(ctx, path)
@@ -311,8 +283,8 @@ func TestTelegramOperatorCommands(t *testing.T) {
 		if err != nil || state.NextUpdateID != 21 {
 			t.Fatal("replayed disposition did not advance offset")
 		}
-		if len(canceller.attempts) != 1 {
-			t.Fatal("consumed callback cancelled bank twice")
+		if err := restarted.DB().QueryRowContext(ctx, `SELECT status FROM auth_attempts WHERE id=?`, a.ID).Scan(&cancelled); err != nil || cancelled != "CANCELLED" {
+			t.Fatal("callback replay changed durable cancellation")
 		}
 		count := len(f.messages)
 		if err := h.Client.pollOnce(ctx, restarted, h); err != nil {
@@ -380,8 +352,6 @@ func TestTelegramOperatorCommands(t *testing.T) {
 		mustExec(t, s, `INSERT INTO sessions(connection_id,generation,envelope,key_id,verified_at,updated_at) VALUES(?,?,?,'k1',?,?)`, c.ID, c.Generation, []byte("encrypted-fixture"), now, now)
 		mustExec(t, s, `UPDATE recovery_runs SET status='FAILED',error_code='NETWORK_ERROR' WHERE id=?`, run.ID)
 		mustExec(t, s, `UPDATE auth_recovery_episodes SET state='MANUAL_REQUIRED',recovery_run_id=?,attempt_count=3,reason_code='CATCHUP_FAILED' WHERE id=?`, run.ID, e.ID)
-		scheduler := &scheduleRecorder{}
-		h.Scheduler = scheduler
 		if err := h.HandleUpdate(ctx, command("/acb_retry")); err != nil {
 			t.Fatal(err)
 		}
@@ -397,14 +367,16 @@ func TestTelegramOperatorCommands(t *testing.T) {
 		if err != nil || after.Status != storage.RecoveryRunStatusPending || after.NextDay != "2026-10-02" || after.RangeFrom != "2026-10-01" {
 			t.Fatal("catchup range/cursor lost")
 		}
-		if len(scheduler.keys) != 1 || scheduler.keys[0] != run.EventKey {
-			t.Fatal("wrong immutable run rescheduled")
+		var attempts int
+		if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_attempts`).Scan(&attempts); err != nil || attempts != 0 {
+			t.Fatal("catchup retry admitted bank login")
 		}
 		if err := h.HandleUpdate(ctx, callback(data, id)); err != nil {
 			t.Fatal(err)
 		}
-		if len(scheduler.keys) != 1 {
-			t.Fatal("replayed callback rescheduled twice")
+		after, err = s.GetRecoveryRun(ctx, run.ID)
+		if err != nil || after.Status != storage.RecoveryRunStatusPending {
+			t.Fatal("replay changed catchup disposition")
 		}
 	})
 }
@@ -499,5 +471,194 @@ func TestTelegramNoticeBackoffSurvivesRestart(t *testing.T) {
 	notices, err = restarted.PendingAuthRecoveryNotices(ctx)
 	if err != nil || len(notices) != 0 {
 		t.Fatal("successful notice remained pending")
+	}
+}
+
+func menuLogin(t *testing.T, f *botFixture) (string, int64) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var keyboard inlineKeyboard
+	if err := json.Unmarshal(f.messages[len(f.messages)-1]["reply_markup"], &keyboard); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range keyboard.Rows {
+		for _, button := range row {
+			if button.Text == "Đăng nhập" {
+				return button.Data, f.messageID
+			}
+		}
+	}
+	t.Fatal("login control unavailable")
+	return "", 0
+}
+
+func TestTelegramMenuOneClickConsentAndExpiredRefresh(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := h.HandleUpdate(ctx, command("/menu")); err != nil {
+		t.Fatal(err)
+	}
+	old, oldMessage := menuLogin(t, f)
+	mustExec(t, s, `UPDATE telegram_auth_actions SET expires_at=? WHERE id=?`, time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano), strings.TrimPrefix(old, "ar:"))
+	if err := h.HandleUpdate(ctx, callback(old, oldMessage)); err != nil {
+		t.Fatal(err)
+	}
+	fresh, messageID := menuLogin(t, f)
+	if fresh == old || !strings.HasPrefix(fresh, "ar:") {
+		t.Fatal("expired button was reused")
+	}
+	var consentCount int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_recovery_episodes WHERE consent_action_id IS NOT NULL`).Scan(&consentCount); err != nil || consentCount != 0 {
+		t.Fatal("expired click granted login consent")
+	}
+	if err := h.HandleUpdate(ctx, callback(fresh, messageID+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_recovery_episodes WHERE consent_action_id IS NOT NULL`).Scan(&consentCount); err != nil || consentCount != 0 {
+		t.Fatal("different message granted consent")
+	}
+	if err := h.HandleUpdate(ctx, callback(fresh, messageID)); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.LatestAuthRecoveryEpisode(ctx, c.ID)
+	if err != nil || e.ConsentActionID != strings.TrimPrefix(fresh, "ar:") {
+		t.Fatal("one authorized menu click did not grant consent")
+	}
+	_, err = s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.HandleUpdate(ctx, callback(fresh, messageID)); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_attempts`).Scan(&attempts); err != nil || attempts != 1 {
+		t.Fatal("replayed click admitted another attempt")
+	}
+}
+
+func TestTelegramNavigationDuringMutationFence(t *testing.T) {
+	ctx, s, h, _, _ := testTelegram(t)
+	if _, err := s.AcquireMutationGate(ctx, "fixture", time.Minute, "maintenance"); err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range []string{"nav:menu", "nav:status", "nav:help", "nav:credentials", "nav:logout"} {
+		if err := h.HandleUpdate(ctx, callback(data, 100)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actions int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM telegram_auth_actions`).Scan(&actions); err != nil || actions != 0 {
+		t.Fatal("maintenance navigation created a mutating action")
+	}
+}
+
+func TestTelegramProgressUsesOneMessageAndCoalescesStaleNotices(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.EnsureAuthRecoveryEpisode(ctx, c.ID, c.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='STARTING' WHERE id=?`, e.ID)
+	if err := h.DeliverNotices(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 0 {
+		t.Fatal("delivery replayed obsolete session-loss notice")
+	}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || progress.StatusMessageID != f.messageID {
+		t.Fatal("progress message not persisted")
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='VERIFYING' WHERE id=?`, e.ID)
+	h.lastProgress = time.Time{}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.edits) != 1 {
+		t.Fatal("changed progress was not edited")
+	}
+	var editedID int64
+	var editedText string
+	if err := json.Unmarshal(f.edits[0]["message_id"], &editedID); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(f.edits[0]["text"], &editedText); err != nil {
+		t.Fatal(err)
+	}
+	if editedID != progress.StatusMessageID || editedText != "Đang xác minh phiên" {
+		t.Fatal("edited progress did not represent current durable state")
+	}
+	if len(f.messages) != 1 {
+		t.Fatal("progress created a second message instead of editing")
+	}
+	if err := s.SetAuthRecoveryStatusMessage(ctx, e.ID, c.Generation+1, 999); !errors.Is(err, storage.ErrRecoverySuperseded) {
+		t.Fatal("stale progress fence was accepted")
+	}
+	progress, err = s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || progress.StatusMessageID == 999 {
+		t.Fatal("stale CAS replaced progress message")
+	}
+}
+
+func TestTelegramConfirmationNavigationRequiresExactPrivateOperator(t *testing.T) {
+	ctx, s, h, _, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	for _, mutate := range []func(*CallbackQuery){
+		func(q *CallbackQuery) { q.From.ID++ },
+		func(q *CallbackQuery) { q.Message.Chat.ID++ },
+		func(q *CallbackQuery) { q.Message.Chat.Type = "group" },
+		func(q *CallbackQuery) { q.InlineMessageID = "inline" },
+		func(q *CallbackQuery) { q.Message.EditDate = 1 },
+		func(q *CallbackQuery) { q.Message.ForwardOrigin = json.RawMessage(`{}`) },
+	} {
+		u := callback("nav:credentials", 100)
+		mutate(u.Callback)
+		if err := h.HandleUpdate(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actions int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM telegram_auth_actions`).Scan(&actions); err != nil || actions != 0 {
+		t.Fatal("untrusted callback created confirmation authority")
+	}
+	for _, data := range []string{"nav:credentials", "nav:logout"} {
+		if err := h.HandleUpdate(ctx, callback(data, 100)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var updateActions, logoutActions, consents, grants, jobs int
+	for _, q := range []struct {
+		query       string
+		destination *int
+	}{
+		{`SELECT count(*) FROM telegram_auth_actions WHERE action='UPDATE_CREDENTIALS' AND status='PENDING' AND message_id IS NOT NULL`, &updateActions},
+		{`SELECT count(*) FROM telegram_auth_actions WHERE action='LOGOUT' AND status='PENDING' AND message_id IS NOT NULL`, &logoutActions},
+		{`SELECT count(*) FROM auth_recovery_episodes WHERE consent_action_id IS NOT NULL`, &consents},
+		{`SELECT count(*) FROM acb_credential_grants`, &grants},
+		{`SELECT count(*) FROM acb_logout_jobs`, &jobs},
+	} {
+		if err := s.DB().QueryRowContext(ctx, q.query).Scan(q.destination); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if updateActions != 1 || logoutActions != 1 || consents != 0 || grants != 0 || jobs != 0 {
+		t.Fatal("navigation performed an operation instead of rendering confirmation")
 	}
 }

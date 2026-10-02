@@ -20,6 +20,10 @@ func SessionAAD(connectionID string, generation int64) []byte {
 	return []byte(fmt.Sprintf("acb-session:%s:%d", connectionID, generation))
 }
 
+func CredentialsAAD(connectionID string, revision int64) []byte {
+	return []byte(fmt.Sprintf("acb-credentials:%s:%d", connectionID, revision))
+}
+
 func LegacySessionAAD(connectionID string) []byte {
 	return []byte("acb-session:" + connectionID)
 }

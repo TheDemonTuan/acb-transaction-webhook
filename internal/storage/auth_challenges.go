@@ -13,13 +13,14 @@ type AuthChallenge struct {
 	AttemptID, BrowserRevision, Kind, Status string
 	ChatID, PromptMessageID                  int64
 	ExpiresAt, CreatedAt, ConsumedAt         string
+	PromptDeletedAt                          string
 }
 
-const challengeColumns = `id,episode_id,connection_id,generation,attempt_id,browser_revision,kind,status,chat_id,COALESCE(prompt_message_id,0),expires_at,created_at,COALESCE(consumed_at,'')`
+const challengeColumns = `id,episode_id,connection_id,generation,attempt_id,browser_revision,kind,status,chat_id,COALESCE(prompt_message_id,0),expires_at,created_at,COALESCE(consumed_at,''),COALESCE(prompt_deleted_at,'')`
 
 func scanChallenge(row recoveryScanner) (AuthChallenge, error) {
 	var c AuthChallenge
-	err := row.Scan(&c.ID, &c.EpisodeID, &c.ConnectionID, &c.Generation, &c.AttemptID, &c.BrowserRevision, &c.Kind, &c.Status, &c.ChatID, &c.PromptMessageID, &c.ExpiresAt, &c.CreatedAt, &c.ConsumedAt)
+	err := row.Scan(&c.ID, &c.EpisodeID, &c.ConnectionID, &c.Generation, &c.AttemptID, &c.BrowserRevision, &c.Kind, &c.Status, &c.ChatID, &c.PromptMessageID, &c.ExpiresAt, &c.CreatedAt, &c.ConsumedAt, &c.PromptDeletedAt)
 	return c, err
 }
 func challengeFenceTx(ctx context.Context, tx *sql.Tx, c AuthChallenge, at time.Time) error {
@@ -56,6 +57,20 @@ func challengeFenceTx(ctx context.Context, tx *sql.Tx, c AuthChallenge, at time.
 	if paused {
 		return ErrChallengeMismatch
 	}
+	e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, c.EpisodeID))
+	if err != nil {
+		return err
+	}
+	if err := checkRecoveryConsentTx(ctx, tx, e, false); err != nil {
+		return err
+	}
+	var chatID int64
+	if err := tx.QueryRowContext(ctx, `SELECT chat_id FROM telegram_auth_actions WHERE id=?`, e.ConsentActionID).Scan(&chatID); err != nil {
+		return err
+	}
+	if chatID != c.ChatID {
+		return ErrChallengeMismatch
+	}
 	return nil
 }
 func (s *Store) CreateAuthChallenge(ctx context.Context, c AuthChallenge) (AuthChallenge, error) {
@@ -76,6 +91,9 @@ func (s *Store) CreateAuthChallenge(ctx context.Context, c AuthChallenge) (AuthC
 	c.CreatedAt = at.Format(time.RFC3339Nano)
 	c.PromptMessageID = 0
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := challengeFenceTx(ctx, tx, c, at); err != nil {
 			return err
 		}
@@ -89,6 +107,9 @@ func (s *Store) DeliverAuthChallenge(ctx context.Context, challengeID string, ch
 		return ErrChallengeMismatch
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		c, err := scanChallenge(tx.QueryRowContext(ctx, `SELECT `+challengeColumns+` FROM auth_challenges WHERE id=?`, challengeID))
 		if err != nil {
 			return err
@@ -114,9 +135,75 @@ func (s *Store) AuthChallengeForPrompt(ctx context.Context, chatID, messageID in
 func (s *Store) ActiveAuthChallenge(ctx context.Context, attemptID string) (AuthChallenge, error) {
 	return scanChallenge(s.db.QueryRowContext(ctx, `SELECT `+challengeColumns+` FROM auth_challenges WHERE attempt_id=? AND status IN ('DELIVERING','PENDING','CONSUMING')`, attemptID))
 }
+
+// AuthChallengesForDelivery also returns terminal prompts so the sole delivery
+// loop can remove messages invalidated by cancellation or generation changes.
+func (s *Store) AuthChallengesForDelivery(ctx context.Context) ([]AuthChallenge, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+challengeColumns+` FROM auth_challenges WHERE status IN ('DELIVERING','PENDING') OR (prompt_message_id IS NOT NULL AND prompt_deleted_at IS NULL AND status NOT IN ('DELIVERING','PENDING','CONSUMING')) ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var challenges []AuthChallenge
+	for rows.Next() {
+		c, err := scanChallenge(rows)
+		if err != nil {
+			return nil, err
+		}
+		challenges = append(challenges, c)
+	}
+	return challenges, rows.Err()
+}
+
+// MarkAuthChallengePromptDeleted retains the prompt ID for replay correlation.
+// Cleanup acknowledgement is safe even while the bank result is CONSUMING.
+func (s *Store) MarkAuthChallengePromptDeleted(ctx context.Context, c AuthChallenge) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE auth_challenges SET prompt_deleted_at=COALESCE(prompt_deleted_at,?) WHERE id=? AND chat_id=? AND prompt_message_id=? AND status NOT IN ('DELIVERING','PENDING')`, now(), c.ID, c.ChatID, c.PromptMessageID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrChallengeMismatch
+	}
+	return nil
+}
+
+// ValidateAuthChallenge checks the durable attempt/consent fence immediately
+// before external delivery. DeliverAuthChallenge repeats it before binding.
+func (s *Store) ValidateAuthChallenge(ctx context.Context, c AuthChallenge, at time.Time) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
+		expiry, err := time.Parse(time.RFC3339Nano, c.ExpiresAt)
+		if err != nil || !at.Before(expiry) {
+			return ErrChallengeExpired
+		}
+		return challengeFenceTx(ctx, tx, c, at)
+	})
+}
+
+// RecoverAuthChallengeDelivery is startup-only: a send without a committed
+// message binding has an unknowable outcome and must never be replayed.
+func (s *Store) RecoverAuthChallengeDelivery(ctx context.Context) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE auth_challenges SET status='INVALIDATED' WHERE status='DELIVERING' AND COALESCE(prompt_message_id,0)=0`)
+		return err
+	})
+}
 func (s *Store) ConsumeAuthChallenge(ctx context.Context, challengeID string, generation int64, revision string, chatID, messageID int64, at time.Time) (AuthChallenge, error) {
 	var c AuthChallenge
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		var err error
 		c, err = scanChallenge(tx.QueryRowContext(ctx, `SELECT `+challengeColumns+` FROM auth_challenges WHERE id=?`, challengeID))
 		if err != nil {

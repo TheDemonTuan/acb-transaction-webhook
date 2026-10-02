@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/captchasolver"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/challenge"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telegramauth"
 )
@@ -26,6 +26,7 @@ type RecoveryBrowser interface {
 	SubmitOTP(context.Context, string, authbrowser.ChallengeInput) (authbrowser.AuthObservation, error)
 	Cancel(context.Context, string) error
 	Complete(context.Context, string) error
+	RevokeSession(context.Context, string, string, string) (authbrowser.RevocationResult, error)
 }
 type Finalizer interface {
 	Complete(context.Context, storage.AuthAttempt) (storage.Connection, error)
@@ -33,26 +34,31 @@ type Finalizer interface {
 type TelegramReadiness interface {
 	Readiness() telegramauth.TransportState
 }
-type NoticeDelivery interface{ DeliverNotices(context.Context) error }
+type NoticeDelivery interface{ Wake() }
 type CoordinatorOptions struct {
-	Config      Config
-	Store       *storage.Store
-	Browser     RecoveryBrowser
-	Broker      *challenge.Broker
-	Finalizer   Finalizer
-	Telegram    TelegramReadiness
-	Notices     NoticeDelivery
-	WorkerReady func(context.Context) error
-	Solver      captchasolver.Solver
-	Credentials func() (Credentials, error)
-	Now         func() time.Time
-	// Jitter returns an additional fraction in [0,0.2].
-	Jitter func() float64
+	Config            Config
+	Store             *storage.Store
+	Browser           RecoveryBrowser
+	Broker            *challenge.Broker
+	Finalizer         Finalizer
+	Telegram          TelegramReadiness
+	Notices           NoticeDelivery
+	WorkerReady       func(context.Context) error
+	Keyring           *security.Keyring
+	InvalidateSession func(context.Context, string, int64) error
+	Solver            captchasolver.Solver
+	Credentials       func(context.Context, string) (storage.ACBCredentials, error)
+	Now               func() time.Time
 }
 type observationWindow struct {
 	first time.Time
 	count int
 	next  time.Time
+}
+type attemptSubmissions struct {
+	lastLogin    string
+	captchaRetry string
+	revisions    map[string]bool
 }
 type Coordinator struct {
 	CoordinatorOptions
@@ -62,21 +68,20 @@ type Coordinator struct {
 	windows        map[string]observationWindow
 	verifyAfter    map[string]time.Time
 	liveChallenges map[string]time.Time
+	submissions    map[string]*attemptSubmissions
 	degradedMu     sync.RWMutex
 	aiDegraded     string
+	wake           chan struct{}
 }
 
 func NewCoordinator(o CoordinatorOptions) (*Coordinator, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	if o.Jitter == nil {
-		o.Jitter = func() float64 { return rand.Float64() * 0.2 }
+	if o.Credentials == nil && o.Store != nil {
+		o.Credentials = o.Store.ReadACBCredentials
 	}
-	if o.Credentials == nil {
-		o.Credentials = o.Config.ReadCredentials
-	}
-	c := &Coordinator{CoordinatorOptions: o, windows: make(map[string]observationWindow), verifyAfter: make(map[string]time.Time), liveChallenges: make(map[string]time.Time)}
+	c := &Coordinator{CoordinatorOptions: o, windows: make(map[string]observationWindow), verifyAfter: make(map[string]time.Time), liveChallenges: make(map[string]time.Time), submissions: make(map[string]*attemptSubmissions), wake: make(chan struct{}, 1)}
 	if !o.Config.Enabled {
 		return c, nil
 	}
@@ -90,6 +95,12 @@ func (c *Coordinator) AIDegraded() string {
 	c.degradedMu.RLock()
 	defer c.degradedMu.RUnlock()
 	return c.aiDegraded
+}
+func (c *Coordinator) Wake() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
 }
 func (c *Coordinator) Run(ctx context.Context) error {
 	if !c.Config.Enabled {
@@ -119,6 +130,8 @@ func (c *Coordinator) Run(ctx context.Context) error {
 			timer.Stop()
 			return nil
 		case <-timer.C:
+		case <-c.wake:
+			timer.Stop()
 		}
 	}
 }
@@ -136,9 +149,7 @@ func (c *Coordinator) ReconcileOnce(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if c.Notices != nil && ctx.Err() == nil {
-		if err := c.Notices.DeliverNotices(ctx); err != nil {
-			return errors.New("RECOVERY_NOTICE_UNAVAILABLE")
-		}
+		c.Notices.Wake()
 	}
 	if reconcileErr != nil {
 		return errors.New("RECOVERY_RECONCILE_UNAVAILABLE")
@@ -164,20 +175,7 @@ func (c *Coordinator) current(ctx context.Context, e storage.AuthRecoveryEpisode
 		return storage.ErrRecoverySuperseded
 	}
 	if active {
-		_, err = c.Store.AuthAttemptForOwner(ctx, e.AttemptID, AutomaticOwner)
-		if err != nil {
-			return err
-		}
-		var paused bool
-		if err := c.Store.DB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM telegram_auth_state WHERE paused=1)`).Scan(&paused); err != nil {
-			return err
-		}
-		if paused {
-			return storage.ErrRecoveryPaused
-		}
-		if err := c.Store.CheckMutationAllowed(ctx); err != nil {
-			return err
-		}
+		return c.Store.CheckRecoveryAuthAttempt(ctx, e.ID, e.Generation)
 	}
 	return nil
 }
@@ -205,6 +203,9 @@ func (c *Coordinator) ready(ctx context.Context) (bool, error) {
 	return ctx.Err() == nil, nil
 }
 func (c *Coordinator) reconcile(ctx context.Context) error {
+	if pending, err := c.reconcileLogout(ctx); pending || err != nil {
+		return err
+	}
 	conn, err := c.Store.Connection(ctx)
 	if err != nil {
 		return err
@@ -229,19 +230,13 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 			}
 			delete(c.windows, e.AttemptID)
 			delete(c.verifyAfter, e.AttemptID)
+			delete(c.submissions, e.AttemptID)
 			clear(c.liveChallenges)
 			e = storage.AuthRecoveryEpisode{}
 		}
 	}
 	if e.ID == "" {
 		if conn.State != "AUTH_REQUIRED" {
-			return nil
-		}
-		known, err := c.Store.HasPriorOperationalEvidence(ctx, conn.ID)
-		if err != nil {
-			return err
-		}
-		if !known {
 			return nil
 		}
 		e, err = c.Store.EnsureAuthRecoveryEpisode(ctx, conn.ID, conn.Generation)
@@ -253,6 +248,9 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 		// CANCELLED at the current generation must not create another episode.
 		if e.State == "COMPLETED" && e.AttemptID != "" && ctx.Err() == nil {
 			_ = c.Browser.Complete(ctx, e.AttemptID)
+		}
+		if e.State != "COMPLETED" && e.AttemptID != "" && ctx.Err() == nil {
+			_ = c.Browser.Cancel(ctx, e.AttemptID)
 		}
 		delete(c.windows, e.AttemptID)
 		delete(c.verifyAfter, e.AttemptID)
@@ -270,14 +268,14 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 	}
 	if e.State == "DETECTED" || e.State == "RETRY_WAIT" || e.State == "MAINTENANCE_WAIT" {
 		delete(c.windows, e.AttemptID)
-		if e.ReasonCode != "OPERATOR_CONFIRMED" {
-			known, err := c.Store.HasPriorOperationalEvidence(ctx, e.ConnectionID)
-			if err != nil {
-				return err
-			}
-			if !known {
-				return nil
-			}
+		// A reason code or operational history is not permission to log in.
+		// Admission consumes the button's short-lived consent atomically.
+		if e.ConsentActionID == "" || e.ConsentConsumedAt != "" {
+			return nil
+		}
+		expires, err := time.Parse(time.RFC3339Nano, e.ConsentExpiresAt)
+		if err != nil || !c.Now().Before(expires) {
+			return nil
 		}
 		ok, err := c.ready(ctx)
 		if err != nil {
@@ -294,7 +292,7 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 			return nil
 		}
 		a, err := c.Store.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, BrowserAttemptTTL)
-		if errors.Is(err, storage.ErrRecoveryNotReady) || errors.Is(err, storage.ErrRecoveryCooldown) || errors.Is(err, storage.ErrAuthAttemptActive) || errors.Is(err, storage.ErrRecoveryPaused) {
+		if errors.Is(err, storage.ErrRecoveryConsentRequired) || errors.Is(err, storage.ErrRecoveryNotReady) || errors.Is(err, storage.ErrRecoveryCooldown) || errors.Is(err, storage.ErrAuthAttemptActive) || errors.Is(err, storage.ErrRecoveryPaused) {
 			return nil
 		}
 		if err != nil {
@@ -345,11 +343,11 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 		return err
 	}
 	if !c.Now().Before(expiry) {
-		state, reason := "RETRY_WAIT", "BROWSER_EXPIRED"
+		reason := "BROWSER_EXPIRED"
 		if e.State == "WAITING_OTP" || e.State == "WAITING_CAPTCHA" || e.State == "VERIFYING" {
-			state, reason = "WAIT_OPERATOR", "CHALLENGE_EXPIRED"
+			reason = "CHALLENGE_EXPIRED"
 		}
-		return c.finish(ctx, e, state, reason, c.retryTime(e))
+		return c.finish(ctx, e, "WAIT_OPERATOR", reason, c.retryEligibleAt(e))
 	}
 	if err := c.current(ctx, e, true); err != nil {
 		return err
@@ -406,22 +404,17 @@ func (c *Coordinator) transition(ctx context.Context, e *storage.AuthRecoveryEpi
 	e.ReasonCode = reason
 	return nil
 }
-func (c *Coordinator) retryTime(e storage.AuthRecoveryEpisode) time.Time {
+
+// retryEligibleAt is a deadline for a new operator button, not an automatic retry.
+func (c *Coordinator) retryEligibleAt(e storage.AuthRecoveryEpisode) time.Time {
 	delay := 30 * time.Second
 	if e.AttemptCount-e.BudgetStartCount >= 2 {
 		delay = 120 * time.Second
 	}
-	jitter := c.Jitter()
-	if jitter < 0 {
-		jitter = 0
-	}
-	if jitter > 0.2 {
-		jitter = 0.2
-	}
-	return c.Now().Add(delay + time.Duration(float64(delay)*jitter))
+	return c.Now().Add(delay)
 }
 func (c *Coordinator) retry(ctx context.Context, e storage.AuthRecoveryEpisode, reason string) error {
-	return c.finish(ctx, e, "RETRY_WAIT", reason, c.retryTime(e))
+	return c.finish(ctx, e, "WAIT_OPERATOR", reason, c.retryEligibleAt(e))
 }
 func (c *Coordinator) finish(ctx context.Context, e storage.AuthRecoveryEpisode, state, reason string, next time.Time) error {
 	if ctx.Err() != nil {
@@ -432,6 +425,7 @@ func (c *Coordinator) finish(ctx context.Context, e storage.AuthRecoveryEpisode,
 	}
 	delete(c.windows, e.AttemptID)
 	delete(c.verifyAfter, e.AttemptID)
+	delete(c.submissions, e.AttemptID)
 	clear(c.liveChallenges)
 	if ctx.Err() == nil {
 		_ = c.Browser.Cancel(ctx, e.AttemptID)
@@ -479,12 +473,12 @@ func (c *Coordinator) recoverChallenge(ctx context.Context, e storage.AuthRecove
 		return true, c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_EXPIRED", time.Time{})
 	}
 	matches := ch.Generation == e.Generation && ch.BrowserRevision == o.Revision && ((ch.Kind == "OTP" && o.State == authbrowser.OTPRequired) || (ch.Kind == "CAPTCHA_TEXT" && (o.State == authbrowser.CaptchaRequired || o.State == authbrowser.LoginForm && o.CaptchaRequired)))
-	if ch.Status == "PENDING" && matches {
+	if (ch.Status == "PENDING" || ch.Status == "DELIVERING") && matches {
+		// Startup delivery recovery is explicit in Broker.RecoverDelivery. A live
+		// delivery loop can be sending this durable prompt outside our lock.
 		c.liveChallenges[ch.ID] = time.Time{}
 		return true, nil
 	}
-	// DELIVERING is always uncertain after a restart. Only a persisted PENDING
-	// prompt is accepted; invalidate before publishing its replacement.
 	if err := c.Store.FinishAuthChallenge(ctx, ch.ID, "INVALIDATED"); err != nil {
 		return true, err
 	}
@@ -515,25 +509,17 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		_, err = c.Finalizer.Complete(ctx, a)
 		return c.finalizerError(ctx, e, err)
 	case authbrowser.LoginForm:
-		if o.CaptchaRequired {
-			return c.captcha(ctx, e, o)
-		}
-		if e.LastLoginAt != "" {
-			last, err := time.Parse(time.RFC3339Nano, e.LastLoginAt)
-			if err != nil {
-				return err
-			}
-			attempt, err := c.Store.AuthAttemptForOwner(ctx, e.AttemptID, AutomaticOwner)
-			if err != nil {
-				return err
-			}
-			created, err := time.Parse(time.RFC3339Nano, attempt.CreatedAt)
-			if err != nil {
-				return err
-			}
-			if !last.Before(created) {
+		if o.ReasonCode == "CAPTCHA_REJECTED" || o.ReasonCode == "INVALID_CAPTCHA" {
+			if !o.CaptchaRequired || !c.authorizeCaptchaRetry(e, o.Revision) {
 				return c.finish(ctx, e, "WAIT_OPERATOR", "LOGIN_OUTCOME_UNKNOWN", time.Time{})
 			}
+		}
+		allowed, err := c.allowLogin(ctx, e, o.Revision)
+		if err != nil || !allowed {
+			return err
+		}
+		if o.CaptchaRequired {
+			return c.captcha(ctx, e, o)
 		}
 		if err := c.transition(ctx, &e, "LOGIN", ""); err != nil {
 			return err
@@ -551,15 +537,23 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		if err := c.current(ctx, e, true); err != nil {
 			return err
 		}
-		prompt, err := c.Broker.Prompt(ctx, e, o, "OTP", nil)
+		prompt, err := c.Broker.Prompt(ctx, e, o, "OTP")
 		if err == nil {
 			c.liveChallenges[prompt.ID] = time.Time{}
+			if c.Notices != nil {
+				c.Notices.Wake()
+			}
 		}
 		return err
 	case authbrowser.LoginRejected:
 		switch o.ReasonCode {
 		case "CAPTCHA_REJECTED", "INVALID_CAPTCHA":
-			return c.unknown(ctx, e)
+			if !c.authorizeCaptchaRetry(e, o.Revision) {
+				return c.finish(ctx, e, "WAIT_OPERATOR", "LOGIN_OUTCOME_UNKNOWN", time.Time{})
+			}
+			// SubmitLogin requires the adapter's safe LoginForm observation. Only
+			// that exact rejected revision may later resubmit credentials.
+			return nil
 		case "OTP_REJECTED", "OTP_EXPIRED", "INVALID_OTP":
 			return c.finish(ctx, e, "WAIT_OPERATOR", "OTP_REJECTED", time.Time{})
 		case "ACCOUNT_LOCKED":
@@ -570,7 +564,7 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 			return c.unknown(ctx, e)
 		}
 	case authbrowser.Maintenance:
-		return c.finish(ctx, e, "MAINTENANCE_WAIT", "BANK_MAINTENANCE", c.Now().Add(15*time.Minute))
+		return c.finish(ctx, e, "WAIT_OPERATOR", "BANK_MAINTENANCE", c.Now().Add(15*time.Minute))
 	case authbrowser.UnsupportedChallenge:
 		return c.finish(ctx, e, "MANUAL_REQUIRED", "UNSUPPORTED_CHALLENGE", time.Time{})
 	default:
@@ -592,7 +586,80 @@ func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode
 	}
 	return nil
 }
+
+// A durable login reservation is also an unknown-outcome marker after a crash.
+// It must never authorize replaying username/password into a returned form.
+func (c *Coordinator) loginRecorded(ctx context.Context, e storage.AuthRecoveryEpisode) (bool, error) {
+	if e.LastLoginAt == "" {
+		return false, nil
+	}
+	last, err := time.Parse(time.RFC3339Nano, e.LastLoginAt)
+	if err != nil {
+		return false, err
+	}
+	attempt, err := c.Store.AuthAttemptForOwner(ctx, e.AttemptID, AutomaticOwner)
+	if err != nil {
+		return false, err
+	}
+	created, err := time.Parse(time.RFC3339Nano, attempt.CreatedAt)
+	if err != nil {
+		return false, err
+	}
+	return !last.Before(created), nil
+}
+func (c *Coordinator) authorizeCaptchaRetry(e storage.AuthRecoveryEpisode, revision string) bool {
+	s := c.submissions[e.AttemptID]
+	if revision == "" || s == nil || s.lastLogin == "" || s.lastLogin == revision || s.revisions[revision] {
+		return false
+	}
+	s.captchaRetry = revision
+	return true
+}
+func (c *Coordinator) allowLogin(ctx context.Context, e storage.AuthRecoveryEpisode, revision string) (bool, error) {
+	submitted, err := c.loginRecorded(ctx, e)
+	if err != nil {
+		return false, err
+	}
+	if !submitted {
+		return true, nil
+	}
+	s := c.submissions[e.AttemptID]
+	if s != nil && s.captchaRetry == revision && !s.revisions[revision] {
+		return true, nil
+	}
+	// A returned form, a repeated revision, or a process restart is not
+	// evidence that replaying the password is safe.
+	return false, c.finish(ctx, e, "WAIT_OPERATOR", "LOGIN_OUTCOME_UNKNOWN", time.Time{})
+}
+func (c *Coordinator) rememberSubmission(attemptID, revision string, login bool) {
+	s := c.submissions[attemptID]
+	if s == nil {
+		s = &attemptSubmissions{revisions: make(map[string]bool)}
+		c.submissions[attemptID] = s
+	}
+	s.revisions[revision] = true
+	if login {
+		s.lastLogin = revision
+		s.captchaRetry = ""
+	}
+}
 func (c *Coordinator) captcha(ctx context.Context, e storage.AuthRecoveryEpisode, o authbrowser.AuthObservation) error {
+	if o.State == authbrowser.LoginForm {
+		allowed, err := c.allowLogin(ctx, e, o.Revision)
+		if err != nil || !allowed {
+			return err
+		}
+	}
+	if s := c.submissions[e.AttemptID]; s != nil && s.revisions[o.Revision] {
+		return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_OUTCOME_UNKNOWN", time.Time{})
+	}
+	var consumed bool
+	if err := c.Store.DB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_challenges WHERE attempt_id=? AND browser_revision=? AND kind='CAPTCHA_TEXT' AND status IN ('CONSUMING','CONSUMED'))`, e.AttemptID, o.Revision).Scan(&consumed); err != nil {
+		return err
+	}
+	if consumed {
+		return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_OUTCOME_UNKNOWN", time.Time{})
+	}
 	if e.CaptchaSubmissions >= MaxCaptchaSubmissions {
 		return c.finish(ctx, e, "WAIT_OPERATOR", "CAPTCHA_BUDGET_EXHAUSTED", time.Time{})
 	}
@@ -613,55 +680,62 @@ func (c *Coordinator) captcha(ctx context.Context, e storage.AuthRecoveryEpisode
 	if err := c.current(ctx, e, true); err != nil {
 		return err
 	}
-	image, err := c.Browser.CaptureCaptcha(ctx, e.AttemptID, o.Revision)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	if c.Config.AICaptchaEnabled {
+		claimErr := c.Store.ClaimRecoveryAI(ctx, e.ID, e.Generation, o.Revision)
+		if claimErr != nil && !errors.Is(claimErr, storage.ErrRecoveryAIClaimed) && !errors.Is(claimErr, storage.ErrRecoveryBudgetExhausted) {
+			return claimErr
 		}
-		return c.finish(ctx, e, "MANUAL_REQUIRED", "CAPTCHA_CAPTURE_UNAVAILABLE", time.Time{})
-	}
-	defer clear(image)
-	if c.Config.AICaptchaEnabled && e.AIUsed == 0 && e.CaptchaSubmissions == 0 {
-		if err := c.Store.ClaimRecoveryAI(ctx, e.ID, e.Generation); err != nil {
-			return err
+		if errors.Is(claimErr, storage.ErrRecoveryAIClaimed) && e.CaptchaSubmissions > 0 {
+			// A claimed revision with a durable submission reservation may be a
+			// crash boundary. Never turn it into another automatic submission.
+			return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_OUTCOME_UNKNOWN", time.Time{})
 		}
-		if c.Notices != nil {
-			if err := c.Notices.DeliverNotices(ctx); err != nil {
-				return errors.New("RECOVERY_NOTICE_UNAVAILABLE")
-			}
-		}
-		if err := c.current(ctx, e, true); err != nil {
-			return err
-		}
-		value, err := c.Solver.Solve(ctx, image)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err == nil && challenge.ValidResponse("CAPTCHA_TEXT", value) {
-			if o.State == authbrowser.LoginForm {
-				return c.submitLogin(ctx, e, o, value, true, "")
+		if claimErr == nil {
+			if c.Notices != nil {
+				c.Notices.Wake()
 			}
 			if err := c.current(ctx, e, true); err != nil {
 				return err
 			}
-			if err := c.Store.ReserveRecoverySubmission(ctx, e.ID, e.Generation, "CAPTCHA_TEXT", false); err != nil {
-				return err
-			}
-			next, err := c.Browser.SubmitCaptcha(ctx, e.AttemptID, authbrowser.ChallengeInput{Revision: o.Revision, Value: value})
-			value = ""
+			image, err := c.Browser.CaptureCaptcha(ctx, e.AttemptID, o.Revision)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_OUTCOME_UNKNOWN", time.Time{})
+				return c.finish(ctx, e, "MANUAL_REQUIRED", "CAPTCHA_CAPTURE_UNAVAILABLE", time.Time{})
 			}
-			e, err = c.Store.AuthRecoveryEpisode(ctx, e.ID)
-			if err != nil {
-				return err
+			value, err := c.Solver.Solve(ctx, image)
+			clear(image)
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			return c.advance(ctx, e, next)
+			if err == nil && challenge.ValidResponse("CAPTCHA_TEXT", value) {
+				if o.State == authbrowser.LoginForm {
+					return c.submitLogin(ctx, e, o, value, true, "")
+				}
+				if err := c.current(ctx, e, true); err != nil {
+					return err
+				}
+				if err := c.Store.ReserveRecoverySubmission(ctx, e.ID, e.Generation, "CAPTCHA_TEXT", false); err != nil {
+					return err
+				}
+				c.rememberSubmission(e.AttemptID, o.Revision, false)
+				next, err := c.Browser.SubmitCaptcha(ctx, e.AttemptID, authbrowser.ChallengeInput{Revision: o.Revision, Value: value})
+				value = ""
+				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_OUTCOME_UNKNOWN", time.Time{})
+				}
+				e, err = c.Store.AuthRecoveryEpisode(ctx, e.ID)
+				if err != nil {
+					return err
+				}
+				return c.advance(ctx, e, next)
+			}
+			value = ""
 		}
-		value = ""
 		c.degradedMu.Lock()
 		c.aiDegraded = "AI_CAPTCHA_UNAVAILABLE"
 		c.degradedMu.Unlock()
@@ -669,9 +743,12 @@ func (c *Coordinator) captcha(ctx context.Context, e storage.AuthRecoveryEpisode
 	if err := c.current(ctx, e, true); err != nil {
 		return err
 	}
-	prompt, err := c.Broker.Prompt(ctx, e, o, "CAPTCHA_TEXT", image)
+	prompt, err := c.Broker.Prompt(ctx, e, o, "CAPTCHA_TEXT")
 	if err == nil {
 		c.liveChallenges[prompt.ID] = time.Time{}
+		if c.Notices != nil {
+			c.Notices.Wake()
+		}
 	}
 	return err
 }
@@ -686,9 +763,9 @@ func (c *Coordinator) submitLogin(ctx context.Context, e storage.AuthRecoveryEpi
 	if err := c.current(ctx, e, true); err != nil {
 		return err
 	}
-	credentials, err := c.Credentials()
-	if err != nil {
-		return c.finish(ctx, e, "MANUAL_REQUIRED", "CREDENTIALS_UNAVAILABLE", time.Time{})
+	allowed, err := c.allowLogin(ctx, e, o.Revision)
+	if err != nil || !allowed {
+		return err
 	}
 	if ai {
 		err = c.Store.ReserveRecoverySubmission(ctx, e.ID, e.Generation, "CAPTCHA_TEXT", true)
@@ -701,8 +778,28 @@ func (c *Coordinator) submitLogin(ctx context.Context, e storage.AuthRecoveryEpi
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	credentials, err := c.Credentials(ctx, e.ConnectionID)
+	if err != nil {
+		reason := "CREDENTIALS_UNAVAILABLE"
+		if errors.Is(err, storage.ErrCredentialsNotConfigured) {
+			reason = "CREDENTIALS_NOT_CONFIGURED"
+		}
+		if errors.Is(err, storage.ErrCredentialsDecryptFailed) {
+			reason = "CREDENTIALS_DECRYPT_FAILED"
+		}
+		return c.finish(ctx, e, "MANUAL_REQUIRED", reason, time.Time{})
+	}
+	if credentials.Revision != e.CredentialRevision {
+		credentials = storage.ACBCredentials{}
+		return c.finish(ctx, e, "WAIT_OPERATOR", "CREDENTIALS_REVISION_CONFLICT", time.Time{})
+	}
+	if err := c.current(ctx, e, true); err != nil {
+		credentials = storage.ACBCredentials{}
+		return err
+	}
+	c.rememberSubmission(e.AttemptID, o.Revision, true)
 	next, err := c.Browser.SubmitLogin(ctx, e.AttemptID, authbrowser.LoginInput{Revision: o.Revision, Username: credentials.Username, Password: credentials.Password, AccountNumber: credentials.AccountNumber, Captcha: value})
-	credentials = Credentials{}
+	credentials = storage.ACBCredentials{}
 	value = ""
 	if err != nil {
 		if ctx.Err() != nil {
@@ -771,6 +868,10 @@ func (c *Coordinator) SubmitChallenge(ctx context.Context, ch storage.AuthChalle
 	if ctx.Err() != nil {
 		return authbrowser.AuthObservation{}, ctx.Err()
 	}
+	if s := c.submissions[e.AttemptID]; s != nil && s.revisions[ch.BrowserRevision] {
+		return authbrowser.AuthObservation{}, storage.ErrChallengeConsumed
+	}
+	c.rememberSubmission(e.AttemptID, ch.BrowserRevision, false)
 	if ch.Kind == "OTP" {
 		observation, err = c.Browser.SubmitOTP(ctx, ch.AttemptID, authbrowser.ChallengeInput{Revision: ch.BrowserRevision, Value: value})
 	} else {
@@ -818,6 +919,7 @@ func (c *Coordinator) finalizerError(ctx context.Context, e storage.AuthRecovery
 func (c *Coordinator) catchup(ctx context.Context, e storage.AuthRecoveryEpisode) error {
 	delete(c.windows, e.AttemptID)
 	delete(c.verifyAfter, e.AttemptID)
+	delete(c.submissions, e.AttemptID)
 	clear(c.liveChallenges)
 	if err := c.current(ctx, e, false); err != nil {
 		return err

@@ -284,7 +284,7 @@ http:
   middlewares:
     tunnel-only:
       ipAllowList:
-        sourceRange: ["192.0.2.1/32"]
+        sourceRange: ["192.0.2.1/32", "127.0.0.1/32"]
     deny-internal:
       ipAllowList:
         sourceRange: ["192.0.2.1/32"]
@@ -441,7 +441,7 @@ done
 cat > "$root/state/current-release.json" <<EOF
 {"schema_version":2,"status":"COMPLETED","git_sha":"$base_sha","release_dir":"$legacy","active_slots":{"gateway":"blue","frontend":"blue"},"images":{"gateway":{"blue":"$GATEWAY_IMAGE_REF","green":"$GATEWAY_IMAGE_REF"},"frontend":"$FRONTEND_IMAGE_REF","worker":"$WORKER_IMAGE_REF","auth_browser":"$BROWSER_IMAGE_REF","tts":"$TTS_IMAGE_REF","bark":"$BARK_IMAGE_REF","dbtool":"$DBTOOL_IMAGE_REF"}}
 EOF
-for path in /api/private /internal /admin /readyz; do
+for path in /api/private /internal /admin /admin/acb-credentials /api/v1/connection/credentials /readyz; do
   code="$(docker run --rm --network edge-acb curlimages/curl:8.12.1 -s -o /dev/null -w '%{http_code}' \
     -H 'Host: transactions.tuannguyenviet.site' "http://edge-traefik:8080$path")"
   [[ "$code" == 403 ]] || fail "Public private path $path unexpectedly returned $code"
@@ -574,6 +574,19 @@ PY
     [[ "$(docker inspect --format '{{.State.Running}}' "$name")" == false ]] || fail "Retired container $name still running"
   done
   [[ "$(curl -fsS https://transactions.tuannguyenviet.site/__release)" == "$release_sha" ]] || fail 'Public HTTPS frontend SHA mismatch'
+  log_test_start "Credential page security policy survives production routing and SPA fallback"
+  docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -fsS -D- -o /dev/null \
+    -H 'Host: bank.tuannguyenviet.site' http://127.0.0.1:8080/admin/acb-credentials | python3 -c '
+import sys
+lines=sys.stdin.read().splitlines(); assert any(" 200 " in line for line in lines),lines
+headers={k.lower():v.strip() for line in lines if ":" in line for k,v in [line.split(":",1)]}
+assert headers["cache-control"]=="no-store",headers
+assert headers["referrer-policy"]=="no-referrer",headers
+assert headers["x-frame-options"]=="DENY",headers
+csp=headers["content-security-policy"]
+assert "frame-ancestors '\''none'\''" in csp and "script-src '\''self'\'';" in csp,csp
+assert "cloudflareinsights" not in csp and "script-src-elem" not in csp,csp'
+  log_test_pass "Actual credential route returns restrictive headers without public ingress exposure"
   [[ "$(docker run --rm --network edge-acb curlimages/curl:8.12.1 -s -o /dev/null -w '%{http_code}' \
     -H 'Host: gateway-deploy.acb.internal.invalid' http://edge-traefik:8080/readyz)" == 404 ]] || fail 'Internal deploy router exposed via public web'
   [[ "$(docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -s -o /dev/null -w '%{http_code}' \
@@ -629,6 +642,41 @@ PY
   [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Opting into recovery restarted worker'
   docker inspect acb-recovery-controller | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert set(c["NetworkSettings"]["Networks"])=={"acb-core","acb-egress"}; assert not c["HostConfig"]["PortBindings"]; assert c["HostConfig"]["ReadonlyRootfs"]; assert not any(m["Destination"].endswith("ninerouter_api_key") for m in c["Mounts"])'
   log_test_pass "Human-mode controller healthy with shared worker image and no AI key"
+
+  log_test_start "Legacy importer is no-overwrite and runtime survives absent legacy files"
+  credential_before="$(docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data:ro python:3.13-alpine python -c '
+import hashlib,sqlite3
+db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
+rows=db.execute("SELECT revision,envelope FROM acb_credentials").fetchall(); assert len(rows)==1
+revision,envelope=rows[0]; assert revision==1
+assert b"fixture-password" not in envelope and b"fixture-operator" not in envelope
+assert db.execute("SELECT count(*) FROM auth_attempts").fetchone()[0]==0
+print(str(revision)+":"+hashlib.sha256(envelope).hexdigest())')"
+  docker inspect acb-recovery-controller | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert not any("/run/import" in m["Destination"] or m["Destination"].endswith(("acb_username","acb_password","acb_account")) for m in c["Mounts"])'
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
+  mkdir "$root/legacy-import-fixture"
+  for name in acb_username acb_password acb_account; do mv "$root/deploy/secrets/$name" "$root/legacy-import-fixture/$name"; done
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
+  EXPECTED_IMAGE_REF="$candidate_worker_ref" bash "$target/healthcheck.sh" container acb-recovery-controller 120
+  credential_after="$(docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data:ro python:3.13-alpine python -c '
+import hashlib,sqlite3
+db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
+revision,envelope=db.execute("SELECT revision,envelope FROM acb_credentials").fetchone()
+assert db.execute("SELECT count(*) FROM auth_attempts").fetchone()[0]==0
+print(str(revision)+":"+hashlib.sha256(envelope).hexdigest())')"
+  [[ "$credential_before" == "$credential_after" ]] || fail 'Import rerun or missing files changed encrypted credentials'
+  if (source "$target/simple-lib.sh"; import_recovery_credentials "$target" "$target/runtime.env" true) >"$root/import-missing.log" 2>&1; then fail 'Explicit import accepted missing legacy files'; fi
+  for name in acb_username acb_password acb_account; do mv "$root/legacy-import-fixture/$name" "$root/deploy/secrets/$name"; done
+  chmod 644 "$root/deploy/secrets/acb_password"
+  if (source "$target/simple-lib.sh"; import_recovery_credentials "$target" "$target/runtime.env") >"$root/import-mode.log" 2>&1; then fail 'Importer accepted group/world-readable credential file'; fi
+  chmod 600 "$root/deploy/secrets/acb_password"
+  mv "$root/deploy/secrets/acb_password" "$root/legacy-import-fixture/acb_password"
+  ln -s "$root/legacy-import-fixture/acb_password" "$root/deploy/secrets/acb_password"
+  if (source "$target/simple-lib.sh"; import_recovery_credentials "$target" "$target/runtime.env") >"$root/import-symlink.log" 2>&1; then fail 'Importer accepted symlink credential file'; fi
+  rm "$root/deploy/secrets/acb_password"
+  mv "$root/legacy-import-fixture/acb_password" "$root/deploy/secrets/acb_password"
+  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Permission preflight interrupted running bot'
+  log_test_pass "Imported ciphertext unchanged on rerun and missing-file runtime; no bank attempt created"
 
   log_test_start "AI override and conditional secret admission"
   set_recovery_flags true true

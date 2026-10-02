@@ -24,6 +24,7 @@ type ACBHistoryClient interface {
 type HistoryJobRunner struct {
 	store          *storage.Store
 	client         ACBHistoryClient
+	operationMu    sync.Mutex
 	scheduler      *scheduler.Scheduler
 	sessions       *SessionLoader
 	configMu       sync.RWMutex
@@ -50,6 +51,14 @@ func NewHistoryJobRunner(store *storage.Store, client ACBHistoryClient, sched *s
 		pollInterval:   5 * time.Second,
 		logger:         slog.Default().With("component", "history_runner"),
 	}
+}
+
+func (r *HistoryJobRunner) sessionRequest(ctx context.Context, connectionID string, generation int64, fn func() (acb.Response, error)) (acb.Response, error) {
+	mu := &r.operationMu
+	if shared, ok := r.client.(interface{ SessionOperationMutex() *sync.Mutex }); ok {
+		mu = shared.SessionOperationMutex()
+	}
+	return sessionOperation(ctx, r.store, r.sessions, mu, connectionID, generation, false, fn)
 }
 
 // WithMonitor sets the associated monitor for backoff/circuit-breaker awareness.
@@ -377,6 +386,15 @@ func (t *HistoryJobTask) finish(err error) {
 	}
 }
 
+func (t *HistoryJobTask) sessionRequest(ctx context.Context, fn func() (acb.Response, error)) (acb.Response, error) {
+	response, err := t.runner.sessionRequest(ctx, t.job.ConnectionID, t.job.Generation, fn)
+	if errors.Is(err, storage.ErrGenerationFenceMismatch) {
+		t.nextAction, t.nextFields, t.cursor = "", nil, nil
+		t.dayTxns = nil
+	}
+	return response, err
+}
+
 // Step executes at most one ACB history page request, ingests with FILTER_SYNC source,
 // updates durable progress/coverage, and yields to the scheduler.
 func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, error) {
@@ -412,6 +430,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 	}
 	if conn.State != "MONITORING" {
+		t.nextAction, t.nextFields, t.cursor = "", nil, nil
 		notMonErr := errors.New("connection not in MONITORING state")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -420,6 +439,7 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 		return scheduler.TaskStepResult{Done: true, Error: notMonErr, Outcome: scheduler.OutcomeTransient}, notMonErr
 	}
 	if conn.ID != t.job.ConnectionID || conn.Generation != t.job.Generation {
+		t.nextAction, t.nextFields, t.cursor = "", nil, nil
 		staleErr := fmt.Errorf("%w: job gen %d != conn gen %d", storage.ErrGenerationFenceMismatch, t.job.Generation, conn.Generation)
 		_ = t.runner.store.CancelHistorySyncJob(ctx, t.job.ID)
 		t.finish(staleErr)
@@ -516,7 +536,9 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			}
 		}
 
-		resp, err := t.runner.client.Bootstrap(ctx)
+		resp, err := t.sessionRequest(ctx, func() (acb.Response, error) {
+			return t.runner.client.Bootstrap(ctx)
+		})
 		if err != nil {
 			bootErr := fmt.Errorf("bootstrap ACB session: %w", err)
 			retryAt := time.Now().Add(5 * time.Second)
@@ -574,7 +596,9 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			return scheduler.TaskStepResult{Done: false, Error: err, Outcome: scheduler.OutcomeTransient}, err
 		}
 
-		histResp, histErr := t.runner.client.History(ctx, t.nextAction, t.nextFields)
+		histResp, histErr := t.sessionRequest(ctx, func() (acb.Response, error) {
+			return t.runner.client.History(ctx, t.nextAction, t.nextFields)
+		})
 		if histErr != nil {
 			var authFail *acb.AuthFailure
 			if errors.As(histErr, &authFail) {
@@ -590,7 +614,9 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 					t.dayPageCount = 0
 					t.dayTxns = nil
 					t.cursor = nil
-					bootResp, bootErr := t.runner.client.Bootstrap(ctx)
+					bootResp, bootErr := t.sessionRequest(ctx, func() (acb.Response, error) {
+						return t.runner.client.Bootstrap(ctx)
+					})
 					if bootErr != nil {
 						var bAuthFail *acb.AuthFailure
 						if errors.As(bootErr, &bAuthFail) {

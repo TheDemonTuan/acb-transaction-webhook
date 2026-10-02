@@ -20,9 +20,59 @@ const (
 type Session struct {
 	AttemptID string `json:"attemptId"`
 	Status    string `json:"status"`
-	ScreenURL string `json:"screenUrl"`
 	ExpiresAt string `json:"expiresAt"`
 	Error     string `json:"error,omitempty"`
+}
+
+type RevocationResult struct {
+	Status     string `json:"status"`
+	ReasonCode string `json:"reasonCode"`
+}
+
+// RevokeSession is a single bounded operation. A timeout must not be replayed.
+func (c *Client) RevokeSession(ctx context.Context, operationID, attemptID, handoff string) (RevocationResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	body, err := json.Marshal(map[string]string{"operationId": operationID, "attemptId": attemptID, "handoff": handoff})
+	if err != nil || len(body) > 64<<10 {
+		return RevocationResult{}, errors.New("invalid session revocation request")
+	}
+	request, err := c.request(ctx, http.MethodPost, "/session-revocations", bytes.NewReader(body))
+	if err != nil {
+		return RevocationResult{}, errors.New("invalid session revocation request")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	client := *c.http
+	client.Timeout = 60 * time.Second
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return RevocationResult{}, errors.New("session revocation outcome unknown")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return RevocationResult{}, &HTTPError{StatusCode: response.StatusCode}
+	}
+	var result RevocationResult
+	if decodeJSON(response.Body, &result) != nil || !validRevocationResult(result) {
+		return RevocationResult{}, errors.New("invalid session revocation result")
+	}
+	return result, nil
+}
+
+func validRevocationResult(result RevocationResult) bool {
+	switch result.Status {
+	case "CONFIRMED":
+		return result.ReasonCode == "SESSION_REVOKED"
+	case "ALREADY_EXPIRED":
+		return result.ReasonCode == "SESSION_ALREADY_EXPIRED"
+	case "UNCONFIRMED":
+		switch result.ReasonCode {
+		case "LOGOUT_SNAPSHOT_INVALID", "LOGOUT_NO_SESSION", "LOGOUT_BROWSER_UNAVAILABLE", "LOGOUT_CONTROL_UNSUPPORTED", "LOGOUT_OUTCOME_UNKNOWN", "LOGOUT_PROBE_UNSUPPORTED", "LOGOUT_PROBE_FAILED", "LOGOUT_NOT_CONFIRMED":
+			return true
+		}
+	}
+	return false
 }
 
 type HTTPError struct {

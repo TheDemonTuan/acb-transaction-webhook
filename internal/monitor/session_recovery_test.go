@@ -149,3 +149,5 @@ func TestSessionRestoreLossCreatesDurableRecovery(t *testing.T) {
 type noRowsRestorer struct{}
 
 func (noRowsRestorer) RestoreSession(authbrowser.Handoff) error { return sql.ErrNoRows }
+
+func (noRowsRestorer) ClearSession() error { return nil }

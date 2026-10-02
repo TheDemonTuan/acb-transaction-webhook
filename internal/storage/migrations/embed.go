@@ -26,3 +26,8 @@ var RecoveryRunsSQL string
 //
 //go:embed 012_auth_recovery.sql
 var AuthRecoverySQL string
+
+// TelegramSessionControlSQL embeds schema version 13 durable session consent.
+//
+//go:embed 013_telegram_session_control.sql
+var TelegramSessionControlSQL string

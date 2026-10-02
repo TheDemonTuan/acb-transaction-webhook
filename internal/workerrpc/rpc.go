@@ -88,6 +88,10 @@ type ScheduleRecoveryRequest struct {
 	Generation   int64  `json:"generation"`
 	EventKey     string `json:"eventKey"`
 }
+type InvalidateSessionRequest struct {
+	ConnectionID string `json:"connectionId"`
+	Generation   int64  `json:"generation"`
+}
 
 type PaymentBoostRequest struct {
 	AmountVnd int64 `json:"amountVnd"`
@@ -166,6 +170,7 @@ type WorkerHandler interface {
 	WakeDispatcher(ctx context.Context) error
 	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
 	VerifySession(ctx context.Context, account string, generation int64, password []byte) error
+	InvalidateSession(ctx context.Context, connectionID string, generation int64) error
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
@@ -868,6 +873,34 @@ func (s *Server) routes() {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
 	}))
+	s.mux.HandleFunc("/rpc/session/invalidate", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get(HeaderRequestID)
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
+			return
+		}
+		var req InvalidateSessionRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_SESSION_INVALIDATION", reqID)
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF || strings.TrimSpace(req.ConnectionID) == "" || req.Generation <= 0 {
+			writeError(w, http.StatusBadRequest, "INVALID_SESSION_INVALIDATION", reqID)
+			return
+		}
+		if err := s.handler.InvalidateSession(r.Context(), req.ConnectionID, req.Generation); err != nil {
+			if errors.Is(err, storage.ErrGenerationFenceMismatch) || errors.Is(err, storage.ErrRecoverySuperseded) || errors.Is(err, storage.ErrRecoveryNotReady) {
+				writeError(w, http.StatusConflict, "SESSION_INVALIDATION_CONFLICT", reqID)
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "SESSION_INVALIDATION_UNAVAILABLE", reqID)
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
+	}))
 
 	s.mux.HandleFunc("/rpc/verify-session", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
@@ -1119,6 +1152,12 @@ func (c *Client) ScheduleRecovery(ctx context.Context, connectionID string, gene
 		Generation:   generation,
 		EventKey:     eventKey,
 	}, nil)
+}
+
+func (c *Client) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
+	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.post(callCtx, "/rpc/session/invalidate", InvalidateSessionRequest{ConnectionID: connectionID, Generation: generation}, nil)
 }
 
 func (c *Client) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {

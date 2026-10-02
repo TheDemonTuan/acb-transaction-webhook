@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,8 +22,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/auth"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
@@ -58,14 +55,6 @@ type MonitorNotifierFunc func(ctx context.Context) error
 
 func (f MonitorNotifierFunc) NotifySettingsChanged(ctx context.Context) error {
 	return f(ctx)
-}
-
-type AuthVerifier interface {
-	VerifySession(context.Context, string, int64, []byte) error
-}
-
-type PostAuthRecoveryRequester interface {
-	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
 }
 
 type WorkerProber interface {
@@ -121,35 +110,32 @@ func (l *ipRateLimiter) allow(ip string, limit int, window time.Duration, now ti
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
-	syncRequester     SyncRequester
-	paymentBooster    PaymentBooster
-	historyEnsurer    HistoryEnsurer
-	historyJobManager HistoryJobManager
-	monitorNotifier   MonitorNotifier
-	authVerifier      AuthVerifier
-	postAuthRecovery  PostAuthRecoveryRequester
-	workerProber      WorkerProber
-	channelTester     NotificationChannelTester
-	providerReader    NotificationProviderReader
-	cfg               config.Config
-	store             *storage.Store
-	auth              *auth.Middleware
-	browser           *authbrowser.Client
-	browserVNCURL     string
-	keyring           *security.Keyring
-	eventHub          *eventhub.Hub
-	realtimeSubmit    func(eventhub.Event) error
-	ttsClient         *ttsclient.Client
-	barkSender        *bark.Sender
-	notifRegistry     *notification.Registry
-	wakeFn            WakeDispatcherFunc
-	instanceNonce     string
-	testCooldownMu    sync.Mutex
-	lastTestPerCh     map[string]time.Time
-	started           time.Time
-	handler           http.Handler
-	boostLimiter      *ipRateLimiter
-	vietQRClient      *http.Client
+	syncRequester          SyncRequester
+	paymentBooster         PaymentBooster
+	historyEnsurer         HistoryEnsurer
+	historyJobManager      HistoryJobManager
+	monitorNotifier        MonitorNotifier
+	workerProber           WorkerProber
+	channelTester          NotificationChannelTester
+	providerReader         NotificationProviderReader
+	cfg                    config.Config
+	store                  *storage.Store
+	auth                   *auth.Middleware
+	keyring                *security.Keyring
+	eventHub               *eventhub.Hub
+	realtimeSubmit         func(eventhub.Event) error
+	ttsClient              *ttsclient.Client
+	barkSender             *bark.Sender
+	notifRegistry          *notification.Registry
+	wakeFn                 WakeDispatcherFunc
+	instanceNonce          string
+	testCooldownMu         sync.Mutex
+	lastTestPerCh          map[string]time.Time
+	started                time.Time
+	handler                http.Handler
+	boostLimiter           *ipRateLimiter
+	credentialGrantLimiter *ipRateLimiter
+	vietQRClient           *http.Client
 }
 
 func New(cfg config.Config, store *storage.Store) *Server {
@@ -170,20 +156,19 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	instanceNonce := hex.EncodeToString(nonceBytes)
 
 	s := &Server{
-		cfg:           cfg,
-		store:         store,
-		auth:          auth.New(cfg, verifier),
-		browser:       authbrowser.NewClient(cfg.AuthBrowserURL, cfg.AuthBrowserInternalToken),
-		browserVNCURL: cfg.AuthBrowserVNCURL,
-		keyring:       keyring,
-		eventHub:      eventhub.New(),
-		ttsClient:     ttsClientInstance,
-		instanceNonce: instanceNonce,
-		started:       time.Now().UTC(),
-		boostLimiter:  newIPRateLimiter(),
+		cfg:                    cfg,
+		store:                  store,
+		auth:                   auth.New(cfg, verifier),
+		keyring:                keyring,
+		eventHub:               eventhub.New(),
+		ttsClient:              ttsClientInstance,
+		instanceNonce:          instanceNonce,
+		started:                time.Now().UTC(),
+		boostLimiter:           newIPRateLimiter(),
+		credentialGrantLimiter: newIPRateLimiter(),
 	}
 	r := chi.NewRouter()
-	r.Use(requestID, s.platformHeaders, securityHeaders, recoverer)
+	r.Use(requestID, s.platformHeaders, securityHeaders, credentialResponseHeaders, recoverer)
 	r.Get("/healthz", s.health)
 	r.Get("/health", s.health)
 	r.Get("/readyz", s.ready)
@@ -261,12 +246,9 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Post("/voice/transactions/summary/stream", s.synthesizeSummaryAudio)
 
 		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/configure", s.configure)
+		api.With(s.auth.Require(auth.Owner), s.requireCredentialOrigin, s.requireMutationAllowed).Post("/connection/credentials/grant", s.validateACBCredentialGrant)
+		api.With(s.auth.Require(auth.Owner), s.requireCredentialOrigin, s.requireMutationAllowed).Post("/connection/credentials", s.saveACBCredentials)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/connection/{action:pause|resume|sync}", s.connectionAction)
-		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/auth/start", s.startAuth)
-		api.With(s.auth.Require(auth.Owner)).Get("/connection/auth/current", s.currentAuth)
-		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/auth/cancel", s.cancelAuth)
-		api.With(s.auth.Require(auth.Owner)).Get("/connection/auth/{attemptID}/status", s.authStatus)
-		api.With(s.auth.Require(auth.Owner)).Handle("/connection/auth/{attemptID}/screen/*", http.HandlerFunc(s.browserScreen))
 
 		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/webhooks", s.createEndpoint)
 		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/webhooks/{id}/{action:enable|disable}", s.endpointAction)
@@ -283,16 +265,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	s.handler = r
 	return s
 }
-func (s *Server) WithAuthVerifier(verifier AuthVerifier) *Server {
-	s.authVerifier = verifier
-	return s
-}
-
-func (s *Server) WithPostAuthRecoveryRequester(requester PostAuthRecoveryRequester) *Server {
-	s.postAuthRecovery = requester
-	return s
-}
-
 func (s *Server) WithEventHub(hub *eventhub.Hub) *Server {
 	s.eventHub = hub
 	return s
@@ -685,6 +657,10 @@ func (s *Server) requireMutationAllowed(next http.Handler) http.Handler {
 				})
 				return
 			}
+			if isCredentialAPIPath(r.URL.Path) {
+				writeCredentialError(w, err)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "failed to check mutation gate: "+err.Error())
 			return
 		}
@@ -810,14 +786,25 @@ func (s *Server) operationalAlerts(w http.ResponseWriter, r *http.Request) {
 func (s *Server) connection(w http.ResponseWriter, r *http.Request) {
 	c, err := s.store.Connection(r.Context())
 	if errors.Is(err, storage.ErrNotFound) {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": false})
+		writeJSON(w, http.StatusOK, map[string]any{"configured": false, "authRecovery": nil})
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "storage_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "connection": c})
+	var recovery any
+	episode, err := s.store.LatestAuthRecoveryEpisode(r.Context(), c.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	if err == nil {
+		recovery = map[string]string{
+			"state": episode.State, "reasonCode": episode.ReasonCode, "updatedAt": episode.UpdatedAt,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "connection": c, "authRecovery": recovery})
 }
 func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -875,331 +862,6 @@ func (s *Server) connectionAction(w http.ResponseWriter, r *http.Request) {
 	s.publishStateEvent("connection.changed", c.ID, c)
 	writeJSON(w, http.StatusAccepted, c)
 }
-func isTerminalAuthStatus(status string) bool {
-	return status == "FAILED" || status == "EXPIRED" || status == "CANCELLED" || status == "VERIFIED"
-}
-
-func (s *Server) currentAuth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	identity, _ := auth.FromContext(r.Context())
-	_, _ = s.store.ExpireStaleAuthAttempts(r.Context())
-
-	activeAttempt, found, err := s.store.ActiveAuthAttemptForOwner(r.Context(), identity.Email)
-	if err != nil || !found {
-		writeJSON(w, http.StatusOK, map[string]any{"attempt": nil})
-		return
-	}
-
-	session, err := s.browser.Status(r.Context(), activeAttempt.ID)
-	if err != nil {
-		if authbrowser.IsHTTPStatus(err, http.StatusNotFound) {
-			_ = s.store.FinishAuthAttempt(r.Context(), activeAttempt.ID, "FAILED")
-			writeJSON(w, http.StatusOK, map[string]any{"attempt": nil})
-			return
-		}
-		screenURL := "/api/v1/connection/auth/" + activeAttempt.ID + "/screen/vnc.html?autoconnect=true&resize=remote&path=api/v1/connection/auth/" + activeAttempt.ID + "/screen/websockify"
-		writeJSON(w, http.StatusOK, map[string]any{
-			"attempt": map[string]any{
-				"attemptId":          activeAttempt.ID,
-				"status":             activeAttempt.Status,
-				"screenUrl":          screenURL,
-				"expiresAt":          activeAttempt.ExpiresAt,
-				"browserUnavailable": true,
-			},
-		})
-		return
-	}
-
-	if isTerminalAuthStatus(session.Status) {
-		_ = s.store.FinishAuthAttempt(r.Context(), activeAttempt.ID, session.Status)
-		writeJSON(w, http.StatusOK, map[string]any{"attempt": nil})
-		return
-	}
-
-	screenURL := "/api/v1/connection/auth/" + activeAttempt.ID + "/screen/vnc.html?autoconnect=true&resize=remote&path=api/v1/connection/auth/" + activeAttempt.ID + "/screen/websockify"
-	writeJSON(w, http.StatusOK, map[string]any{
-		"attempt": map[string]any{
-			"attemptId": activeAttempt.ID,
-			"status":    activeAttempt.Status,
-			"screenUrl": screenURL,
-			"expiresAt": activeAttempt.ExpiresAt,
-		},
-	})
-}
-
-func (s *Server) startAuth(w http.ResponseWriter, r *http.Request) {
-	identity, _ := auth.FromContext(r.Context())
-	_, _ = s.store.ExpireStaleAuthAttempts(r.Context())
-
-	// If there is already an active attempt for this owner, resume it if browser is still alive
-	activeAttempt, found, err := s.store.ActiveAuthAttemptForOwner(r.Context(), identity.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Lỗi kiểm tra phiên đăng nhập ACB: "+err.Error())
-		return
-	}
-	if found {
-		session, err := s.browser.Status(r.Context(), activeAttempt.ID)
-		if err == nil {
-			if !isTerminalAuthStatus(session.Status) {
-				session.ScreenURL = "/api/v1/connection/auth/" + activeAttempt.ID + "/screen/vnc.html?autoconnect=true&resize=remote&path=api/v1/connection/auth/" + activeAttempt.ID + "/screen/websockify"
-				audit(s.store, r, "auth.resume", activeAttempt.ID)
-				s.publishStateEvent("auth.changed", activeAttempt.ID, map[string]any{"attemptId": activeAttempt.ID, "status": activeAttempt.Status})
-				writeJSON(w, http.StatusOK, session)
-				return
-			}
-			_ = s.store.FinishAuthAttempt(r.Context(), activeAttempt.ID, session.Status)
-		} else if authbrowser.IsHTTPStatus(err, http.StatusNotFound) {
-			_ = s.store.FinishAuthAttempt(r.Context(), activeAttempt.ID, "FAILED")
-		} else {
-			slog.Warn("transient error querying auth browser status for active attempt", "attempt_id", activeAttempt.ID, "error", err)
-			writeError(w, http.StatusServiceUnavailable, "Không thể kết nối đến trình duyệt ACB. Vui lòng thử lại sau giây lát.")
-			return
-		}
-	}
-
-	attempt, err := s.store.StartAuthAttempt(r.Context(), identity.Email, 15*time.Minute)
-	if err != nil {
-		if errors.Is(err, storage.ErrAuthAttemptActive) || strings.Contains(err.Error(), "database is locked") || strings.Contains(err.Error(), "SQLITE_BUSY") {
-			writeError(w, http.StatusConflict, "Một phiên đăng nhập ACB đang được thực hiện bởi quản trị viên khác.")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	session, err := s.browser.Start(r.Context(), attempt.ID)
-	if err != nil {
-		slog.Warn("failed to start ACB browser session", "attempt_id", attempt.ID, "error", err)
-		_ = s.store.FinishAuthAttempt(r.Context(), attempt.ID, "FAILED")
-		writeError(w, http.StatusServiceUnavailable, "Không thể khởi động trình duyệt ACB. Vui lòng thử lại.")
-		return
-	}
-	if err := s.store.MarkAuthAttemptInProgress(r.Context(), attempt.ID); err != nil {
-		_ = s.browser.Cancel(r.Context(), attempt.ID)
-		_ = s.store.FinishAuthAttempt(r.Context(), attempt.ID, "FAILED")
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
-		return
-	}
-	session.ScreenURL = "/api/v1/connection/auth/" + attempt.ID + "/screen/vnc.html?autoconnect=true&resize=remote&path=api/v1/connection/auth/" + attempt.ID + "/screen/websockify"
-	audit(s.store, r, "auth.start", attempt.ID)
-	s.publishStateEvent("auth.changed", attempt.ID, map[string]any{"attemptId": attempt.ID, "status": "IN_PROGRESS"})
-	writeJSON(w, http.StatusCreated, session)
-}
-func (s *Server) cancelAuth(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		AttemptID string `json:"attemptId"`
-	}
-	if !decode(w, r, &in) {
-		return
-	}
-	if in.AttemptID == "" {
-		writeError(w, http.StatusBadRequest, "attemptId is required")
-		return
-	}
-	identity, _ := auth.FromContext(r.Context())
-	attempt, err := s.store.AuthAttemptStatusForOwner(r.Context(), in.AttemptID, identity.Email)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "ACB browser session not found")
-		return
-	}
-	if attempt.Status == "CANCELLED" {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "CANCELLED"})
-		return
-	}
-	if attempt.Status != "STARTING" && attempt.Status != "IN_PROGRESS" {
-		writeError(w, http.StatusBadRequest, "auth attempt cannot be cancelled")
-		return
-	}
-	if err := s.browser.Cancel(r.Context(), in.AttemptID); err != nil && !authbrowser.IsHTTPStatus(err, http.StatusNotFound) {
-		slog.Warn("failed to cancel ACB browser session upstream", "attempt_id", in.AttemptID, "error", err)
-		writeError(w, http.StatusBadGateway, "Không thể kết nối dịch vụ trình duyệt ACB. Vui lòng thử lại.")
-		return
-	}
-	err = s.store.FinishAuthAttempt(r.Context(), in.AttemptID, "CANCELLED")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	audit(s.store, r, "auth.cancel", in.AttemptID)
-	s.publishStateEvent("auth.changed", in.AttemptID, map[string]any{"attemptId": in.AttemptID, "status": "CANCELLED"})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "CANCELLED"})
-}
-func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
-	identity, _ := auth.FromContext(r.Context())
-	attemptID := chi.URLParam(r, "attemptID")
-	attempt, err := s.store.AuthAttemptStatusForOwner(r.Context(), attemptID, identity.Email)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"code": "AUTH_SESSION_NOT_FOUND", "error": "Không tìm thấy phiên đăng nhập ACB. Vui lòng mở phiên mới."})
-		return
-	}
-	attempt.OwnerSubject = identity.Email
-
-	switch attempt.Status {
-	case "VERIFIED":
-		s.completeBrowserAuth(w, r, attempt, false)
-		return
-	case "CANCELLED":
-		writeJSON(w, http.StatusOK, map[string]string{"status": "CANCELLED"})
-		return
-	case "EXPIRED":
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status": "EXPIRED",
-			"error":  "Phiên đăng nhập ACB đã hết hạn. Vui lòng mở phiên mới.",
-		})
-		return
-	case "FAILED":
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status": "FAILED",
-			"error":  "Phiên trình duyệt ACB đã kết thúc. Vui lòng mở phiên mới.",
-		})
-		return
-	}
-
-	expiresAt, parseErr := time.Parse(time.RFC3339Nano, attempt.ExpiresAt)
-	if parseErr != nil {
-		expiresAt, parseErr = time.Parse(time.RFC3339, attempt.ExpiresAt)
-	}
-	if parseErr == nil && !expiresAt.IsZero() && !time.Now().UTC().Before(expiresAt) {
-		_ = s.browser.Cancel(r.Context(), attemptID)
-		_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "EXPIRED")
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status": "EXPIRED",
-			"error":  "Phiên đăng nhập ACB đã hết hạn. Vui lòng mở phiên mới.",
-		})
-		return
-	}
-
-	conn, err := s.store.Connection(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if conn.Generation != attempt.Generation {
-		_ = s.browser.Cancel(r.Context(), attemptID)
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
-		return
-	}
-
-	session, err := s.browser.Status(r.Context(), attemptID)
-	if err != nil {
-		if authbrowser.IsHTTPStatus(err, http.StatusNotFound) {
-			slog.Warn("ACB browser session missing or ended upstream", "attempt_id", attemptID)
-			_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "FAILED")
-			writeJSON(w, http.StatusOK, map[string]string{
-				"status": "FAILED",
-				"error":  "Phiên trình duyệt ACB đã kết thúc. Vui lòng mở phiên mới.",
-			})
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "AUTH_SESSION_UNAVAILABLE", "error": "Không thể kết nối dịch vụ trình duyệt ACB. Vui lòng thử lại."})
-		return
-	}
-
-	latestConn, err := s.store.Connection(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if latestConn.Generation != attempt.Generation {
-		_ = s.browser.Cancel(r.Context(), attemptID)
-		writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới."})
-		return
-	}
-
-	if session.Status == "FAILED" || session.Status == "EXPIRED" {
-		_ = s.store.FinishAuthAttempt(r.Context(), attemptID, session.Status)
-		message := "Không thể khởi động trình duyệt ACB. Vui lòng mở phiên mới."
-		if session.Status == "EXPIRED" {
-			message = "Phiên đăng nhập ACB đã hết hạn. Vui lòng mở phiên mới."
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": session.Status, "error": message})
-		return
-	}
-
-	if session.Status == "CANCELLED" {
-		_ = s.store.FinishAuthAttempt(r.Context(), attemptID, "CANCELLED")
-		writeJSON(w, http.StatusOK, map[string]string{"status": "CANCELLED"})
-		return
-	}
-
-	if session.Status == "VERIFIED" {
-		s.completeBrowserAuth(w, r, attempt, true)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": session.Status})
-}
-
-func (s *Server) completeBrowserAuth(w http.ResponseWriter, r *http.Request, attempt storage.AuthAttempt, publish bool) {
-	finalizer := authsession.NewFinalizer(authsession.Options{
-		Store: s.store, Browser: s.browser, Keyring: s.keyring,
-		Verifier: s.authVerifier, Scheduler: s.postAuthRecovery,
-	})
-	conn, err := finalizer.Complete(r.Context(), attempt)
-	if err != nil {
-		switch {
-		case errors.Is(err, authsession.ErrVerificationPending):
-			writeJSON(w, http.StatusOK, map[string]string{
-				"status": "VERIFYING",
-				"error":  "Đã đăng nhập ACB thành công. Vui lòng bấm vào tài khoản thanh toán trên màn hình để kết nối lịch sử giao dịch.",
-			})
-		case errors.Is(err, authsession.ErrConflict):
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_SESSION_SUPERSEDED", "error": "Phiên đăng nhập ACB đã được thay thế. Vui lòng tải lại trạng thái kết nối."})
-		case errors.Is(err, authsession.ErrAttemptNotFound):
-			writeJSON(w, http.StatusNotFound, map[string]string{"code": "AUTH_SESSION_NOT_FOUND", "error": "Không tìm thấy phiên đăng nhập ACB. Vui lòng mở phiên mới."})
-		case errors.Is(err, authsession.ErrExpired):
-			writeJSON(w, http.StatusOK, map[string]string{"status": "EXPIRED", "error": "Phiên đăng nhập ACB đã hết hạn. Vui lòng mở phiên mới."})
-		case errors.Is(err, authsession.ErrUnavailable):
-			writeError(w, http.StatusServiceUnavailable, "ACB session finalization is unavailable")
-		case errors.Is(err, authsession.ErrHandoff):
-			writeError(w, http.StatusBadGateway, "ACB browser session handoff failed")
-		default:
-			writeError(w, http.StatusInternalServerError, "ACB session finalization failed")
-		}
-		return
-	}
-	if publish {
-		audit(s.store, r, "auth.verified", conn.ID)
-		s.publishStateEvent("connection.changed", conn.ID, conn)
-		s.publishStateEvent("auth.changed", attempt.ID, map[string]any{"attemptId": attempt.ID, "status": "MONITORING"})
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "MONITORING"})
-}
-
-func (s *Server) browserScreen(w http.ResponseWriter, r *http.Request) {
-	identity, _ := auth.FromContext(r.Context())
-	attemptID := chi.URLParam(r, "attemptID")
-	if _, err := s.store.AuthAttemptForOwner(r.Context(), attemptID, identity.Email); err != nil {
-		writeError(w, http.StatusNotFound, "ACB browser session not found")
-		return
-	}
-	browserURL, err := url.Parse(s.browserVNCURL)
-	if err != nil || browserURL.Scheme == "" || browserURL.Host == "" {
-		writeError(w, http.StatusServiceUnavailable, "ACB browser screen unavailable")
-		return
-	}
-	proxy := httputil.NewSingleHostReverseProxy(browserURL)
-	originalDirector := proxy.Director
-	proxy.Director = func(request *http.Request) {
-		originalDirector(request)
-		request.URL.Path = "/" + strings.TrimPrefix(chi.URLParam(r, "*"), "/")
-		request.Host = browserURL.Host
-	}
-	proxy.ModifyResponse = func(response *http.Response) error {
-		sub := strings.TrimPrefix(chi.URLParam(r, "*"), "/")
-		if (sub == "vnc.html" || sub == "" || sub == "index.html") && response.StatusCode == http.StatusOK {
-			w.Header().Del("Content-Security-Policy")
-			response.Header.Set("Content-Security-Policy", vncContentSecurityPolicy)
-			response.Header.Set("Cache-Control", "no-store, no-transform")
-			response.Header.Set("cf-rocket-loader", "off")
-		}
-		return nil
-	}
-	proxy.ErrorHandler = func(rw http.ResponseWriter, _ *http.Request, _ error) {
-		writeError(rw, http.StatusBadGateway, "ACB browser screen unavailable")
-	}
-	proxy.ServeHTTP(w, r)
-}
-
 func pageParams(r *http.Request) (int, string, error) {
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -2075,8 +1737,6 @@ func requestIDFromContext(ctx context.Context) string {
 }
 
 const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self'"
-
-const vncContentSecurityPolicy = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
 
 func (s *Server) platformHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

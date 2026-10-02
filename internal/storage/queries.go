@@ -435,10 +435,29 @@ func (s *Store) ListAuditLogs(ctx context.Context, limit int) ([]AuditLogView, e
 // CompleteAuthSession saves the verified session and transitions the connection to MONITORING.
 func (s *Store) CompleteAuthSession(ctx context.Context, attemptID string, sessionEnvelope []byte) (Connection, error) {
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		var connectionID string
 		var generation int64
 		if err := tx.QueryRowContext(ctx, `SELECT connection_id,generation FROM auth_attempts WHERE id=? AND status IN ('STARTING','IN_PROGRESS')`, attemptID).Scan(&connectionID, &generation); err != nil {
 			return err
+		}
+		var owner string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(owner_subject,'') FROM auth_attempts WHERE id=?`, attemptID).Scan(&owner); err != nil {
+			return err
+		}
+		if owner == RecoveryOwner {
+			e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE attempt_id=? AND finished_at IS NULL`, attemptID))
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrRecoveryConsentRequired
+			}
+			if err != nil {
+				return err
+			}
+			if err := checkRecoveryAttemptTx(ctx, tx, e); err != nil {
+				return err
+			}
 		}
 		nowString := now()
 		if _, err := tx.ExecContext(ctx, `UPDATE auth_attempts SET status='VERIFIED',finished_at=? WHERE id=?`, nowString, attemptID); err != nil {

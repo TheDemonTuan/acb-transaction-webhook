@@ -107,6 +107,9 @@ export const SystemPage: React.FC = () => {
       {/* Technical Diagnostics Details */}
       <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-2xs space-y-4">
         <h3 className="font-bold text-stone-900 text-base">Thông số vận hành chi tiết</h3>
+        <p className="text-sm text-stone-600">
+          Phiên ACB được quản lý qua menu Telegram. Chẩn đoán tại đây không bắt đầu đăng nhập hay thay đổi phiên ngân hàng.
+        </p>
 
         <div className="divide-y divide-stone-100 text-xs font-mono">
           <div className="py-2.5 flex items-center justify-between">

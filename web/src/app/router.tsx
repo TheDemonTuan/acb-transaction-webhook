@@ -4,6 +4,7 @@ import { AdminLayout } from '../layouts/admin/AdminLayout';
 import { ViewerLayout } from '../layouts/viewer/ViewerLayout';
 import { OverviewPage } from '../pages/admin/OverviewPage';
 import { BankConnectionPage } from '../pages/admin/BankConnectionPage';
+import { ACBCredentialsPage } from '../pages/admin/ACBCredentialsPage';
 import { NotificationChannelsPage } from '../pages/admin/NotificationChannelsPage';
 import { ActivityPage } from '../pages/admin/ActivityPage';
 import { SystemPage } from '../pages/admin/SystemPage';
@@ -27,6 +28,10 @@ export const publicRoutes = [
 ];
 
 export const adminRoutes = [
+  {
+    path: '/admin/acb-credentials',
+    element: <ACBCredentialsPage />,
+  },
   {
     path: '/',
     element: <AdminLayout />,

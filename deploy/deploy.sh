@@ -140,7 +140,9 @@ start_recovery_controller() {
   [[ "$AUTH_RECOVERY_ENABLED" == true ]] || return 0
   [[ -z "${GATE_TOKEN:-}" ]] || fail 'release deploy gate before starting recovery controller' || return 1
   load_runtime "$bundle"
-  compose "$bundle" up -d --no-deps recovery-controller || return 1
+  dbtool ro -readonly -schema-compat -min-version 13 >/dev/null || return 1
+  import_recovery_credentials "$bundle" "$bundle/runtime.env" || return 1
+  compose "$bundle" up -d --no-deps --force-recreate recovery-controller || return 1
   EXPECTED_IMAGE_REF="$WORKER_IMAGE_REF" "$HERE/healthcheck.sh" container acb-recovery-controller 120 || return 1
   container_image_check acb-recovery-controller "$WORKER_IMAGE_REF"
 }
@@ -370,7 +372,7 @@ if [[ "$mode" == rollback ]]; then
   for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || docker pull "$ref"; done
   auth="$(dbtool ro -readonly -active-auth-count)"
   [[ "$(printf '%s' "$auth" | json_field activeCount)" == 0 ]] || fail 'active authentication blocks rollback; use /acb_pause or wait for the attempt to expire'
-  dbtool ro -readonly -schema-compat -min-version 11 >/dev/null
+  dbtool ro -readonly -schema-compat -min-version 13 >/dev/null
   GATE_OWNER="rollback-$$"; GATE_TOKEN=''; DEADLINE=$((SECONDS+600))
   gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason rollback -lease-duration 15m)" || { fail 'rollback admission failed; use /acb_pause or wait for active authentication to expire'; exit 1; }
   GATE_TOKEN="$(printf '%s' "$gate" | json_field leaseToken)"
@@ -539,7 +541,7 @@ printf '%s\n' "$receipt" | atomic_write_file "$RELEASE/backup-receipt-path" 600
 renew
 remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'migration deadline expired'
 DBTOOL_TIMEOUT_SEC="$remaining" dbtool rw -migrate
-dbtool ro -readonly -schema-compat -min-version 11
+dbtool ro -readonly -schema-compat -min-version 13
 dbtool ro -readonly -check
 for svc in auth-browser tts-gateway bark; do
   renew; compose "$RELEASE" up -d --no-deps "$svc"

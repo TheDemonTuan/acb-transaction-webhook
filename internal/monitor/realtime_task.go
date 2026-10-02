@@ -74,20 +74,32 @@ func (t *RealtimeTask) bootstrap(ctx context.Context) (acb.Response, error) {
 	if !t.todayStillCurrent() {
 		return acb.Response{}, errRealtimeDateRollover
 	}
-	if client, ok := t.m.client.(realtimeDateBankClient); ok {
-		return client.BootstrapForDate(ctx, t.today)
-	}
-	return t.m.client.Bootstrap(ctx)
+	return t.sessionRequest(ctx, func() (acb.Response, error) {
+		if client, ok := t.m.client.(realtimeDateBankClient); ok {
+			return client.BootstrapForDate(ctx, t.today)
+		}
+		return t.m.client.Bootstrap(ctx)
+	})
 }
 
 func (t *RealtimeTask) history(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
 	if !t.todayStillCurrent() {
 		return acb.Response{}, errRealtimeDateRollover
 	}
-	if client, ok := t.m.client.(realtimeDateBankClient); ok {
-		return client.HistoryForDate(ctx, endpoint, fields, t.today)
+	return t.sessionRequest(ctx, func() (acb.Response, error) {
+		if client, ok := t.m.client.(realtimeDateBankClient); ok {
+			return client.HistoryForDate(ctx, endpoint, fields, t.today)
+		}
+		return t.m.client.History(ctx, endpoint, fields)
+	})
+}
+
+func (t *RealtimeTask) sessionRequest(ctx context.Context, fn func() (acb.Response, error)) (acb.Response, error) {
+	response, err := t.m.sessionRequest(ctx, t.connectionID, t.generation, fn)
+	if errors.Is(err, storage.ErrGenerationFenceMismatch) {
+		t.nextAction, t.nextFields, t.cursor = "", nil, nil
 	}
-	return t.m.client.History(ctx, endpoint, fields)
+	return response, err
 }
 
 func classifyRealtimeResponse(resp *acb.Response) {
@@ -190,6 +202,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 	}
 	if conn.State != "MONITORING" {
+		t.nextAction, t.nextFields, t.cursor = "", nil, nil
 		if t.started && t.poll.ID != "" && !t.finished {
 			return t.finishPoll(ctx, "PARTIAL", "REALTIME_CONNECTION_NOT_MONITORING")
 		}
@@ -200,7 +213,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	}
 
 	// Generation guard: a task queued for an older or mismatched generation is discarded before any ACB call.
-	if t.generation > 0 && (conn.ID != t.connectionID || conn.Generation != t.generation) {
+	if conn.ID != t.connectionID || conn.Generation != t.generation {
+		t.nextAction, t.nextFields, t.cursor = "", nil, nil
 		slog.Info("stale realtime/manual task discarded due to generation mismatch",
 			"task_gen", t.generation, "current_gen", conn.Generation, "conn_id", conn.ID)
 		if t.started && t.poll.ID != "" && !t.finished {

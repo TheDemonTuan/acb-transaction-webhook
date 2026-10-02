@@ -26,11 +26,36 @@ func recoveryStoreAt(t *testing.T, path string) (*Store, context.Context, AuthRe
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedRecoveryCredentials(t, s, ctx, c.ID)
 	e, err := s.EnsureAuthRecoveryEpisode(ctx, c.ID, c.Generation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s, ctx, e
+}
+
+func seedRecoveryCredentials(t *testing.T, s *Store, ctx context.Context, connectionID string) {
+	t.Helper()
+	if _, err := s.DB().ExecContext(ctx, `INSERT OR IGNORE INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, connectionID, now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func consentRecovery(t *testing.T, s *Store, ctx context.Context, e AuthRecoveryEpisode) TelegramAuthAction {
+	t.Helper()
+	seedRecoveryCredentials(t, s, ctx, e.ConnectionID)
+	a, err := s.CreateTelegramAuthAction(ctx, TelegramAuthAction{BotID: 123, ChatID: 456, UserID: 789, EpisodeID: e.ID, ExpectedGeneration: e.Generation, Action: "LOGIN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeliverTelegramAuthAction(ctx, a.ID, 44); err != nil {
+		t.Fatal(err)
+	}
+	a, _, err = s.ConsumeTelegramAuthAction(ctx, a.ID, 123, 456, 789, 44, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
 
 func TestRecoveryEpisodeBudgetSurvivesGenerationChanges(t *testing.T) {
@@ -65,6 +90,7 @@ func TestRecoveryEpisodeBudgetSurvivesGenerationChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {
+		consentRecovery(t, s, ctx, e)
 		a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 		if err != nil {
 			t.Fatal(err)
@@ -108,6 +134,7 @@ func TestRecoveryEpisodeBudgetSurvivesGenerationChanges(t *testing.T) {
 	if err := s.RearmAuthRecovery(ctx, e.ID, e.Generation); err != nil {
 		t.Fatal(err)
 	}
+	consentRecovery(t, s, ctx, e)
 	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +170,7 @@ func TestRecoveryAdmissionSerializesWithManualAndDeploy(t *testing.T) {
 		t.Run(winner, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "recovery.db")
 			s, ctx, e := recoveryStoreAt(t, path)
+			consentRecovery(t, s, ctx, e)
 			other, err := Open(ctx, path)
 			if err != nil {
 				t.Fatal(err)
@@ -224,7 +252,11 @@ func assertRecoveryInputsInvalidated(t *testing.T, s *Store, ctx context.Context
 	t.Helper()
 	for _, table := range []string{"auth_challenges", "telegram_auth_actions"} {
 		var status string
-		if err := s.DB().QueryRowContext(ctx, `SELECT status FROM `+table+` WHERE episode_id=?`, e.ID).Scan(&status); err != nil {
+		prefix := "challenge-"
+		if table == "telegram_auth_actions" {
+			prefix = "action-"
+		}
+		if err := s.DB().QueryRowContext(ctx, `SELECT status FROM `+table+` WHERE id=?`, prefix+e.ID).Scan(&status); err != nil {
 			t.Fatal(err)
 		}
 		if status != "INVALIDATED" {
@@ -237,6 +269,7 @@ func TestRecoveryExpiryAndConfirmedPollPreserveEpisode(t *testing.T) {
 	for _, loss := range []string{"expiry", "poll", "local", "decrypt"} {
 		t.Run(loss, func(t *testing.T) {
 			s, ctx, e := recoveryStore(t)
+			consentRecovery(t, s, ctx, e)
 			a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 			if err != nil {
 				t.Fatal(err)
@@ -328,6 +361,9 @@ func TestRecoveryExpiryAndConfirmedPollPreserveEpisode(t *testing.T) {
 			if updated.RecoveryRunID != "" {
 				t.Fatalf("old-generation run retained after auth loss: %+v", updated)
 			}
+			if updated.ConsentActionID != "" || updated.ConsentConsumedAt != "" || updated.ConsentExpiresAt != "" {
+				t.Fatalf("auth loss retained login consent: %+v", updated)
+			}
 			assertRecoveryInputsInvalidated(t, s, ctx, e)
 		})
 	}
@@ -335,6 +371,7 @@ func TestRecoveryExpiryAndConfirmedPollPreserveEpisode(t *testing.T) {
 
 func TestRecoveryReservationsAndExternalSupersession(t *testing.T) {
 	s, ctx, e := recoveryStore(t)
+	consentRecovery(t, s, ctx, e)
 	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -342,10 +379,10 @@ func TestRecoveryReservationsAndExternalSupersession(t *testing.T) {
 	if err := s.TransitionAuthRecovery(ctx, e.ID, a.Generation, "STARTING", "LOGIN", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation); err != nil {
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "captcha-A"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation); !errors.Is(err, ErrRecoveryBudgetExhausted) {
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "captcha-A"); !errors.Is(err, ErrRecoveryAIClaimed) {
 		t.Fatalf("AI retried: %v", err)
 	}
 	if err := s.ReserveRecoverySubmission(ctx, e.ID, a.Generation, "CAPTCHA_TEXT", true); err != nil {
@@ -420,12 +457,13 @@ func TestRecoveryPauseCooldownExpiryAndOnboarding(t *testing.T) {
 	if _, err := s.DB().ExecContext(ctx, `UPDATE connections SET state='UNCONFIGURED'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute); !errors.Is(err, ErrRecoveryNotReady) {
-		t.Fatalf("watcher onboarded: %v", err)
+	if _, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute); !errors.Is(err, ErrRecoveryConsentRequired) {
+		t.Fatalf("watcher onboarded without button: %v", err)
 	}
 	if err := s.RearmAuthRecovery(ctx, e.ID, e.Generation); err != nil {
 		t.Fatal(err)
 	}
+	consentRecovery(t, s, ctx, e)
 	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -439,7 +477,7 @@ func TestRecoveryPauseCooldownExpiryAndOnboarding(t *testing.T) {
 	if _, err := s.DB().ExecContext(ctx, `UPDATE auth_attempts SET expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), a.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation); !errors.Is(err, ErrChallengeExpired) {
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "captcha-A"); !errors.Is(err, ErrChallengeExpired) {
 		t.Fatalf("expired attempt used AI: %v", err)
 	}
 	if err := s.TransitionAuthRecovery(ctx, e.ID, a.Generation, "LOGIN", "WAITING_CAPTCHA", ""); !errors.Is(err, ErrChallengeExpired) {
@@ -477,6 +515,7 @@ func TestRecoveryPriorOperationalEvidenceSurvivesMissingSession(t *testing.T) {
 
 func TestRecoveryAdmissionRespectsRetryDeadline(t *testing.T) {
 	s, ctx, e := recoveryStore(t)
+	consentRecovery(t, s, ctx, e)
 	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -501,11 +540,176 @@ func TestRecoveryAdmissionRespectsRetryDeadline(t *testing.T) {
 	if _, err := s.DB().ExecContext(ctx, `UPDATE auth_recovery_episodes SET next_attempt_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), e.ID); err != nil {
 		t.Fatal(err)
 	}
+	consentRecovery(t, s, ctx, e)
 	next, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next.ID == a.ID || next.Generation != e.Generation+1 {
 		t.Fatalf("due retry did not advance attempt: %+v", next)
+	}
+}
+
+func TestRecoveryAIClaimsAreUniqueDurableAndAttemptScoped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ai-claims.db")
+	s, ctx, e := recoveryStoreAt(t, path)
+	consentRecovery(t, s, ctx, e)
+	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TransitionAuthRecovery(ctx, e.ID, a.Generation, "STARTING", "LOGIN", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, ""); !errors.Is(err, ErrChallengeMismatch) {
+		t.Fatalf("empty revision: %v", err)
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "A") }()
+	}
+	successes, duplicates := 0, 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrRecoveryAIClaimed):
+			duplicates++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || duplicates != 1 {
+		t.Fatalf("concurrent claims: success=%d duplicate=%d", successes, duplicates)
+	}
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "A"); !errors.Is(err, ErrRecoveryAIClaimed) {
+		t.Fatalf("A-B-A replay after restart: %v", err)
+	}
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "C"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimRecoveryAI(ctx, e.ID, a.Generation, "D"); !errors.Is(err, ErrRecoveryBudgetExhausted) {
+		t.Fatalf("fourth AI request: %v", err)
+	}
+	current, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_recovery_ai_claims WHERE attempt_id=?`, a.ID).Scan(&claims); err != nil {
+		t.Fatal(err)
+	}
+	if current.AIUsed != 3 || claims != 3 {
+		t.Fatalf("claims and budget diverged: used=%d claims=%d", current.AIUsed, claims)
+	}
+	if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, a.Generation, "FAILED", "WAIT_OPERATOR", "CAPTCHA_BUDGET_EXHAUSTED", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	current, err = s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consentRecovery(t, s, ctx, current)
+	next, err := s.StartRecoveryAuthAttempt(ctx, e.ID, current.Generation, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TransitionAuthRecovery(ctx, e.ID, next.Generation, "STARTING", "LOGIN", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimRecoveryAI(ctx, e.ID, next.Generation, "A"); err != nil {
+		t.Fatalf("new consent attempt retained old claims: %v", err)
+	}
+	current, err = s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || current.AIUsed != 1 {
+		t.Fatalf("new attempt AI budget: %+v %v", current, err)
+	}
+}
+
+func TestRecoveryWaitOperatorExhaustionAdmitsFreshConsentAndPreservesCooldown(t *testing.T) {
+	for _, legacyWait := range []bool{false, true} {
+		name := "current"
+		if legacyWait {
+			name = "previous-wait-operator"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, ctx, e := recoveryStore(t)
+			for i := 1; i <= 3; i++ {
+				consentRecovery(t, s, ctx, e)
+				a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = s.FinishRecoveryAuthAttempt(ctx, e.ID, a.Generation, "FAILED", "WAIT_OPERATOR", "BROWSER_UNAVAILABLE", time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+				e, err = s.AuthRecoveryEpisode(ctx, e.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected := "WAIT_OPERATOR"
+				if i == 3 {
+					expected = "MANUAL_REQUIRED"
+				}
+				if e.State != expected || e.AttemptCount != i || e.BudgetStartCount != 0 || e.ConsentActionID != "" {
+					t.Fatalf("failure %d left unexpected episode: %+v", i, e)
+				}
+			}
+			if legacyWait {
+				if _, err := s.DB().Exec(`UPDATE auth_recovery_episodes SET state='WAIT_OPERATOR',reason_code='BROWSER_UNAVAILABLE' WHERE id=?`, e.ID); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				e, err = s.AuthRecoveryEpisode(ctx, e.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.DB().Exec(`UPDATE auth_recovery_episodes SET last_login_at=? WHERE id=?`, now(), e.ID); err != nil {
+				t.Fatal(err)
+			}
+			a, err := s.CreateTelegramAuthAction(ctx, TelegramAuthAction{BotID: 123, ChatID: 456, UserID: 789, EpisodeID: e.ID, ExpectedGeneration: e.Generation, Action: "LOGIN"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.DeliverTelegramAuthAction(ctx, a.ID, 45); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err = s.ConsumeTelegramAuthAction(ctx, a.ID, 123, 456, 789, 45, time.Now()); !errors.Is(err, ErrRecoveryCooldown) {
+				t.Fatalf("new consent bypassed login cooldown: %v", err)
+			}
+			earlier := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+			if _, err = s.DB().Exec(`UPDATE auth_recovery_episodes SET last_login_at=? WHERE id=?`, earlier, e.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err = s.ConsumeTelegramAuthAction(ctx, a.ID, 123, 456, 789, 45, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
+			if err != nil {
+				t.Fatalf("fresh consent stuck behind exhausted budget: %v", err)
+			}
+			current, err := s.AuthRecoveryEpisode(ctx, e.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.AttemptCount != 4 || current.BudgetStartCount != 3 || current.AttemptID != attempt.ID || current.ConsentConsumedAt == "" || current.LastLoginAt != earlier {
+				t.Fatalf("fresh consent lost budget/cooldown: %+v", current)
+			}
+			if _, err = s.StartRecoveryAuthAttempt(ctx, e.ID, attempt.Generation, time.Minute); err == nil {
+				t.Fatal("one fresh click admitted a second attempt")
+			}
+		})
 	}
 }

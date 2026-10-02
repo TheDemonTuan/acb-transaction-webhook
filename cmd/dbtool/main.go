@@ -243,6 +243,11 @@ func main() {
 			os.Exit(1)
 		}
 		compat := report.Version >= *minVersionFlag
+		if compat && *minVersionFlag >= 13 {
+			var checksum string
+			err := store.DB().QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE version=13").Scan(&checksum)
+			compat = err == nil && checksum == "2026-10-02-v13-telegram-session-control"
+		}
 		res := map[string]any{
 			"compatible":      compat,
 			"schemaVersion":   report.Version,
@@ -273,11 +278,11 @@ func main() {
 			if conn, cErr := store.Connection(ctx); cErr == nil && (conn.State == "AUTH_REQUIRED" || conn.State == "UNCONFIGURED" || conn.State == "DISCONNECTED") {
 				report := map[string]any{
 					"status":          "ok",
-					"connection_id":  conn.ID,
-					"generation":     conn.Generation,
-					"state":          conn.State,
+					"connection_id":   conn.ID,
+					"generation":      conn.Generation,
+					"state":           conn.State,
 					"unauthenticated": true,
-					"has_envelope":   false,
+					"has_envelope":    false,
 				}
 				if err := encoder.Encode(report); err != nil {
 					logger.Error("encode session check report", "error", err)

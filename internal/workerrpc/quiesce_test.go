@@ -32,6 +32,9 @@ func (q *quiesceMockHandler) ScheduleRecovery(ctx context.Context, connectionID 
 func (q *quiesceMockHandler) VerifySession(ctx context.Context, acc string, gen int64, pw []byte) error {
 	return nil
 }
+func (q *quiesceMockHandler) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
+	return nil
+}
 func (q *quiesceMockHandler) TestNotificationChannel(ctx context.Context, id string) (workerrpc.TestNotificationResponse, error) {
 	return workerrpc.TestNotificationResponse{Success: true}, nil
 }

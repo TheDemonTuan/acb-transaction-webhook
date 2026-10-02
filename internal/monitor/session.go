@@ -18,6 +18,7 @@ import (
 
 type SessionRestorer interface {
 	RestoreSession(authbrowser.Handoff) error
+	ClearSession() error
 }
 
 type SessionSnapshotter interface {
@@ -34,23 +35,17 @@ type SessionLoader struct {
 	keyring          *security.Keyring
 	restorer         SessionRestorer
 	mu               sync.Mutex
+	operationMu      *sync.Mutex
 	loadedID         string
 	loadedGeneration int64
 }
 
 func NewSessionLoader(store *storage.Store, keyring *security.Keyring, restorer SessionRestorer) *SessionLoader {
-	return &SessionLoader{store: store, keyring: keyring, restorer: restorer}
-}
-
-// InvalidateCache clears in-memory generation caching so the next restore re-reads from storage.
-func (l *SessionLoader) InvalidateCache() {
-	if l == nil {
-		return
+	operationMu := &sync.Mutex{}
+	if shared, ok := restorer.(interface{ SessionOperationMutex() *sync.Mutex }); ok {
+		operationMu = shared.SessionOperationMutex()
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.loadedID = ""
-	l.loadedGeneration = 0
+	return &SessionLoader{store: store, keyring: keyring, restorer: restorer, operationMu: operationMu}
 }
 
 // Restore loads only the encrypted session for the current connection
@@ -59,8 +54,13 @@ func (l *SessionLoader) Restore(ctx context.Context, connectionID string, genera
 	if l == nil || l.store == nil || l.keyring == nil || l.restorer == nil {
 		return errors.New("ACB session loader is unavailable")
 	}
+	l.operationMu.Lock()
+	defer l.operationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := checkSessionFence(ctx, l.store, connectionID, generation, false); err != nil {
+		return err
+	}
 	if l.loadedID == connectionID && l.loadedGeneration == generation {
 		return nil
 	}
@@ -87,8 +87,15 @@ func (l *SessionLoader) Restore(ctx context.Context, connectionID string, genera
 }
 
 func (l *SessionLoader) Persist(ctx context.Context, connectionID string, generation int64) error {
-	if l == nil || l.keyring == nil {
+	if l == nil || l.store == nil || l.keyring == nil || l.restorer == nil {
 		return errors.New("ACB session loader is unavailable")
+	}
+	l.operationMu.Lock()
+	defer l.operationMu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := checkSessionFence(ctx, l.store, connectionID, generation, false); err != nil {
+		return err
 	}
 	snapshotter, ok := l.restorer.(SessionSnapshotter)
 	if !ok {
@@ -123,12 +130,17 @@ func (l *SessionLoader) Persist(ctx context.Context, connectionID string, genera
 	return l.store.RefreshSession(ctx, connectionID, generation, encoded, envelope.KeyID)
 }
 
-func (l *SessionLoader) RestoreEnvelope(connectionID string, generation int64, encoded []byte) error {
-	if l == nil || l.keyring == nil || l.restorer == nil {
+func (l *SessionLoader) RestoreEnvelope(ctx context.Context, connectionID string, generation int64, encoded []byte) error {
+	if l == nil || l.store == nil || l.keyring == nil || l.restorer == nil {
 		return errors.New("ACB session loader is unavailable")
 	}
+	l.operationMu.Lock()
+	defer l.operationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := checkSessionFence(ctx, l.store, connectionID, generation, true); err != nil {
+		return err
+	}
 	return l.restoreLocked(connectionID, generation, encoded)
 }
 
@@ -179,5 +191,63 @@ func (l *SessionLoader) restoreLocked(connectionID string, generation int64, enc
 	}
 	l.loadedID = connectionID
 	l.loadedGeneration = generation
+	return nil
+}
+
+// checkSessionFence uses one database snapshot, including on loader cache hits.
+func checkSessionFence(ctx context.Context, store *storage.Store, connectionID string, generation int64, verifier bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if store == nil {
+		return errors.New("ACB session store is unavailable")
+	}
+	var state string
+	var currentGeneration int64
+	var logout bool
+	err := store.DB().QueryRowContext(ctx, `SELECT state,generation,EXISTS(SELECT 1 FROM acb_logout_jobs WHERE connection_id=connections.id AND finished_at IS NULL) FROM connections WHERE id=? AND id=(SELECT id FROM connections ORDER BY created_at LIMIT 1)`, connectionID).Scan(&state, &currentGeneration, &logout)
+	if err != nil {
+		return err
+	}
+	if currentGeneration != generation || logout || (state != "MONITORING" && !(verifier && state == "AUTH_STARTING")) {
+		return storage.ErrGenerationFenceMismatch
+	}
+	return ctx.Err()
+}
+
+func sessionOperation(ctx context.Context, store *storage.Store, loader *SessionLoader, fallback *sync.Mutex, connectionID string, generation int64, verifier bool, fn func() (acb.Response, error)) (acb.Response, error) {
+	mu := fallback
+	if loader != nil {
+		mu = loader.operationMu
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if err := checkSessionFence(ctx, store, connectionID, generation, verifier); err != nil {
+		return acb.Response{}, err
+	}
+	response, err := fn()
+	// Discard results produced while the durable logout/generation fence changed.
+	if fenceErr := checkSessionFence(ctx, store, connectionID, generation, verifier); fenceErr != nil {
+		return acb.Response{}, fenceErr
+	}
+	return response, err
+}
+
+func (l *SessionLoader) InvalidateSession(ctx context.Context, connectionID string, fencedGeneration int64) error {
+	if l == nil || l.store == nil || l.restorer == nil {
+		return errors.New("ACB session loader is unavailable")
+	}
+	l.operationMu.Lock()
+	defer l.operationMu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.store.CheckACBLogoutFence(ctx, connectionID, fencedGeneration); err != nil {
+		return err
+	}
+	if err := l.restorer.ClearSession(); err != nil {
+		return err
+	}
+	l.loadedID = ""
+	l.loadedGeneration = 0
 	return nil
 }
