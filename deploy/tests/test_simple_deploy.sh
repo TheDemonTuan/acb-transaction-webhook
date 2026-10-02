@@ -706,13 +706,13 @@ print(str(revision)+":"+hashlib.sha256(envelope).hexdigest())')"
   set_recovery_flags true false
   log_test_pass "AI key and override required only when enabled"
 
-  log_test_start "Enabled recovery rerun cannot interrupt active authentication awaiting OTP"
+  log_test_start "Enabled recovery rerun cannot interrupt an active authentication attempt"
   recovery_before="$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)"
   reconfigure_state_before="$(sha256sum "$root/state.env")"
   reconfigure_route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
-  # Seed durable OTP metadata on a later fixture connection so controller reconciliation
-  # of the original UNCONFIGURED connection cannot race the deployment admission probe.
-  # This exercises real deploy/worker fencing, not an upstream browser OTP exchange.
+  # A later fixture connection isolates the active-attempt admission check from
+  # the live controller. Prompt/browser behavior is covered by the real browser
+  # and broker suites; no fabricated prompt is bound to a nonexistent browser.
   docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
 import datetime,sqlite3
 db=sqlite3.connect("/data/gateway.db"); now=datetime.datetime.now(datetime.timezone.utc)
@@ -720,7 +720,6 @@ db.execute("INSERT INTO connections(id,created_at,updated_at) VALUES(?,?,?)",("d
 db.execute("INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",("disable-attempt","disable-auth",0,"system:acb-recovery","IN_PROGRESS",(now+datetime.timedelta(minutes=10)).isoformat(),now.isoformat()))
 revision=db.execute("SELECT config_revision FROM connections WHERE id=?",("disable-auth",)).fetchone()[0]
 db.execute("INSERT INTO auth_recovery_episodes(id,connection_id,trigger_generation,generation,config_revision,attempt_id,state,attempt_count,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",("disable-episode","disable-auth",0,0,revision,"disable-attempt","WAITING_OTP",1,now.isoformat(),now.isoformat()))
-db.execute("INSERT INTO auth_challenges(id,episode_id,connection_id,generation,attempt_id,browser_revision,kind,status,chat_id,prompt_message_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",("disable-otp","disable-episode","disable-auth",0,"disable-attempt","fixture-revision","OTP","PENDING",123456,42,(now+datetime.timedelta(seconds=120)).isoformat(),now.isoformat()))
 db.commit()'
   if bash "$target/deploy.sh" "$release_sha" >"$root/reconfigure-active-auth.log" 2>&1; then fail 'Enabled recovery rerun bypassed active-auth deploy gate'; fi
   [[ "$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)" == "$recovery_before" && "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Enabled rerun restarted or stopped controller holding active authentication'
@@ -729,8 +728,7 @@ db.commit()'
 import sqlite3
 db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
 assert db.execute("SELECT status,generation,owner_subject FROM auth_attempts WHERE id=?",("disable-attempt",)).fetchone()==("IN_PROGRESS",0,"system:acb-recovery")
-assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)
-assert db.execute("SELECT status,prompt_message_id,consumed_at FROM auth_challenges WHERE id=?",("disable-otp",)).fetchone()==("PENDING",42,None)'
+assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)'
   log_test_pass "Enabled rerun preserves active attempt and running controller without cancellation"
 
   log_test_start "Reconciliation rejects a non-current release without redeploying"
@@ -749,8 +747,7 @@ import sqlite3
 db=sqlite3.connect("/data/gateway.db")
 assert db.execute("SELECT status FROM auth_attempts WHERE id=?",("disable-attempt",)).fetchone()[0]=="IN_PROGRESS"
 assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)
-assert db.execute("SELECT status,prompt_message_id,consumed_at FROM auth_challenges WHERE id=?",("disable-otp",)).fetchone()==("PENDING",42,None)
-db.execute("DELETE FROM auth_challenges WHERE id=?",("disable-otp",)); db.execute("DELETE FROM auth_recovery_episodes WHERE id=?",("disable-episode",))
+db.execute("DELETE FROM auth_recovery_episodes WHERE id=?",("disable-episode",))
 db.execute("DELETE FROM auth_attempts WHERE id=?",("disable-attempt",)); db.execute("DELETE FROM connections WHERE id=?",("disable-auth",)); db.commit()'
   DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
   [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'Disabled controller still running'
