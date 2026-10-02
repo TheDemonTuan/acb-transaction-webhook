@@ -45,7 +45,7 @@ test('serves the dashboard on a future SPA route', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Giao dịch' })).toBeVisible();
 });
 
-test('activates ACB session to MONITORING and navigates all tabs', async ({ page }) => {
+test('navigates monitoring and diagnostic pages without activating a bank session', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Kết nối ACB' }).click();
   await expect(page.getByRole('heading', { name: 'Kết nối ACB' })).toBeVisible();
@@ -53,12 +53,6 @@ test('activates ACB session to MONITORING and navigates all tabs', async ({ page
   if (await accountInput.isVisible()) {
     await accountInput.fill('***1234');
     await page.getByRole('button', { name: 'Lưu kết nối' }).click();
-  }
-
-  const quickBtn = page.getByRole('button', { name: 'Kích hoạt nhanh (Simulate/Verify)' });
-  if (await quickBtn.count()) {
-    await quickBtn.click();
-    await expect(page.getByText('Phiên ACB đang hoạt động')).toBeVisible();
   }
 
   await page.getByRole('button', { name: 'Giao dịch' }).click();

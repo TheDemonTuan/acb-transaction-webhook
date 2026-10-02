@@ -35,6 +35,7 @@ func automaticCompletionFixture(t *testing.T) (context.Context, *Store, AuthReco
 	if err != nil {
 		t.Fatal(err)
 	}
+	consentRecovery(t, s, ctx, e)
 	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)

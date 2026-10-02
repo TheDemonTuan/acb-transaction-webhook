@@ -13,19 +13,8 @@ export class ApiError extends Error {
   }
 }
 
-export const AUTH_CODE_SUPERSEDED = 'AUTH_SESSION_SUPERSEDED';
-export const AUTH_CODE_NOT_FOUND = 'AUTH_SESSION_NOT_FOUND';
-export const AUTH_CODE_UNAVAILABLE = 'AUTH_SESSION_UNAVAILABLE';
 export const CSRF_CODE_ORIGIN_MISMATCH = 'ORIGIN_MISMATCH';
 export const CSRF_CODE_TOKEN_INVALID = 'CSRF_TOKEN_INVALID';
-
-export const TERMINAL_AUTH_CODES = [AUTH_CODE_SUPERSEDED, AUTH_CODE_NOT_FOUND] as const;
-export type TerminalAuthCode = (typeof TERMINAL_AUTH_CODES)[number];
-
-export const isTerminalAuthError = (error: unknown): error is ApiError => {
-  if (!(error instanceof ApiError)) return false;
-  return error.code === AUTH_CODE_SUPERSEDED || error.code === AUTH_CODE_NOT_FOUND;
-};
 
 export const parseApiError = async (response: Response): Promise<ApiError> => {
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
@@ -92,7 +81,11 @@ export const getCsrfToken = async (forceRefresh = false): Promise<string> => {
   return csrfPromise;
 };
 
-export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+export const api = async <T,>(
+  path: string,
+  init?: RequestInit,
+  options?: { retryCsrf?: boolean },
+): Promise<T> => {
   const method = init?.method?.toUpperCase() ?? 'GET';
   const mutating = isMutation(method);
 
@@ -126,7 +119,7 @@ export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 
   if (!response.ok) {
     const error = await parseApiError(response);
-    if (mutating && !isPublicViewerHost() && error.code === CSRF_CODE_TOKEN_INVALID) {
+    if (mutating && !isPublicViewerHost() && error.code === CSRF_CODE_TOKEN_INVALID && options?.retryCsrf !== false) {
       const newToken = await getCsrfToken(true);
       headers.set('X-CSRF-Token', newToken);
       try {

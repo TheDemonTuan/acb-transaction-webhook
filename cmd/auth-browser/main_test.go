@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,78 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
 )
+
+func TestDisplayHealthRequiresLiveSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Xvfb display socket health requires Unix")
+	}
+	path := filepath.Join(t.TempDir(), "X99")
+	if err := displayHealth(context.Background(), path); err == nil {
+		t.Fatal("missing display accepted")
+	}
+	if err := os.WriteFile(path, []byte("not a display"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := displayHealth(context.Background(), path); err == nil {
+		t.Fatal("regular file accepted as display")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	t.Cleanup(func() { listener.Close() })
+	if err := displayHealth(context.Background(), path); err != nil {
+		t.Fatalf("live display socket rejected: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := displayHealth(context.Background(), path); err == nil {
+		t.Fatal("stale display socket accepted")
+	}
+}
+
+func TestBrowserHealthRealChromium(t *testing.T) {
+	if os.Getenv("ACB_BROWSER_INTEGRATION") != "1" {
+		t.Skip("set ACB_BROWSER_INTEGRATION=1 to check real Chromium health")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	s := &server{profiles: t.TempDir(), browserExec: findDefaultBrowser(), extraFlags: []string{"--headless=new"}}
+	port, err := allocateFreePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := &browserSession{AttemptID: "health-browser", Status: "REVOKING", ExpiresAt: time.Now().Add(time.Minute), profile: "health-profile", cancel: cancel, debugURL: fmt.Sprintf("http://127.0.0.1:%d", port), done: make(chan struct{})}
+	t.Cleanup(func() { s.reapSession(item, 3*time.Second) })
+	ready := make(chan error, 1)
+	go s.launch(ctx, item, port, ready, browserLaunchOptions{InitialURL: "about:blank", ObserveLogin: false})
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatalf("real Chromium launch: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Chromium did not become ready")
+	}
+	if err := s.browserHealth(ctx); err != nil {
+		t.Fatalf("live Chromium health failed: %v", err)
+	}
+	s.mu.Lock()
+	tracked := s.healthBrowser == item
+	s.mu.Unlock()
+	if !tracked {
+		t.Fatal("revoke-only browser was not tracked for health")
+	}
+	s.reapSession(item, 3*time.Second)
+	if err := chromiumHealth(context.Background(), item.debugURL); err == nil {
+		t.Fatal("stopped Chromium CDP accepted as healthy")
+	}
+}
 
 func TestValidHistoryForm(t *testing.T) {
 	cases := []struct {
@@ -854,7 +927,6 @@ func TestRealChromiumIntegration(t *testing.T) {
 	item := &browserSession{
 		AttemptID: "real-browser-test",
 		Status:    "STARTING",
-		ScreenURL: "/",
 		ExpiresAt: time.Now().UTC().Add(sessionTTL),
 		cancel:    cancel,
 		debugURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
@@ -863,7 +935,7 @@ func TestRealChromiumIntegration(t *testing.T) {
 	s.session = item
 
 	ready := make(chan error, 1)
-	go s.launch(ctx, item, port, ready)
+	go s.launch(ctx, item, port, ready, browserLaunchOptions{InitialURL: acbLoginURL(), ObserveLogin: true})
 
 	select {
 	case err := <-ready:

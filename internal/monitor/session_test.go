@@ -21,6 +21,11 @@ func (r *recordingRestorer) RestoreSession(handoff authbrowser.Handoff) error {
 	return nil
 }
 
+func (r *recordingRestorer) ClearSession() error {
+	r.handoff = authbrowser.Handoff{}
+	return nil
+}
+
 func TestSessionLoaderRejectsCrossGenerationEnvelope(t *testing.T) {
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "key")
@@ -31,7 +36,20 @@ func TestSessionLoaderRejectsCrossGenerationEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connectionID := "conn-cross-generation"
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(dir, "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	connection, err := store.ConfigureConnection(ctx, "***1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET generation=2,state='AUTH_STARTING' WHERE id=?`, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	connectionID := connection.ID
 	plaintext, err := authbrowser.EncodeHandoff(authbrowser.Handoff{
 		Version: 1,
 		URL:     "https://online.acb.com.vn/acbib/AccountSummary",
@@ -48,8 +66,8 @@ func TestSessionLoaderRejectsCrossGenerationEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loader := NewSessionLoader(nil, keyring, &recordingRestorer{})
-	if err := loader.RestoreEnvelope(connectionID, 2, encoded); err == nil {
+	loader := NewSessionLoader(store, keyring, &recordingRestorer{})
+	if err := loader.RestoreEnvelope(ctx, connectionID, 2, encoded); err == nil {
 		t.Fatal("expected generation-bound session envelope to reject replay")
 	}
 }
@@ -108,6 +126,11 @@ type mockSessionSnapshotter struct {
 
 func (m *mockSessionSnapshotter) RestoreSession(handoff authbrowser.Handoff) error {
 	m.handoff = handoff
+	return nil
+}
+
+func (m *mockSessionSnapshotter) ClearSession() error {
+	m.handoff = authbrowser.Handoff{}
 	return nil
 }
 

@@ -242,4 +242,5 @@ CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_provider_status ON webhook_endp
 	{9, "2026-09-14-v9-deployment-control", migrationfiles.DeploymentControlSQL},
 	{10, "2026-09-17-v10-monitor-idle-cadence", migrationfiles.MonitorIdleCadenceSQL},
 	{11, "2026-09-22-v11-recovery-runs", migrationfiles.RecoveryRunsSQL},
-	{12, "2026-10-02-v12-auth-recovery", migrationfiles.AuthRecoverySQL}}
+	{12, "2026-10-02-v12-auth-recovery", migrationfiles.AuthRecoverySQL},
+	{13, "2026-10-02-v13-telegram-session-control", migrationfiles.TelegramSessionControlSQL}}

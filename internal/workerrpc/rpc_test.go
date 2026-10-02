@@ -115,6 +115,9 @@ func (m *mockWorkerHandler) VerifySession(ctx context.Context, account string, g
 	m.verifiedAccount = account
 	return nil
 }
+func (m *mockWorkerHandler) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
+	return nil
+}
 
 func (m *mockWorkerHandler) TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error) {
 	if channelID == "error-id" {

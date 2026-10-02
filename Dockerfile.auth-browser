@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /auth-browser ./cmd/aut
 
 FROM alpine:3.23
 RUN apk upgrade --no-cache \
-    && apk add --no-cache ca-certificates chromium novnc openbox tini websockify x11vnc xvfb \
+    && apk add --no-cache ca-certificates chromium openbox tini xvfb \
     && adduser -S -u 1000 -h /home/gateway gateway
 COPY --from=build /auth-browser /auth-browser
 COPY cmd/auth-browser/entrypoint.sh /entrypoint.sh

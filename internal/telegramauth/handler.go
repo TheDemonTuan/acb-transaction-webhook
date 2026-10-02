@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/challenge"
@@ -16,23 +17,31 @@ import (
 type ReplyBroker interface {
 	HandleReply(ctx context.Context, chatID, promptID, incomingID int64, text string) error
 }
-type BrowserCanceller interface {
-	Cancel(ctx context.Context, attemptID string) error
-}
-type RecoveryScheduler interface {
-	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
-}
 type HandlerOptions struct {
-	Store          *storage.Store
-	Client         *Client
-	ChatID, UserID int64
-	PublicOrigin   string
-	ReplyBroker    ReplyBroker
-	Browser        BrowserCanceller
-	Scheduler      RecoveryScheduler
-	AIDegraded     func() string
+	Store           *storage.Store
+	Client          *Client
+	ChatID, UserID  int64
+	PublicOrigin    string
+	ReplyBroker     ReplyBroker
+	CoordinatorWake func()
+	AIDegraded      func() string
 }
-type Handler struct{ HandlerOptions }
+type PendingDeliveryBroker interface {
+	DeliverPending(context.Context) error
+}
+type CaptchaImageBroker interface {
+	RequestCaptchaImage(context.Context, storage.TelegramAuthAction) error
+}
+
+type Handler struct {
+	HandlerOptions
+	wake                          chan struct{}
+	deliveryMu                    sync.Mutex
+	deliveryRunning               bool
+	lastProgress                  time.Time
+	progressEpisode, progressText string
+	deliveryRetryAt               time.Time
+}
 
 func NewHandler(options HandlerOptions) (*Handler, error) {
 	if options.Store == nil || options.Client == nil || options.ChatID == 0 || options.UserID == 0 {
@@ -43,7 +52,7 @@ func NewHandler(options HandlerOptions) (*Handler, error) {
 		return nil, errors.New("TELEGRAM_PUBLIC_ORIGIN_INVALID")
 	}
 	options.PublicOrigin = strings.TrimRight(options.PublicOrigin, "/")
-	return &Handler{options}, nil
+	return &Handler{HandlerOptions: options, wake: make(chan struct{}, 1)}, nil
 }
 func (h *Handler) authorized(chat Chat, from *User) bool {
 	return chat.Type == "private" && chat.ID == h.ChatID && from != nil && from.ID == h.UserID && !from.IsBot
@@ -53,6 +62,9 @@ func unsafeMessage(m *Message) bool {
 	return m.EditDate != 0 || m.ForwardDate != 0 || present(m.ForwardOrigin) || present(m.ForwardFrom) || present(m.ForwardFromChat) || present(m.ViaBot) || present(m.SenderChat) || present(m.Photo) || present(m.Video) || present(m.Animation) || present(m.Audio) || present(m.Voice) || present(m.VideoNote) || present(m.Document) || present(m.Contact) || present(m.Sticker) || present(m.Location) || present(m.Venue) || present(m.Poll) || present(m.Dice) || present(m.Story) || present(m.PaidMedia) || present(m.Game) || present(m.Invoice) || present(m.SuccessfulPayment) || present(m.PassportData) || present(m.WebAppData)
 }
 func rejectedDisposition(err error) bool {
+	if errors.Is(err, storage.ErrRecoveryConsentRequired) {
+		return true
+	}
 	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, storage.ErrChallengeMismatch) || errors.Is(err, storage.ErrChallengeConsumed) || errors.Is(err, storage.ErrChallengeExpired) || errors.Is(err, storage.ErrRecoverySuperseded) || errors.Is(err, storage.ErrRecoveryCommitted) || errors.Is(err, storage.ErrRecoveryCooldown) || errors.Is(err, storage.ErrRecoveryBudgetExhausted) || errors.Is(err, storage.ErrAuthAttemptActive) || errors.Is(err, storage.ErrRecoveryRunInvalidState) || errors.Is(err, storage.ErrRecoveryNotReady)
 }
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
@@ -73,13 +85,14 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 		}
 		err := h.ReplyBroker.HandleReply(ctx, m.Chat.ID, m.ReplyTo.ID, m.ID, m.Text)
 		if err == nil || rejectedDisposition(err) || errors.Is(err, challenge.ErrInvalidResponse) || errors.Is(err, challenge.ErrOutcomeUnknown) {
+			h.wakeCoordinator()
 			return nil
 		}
 		return err
 	}
 	switch m.Text {
-	case "/start", "/help":
-		return h.say(ctx, "Bot riêng để khôi phục đăng nhập ACB. Chỉ trả lời CAPTCHA/OTP khi bot yêu cầu; không nhập OTP chuyển tiền. Telegram không mã hóa đầu cuối; xóa tin chỉ là cố gắng tốt nhất.\n/acb_status — trạng thái\n/acb_login — xác nhận đăng nhập\n/acb_retry — xác nhận thử lại\n/acb_pause — tạm dừng tự đăng nhập (không dừng theo dõi)\n/acb_resume — tiếp tục tự đăng nhập\n/acb_cancel — xác nhận hủy lần này\n/acb_manual — xác nhận chuyển sang trang quản trị")
+	case "/start", "/menu", "/help":
+		return h.menu(ctx, m.Text == "/help")
 	case "/acb_status":
 		return h.status(ctx)
 	case "/acb_pause":
@@ -92,10 +105,8 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 		return h.confirm(ctx, "RETRY")
 	case "/acb_cancel":
 		return h.confirm(ctx, "CANCEL")
-	case "/acb_manual":
-		return h.confirm(ctx, "MANUAL")
 	default:
-		return h.say(ctx, "Lệnh không hợp lệ. Gửi /help để xem hướng dẫn; trả lời trực tiếp tin yêu cầu khi nhập CAPTCHA hoặc OTP.")
+		return h.menu(ctx, true)
 	}
 }
 func (h *Handler) say(ctx context.Context, text string) error {
@@ -104,6 +115,9 @@ func (h *Handler) say(ctx context.Context, text string) error {
 }
 func (h *Handler) snapshot(ctx context.Context) (storage.Connection, storage.AuthRecoveryEpisode, error) {
 	c, err := h.Store.Connection(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storage.Connection{State: "UNCONFIGURED"}, storage.AuthRecoveryEpisode{}, nil
+	}
 	if err != nil {
 		return c, storage.AuthRecoveryEpisode{}, err
 	}
@@ -144,17 +158,19 @@ func (h *Handler) buttons(ctx context.Context, c storage.Connection, e storage.A
 func actionLabel(operation string) string {
 	switch operation {
 	case "LOGIN":
-		return "Xác nhận đăng nhập"
+		return "Đăng nhập"
 	case "RETRY":
-		return "Xác nhận thử lại"
+		return "Thử lại"
 	case "CANCEL":
-		return "Xác nhận hủy lần này"
-	case "MANUAL":
-		return "Xác nhận chuyển manual"
+		return "Hủy đăng nhập"
+	case "LOGOUT":
+		return "Xác nhận đăng xuất ACB"
+	case "UPDATE_CREDENTIALS":
+		return "Cấp link đổi thông tin"
 	case "PAUSE":
-		return "Tạm dừng"
+		return "Khóa đăng nhập"
 	case "RESUME":
-		return "Tiếp tục"
+		return "Mở khóa đăng nhập"
 	default:
 		return "Trạng thái"
 	}
@@ -170,15 +186,192 @@ func (h *Handler) sendButtons(ctx context.Context, c storage.Connection, e stora
 	}
 	for _, a := range actions {
 		if err := h.Store.DeliverTelegramAuthAction(ctx, a.ID, id); err != nil {
+			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
 			return id, err
 		}
 	}
 	return id, nil
 }
+
+func (h *Handler) Wake() {
+	select {
+	case h.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (h *Handler) wakeCoordinator() {
+	if h.CoordinatorWake != nil {
+		h.CoordinatorWake()
+	}
+	h.Wake()
+}
+
+func (h *Handler) menu(ctx context.Context, help bool) error {
+	c, e, err := h.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	text := "Quản lý phiên ACB. Đăng nhập chỉ bắt đầu sau khi bạn bấm nút Đăng nhập."
+	if help {
+		text += "\nBot xử lý các bước được ACB hỗ trợ; chỉ trả lời trực tiếp yêu cầu OTP đăng nhập từ app ACB, không nhập OTP chuyển tiền. Telegram không mã hóa đầu cuối; xóa tin chỉ là cố gắng tốt nhất. Đổi thông tin chỉ thay bản lưu hệ thống, không đổi mật khẩu tại ngân hàng."
+	}
+	return h.sendPanel(ctx, c, e, text)
+}
+
+func (h *Handler) sendPanel(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, text string) error {
+	return h.sendNoticePanel(ctx, c, e, text, nil)
+}
+
+func (h *Handler) sendNoticePanel(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, text string, deliveredID *int64) error {
+	keyboard := inlineKeyboard{Rows: [][]inlineButton{{{Text: "Trạng thái", Data: "nav:status"}}}}
+	var actions []storage.TelegramAuthAction
+	locked := false
+	if err := h.Store.CheckMutationAllowed(ctx); err != nil {
+		if !errors.Is(err, storage.ErrMutationGateLocked) {
+			return err
+		}
+		locked = true
+		text += "\nHệ thống đang bảo trì; thao tác thay đổi tạm khóa. Trạng thái và trợ giúp vẫn hoạt động."
+	}
+	configured := false
+	if c.ID != "" && c.State != "UNCONFIGURED" {
+		var err error
+		configured, err = h.Store.HasACBCredentials(ctx, c.ID)
+		if err != nil {
+			return err
+		}
+	}
+	if !configured {
+		text += "\nChưa khởi tạo — chạy setup/import trên VPS. Chưa đăng nhập ACB."
+	}
+	bot, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
+	if err != nil {
+		return err
+	}
+	active := false
+	if e.AttemptID != "" {
+		report, err := h.Store.ActiveAuthAttempts(ctx)
+		if err != nil {
+			return err
+		}
+		for _, attempt := range report.Attempts {
+			if attempt.ID == e.AttemptID {
+				active = true
+			}
+		}
+	}
+	login := inlineButton{Text: "Đăng nhập", Data: "nav:menu"}
+	operations := []string{}
+	if !locked && configured && !bot.Paused && !active && c.State != "MONITORING" {
+		operations = append(operations, "LOGIN")
+	}
+	if !locked && c.ID != "" {
+		if bot.Paused {
+			operations = append(operations, "RESUME")
+		} else {
+			operations = append(operations, "PAUSE")
+		}
+		if active {
+			operations = append(operations, "CANCEL")
+		}
+		if e.RecoveryRunID != "" && c.State == "MONITORING" {
+			run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
+			if err != nil {
+				return err
+			}
+			if run.Status == storage.RecoveryRunStatusFailed || run.Status == storage.RecoveryRunStatusCanceled {
+				operations = append(operations, "RETRY")
+			}
+		}
+	}
+	for _, operation := range operations {
+		buttons, created, err := h.buttons(ctx, c, e, []string{operation})
+		if errors.Is(err, storage.ErrMutationGateLocked) {
+			return h.sendNoticePanel(ctx, c, e, text, deliveredID)
+		}
+		if err != nil {
+			return err
+		}
+		actions = append(actions, created...)
+		button := buttons.Rows[0][0]
+		if operation == "LOGIN" {
+			login = button
+		} else {
+			if operation == "RETRY" {
+				button.Text = "Thử lại đồng bộ"
+			}
+			keyboard.Rows = append(keyboard.Rows, []inlineButton{button})
+		}
+	}
+	if !locked && active && e.AttemptID != "" {
+		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
+		if err == nil && ch.Kind == "CAPTCHA_TEXT" && (ch.Status == "PENDING" || ch.Status == "DELIVERING") {
+			expires, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
+			if parseErr == nil && time.Now().Before(expires) {
+				a, err := h.Store.CreateTelegramAuthAction(ctx, storage.TelegramAuthAction{BotID: h.Client.Readiness().BotID, ChatID: h.ChatID, UserID: h.UserID, EpisodeID: e.ID, ExpectedGeneration: e.Generation, AttemptID: e.AttemptID, BrowserRevision: ch.BrowserRevision, Action: "CAPTCHA_IMAGE"})
+				if err != nil {
+					return err
+				}
+				actions = append(actions, a)
+				keyboard.Rows = append(keyboard.Rows, []inlineButton{{Text: "Xem ảnh captcha", Data: "ar:" + a.ID}})
+			}
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	keyboard.Rows = append(keyboard.Rows,
+		[]inlineButton{login},
+		[]inlineButton{{Text: "Đổi thông tin đăng nhập", Data: "nav:credentials"}},
+		[]inlineButton{{Text: "Đăng xuất ACB", Data: "nav:logout"}},
+		[]inlineButton{{Text: "Trợ giúp", Data: "nav:help"}, {Text: "Menu", Data: "nav:menu"}},
+	)
+	id, err := h.Client.SendText(ctx, h.ChatID, text, keyboard)
+	if err != nil {
+		return err
+	}
+	for _, action := range actions {
+		if err := h.Store.DeliverTelegramAuthAction(ctx, action.ID, id); err != nil {
+			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
+			return err
+		}
+	}
+	if deliveredID != nil {
+		*deliveredID = id
+	}
+	return nil
+}
 func (h *Handler) confirm(ctx context.Context, operation string) error {
 	c, e, err := h.snapshot(ctx)
 	if err != nil {
 		return err
+	}
+	if c.ID == "" || c.State == "UNCONFIGURED" {
+		return h.menu(ctx, false)
+	}
+	if err := h.Store.CheckMutationAllowed(ctx); err != nil {
+		if errors.Is(err, storage.ErrMutationGateLocked) {
+			return h.menu(ctx, false)
+		}
+		return err
+	}
+	if operation == "LOGIN" || operation == "UPDATE_CREDENTIALS" {
+		configured, err := h.Store.HasACBCredentials(ctx, c.ID)
+		if err != nil {
+			return err
+		}
+		if !configured {
+			return h.menu(ctx, false)
+		}
+	}
+	if operation == "LOGIN" || operation == "RETRY" && c.State != "MONITORING" {
+		state, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
+		if err != nil {
+			return err
+		}
+		if state.Paused {
+			return h.menu(ctx, false)
+		}
 	}
 	if operation == "LOGIN" && c.State == "MONITORING" {
 		blocked, err := h.Store.HasBlockingAuthRecovery(ctx, c.ID, c.Generation)
@@ -215,7 +408,14 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 			}
 		}
 	}
-	_, err = h.sendButtons(ctx, c, e, fmt.Sprintf("%s? Kết nối %s, đợt %s. Nút xác nhận dùng một lần, hết hạn sau 60 giây.", actionLabel(operation), shortID(c.ID), shortID(e.ID)), []string{operation})
+	text := fmt.Sprintf("%s? Nút dùng một lần, hết hạn sau 60 giây.", actionLabel(operation))
+	if operation == "UPDATE_CREDENTIALS" {
+		text += " Link HTTPS có hạn 5 phút và yêu cầu đăng nhập chủ tài khoản. Chỉ thay thông tin lưu trên VPS, không đổi mật khẩu ngân hàng và không tự đăng nhập."
+	}
+	if operation == "LOGOUT" {
+		text += " Hệ thống sẽ xóa phiên trên VPS và thử thu hồi phiên tại ACB. Nếu ngân hàng không xác nhận, bot sẽ báo rõ; thông tin đăng nhập và giao dịch vẫn được giữ."
+	}
+	_, err = h.sendButtons(ctx, c, e, text, []string{operation})
 	return err
 }
 func (h *Handler) direct(ctx context.Context, operation string) error {
@@ -225,41 +425,68 @@ func (h *Handler) direct(ctx context.Context, operation string) error {
 	}
 	disposition, err := h.Store.ApplyTelegramAuthOperation(ctx, h.Client.Readiness().BotID, e.ID, c.Generation, operation)
 	if err != nil {
-		if rejectedDisposition(err) {
+		if rejectedDisposition(err) || errors.Is(err, storage.ErrMutationGateLocked) {
 			return h.say(ctx, operationFailure(err))
 		}
 		return err
 	}
-	return h.afterOperation(ctx, e, operation, disposition)
+	return h.afterOperation(ctx, disposition)
 }
 func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 	if q.Message == nil || q.InlineMessageID != "" || !h.authorized(q.Message.Chat, &q.From) || unsafeMessage(q.Message) {
 		return nil
 	}
-	// Answer even stale/unknown authorized callbacks to clear the spinner. This is
-	// best effort and independent of the durable command disposition.
-	defer func() { _ = h.Client.AnswerCallbackQuery(ctx, q.ID) }()
+	// Clear the spinner before storage or delivery work, with its own deadline.
+	ackCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	_ = h.Client.AnswerCallbackQuery(ackCtx, q.ID)
+	cancel()
+	switch q.Data {
+	case "nav:menu":
+		return h.menu(ctx, false)
+	case "nav:status":
+		return h.status(ctx)
+	case "nav:help":
+		return h.menu(ctx, true)
+	case "nav:credentials":
+		return h.confirm(ctx, "UPDATE_CREDENTIALS")
+	case "nav:logout":
+		return h.confirm(ctx, "LOGOUT")
+	}
 	if !strings.HasPrefix(q.Data, "ar:") || len(q.Data) != 25 {
-		return h.say(ctx, "Nút không hợp lệ hoặc đã hết hạn. Gửi lại lệnh để lấy nút mới.")
+		return h.menu(ctx, false)
 	}
 	a, disposition, err := h.Store.ConsumeTelegramAuthAction(ctx, strings.TrimPrefix(q.Data, "ar:"), h.Client.Readiness().BotID, h.ChatID, h.UserID, q.Message.ID, time.Now())
 	if err != nil {
-		if rejectedDisposition(err) {
+		if errors.Is(err, storage.ErrChallengeExpired) {
+			return h.menu(ctx, false)
+		}
+		if rejectedDisposition(err) || errors.Is(err, storage.ErrMutationGateLocked) {
 			return h.say(ctx, operationFailure(err))
 		}
 		return err
 	}
-	var e storage.AuthRecoveryEpisode
-	if a.EpisodeID != "" {
-		e, err = h.Store.AuthRecoveryEpisode(ctx, a.EpisodeID)
-		if err != nil {
+	if disposition == "CREDENTIAL_GRANT" {
+		_, err := h.Client.SendText(ctx, h.ChatID, "Link đổi thông tin đăng nhập có hạn 5 phút, yêu cầu đăng nhập chủ tài khoản. Nếu trình duyệt Telegram chưa đăng nhập Cloudflare Access, hãy mở bằng trình duyệt thường. Chỉ thay bản lưu trên VPS; chưa đăng nhập ACB.\n"+h.PublicOrigin+"/admin/acb-credentials#grant="+a.CredentialGrantToken, nil)
+		a.CredentialGrantToken = ""
+		return err
+	}
+	if disposition == "CAPTCHA_IMAGE" {
+		broker, ok := h.ReplyBroker.(CaptchaImageBroker)
+		if !ok {
+			return errors.New("TELEGRAM_CAPTCHA_BROKER_UNAVAILABLE")
+		}
+		if err := broker.RequestCaptchaImage(ctx, a); err != nil {
 			return err
 		}
+		h.Wake()
+		return nil
 	}
-	return h.afterOperation(ctx, e, a.Action, disposition)
+	return h.afterOperation(ctx, disposition)
 }
 func operationFailure(err error) string {
 	switch {
+	case errors.Is(err, storage.ErrMutationGateLocked):
+		return "Hệ thống đang bảo trì. Bạn vẫn có thể xem Trạng thái và Trợ giúp."
 	case errors.Is(err, storage.ErrRecoveryCommitted):
 		return "Không thể hủy bước bù hoặc thử lại dữ liệu cần sửa thủ công. Phiên và cổng chặn vẫn được giữ nguyên."
 	case errors.Is(err, storage.ErrRecoveryCooldown):
@@ -270,35 +497,23 @@ func operationFailure(err error) string {
 		return "Yêu cầu đã dùng, hết hạn hoặc trạng thái đã thay đổi. Gửi /acb_status rồi lấy nút xác nhận mới."
 	}
 }
-func (h *Handler) afterOperation(ctx context.Context, e storage.AuthRecoveryEpisode, operation, disposition string) error {
-	if (operation == "PAUSE" || operation == "CANCEL" || operation == "MANUAL") && e.AttemptID != "" && e.RecoveryRunID == "" && h.Browser != nil {
-		_ = h.Browser.Cancel(ctx, e.AttemptID)
-	}
+func (h *Handler) afterOperation(ctx context.Context, disposition string) error {
+	h.wakeCoordinator()
 	switch disposition {
+	case "LOGOUT_QUEUED":
+		return h.say(ctx, "Đã nhận yêu cầu đăng xuất. Phiên lưu đã bị chặn; bot đang chờ worker xóa trạng thái bộ nhớ và thử thu hồi phía ACB. Kết quả hai phía sẽ được báo riêng.")
 	case "STATUS":
 		return h.status(ctx)
 	case "CATCHUP_RETRY":
-		if h.Scheduler == nil {
-			return errors.New("TELEGRAM_RECOVERY_SCHEDULER_UNAVAILABLE")
-		}
-		run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
-		if err != nil {
-			return err
-		}
-		if err := h.Scheduler.ScheduleRecovery(ctx, e.ConnectionID, e.Generation, run.EventKey); err != nil {
-			return err
-		}
 		return h.say(ctx, "Đã yêu cầu thử lại bù giao dịch với phiên hiện tại; không đăng nhập hoặc yêu cầu OTP lại.")
 	case "ACTIVE":
 		return h.say(ctx, "Phiên đang hoạt động.")
 	case "REARMED":
-		return h.say(ctx, "Đã xác nhận đợt đăng nhập. Ngân sách mới đã được cấp; nếu đang tạm dừng hãy dùng /acb_resume.")
+		return h.say(ctx, "Đã nhận yêu cầu đăng nhập một lần. Bot sẽ xử lý và yêu cầu OTP từ app ACB khi cần.")
 	case "PAUSE":
-		return h.say(ctx, "Đã tạm dừng tự đăng nhập, yêu cầu đang chờ đã bị hủy. Theo dõi với phiên đã xác minh và bù giao dịch vẫn tiếp tục.")
+		return h.say(ctx, "Đã khóa đăng nhập và hủy yêu cầu đang chờ. Theo dõi với phiên đã xác minh và bù giao dịch vẫn tiếp tục.")
 	case "RESUMED":
-		return h.say(ctx, "Đã tiếp tục tự đăng nhập. Không đặt lại ngân sách hoặc trạng thái cần manual; dùng /acb_retry để xác nhận nếu cần.")
-	case "MANUAL":
-		return h.say(ctx, "Đã tạm dừng tự đăng nhập. Mở trang quản trị HTTPS để đăng nhập manual: "+h.PublicOrigin+"/admin")
+		return h.say(ctx, "Đã mở khóa đăng nhập. Chưa đăng nhập ACB; hãy bấm Đăng nhập khi cần.")
 	case "CANCEL":
 		return h.say(ctx, "Đã hủy lần này. Bot không tự tạo lại đợt đã hủy; dùng /acb_login hoặc /acb_retry để xác nhận đợt mới.")
 	default:
@@ -310,11 +525,11 @@ func (h *Handler) status(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	bot, err := h.Store.TelegramAuthState(ctx, h.Client.Readiness().BotID)
+	bot, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
 	if err != nil {
 		return err
 	}
-	text := fmt.Sprintf("Kết nối %s: %s.\nĐợt %s: %s. Số lần thử: %d (ngân sách hiện tại %d/3).\nTạm dừng tự đăng nhập: %t.", shortID(c.ID), connectionLabel(c.State), shortID(e.ID), episodeLabel(e.State), e.AttemptCount, e.AttemptCount-e.BudgetStartCount, bot.Paused)
+	text := fmt.Sprintf("Kết nối %s: %s.\nĐợt %s: %s. Số lần thử: %d.\nKhóa đăng nhập: %t.", shortID(c.ID), connectionLabel(c.State), shortID(e.ID), episodeLabel(e.State), e.AttemptCount, bot.Paused)
 	if e.AttemptID != "" {
 		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
 		if err == nil {
@@ -346,7 +561,7 @@ func (h *Handler) status(ctx context.Context) error {
 	if h.AIDegraded != nil && h.AIDegraded() != "" {
 		text += "\nAI CAPTCHA: suy giảm; dùng phản hồi người vận hành."
 	}
-	return h.say(ctx, text)
+	return h.sendPanel(ctx, c, e, text)
 }
 func connectionLabel(state string) string {
 	switch state {
@@ -415,7 +630,7 @@ func reasonLabel(reason string) string {
 	case "ACCOUNT_SELECTION_REQUIRED":
 		return "Không chọn được đúng tài khoản"
 	case "UNSUPPORTED_CHALLENGE":
-		return "Ngân hàng yêu cầu phương thức không hỗ trợ; mở ứng dụng hoặc đăng nhập manual"
+		return "Ngân hàng yêu cầu phương thức không hỗ trợ; xử lý trong ứng dụng ACB hoặc liên hệ ngân hàng"
 	case "MANUAL_ACTIVE":
 		return "Đang có phiên manual"
 	default:
@@ -423,14 +638,97 @@ func reasonLabel(reason string) string {
 	}
 }
 
-// DeliverNotices is at-least-once: a crash between send and persistence may
-// duplicate a notice, never a bank action. Retry times survive controller restart.
+// RunDelivery is the sole runtime sender for outbox, challenge and progress.
+// It never shares the coordinator's bank-operation mutex.
+func (h *Handler) RunDelivery(ctx context.Context) error {
+	h.deliveryMu.Lock()
+	if h.deliveryRunning {
+		h.deliveryMu.Unlock()
+		return errors.New("TELEGRAM_DELIVERY_ALREADY_RUNNING")
+	}
+	h.deliveryRunning = true
+	h.deliveryMu.Unlock()
+	defer func() { h.deliveryMu.Lock(); h.deliveryRunning = false; h.deliveryMu.Unlock() }()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	h.Wake()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		case <-h.wake:
+		}
+		if time.Now().Before(h.deliveryRetryAt) {
+			continue
+		}
+		err := h.deliverLogoutNotices(ctx)
+		if err == nil {
+			err = h.DeliverNotices(ctx)
+		}
+		if err == nil {
+			if broker, ok := h.ReplyBroker.(PendingDeliveryBroker); ok {
+				err = broker.DeliverPending(ctx)
+			}
+		}
+		if err == nil {
+			err = h.deliverProgress(ctx)
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			var transport *TransportError
+			if errors.As(err, &transport) {
+				if transport.Fatal {
+					return err
+				}
+				h.deliveryRetryAt = time.Now().Add(deliveryDelay(err))
+			}
+		}
+	}
+}
+
+func deliveryDelay(err error) time.Duration {
+	delay := 30 * time.Second
+	var transport *TransportError
+	if errors.As(err, &transport) && transport.RetryAfter > delay {
+		delay = transport.RetryAfter
+	}
+	return delay
+}
+
+func progressKind(kind string) bool {
+	switch kind {
+	case "STARTING", "AI_READING", "LOGIN", "WAITING_CAPTCHA", "WAITING_OTP", "VERIFYING", "CATCHING_UP":
+		return true
+	default:
+		return false
+	}
+}
+
+// Delivery is at-least-once. Coalescing records obsolete steps as delivered
+// without replaying their text or generating a bank operation.
 func (h *Handler) DeliverNotices(ctx context.Context) error {
 	notices, err := h.Store.PendingAuthRecoveryNotices(ctx)
 	if err != nil {
 		return err
 	}
+	c, current, err := h.snapshot(ctx)
+	if err != nil {
+		return err
+	}
 	for _, n := range notices {
+		e, err := h.Store.AuthRecoveryEpisode(ctx, n.EpisodeID)
+		if err != nil {
+			return err
+		}
+		if e.ID != current.ID || e.Generation != c.Generation || progressKind(n.Kind) || n.Kind != e.State && n.Kind != "CREDENTIALS_UPDATED" || n.Kind != "CREDENTIALS_UPDATED" && n.EventKey != fmt.Sprintf("%s:%s:%d", e.ID, n.Kind, e.AttemptCount) {
+			if err := h.Store.CoalesceAuthRecoveryNotice(ctx, n.ID); err != nil {
+				return err
+			}
+			continue
+		}
 		if n.NextAttemptAt != "" {
 			when, err := time.Parse(time.RFC3339Nano, n.NextAttemptAt)
 			if err != nil {
@@ -440,58 +738,105 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 				continue
 			}
 		}
-		e, err := h.Store.AuthRecoveryEpisode(ctx, n.EpisodeID)
-		if err != nil {
-			return err
-		}
-		c, err := h.Store.Connection(ctx)
-		if err != nil {
-			return err
-		}
 		text, err := h.noticeText(ctx, n, e)
 		if err != nil {
 			return err
 		}
-		// Never offer actions fenced to an old generation. The historical notice
-		// remains truthful but cannot affect a newer connection.
-		var messageID int64
-		if e.Generation == c.Generation && e.ConnectionID == c.ID {
-			messageID, err = h.sendButtons(ctx, c, e, text, noticeActions(n.Kind))
-		} else {
-			messageID, err = h.Client.SendText(ctx, h.ChatID, text, nil)
-		}
+		// Actionable notices use the same fence-aware operator menu. No nonce
+		// is created while maintenance locks mutations.
+		beforeID := int64(0)
+		err = h.sendNoticePanel(ctx, c, e, text, &beforeID)
 		if err != nil {
-			delay := 30 * time.Second
-			var transport *TransportError
-			if errors.As(err, &transport) && transport.RetryAfter > delay {
-				delay = transport.RetryAfter
-			}
-			if persistErr := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, 0, time.Now().Add(delay)); persistErr != nil {
+			if persistErr := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, 0, time.Now().Add(deliveryDelay(err))); persistErr != nil {
 				return persistErr
 			}
 			return err
 		}
-		if err := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, messageID, time.Time{}); err != nil {
+		if err := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, beforeID, time.Time{}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
-func noticeActions(kind string) []string {
-	switch kind {
-	case "DETECTED", "STARTING", "LOGIN", "WAITING_CAPTCHA", "WAITING_OTP":
-		return []string{"STATUS", "PAUSE", "CANCEL"}
-	case "WAIT_OPERATOR", "MANUAL_REQUIRED", "RETRY_WAIT", "MAINTENANCE_WAIT":
-		return []string{"RETRY", "STATUS", "MANUAL"}
-	default:
-		return []string{"STATUS"}
+
+func (h *Handler) deliverProgress(ctx context.Context) error {
+	if time.Since(h.lastProgress) < time.Second {
+		return nil
 	}
+	c, e, err := h.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if e.ID == "" {
+		return nil
+	}
+	text := ""
+	switch e.State {
+	case "STARTING":
+		text = "Đang mở ACB"
+	case "LOGIN":
+		text = "Đang xử lý bước đăng nhập ACB"
+		loginAt, loginErr := time.Parse(time.RFC3339Nano, e.LastLoginAt)
+		consentAt, consentErr := time.Parse(time.RFC3339Nano, e.ConsentConsumedAt)
+		if loginErr == nil && consentErr == nil && !loginAt.Before(consentAt) {
+			text = "Đang gửi thông tin đăng nhập"
+		} else if e.AIUsed > 0 {
+			text = "Đang đọc captcha bằng AI"
+		}
+	case "WAITING_CAPTCHA":
+		text = "Chờ CAPTCHA"
+	case "WAITING_OTP":
+		text = "Chờ OTP đăng nhập từ app ACB"
+		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
+		if err == nil {
+			text += " (hạn " + localExpiry(ch.ExpiresAt) + ")"
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	case "VERIFYING":
+		text = "Đang xác minh phiên"
+	case "CATCHING_UP":
+		text = "Đang bù giao dịch từ " + e.RequiredFrom + " đến " + e.RequiredTo
+	case "COMPLETED":
+		text = "Đã sẵn sàng"
+	default:
+		return nil
+	}
+	if h.progressEpisode == e.ID && h.progressText == text {
+		return nil
+	}
+	markup := inlineKeyboard{Rows: [][]inlineButton{{{Text: "Trạng thái", Data: "nav:status"}, {Text: "Menu", Data: "nav:menu"}}}}
+	h.lastProgress = time.Now()
+	if e.StatusMessageID > 0 {
+		err = h.Client.EditText(ctx, h.ChatID, e.StatusMessageID, text, markup)
+		if err != nil {
+			var transport *TransportError
+			if !errors.As(err, &transport) || transport.Code != "TELEGRAM_MESSAGE_UNEDITABLE" {
+				return err
+			}
+		} else {
+			h.progressEpisode, h.progressText = e.ID, text
+			return nil
+		}
+	}
+	id, err := h.Client.SendText(ctx, h.ChatID, text, markup)
+	if err != nil {
+		return err
+	}
+	if err := h.Store.SetAuthRecoveryStatusMessage(ctx, e.ID, c.Generation, id); err != nil {
+		_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
+		return err
+	}
+	h.progressEpisode, h.progressText = e.ID, text
+	return nil
 }
 func (h *Handler) noticeText(ctx context.Context, n storage.AuthRecoveryNotice, e storage.AuthRecoveryEpisode) (string, error) {
 	var text string
 	switch n.Kind {
 	case "DETECTED":
-		text = "ACB mất phiên. Đang tự đăng nhập lại. Bạn chỉ cần phản hồi khi bot yêu cầu CAPTCHA hoặc OTP."
+		text = "ACB mất phiên. Hệ thống chưa đăng nhập lại. Bấm Đăng nhập để bot tự xử lý; bạn chỉ cần lấy OTP trong app ACB khi được yêu cầu."
+	case "CREDENTIALS_UPDATED":
+		text = "Đã lưu thông tin đăng nhập. Chưa đăng nhập ACB. Bấm Đăng nhập khi bạn sẵn sàng."
 	case "AI_READING":
 		text = "Đang đọc CAPTCHA tự động."
 	case "CATCHING_UP", "VERIFYING":
@@ -500,7 +845,7 @@ func (h *Handler) noticeText(ctx context.Context, n storage.AuthRecoveryNotice, 
 			text = "Đang xác minh phiên đăng nhập; chưa khôi phục theo dõi realtime."
 		}
 	case "COMPLETED":
-		state, err := h.Store.TelegramAuthState(ctx, h.Client.Readiness().BotID)
+		state, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
 		if err != nil {
 			return "", err
 		}
@@ -517,4 +862,36 @@ func (h *Handler) noticeText(ctx context.Context, n storage.AuthRecoveryNotice, 
 		text = episodeLabel(n.Kind) + ". " + reasonLabel(e.ReasonCode) + "."
 	}
 	return fmt.Sprintf("%s\nKết nối %s; đợt %s; số lần thử %d.", text, shortID(e.ConnectionID), shortID(e.ID), e.AttemptCount), nil
+}
+func (h *Handler) deliverLogoutNotices(ctx context.Context) error {
+	jobs, err := h.Store.PendingACBLogoutNotices(ctx)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		local := "Đang chờ worker xóa trạng thái bộ nhớ; chưa xác nhận xóa phiên local hoàn tất."
+		if job.LocalClearedAt != "" {
+			local = "Đã xóa phiên lưu và trạng thái bộ nhớ của hệ thống trên VPS."
+		}
+		bank := "Chưa có kết quả thu hồi phiên phía ACB."
+		switch job.BankStatus {
+		case "CONFIRMED":
+			bank = "ACB đã xác nhận phiên trước bị thu hồi."
+		case "ALREADY_EXPIRED":
+			bank = "Phiên trước đã hết hạn tại ACB trước thao tác đăng xuất."
+		case "UNCONFIRMED":
+			bank = "Chưa xác nhận ACB thu hồi phiên. Nếu cần, kiểm tra hoặc đăng xuất trong app ACB."
+		case "IN_FLIGHT":
+			bank = "Đang thử thu hồi phiên phía ACB; chưa xác nhận thành công."
+		}
+		text := local + "\n" + bank + "\nHệ thống chưa đăng nhập lại. Mở khóa đăng nhập không tạo phiên mới."
+		messageID, err := h.Client.SendText(ctx, h.ChatID, text, inlineKeyboard{Rows: [][]inlineButton{{{Text: "Trạng thái", Data: "nav:status"}, {Text: "Menu", Data: "nav:menu"}}}})
+		if err != nil {
+			return err
+		}
+		if err := h.Store.FinishACBLogoutNotice(ctx, job.ID, messageID, job.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return nil
 }

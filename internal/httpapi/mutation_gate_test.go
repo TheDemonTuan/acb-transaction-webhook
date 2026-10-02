@@ -71,7 +71,6 @@ func TestMutationGate_GuardsAllGatewayWrites(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodPost, "/api/v1/connection/auth/start", `{}`},
 		{http.MethodPost, "/api/v1/connection/pause", `{}`},
 		{http.MethodPost, "/api/v1/webhooks", `{"name":"test","url":"https://example.com"}`},
 		{http.MethodPost, "/api/v1/payment-qr", `{"accountNumber":"123","accountName":"Test"}`},

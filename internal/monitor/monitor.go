@@ -66,6 +66,7 @@ type PaymentBoostStatus struct {
 type Monitor struct {
 	store           *storage.Store
 	client          BankClient
+	operationMu     sync.Mutex
 	pollMinInterval time.Duration
 	pollMaxInterval time.Duration
 	nextInterval    func(time.Duration, time.Duration) time.Duration
@@ -97,6 +98,22 @@ type Monitor struct {
 
 	pollWaitersMu sync.Mutex
 	pollWaiters   []chan error
+}
+
+func (m *Monitor) ClearSession(ctx context.Context, connectionID string, generation int64) error {
+	loader := m.SessionLoader()
+	if loader == nil {
+		return errors.New("ACB session loader is unavailable")
+	}
+	return loader.InvalidateSession(ctx, connectionID, generation)
+}
+
+func (m *Monitor) sessionRequest(ctx context.Context, connectionID string, generation int64, fn func() (acb.Response, error)) (acb.Response, error) {
+	mu := &m.operationMu
+	if shared, ok := m.client.(interface{ SessionOperationMutex() *sync.Mutex }); ok {
+		mu = shared.SessionOperationMutex()
+	}
+	return sessionOperation(ctx, m.store, m.SessionLoader(), mu, connectionID, generation, false, fn)
 }
 
 func (m *Monitor) WithEventNotifier(fn func([]storage.EventNotification)) *Monitor {

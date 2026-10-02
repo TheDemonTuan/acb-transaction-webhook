@@ -126,37 +126,6 @@ export const sendConnectionAction = async (action: 'pause' | 'resume' | 'sync'):
   });
 };
 
-export const startAuthSession = async (): Promise<{
-  attemptId: string;
-  status: string;
-  screenUrl: string;
-  expiresAt: string;
-}> => {
-  return api('/connection/auth/start', {
-    method: 'POST',
-  });
-};
-
-export const fetchCurrentAuthSession = async (): Promise<{
-  attempt: {
-    attemptId: string;
-    status: string;
-    screenUrl: string;
-    expiresAt: string;
-    browserUnavailable?: boolean;
-  } | null;
-}> => {
-  return api('/connection/auth/current');
-};
-
-export const cancelAuthSession = async (attemptId: string): Promise<void> => {
-  await api('/connection/auth/cancel', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ attemptId }),
-  });
-};
-
 export const fetchMonitorSettings = async (): Promise<any> => {
   return api('/monitor/settings');
 };
@@ -258,14 +227,6 @@ export const getDynamicPaymentQRURL = (amountVnd?: number): string => {
     return `/api/public/v1/payment-qr/image?amount=${amountVnd}`;
   }
   return '/api/public/v1/payment-qr/image';
-};
-
-export const checkAuthStatus = async (attemptId: string): Promise<{
-  status: string;
-  error?: string;
-  generation?: number;
-}> => {
-  return api(`/connection/auth/${attemptId}/status`);
 };
 
 export const createWebhookEndpoint = async (name: string, url: string): Promise<Endpoint> => {

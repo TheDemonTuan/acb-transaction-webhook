@@ -6,8 +6,6 @@ mkdir -p /tmp/.X11-unix /tmp/acb-browser
 
 xvfb_pid=""
 openbox_pid=""
-x11vnc_pid=""
-websockify_pid=""
 controller_pid=""
 pids=""
 
@@ -15,8 +13,6 @@ proc_name() {
   case "$1" in
     "$xvfb_pid") echo "Xvfb" ;;
     "$openbox_pid") echo "openbox-session" ;;
-    "$x11vnc_pid") echo "x11vnc" ;;
-    "$websockify_pid") echo "websockify" ;;
     "$controller_pid") echo "auth-browser" ;;
     *) echo "process-$1" ;;
   esac
@@ -65,25 +61,13 @@ openbox_pid=$!
 pids="$pids $openbox_pid"
 echo "[entrypoint] Started openbox-session (PID $openbox_pid)"
 
-echo "[entrypoint] Starting x11vnc on :99 (port 5900)..."
-x11vnc -display :99 -localhost -forever -shared -nopw -rfbport 5900 &
-x11vnc_pid=$!
-pids="$pids $x11vnc_pid"
-echo "[entrypoint] Started x11vnc (PID $x11vnc_pid)"
-
-echo "[entrypoint] Starting websockify (port 6080 -> 5900)..."
-websockify --web /usr/share/novnc 6080 localhost:5900 &
-websockify_pid=$!
-pids="$pids $websockify_pid"
-echo "[entrypoint] Started websockify (PID $websockify_pid)"
-
 echo "[entrypoint] Starting auth-browser controller..."
 /auth-browser &
 controller_pid=$!
 pids="$pids $controller_pid"
 echo "[entrypoint] Started auth-browser (PID $controller_pid)"
 
-echo "[entrypoint] All required processes running (Xvfb:$xvfb_pid, openbox-session:$openbox_pid, x11vnc:$x11vnc_pid, websockify:$websockify_pid, auth-browser:$controller_pid). Supervised loop active."
+echo "[entrypoint] All required processes running (Xvfb:$xvfb_pid, openbox-session:$openbox_pid, auth-browser:$controller_pid). Supervised loop active."
 
 while :; do
   for pid in $pids; do

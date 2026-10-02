@@ -451,8 +451,9 @@ function inspectRecovery(fixture) {
  const hash=text=>{let h=2166136261;for(const c of text){h=Math.imul(h^c.charCodeAt(0),16777619)}return h>>>0};
  const validation=[...form.querySelectorAll('[role="alert"],[aria-invalid="true"]')].map(e=>[id(e),hash(e.textContent||''),e.getAttribute('aria-invalid')]);
  result.fingerprint=JSON.stringify([n.document,location.origin,location.pathname,state,id(form),controls.map(e=>[id(e),e.name,e.type,e.maxLength,e.pattern]),id(result.submit),id(image),image?.getAttribute('src'),validation]);
- if(validation.length && state!=='CAPTCHA_REQUIRED'){result.state='UNKNOWN';result.reason='UNRECOGNIZED_REJECTION';return result;}
- result.state=state;result.reason='';return result;
+	const captchaCode=fixture && state==='LOGIN_FORM' && result.captcha && ['CAPTCHA_REJECTED','INVALID_CAPTCHA'].includes(document.body.dataset.recoveryCode) ? document.body.dataset.recoveryCode : '';
+	if(validation.length && state!=='CAPTCHA_REQUIRED' && !captchaCode){result.state='UNKNOWN';result.reason='UNRECOGNIZED_REJECTION';return result;}
+	result.state=state;result.reason=captchaCode;return result;
 }
 `
 

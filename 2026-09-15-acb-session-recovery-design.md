@@ -1,135 +1,176 @@
-# ACB Session Recovery Design
+# ACB Telegram Session Control Design
 
-> Updated 2026-10-02. This document supersedes the earlier human-only CAPTCHA / AI page-classifier design and the generation-scoped retry budget. The companion [operations and acceptance runbook](2026-09-15-acb-session-recovery.md) describes rollout. Production recovery remains disabled until the live DOM, credentials, private Telegram bot and controlled maintenance-window gates are satisfied; fixture results are not live ACB acceptance.
+> Updated 2026-10-03. This is the implemented architecture after the Telegram control cutover. The companion [operations and acceptance runbook](2026-09-15-acb-session-recovery.md) contains commands and observed verification. Supported automation starts only after authenticated one-use button consent; historical automatic-start/retry behavior is no longer the contract. Fixture success is not live bank/provider/Telegram/deployment acceptance.
 
-## Goal and boundaries
+## Goal, retained behavior and limits
 
-Recover an established ACB connection after durable `AUTH_REQUIRED` without requiring VPS/noVNC interaction in the supported normal flow: stored credentials → **9router CAPTCHA OCR first when enabled, private Telegram human fallback** → **human login OTP always** → worker session verification → encrypted persistence → worker-owned day-by-day catch-up → release automatic recovery gate → recovery notice. Existing admin/manual auth and noVNC remain the escape hatch.
+Manage ACB session status, login, stored username/password and logout through the authorized private Telegram operator. After one login button, recognized CAPTCHA/login/verification/catch-up steps are automatic; **login OTP from the ACB app remains human**. Username/password changes use a separate OWNER-protected HTTPS page, not chat. The tracked bank account is immutable after initial setup/import.
 
-- The controller does not perform bank HTTP verification or history scans, transfer money, generate/resend OTP, or bypass SafeKey/push/QR/biometric authentication.
-- AI is not a page classifier, browser agent or fallback for unknown DOM. It receives only a safe CAPTCHA crop, never credentials, account data, balances, transactions, OTP, cookies, DOM, browser storage or handoff.
-- Only confirmed upstream auth failure changes polling state; a login-like/CAPTCHA/OTP page that is inconclusive remains `AUTH_INCONCLUSIVE` rather than being treated as confirmed expiry.
-- Local session loss is also durable: `SESSION_MISSING` and `SESSION_INVALID` request recovery; `SESSION_DECRYPT_FAILED` requires manual intervention rather than masking a master-key problem. Unclassified DB/restorer/network errors do not change auth generation. Checkpoints, journal and the old envelope are preserved.
-- The watcher auto-starts only a connection with prior operational evidence (verified session/attempt, successful poll or completed recovery). A missing session row does not erase that evidence. Initial onboarding requires existing account configuration plus an operator-confirmed `/acb_login`, or manual auth.
+- No new login from session loss, prior operational history, startup, restart, cron, text commands, status requests or unlocking recovery. Session loss creates a warning and waits for a button.
+- No dashboard/manual bank login, browser iframe, screenshot screen proxy or VNC control remains. Unsupported SafeKey/push/QR/biometric/device binding must be resolved in the bank app or with bank support, not guessed by AI.
+- Controller does not verify bank sessions or scan history; worker remains the owner of those HTTP operations, scheduling, transaction deduplication, journal/checkpoints and catch-up completion. QR, tracking configuration, history and data sync remain outside login control.
+- AI receives only an established safe CAPTCHA crop, never credentials, OTP, cookies, DOM, account, balance, history or handoff. It is not a page classifier or autonomous browser agent.
+- Missing credentials allow the bot's degraded setup/import menu but not LOGIN or an empty-connection credential grant. Credential decrypt/DB failure is fail-closed, without password-file fallback.
+- Unknown outcomes are not retried as if they failed. A time/retry state can allow a fresh button, never grant a new unattended attempt.
 
-## Component ownership and topology
-
-```text
-worker: confirmed auth loss / local restore loss
-  -> SQLite AUTH_REQUIRED + durable episode
-  -> recovery-controller (singleton, durable reconciliation)
-  -> auth-browser (actual Chromium, same session across login and OTP)
-       CAPTCHA crop -> 9router once -> answer or Telegram fallback
-       OTP prompt  -> exact private Telegram operator
-  -> shared authsession.Finalizer
-       encrypted envelope -> worker RPC VerifySession
-       atomic session + recovery intent + automatic gate commit
-  -> worker scheduler: catch-up each required day
-  -> worker transaction: midnight extension or COMPLETED + gate release
-  -> controller: deliver recovery notice
-```
-
-| Component | Contract and responsibilities |
-| --- | --- |
-| `cmd/recovery-controller` / `internal/authrecovery` | Independent process using `storage.OpenRuntime`, not migrations or monitor/catch-up. `RunSingleton` holds `DATABASE_PATH + ".auth-recovery.lock"` before polling Telegram or starting a browser; another instance exits without consuming updates. Reconciles durable state every 5 seconds, observing active browser progress approximately every 1.5 seconds. Automatic DB owner is literal `system:acb-recovery`. |
-| `cmd/auth-browser/main.go` + `automation.go` | Production CDP/Chromium implementation, internal token middleware, session TTL and existing noVNC/manual functionality. The unused wrapper is not the automation control plane. |
-| `internal/challenge.Broker` | Durable prompt correlation, format/expiry/revision checks, atomic one-shot consume before browser action. Replies exist only in memory. |
-| `internal/telegramauth` | Bot API HTTPS long polling; configured private chat and exact user, Vietnamese plain-text UX, confirmations, notices and durable update offset. |
-| `internal/captchasolver.NineRouter` | `Solve(ctx, png) (string, error)`; one crop-only OCR request per attempt. Provider failure degrades AI and falls back to human input. |
-| `internal/authsession.Finalizer` | Shared manual/automatic handoff → generation-bound AAD encryption → worker `VerifySession` → `CompleteAuthSession` → best-effort browser completion / `ScheduleRecovery`. RPC receives encrypted session material, not the login password. |
-| Worker / `internal/monitor` | Sole owner of bank HTTP verifier, catch-up scheduler, transaction deduplication, checkpoints and gate release. Controller/Telegram failure never terminates the worker or gateway. |
-
-No DB transaction is held across browser, Telegram, AI or worker RPC I/O. The controller rechecks current connection, generation, configuration revision, attempt and expiry before side effects; browser revisions fence stale submissions. This prevents stale commits, but does not pretend cross-process I/O is an atomic DB transaction.
-
-## Durable metadata and fencing
-
-Migration `012_auth_recovery.sql` (`AuthRecoverySQL`, schema v12) adds `auth_recovery_episodes`, `auth_challenges`, `telegram_auth_state`, `telegram_auth_actions` and `auth_recovery_notices`. Timestamps follow RFC3339Nano UTC; Telegram IDs are signed 64-bit integers. These tables hold IDs, counters, state, expiry and message correlation only: no raw Telegram update JSON, challenge response, image/base64, password, OTP hash or handoff. Session material continues to use the existing encrypted session table.
-
-- At most **one open episode and one active auth attempt per connection**, not merely per generation. Manual and automatic attempts share transactional admission and the deployment mutation gate.
-- An episode has immutable trigger identity `(connection_id, trigger_generation)`, current generation/config revision, linked attempt/run, monotonically increasing `attempt_count`, `budget_start_count`, persisted retry/cooldown times and frozen required coverage range.
-- `EnsureAuthRecoveryEpisode`, `StartRecoveryAuthAttempt`, `FinishRecoveryAuthAttempt` and `TransitionAuthRecovery` fence durable state. Start/finish generation changes, automatic attempt expiry and catch-up auth loss update the same episode and invalidate old challenges **without resetting its budget**.
-- External config/generation change supersedes the old episode and invalidates old actions/prompts. Cancellation targets only its old attempt, never a newer/manual browser. Existing manual attempts are waited for, not stolen or canceled.
-- `CANCELLED` records the post-finish generation and suppresses automatic recreation. An operator confirmation rearms the same episode; it does not insert a duplicate trigger identity.
-
-Episode states (separate from the unchanged `auth_attempts` status vocabulary):
+## Components and flow
 
 ```text
-DETECTED -> STARTING -> LOGIN -> WAITING_CAPTCHA / WAITING_OTP
-  -> VERIFYING -> CATCHING_UP -> COMPLETED
+worker detects confirmed session loss
+  -> durable AUTH_REQUIRED + recovery episode/warning
+  -> private Telegram menu (read-only until consent)
+operator presses authenticated LOGIN/RETRY button
+  -> transactional one-use consent + admission
+  -> recovery-controller -> private auth-browser / Chromium
+       safe CAPTCHA crop -> configured AI or human prompt
+       login OTP -> current private ForceReply
+  -> authsession.Finalizer -> worker verification
+  -> encrypted session + durable catch-up intent + recovery gate
+  -> worker day-by-day coverage -> gate release -> ready notice
 
-Failure/wait: RETRY_WAIT, WAIT_OPERATOR, MAINTENANCE_WAIT, MANUAL_REQUIRED
-Terminal: COMPLETED, SUPERSEDED, CANCELLED
+Telegram credential confirmation -> hashed five-minute grant
+  -> HTTPS OWNER + CSRF + exact Origin -> encrypted revisioned save
+  -> no login until another Telegram LOGIN button
+
+Telegram logout confirmation -> durable generation fence + logout job
+  -> worker memory invalidation + one bank DOM revocation/probe
+  -> independent local acknowledgement and bank result -> durable notice
 ```
 
-`MANUAL_REQUIRED` remains open, so reconciliation cannot evade the circuit by creating another episode. `CATCHING_UP` is an episode state, not a new connection enum: the connection becomes `MONITORING` when the verified session commits, while the automatic recovery gate still suppresses polling.
-
-## Fixed budgets and failure policy
-
-Limits are constants, not environment knobs:
-
-| Limit | Scope |
+| Component | Ownership |
 | --- | --- |
-| 3 browser attempts | Per connection's outage episode budget: `attempt_count - budget_start_count`; restart and internal generation bumps do not reset it. |
-| 3 CAPTCHA submissions | Per browser attempt, **including an AI answer**. Rejection uses a fresh revision and human fallback; exhaustion goes to `WAIT_OPERATOR`, not an automatic new attempt to evade the cap. |
-| 1 OTP submission | Per browser attempt. Incorrect, expired, unanswered or unknown-outcome OTP goes to `WAIT_OPERATOR`; no resend/replay/login loop. |
-| 1 AI request / at most 1 AI answer submission | Per browser attempt. `ai_used` is committed before calling the provider. |
+| `cmd/recovery-controller`, `internal/authrecovery` | Independent singleton using `storage.OpenRuntime`, recovery reconciliation and serialized bank/browser operations; credentials read from encrypted DB only after consent. Five-second safety tick plus wake channel; active observation approximately every 1.5 seconds. |
+| `internal/telegramauth` | One authenticated private-chat long-poll consumer, menu/actions/grants, durable offsets, outbox and one separate notice/progress/challenge delivery loop. Callback acknowledgement precedes slow work. |
+| `internal/challenge.Broker` | Durable challenge creation and delivery, prompt/revision/expiry correlation and reserve-before-submit reply disposition. Answers/images stay in memory. |
+| `cmd/auth-browser`, `internal/authbrowser` | Token-protected Chromium/CDP login automation and revoke-only DOM operation. No publicly routed browser/CDP/control API. Chromium/display lifecycle remains; remote desktop is removed. |
+| `internal/captchasolver` | Exact configured vision model, bounded crop-only OCR and finite safe diagnostics. No provider/model auto-selection. |
+| `internal/authsession.Finalizer` | Generation-bound encrypted handoff, worker verification, atomic session/catch-up commit and idempotent cleanup/scheduling. Worker RPC receives encrypted session, not bank password. |
+| Worker / `internal/monitor` / `internal/acb` | Bank HTTP verification, monitoring, catch-up and history. Shared session-operation fences and memory clear prevent stale-session resurrection. |
+| `internal/storage`, `internal/httpapi` | Transactional consent/action/grant/save/logout admission and encrypted credential storage; private credential HTTP endpoints reuse OWNER/CSRF protections. |
+| Dashboard | Sanitized read-only recovery status plus existing tracking/QR/history/sync; distinct credential page outside AdminLayout in private admin routes. |
 
-Operator-confirmed retry/rearm sets `budget_start_count = attempt_count`, preserving the ordinal and notice identity. A minimum **60 seconds since the last login submission** survives restart. Browser attempt TTL is 15 minutes. CAPTCHA TTL defaults to 180 seconds (30–180 configurable), OTP to 120 seconds (30–120); both are bounded by browser and session expiry.
+No DB transaction spans browser, Telegram, AI or worker RPC I/O. Durable admission/reservation precedes external effects, and generation/revision/expiry checks prevent stale commits. This is not a claim that DB and network I/O are one atomic transaction.
 
-- Browser/network failure: retry after 30 seconds, then 120 seconds, with 0–20% jitter and the same episode cap.
-- Maintenance: wait 15 minutes, still within the same cap.
-- Proven credential rejection/account lock: `MANUAL_REQUIRED`; ambiguous rejection stays unknown rather than guessing a password or CAPTCHA failure.
-- Unknown page: at most 10 observations / 30 seconds, then manual. Unsupported challenge, unsafe crop or ambiguous/account-selection controls fail closed.
-- Bot unavailable: no new login submission without a usable operator channel. Pending challenges expire normally; Telegram network retries do not replenish or consume login budget.
-- Worker verification unavailable: remain `VERIFYING`, re-observe/retry approximately every 5 seconds within session TTL; never request fresh OTP merely because RPC is unavailable.
-- DB unavailable: no new side effect using cached generation; reconcile later.
+## Schema, consent and admission
 
-## Browser automation contract
+Migration **013** (`013_telegram_session_control.sql`, `TelegramSessionControlSQL`, checksum **`2026-10-02-v13-telegram-session-control`**) extends existing migration-012 recovery/action/challenge tables and adds encrypted credentials, credential grants, per-revision AI claims and logout jobs. Migration 012 and its checksum remain unchanged. IDs/timestamps/counters and safe state/reason metadata are persisted; raw updates, plaintext answers/crops/credentials and raw grant tokens are not.
 
-`internal/authbrowser.Client` exposes `Observe`, `CaptureCaptcha`, `SubmitLogin`, `SubmitCaptcha`, and `SubmitOTP`. Internal routes are `GET /sessions/{attemptID}/observation`, `GET /sessions/{attemptID}/captcha?revision=...` and `POST /sessions/{attemptID}/{login,captcha,otp}`. JSON action bodies are limited to 8 KiB; CAPTCHA PNG to 512 KiB. Observation/action/image/handoff responses use `Cache-Control: no-store`; responses never echo answers.
+One open episode and one active attempt per connection remain transactional invariants. `ConsumeTelegramAuthAction` validates bot/chat/user/message, action TTL/status, generation and configuration revision in the same transaction as its effect. LOGIN/RETRY for login sets `consent_action_id`, `consent_expires_at` (60 seconds) and unset `consent_consumed_at`; it also binds the consumed action to the selected/created episode in that transaction. Catch-up RETRY never grants login consent.
 
-An opaque revision describes a live form/challenge. It changes on navigation, form/image replacement, new validation or begun submission; ordinary observation does not rotate it. Browser actions serialize with observer/handoff work and consume the revision **before clicking**, so timeout is never a reason to replay a click or OTP. Wrong attempt, revision/state conflict, expiry and unsupported controls fail closed.
+`StartRecoveryAuthAttempt` requires the actual consumed action, correct episode/identity/revisions, unexpired and unused consent. It consumes that consent, snapshots the current credential revision and creates the new attempt/generation atomically. The action is checked against the pre-bump generation, not incorrectly required to match the newly created attempt generation. `RecordRecoveryLogin`, submission reservations and attempt checks validate the consumed consent; direct storage calls cannot bypass the gate or grant authority using a reason string such as `OPERATOR_CONFIRMED`.
 
-Visible, enabled, uniquely matching controls must share a checked same-origin form. No arbitrary controller-provided selector/JS and no wrong-origin iframe access. An initial CAPTCHA is captured **before** credentials are submitted: `SubmitLogin` fills credentials and CAPTCHA once. A separate later CAPTCHA uses `SubmitCaptcha`. Only proven authenticated signals plus a valid history form with the **exact `AccountNbr` from `ACB_ACCOUNT_FILE`** allow handoff; a masked/first account is insufficient.
+All action/grant/save/logout mutation transactions call `checkMutationAllowedTx` within that transaction, not only an earlier process-level check. Deployment/restore admission blocks new mutations while read-only menu/status work. External configuration/generation changes supersede old actions/challenges/grants. Coordinator does not start a browser, decrypt credentials or call AI before consent.
 
-CAPTCHA capture is the proven image/canvas node or its safe bounding rectangle only. There is **no full-page screenshot fallback**. Current structural selector fixtures are not evidence of current live ACB login/CAPTCHA/OTP compatibility. Before enabling production, use the account owner's existing manual/noVNC session to validate sanitized control type/name/id, labels, form action and error codes; do not save secret values, raw HTML, cookies or tokens. Unsupported SafeKey/push/QR/biometric/device binding requires the bank app/manual flow, not AI guessing.
+| Bound | Contract |
+| --- | --- |
+| Consent | One browser attempt per authenticated button; pending admission expires after 60 seconds. |
+| Browser attempt | TTL 15 minutes. |
+| Login cooldown | At least 60 seconds between login submissions, durable across restart. |
+| CAPTCHA | At most 3 submissions per attempt, including AI answers. |
+| AI | At most 3 calls per attempt, at most one call for each distinct browser CAPTCHA revision. |
+| OTP | At most 1 submission per attempt; 4–10 ASCII digits, at most 120 seconds or shorter browser expiry. |
 
-## Telegram authorization, replay and privacy
+Episode flow is `DETECTED -> STARTING -> LOGIN -> WAITING_CAPTCHA / WAITING_OTP -> VERIFYING -> CATCHING_UP -> COMPLETED`, with waiting states such as `WAIT_OPERATOR`, `RETRY_WAIT`, `MAINTENANCE_WAIT`, `MANUAL_REQUIRED` and terminal `SUPERSEDED`/`CANCELLED`. State names do not confer permission. Browser failure, maintenance, credentials/OTP rejection, timeout, challenge expiry, unsupported controls or uncertain submit outcome require fresh operator consent for any new attempt. Unlocking login does not grant that consent.
 
-Use a dedicated BotFather bot with one private operator chat, exact nonzero `TELEGRAM_CHAT_ID` / `TELEGRAM_USER_ID`, and no second `getUpdates` consumer. `/start` provides help, not enrollment or authorization. `getMe` / `getWebhookInfo` preflight refuses a configured webhook with `TELEGRAM_WEBHOOK_CONFLICT`; it never deletes a webhook automatically.
+Confirmed auth loss during polling/catch-up invalidates prior consent/challenges and warns the operator. Prior operational evidence distinguishes outage wording from onboarding only. Catch-up retry with a verified session resets the existing retryable run, not login/OTP.
 
-Long polling uses 30-second timeout / 40-second HTTP deadline, limit 100 and only `message` / `callback_query`. Persist `next_update_id` only after durable disposition, including rejected updates. 429 respects clamped 1–300-second `retry_after`; transient failures back off to 60 seconds with jitter. 401/403 stops bot transport without terminating bank worker/gateway.
+Migration cancels legacy unfinished unverified attempts and invalidates their actions/challenges, leaving them waiting for new consent. Healthy monitoring sessions and already committed verification/catch-up remain. Restart may observe/verify/continue committed work from an existing consented attempt; it cannot replay Start, credentials or OTP across an unknown outcome. Consumed input is never reset to pending merely because a process restarted.
 
-Authorization happens before reading reply/command content: exact private chat, exact non-bot user; reject forwarded, edited, via-bot and media/document/contact messages. Callback data is only `ar:<random-action-id>`, bound to the persisted originating message, user/chat, generation and 60-second TTL. One-shot command effects and action consumption commit together; authorized stale callbacks are answered to stop the spinner.
+## Telegram authorization and delivery
 
-Challenge delivery is `DELIVERING -> PENDING` only after the returned prompt message ID commits. Direct replies derive the challenge from that message ID, not an ID typed/quoted by the operator. Atomic `PENDING -> CONSUMING` checks generation, attempt, revision, chat, prompt, TTL and current state before submission. Trim edge whitespace, preserve leading zero OTP and CAPTCHA case. OTP is ASCII digits 4–10, CAPTCHA ASCII alphanumeric 1–16, further bounded by the browser form. Unknown action outcome invalidates the challenge; it is never reset to `PENDING` or replayed.
+`/start`, `/menu`, `/help` render the control panel. Runtime registers private-chat commands `menu`, `acb_status`, `help` after bot config checks; `--check-config` does not register commands. Login/retry/cancel text shortcuts create confirmation buttons rather than bank side effects. Pause/resume are labeled “Khóa đăng nhập” / “Mở khóa đăng nhập”; neither is bank logout or login consent.
 
-Prompts use in-memory multipart CAPTCHA photo / login-OTP text, `ForceReply` and `protect_content=true`, local Asia/Ho_Chi_Minh expiry, no parse-mode injection, and short IDs rather than username/account/balance. Deleting accepted answers and prompts is **best effort**. Telegram bot chats are **not end-to-end encrypted**; server and notification history may retain content. Dropping owned references/clearing buffers does not guarantee zeroization of Go strings, JSON or Chromium memory.
+Navigation callbacks `nav:menu`, `nav:status`, `nav:help`, `nav:credentials`, `nav:logout` require the same exact numeric private operator before dispatch. One-use bank/credential actions use random `ar:<id>` tokens bound to their originating message, bot/chat/user, generation/configuration and 60-second TTL. CAPTCHA-image actions additionally bind attempt/revision. Callback payloads contain no credentials, OTP, cookies or account. Wrong user/chat, group, forwarded/edited/inline or stale/duplicate input cannot create an attempt, grant or logout.
 
-Lifecycle notices are transactionally enqueued with keys `episodeID:event:attemptNumber`. Logical deduplication is durable, but Telegram sending is **at least once**: a crash between send and recording the message can duplicate a notice. No claim of exactly-once network notification or webhook delivery is made.
+Authorized callbacks are acknowledged immediately using a separate bounded two-second timeout before longer processing. Menu/status read DB without bank HTTP; callback response goals do not promise bank latency. Poll offsets advance only after durable disposition, including safe rejection. There is one long-poll consumer; an existing webhook is refused with `TELEGRAM_WEBHOOK_CONFLICT`, never deleted automatically.
 
-## 9router crop-only OCR
+Coordinator commits then calls `Wake()`; a separate single delivery loop handles notices/progress and `Broker.DeliverPending`, using a buffered wake plus one-second tick. Telegram I/O never holds the coordinator's bank-operation mutex. One episode progress message is CAS-bound by generation and edited at most once/second/chat, coalescing observed states. Prompt/terminal messages take priority; transport respects retry-after. `TELEGRAM_MESSAGE_NOT_MODIFIED` is a successful no-op; `TELEGRAM_MESSAGE_UNEDITABLE` permits a replacement. A timeout alone does not justify another status message. Failed CAS of a newly sent message causes best-effort deletion.
 
-`NINEROUTER_BASE_URL` is normalized to `/v1` exactly once; requests use `POST /v1/chat/completions`, the configured exact vision model, Bearer key from file, `stream:false`, fixed transcription instruction and PNG `image_url` data URI. No tools, browser instructions, page classification or model-selected fallback. Production requires HTTPS, or a deliberately controlled private Docker service hostname over HTTP. Userinfo/query/fragment and redirects are rejected.
+The session-loss notice explicitly says the system has **not logged in again** and offers LOGIN/status/credential changes. Credential rejection offers a credential link, not an automatic password retry. Stale outbox progress coalesces to current state instead of replaying obsolete steps after bot reconnection. Delivery is at least once: a crash between sending and DB acknowledgement can duplicate a notice, never duplicate its bank authorization.
 
-The solver validates PNG signature/dimensions/512-KiB maximum, uses a 12-second deadline and 16-KiB response limit, and accepts exactly one JSON object `{"text":"..."}` with a valid answer. Empty/refusal/prose/markdown/extra keys, non-2xx, timeout, quota or malformed output immediately use human fallback, with no second AI call that attempt. Bank-rejected AI answers also go to a fresh human challenge, not another AI call.
+## CAPTCHA/OTP safety and browser behavior
 
-`--check-config` checks `/v1/models/image-to-text` (404 fallback to `/v1/models`), exact configured model identity and a synthetic `AB12CD` image. This proves discovery/data-URI wire compatibility on that instance, **not real CAPTCHA accuracy**. Before bank crops leave the controller, verify payload logging/retention controls across 9router, proxy and upstream; `ENABLE_REQUEST_LOGS=false` alone is not a privacy guarantee. AI-disabled mode reads no AI key and retains the full human CAPTCHA + OTP path.
+Browser actions use opaque current revisions, serialized observation/action/handoff work, unique visible enabled controls, checked same-origin form/action and attempt expiry. Consuming a revision before clicking prevents replay after timeout. Initial CAPTCHA is solved before the single credential submit; later CAPTCHA uses the appropriate challenge operation. Handoff requires recognized authenticated/history signals and the exact immutable account, never the first/masked account.
 
-## Verification, catch-up and automatic-only gate
+`auth_recovery_ai_claims` has primary key `(attempt_id,browser_revision)`. `ClaimRecoveryAI` checks consent/fences and durably inserts the claim/increments `ai_used` before I/O. A→B→A cannot call AI for A again, and restart does not replenish the three-call budget. New attempts reset their own AI budget only after new consent. Re-submitting a credential form requires explicit `CAPTCHA_REJECTED`/`INVALID_CAPTCHA` plus fresh revision; image replacement alone leaves `LOGIN_OUTCOME_UNKNOWN`, not a guessed retry.
 
-`Finalizer.Complete(ctx, attempt)` is idempotent. A failed worker verification does not overwrite session/checkpoint or emit recovery success. Once committed, restart discovers the verified attempt and run event key without exporting another handoff or generating OTP; browser cleanup and scheduling are safely retryable.
+`Broker.Prompt` only validates and creates `DELIVERING`; it performs no Telegram send and retains no crop. `DeliverPending` re-observes revision/fence/TTL, captures a safe current crop in RAM when applicable, sends, then CAS-binds the returned prompt as `PENDING`. A failed CAS deletes the new prompt best effort. Unknown delivery outcome invalidates that challenge rather than adopting/replaying an unbound prompt; retry respects transport limits and original expiry. Startup invalidates unbound `DELIVERING`; valid bound `PENDING` can be revalidated.
 
-`CompleteAuthSession` atomically commits encrypted session, connection `MONITORING`, recovery run, automatic episode `CATCHING_UP`, and immutable required range. `HasBlockingAuthRecovery` fences realtime (including payment boost), keepalive, manual sync admission and queued history work before bank I/O. Catch-up and verifier may run; blocked history jobs requeue rather than fail. Failed/canceled catch-up and controller downtime retain the automatic gate. **Manual auth/payment QR boost behavior is unchanged**; this gate applies only to linked automatic episodes.
+`HandleReply` identifies the challenge solely through the exact reply-to prompt. Before submission it validates private identity, attempt/generation/revision/expiry and atomically reserves `CONSUMING`. OTP preserves leading zeroes; no transfer OTP is requested. Reply deletion occurs after durable rejection/invalidation/consumption. If browser observation fails before submission, persist invalidation before acknowledging that input; if DB disposition fails, retain offset/input for recovery. After reserve or an unknown submit, never replay plaintext.
 
-Automatic coverage begins at the earliest of today minus six days, valid checkpoint `coverage_to`, and episode creation local date (plus any already frozen required start), through today in Asia/Ho_Chi_Minh. Missing checkpoint uses available evidence; future/corrupt checkpoint produces `INVALID_CHECKPOINT`, manual intervention and a retained gate, not a reset. A ten-day outage is scanned day by day without the generic seven-day clamp, using existing per-day pagination, transient retries and semantic transaction deduplication. Manual/startup/onboarding semantics retain their existing seven-day range. Upstream inability to serve the required history is explicit `HISTORY_RANGE_UNAVAILABLE`, not false success.
+“Xem ảnh captcha” rechecks the current attempt/revision, captures only a safe image/canvas/bounded rectangle of at most 512 KiB and does not create another challenge or bank submission. If already processed, return that state. No OTP image or full-page fallback is permitted; `UNSAFE_CAPTCHA_CROP` fails closed. Images and answers are not persisted and are protected/deleted best effort. Telegram is not E2EE, and neither deletion nor dropping Go/Chromium references guarantees erasure or zeroization.
 
-Worker-owned `UpdateRecoveryRunProgress` completion checks durable day coverage. If midnight (or several stopped-worker days) extended the gap, the same transaction creates an extension run `attemptID:gap-tail:YYYY-MM-DD` from the day after the old required end through today and keeps the gate. It does not mutate the old immutable run. Only full coverage closes the episode `COMPLETED`, releases the gate and enqueues success, independently of Telegram availability. Retry of non-auth failed catch-up resets the same run/range/progress with the verified session; no new login/OTP. `INVALID_CHECKPOINT` cannot be bypassed by retry.
+## Authoritative encrypted credentials and HTTPS grants
 
-## Restart, deployment and acceptance
+`acb_credentials` stores connection ID, revision, AES-GCM envelope, key ID and timestamp. Plaintext `{"username":"…","password":"…","accountNumber":"…"}` is encrypted using `CredentialsAAD(connectionID,revision)`, literal `acb-credentials:<connectionID>:<revision>`, distinct from session AAD. Runtime reads with `ReadACBCredentials` and compares the admission snapshot revision before credential submit. No file fallback after missing row, DB error or decrypt failure; finite errors include `CREDENTIALS_NOT_CONFIGURED`, `CREDENTIALS_DECRYPT_FAILED`, `CREDENTIALS_REVISION_CONFLICT`.
 
-Persisted budget, pause, offset, cooldown, run and prompt metadata survive process restart. A still-valid `PENDING` prompt can remain usable; stale revision/TTL/browser invalidates it. `CONSUMING` after crash has no plaintext to replay: observe only, continue if OTP/authentication already advanced, otherwise wait for operator. SIGTERM stops new work without blindly finishing a live attempt; lock release follows shutdown.
+The local-only `recovery-controller --import-credentials` uses the existing singleton lock, master key/DB configuration and three readonly `/run/import` files. Import is insert-only and deployment-admitted, never bank I/O or polling. An existing record is not overwritten. A current decryptable session must match exact `Handoff.Fields["AccountNbr"]`; otherwise `CREDENTIAL_ACCOUNT_MISMATCH`. An unverified initial account is stored for later exact-account login verification, not announced as validated. Regular/no-symlink owner/mode checks are importer prerequisites, not runtime password dependencies.
 
-The controller shares the worker image (`WORKER_IMAGE_REF`, `/recovery-controller`) but remains an optional `auth-recovery` Compose-profile singleton, without a host port/Docker socket. `storage.OpenRuntime` never migrates; apply schema through the existing dbtool/deploy pipeline. Deploy acquires mutation admission before stopping controller; active login blocks deploy, rather than force-canceling the operator's OTP. Start controller after worker/browser health and release the gate before allowing new auth work. Rollback to legacy bundles must stop the new controller, not start a binary absent from old images.
+UPDATE_CREDENTIALS confirmation atomically consumes its Telegram action and creates one pending grant bound to bot/chat/user, connection generation/config revision and credential revision. The token is 32 cryptographically random bytes, base64url; DB keeps only its SHA-256 hash. TTL is five minutes; a new grant revokes the previous pending grant. Raw tokens are not stored in the outbox; a crash before link delivery requires a new confirmation/link.
 
-Internal localhost `8182/readyz` / `--readiness-check` measures local runtime/DB/schema/singleton/config initialization, not successful ACB login. Telegram/AI degradation is reported separately and must not fail all deployment services. `--check-config` is the separate credential/webhook/model preflight, with no runtime lock, polling, bank browser or bank CAPTCHA. See the runbook for exact flags, secret provisioning, release-context commands and the distinction between deterministic fixture proof and **not-yet-accomplished live acceptance**.
+Link creation uses configured `PUBLIC_ORIGIN + "/admin/acb-credentials#grant=" + token`, never request Host or query parameters, with link preview disabled. The private admin page sits outside AdminLayout, reads the fragment into RAM then clears history via `replaceState`; no local/session storage, query cache, third-party analytics or automatic clipboard copy. Credentials are not prefilled; account is masked and immutable. User-controlled password visibility is local UI only.
+
+| Endpoint | Required boundary and effect |
+| --- | --- |
+| `POST /api/v1/connection/credentials/grant` with `{"grant":"…"}` | OWNER + CSRF + exact Origin; validate hash/TTL/fences, bind first owner subject atomically, do not consume. Rate limit 10/minute/authenticated owner. Return only revision, masked username/account, expiry, canSave and safe blockedReason. |
+| `POST /api/v1/connection/credentials` with grant, expectedRevision, username, password, passwordConfirmation | Same owner/CSRF/Origin; strict JSON/body <=8 KiB, username trimmed <=256 bytes, password <=1024 bytes preserving spaces, equal confirmation, no empty/CR/LF/NUL. Account change is not an accepted field. |
+
+Save checks pending grant/owner/expiry and exact generation/config/credential revisions inside the mutation-gated transaction. `MONITORING`, `AUTH_STARTING`, active attempt/logout/catch-up means `ACB_SESSION_BUSY` (409) with no consumption/write. Link validation is not logout. Successful save encrypts revision+1, bumps config/generation, deletes obsolete persisted sessions, supersedes episodes/challenges/actions, consumes the grant/revokes others and creates a non-consented episode/notice. Return `{"saved":true,"revision":N+1,"requiresLogin":true}`; never validate the password at the bank or start login. Audit records actor/action/connection/revision/result, never secret/token/password hash. Connection ID/account/checkpoints/journal remain.
+
+Expired/invalid/replayed grant is 410; stale revision 409; invalid input 400; OWNER/CSRF errors use existing 401/403; DB/encryption failure is safe 503 with rollback. A timeout after commit does not trigger client auto-submit; the consumed grant prevents another write. Successful UI clears secret state and offers no web login button.
+
+Production protection requires final no-store/no-referrer/frame denial and strict same-origin CSP. `deploy/render-route.sh` emits exact credential path router priority 250, active frontend target, `tunnel-only` and self-contained `acb-credentials-security`; the generic middleware must not overwrite it. Nginx exact path serves SPA without losing headers to fallback redirect. Public viewer continues to deny admin/private API. Access OWNER policy and disabling Cloudflare Rocket Loader/analytics injection on that exact path need actual production verification; generated YAML and sandbox UI cannot prove the edge response. See runbook for the exact CSP and operator commands.
+
+## Logout: durable local fence, independent bank outcome
+
+LOGOUT confirmation consumes its action and creates `acb_logout_jobs` in the same mutation-gated transaction. It captures an encrypted session snapshot with the **session row's actual generation**, optionally the active browser attempt, bumps/fences connection generation, sets `AUTH_REQUIRED`/login paused, invalidates stale work/grants/prompts, cancels recovery/history jobs and deletes the persisted session. It retains credentials, transactions and checkpoints. Revoke decryption uses that stored session generation and supported legacy session AAD, not an assumption that session generation equals the pre-fence connection generation.
+
+Job state and independent evidence are durable: `local_cleared_at` and bank status `PENDING`, `IN_FLIGHT`, `CONFIRMED`, `ALREADY_EXPIRED`, `UNCONFIRMED`. Logout jobs precede recovery under the bank-operation mutex. LOGIN/save remain blocked while local invalidation is pending; bank revocation gets its opportunity before an active browser is cancelled.
+
+Private `POST /rpc/session/invalidate` receives only connection ID/fenced generation, validates current DB/logout fence and clears both monitor/verifier loaders. It is idempotent for the current fence and conflicts for stale input. `acb.Client.ClearSession` empties jar/bootstrap/history diagnostics and closes idle connections. Loader invalidation resets cache and client under one critical section; `SessionRestorer.ClearSession` is required, not an optional assertion.
+
+Every bank request, including bootstrap, keepalive, realtime, catch-up/history pagination and verifier, uses a pinned generation/state/logout check under the shared session-operation mutex. Invalidation takes that same mutex before loader/client clear (lock order operation → loader → client). Cache hits/RestoreEnvelope are guarded too. After local acknowledgement, no old request can start even if a task retains pagination fields. In-flight stale work cannot commit through the generation fence. Verifier checks context/fence in the actual scheduler task and cancels on caller timeout; queued old verification cannot restore cookies after logout.
+
+Worker invalidation has a bounded five-second attempt; bank revocation is not indefinitely delayed by an offline worker. Before the single bank call, commit `IN_FLIGHT`. Private browser `POST /session-revocations` uses the internal token, <=64 KiB body containing operation ID/attempt/handoff, bounded total timeout 60 seconds, and returns only safe status/reason.
+
+Revoke uses a matching active browser or a temporary isolated about:blank/CDP profile with validated official-domain cookies and allowlisted protected URL. It must not run login observers, read credentials, call Start, construct guessed bank operations or post history just to infer logout. Identify one visible unambiguous official-origin logout control and only an explicit logout-bound confirmation. Ambiguous/off-origin/unsupported control fails closed. Navigation and form/request guards prevent unrelated bank actions.
+
+First prove authentication at a read-only protected target and retain the current pre-logout authentication cookies in RAM. After the DOM logout click, probe that protected target in isolation with those **old cookies**, not a cleared post-click jar. Only proven rejection of the formerly authenticated session gives `CONFIRMED`. A clearly expired pre-probe gives `ALREADY_EXPIRED`. Unsupported controls, no safe protected target, no snapshot, unclear/network outcome or still-authenticated probe give `UNCONFIRMED`, never success from local deletion alone. Profiles/contexts and cookie references are discarded after the operation.
+
+| Local evidence | Bank evidence | Durable report |
+| --- | --- | --- |
+| Clear acknowledged | `CONFIRMED` / `ALREADY_EXPIRED` | `COMPLETED`, describing the bank result separately. |
+| Clear acknowledged | `UNCONFIRMED` | `LOCAL_ONLY`; bank revocation remains unestablished. |
+| Not acknowledged | Any result | `CLEARING` / local pending, report bank result but do not claim local completion. |
+
+Retry only local invalidation while worker is offline. Crash with bank `IN_FLIGHT` becomes `UNCONFIRMED` / `LOGOUT_OUTCOME_UNKNOWN`, never a repeated click. Snapshot is removed on bank outcome or five-minute revoke-window expiry; expiry before a bank attempt yields `REVOKE_WINDOW_EXPIRED`. No saved session does not prove bank expiry. Terminal notices use the one delivery loop outside bank lock.
+
+## AI contract and finite diagnostics
+
+NineRouter uses the configured exact vision model with strict crop PNG limits, no redirects and `POST /v1/chat/completions` multimodal data URI. HTTPS is required except explicitly controlled private Docker HTTP endpoints; userinfo/query/fragment are rejected. Accepted output is supported strict JSON `{"text":"…"}`, 1–16 ASCII alphanumeric, never a permissive Markdown/prose parser.
+
+Preflight discovery `/v1/models/image-to-text` falls back to `/v1/models` for 404/405 or unsupported schema/list without the exact model, not auth/rate-limit/timeout. Exact non-combo discovery must be followed by synthetic `AB12CD` OCR. Overall AI check deadline 45 seconds; discovery <=10 seconds/request, OCR <=25 seconds; runtime solve <=25 seconds with context/attempt limits. No blind retry, repeated tick preflight or automatic model fallback.
+
+`DiagnosticError` unwraps to unavailable and retains only safe stage/code/integer HTTP status. Stages: `MODEL_DISCOVERY`, `SYNTHETIC_OCR`, `CAPTCHA_OCR`. Finite codes: `DNS`, `TLS`, `TIMEOUT`, `CANCELLED`, `NETWORK`, `HTTP_AUTH`, `HTTP_NOT_FOUND`, `HTTP_RATE_LIMIT`, `HTTP_UPSTREAM`, `MODEL_NOT_FOUND`, `MODEL_COMBO_UNSUPPORTED`, `RESPONSE_TOO_LARGE`, `RESPONSE_SCHEMA`, `REFUSAL`, `OCR_MISMATCH`. No raw endpoint, key, provider body or output is retained/logged. The runbook maps every code to operator action.
+
+`--check-ai` loads AI configuration and runs synthetic vision without Telegram/DB/import/bank access. `--check-config` adds bot config/private-destination checks but never polls/registers commands/logs in. Neither validates ACB password. `setup-recovery.sh --configure-ai` stages candidate key/env, synthetic-preflights the candidate mount, then admission-promotes and force-recreates even key-only changes. On activation failure, restore both prior key/env and recreate prior admitted runtime; concurrent modifications are not overwritten. AI failure offers explicit repair, AI-off/human fallback or stop (default), never silent degradation. Provider privacy/retention needs owner validation before any bank crop leaves the controller.
+
+## Verification, catch-up and data continuity
+
+`Finalizer.Complete` is idempotent. Worker verification failure cannot overwrite the session/checkpoint or report success. Once verified commit exists, restart resumes durable intent rather than exporting a second handoff or requesting another OTP. Session encryption remains generation-bound; logout/save fences make stale finalizers unable to commit.
+
+Atomic session commit sets `MONITORING`, durable recovery run/required range and episode `CATCHING_UP`. The linked recovery gate blocks realtime/payment boost, keepalive, sync admission and queued history before bank I/O, allowing verification/catch-up. Controller/Telegram outage and failed/cancelled catch-up do not release it; unrelated QR/config/history behavior is retained.
+
+Required coverage starts at the earliest valid checkpoint coverage end, episode local date or today minus six days (including an already frozen required start), through today Asia/Ho_Chi_Minh. Long outages are scanned per day with existing pagination/retries/semantic dedup, not clipped to seven days. Existing startup/onboarding seven-day semantics remain. Corrupt/future checkpoint is `INVALID_CHECKPOINT`, requiring controlled correction, not reset; unavailable required bank range is `HISTORY_RANGE_UNAVAILABLE`, not false completion.
+
+Worker completion validates durable coverage and creates immutable gap-tail extension runs if midnight or stopped-worker time extended the range. Only full coverage closes the episode/releases the gate and queues readiness independently of Telegram. Non-auth retry preserves run/session/range/progress. Auth loss during catch-up invalidates old consent/challenges and requires a fresh login button.
+
+## Deployment and evidence boundaries
+
+Controller is an optional `auth-recovery` profile using the worker image, non-root/read-only, shared SQLite/WAL, private networks, no host port/Docker socket. Runtime and importer use the same `.auth-recovery.lock`; no second polling consumer is allowed. `storage.OpenRuntime` never migrates. Existing dbtool/pipeline admission applies schema 13/checksum, safely invalidates unverified legacy attempts and retains healthy monitoring/committed catch-up.
+
+Deployment admission precedes replacement/reconfiguration; active login blocks it rather than canceling an OTP. Import runs after admission release and before controller start, not by bypassing a locked mutation gate. Missing import files with absent credentials leave degraded menu. Readiness is local initialization, not external credential acceptance. Disable recovery through admitted flag-off and fix forward if needed; do not restart legacy auto-login code or restore an old DB to roll back this cutover. Preserve master/internal tokens, transaction history and healthy bank sessions.
+
+Current changed Go boundary suites and final scoped native Windows races passed; an earlier full `go test -count=1 ./...` passed, but the latest aggregate run failed unchanged `internal/realtimestream` `TestClientHeartbeatPreventsIdleTimeout` (stream idle timeout instead of caller deadline) and `internal/ttsclient` `TestClientSynthesizeStream` (zero FirstByteDuration). All affected/new packages passed. No final clean full-suite claim is made and these failures were not rerun to hide them. Actual Chromium login/revocation/health fixtures, credential desktop/mobile browser save, finite-diagnostic process fixture, frontend suite/build and route-render smoke are recorded with their exact scope in the runbook. The final Chromium run passed tightened logout-form guards, rejecting unrelated background POST and permitting the exact native logout form once. These do **not** establish live ACB DOM compatibility, provider privacy/real model acceptance, Telegram operator UX or actual production edge/deploy behavior.
+
+Linux Python/Docker deployment permission/admission/remount/rollback acceptance, final production HTTPS CSP/Access/Cloudflare injection settings, owner-operated private bot and real provider/bank flows still require access unavailable in this execution. No production secrets were inspected or healthy session disrupted. Previous 2026-10-02 harness outcomes describe the old implementation and are not relabeled as current end-to-end consent/menu/logout acceptance.

@@ -32,9 +32,6 @@ type Config struct {
 	MasterKeyFile            string
 	AuthBrowserInternalToken string
 	WorkerInternalToken      string
-	UsernameFile             string
-	PasswordFile             string
-	AccountFile              string
 	TelegramBotToken         string
 	TelegramChatID           int64
 	TelegramUserID           int64
@@ -60,9 +57,6 @@ func LoadConfig() (Config, error) {
 		DatabasePath:   envValue("DATABASE_PATH", "/data/gateway.db"),
 		AuthBrowserURL: envValue("AUTH_BROWSER_URL", "http://auth-browser:8181"),
 		WorkerRPCURL:   envValue("WORKER_RPC_URL", "http://worker:8190"),
-		UsernameFile:   envValue("ACB_USERNAME_FILE", "/run/secrets/acb_username"),
-		PasswordFile:   envValue("ACB_PASSWORD_FILE", "/run/secrets/acb_password"),
-		AccountFile:    envValue("ACB_ACCOUNT_FILE", "/run/secrets/acb_account"),
 		CaptchaTTL:     180 * time.Second,
 		OTPTTL:         120 * time.Second,
 	}
@@ -126,55 +120,42 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	for _, name := range []string{"ACB_USERNAME", "ACB_PASSWORD", "ACB_ACCOUNT"} {
-		if os.Getenv(name) != "" {
-			return Config{}, fmt.Errorf("%s_FILE is required; inline credentials are not supported by recovery", name)
-		}
-	}
-	if _, err := cfg.ReadCredentials(); err != nil {
-		return Config{}, err
-	}
 	if cfg.AICaptchaEnabled {
-		cfg.NineRouterBaseURL, err = validateURL("NINEROUTER_BASE_URL", strings.TrimSpace(os.Getenv("NINEROUTER_BASE_URL")), cfg.Production, false, true)
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.NineRouterCaptchaModel = strings.TrimSpace(os.Getenv("NINEROUTER_CAPTCHA_MODEL"))
-		if cfg.NineRouterCaptchaModel == "" || strings.ContainsAny(cfg.NineRouterCaptchaModel, "\r\n\x00") {
-			return Config{}, errors.New("NINEROUTER_CAPTCHA_MODEL is required and must be a single model ID")
-		}
-		cfg.NineRouterAPIKey, err = readToken("NINEROUTER_API_KEY", cfg.Production)
-		if err != nil {
+		if err := loadAIConfig(&cfg); err != nil {
 			return Config{}, err
 		}
 	}
 	return cfg, nil
 }
 
-// ReadCredentials reopens files for each attempt so secret rotation takes effect.
-// Password spaces are significant; only one terminal LF or CRLF is removed.
-func (c Config) ReadCredentials() (Credentials, error) {
-	if !c.Enabled {
-		return Credentials{}, ErrRecoveryDisabled
-	}
-	username, err := credentialFile(c.UsernameFile, "ACB_USERNAME_FILE", false)
+// LoadAIConfig reads only provider configuration; it never reads bank or bot secrets.
+func LoadAIConfig() (Config, error) {
+	cfg := Config{Production: strings.TrimSpace(os.Getenv("APP_ENV")) == "production"}
+	var err error
+	cfg.AICaptchaEnabled, err = strictFlag("AI_CAPTCHA_ENABLED")
 	if err != nil {
-		return Credentials{}, err
+		return Config{}, err
 	}
-	password, err := credentialFile(c.PasswordFile, "ACB_PASSWORD_FILE", true)
+	if !cfg.AICaptchaEnabled {
+		return Config{}, errors.New("AI_CAPTCHA_DISABLED")
+	}
+	if err := loadAIConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+func loadAIConfig(cfg *Config) error {
+	var err error
+	cfg.NineRouterBaseURL, err = validateURL("NINEROUTER_BASE_URL", strings.TrimSpace(os.Getenv("NINEROUTER_BASE_URL")), cfg.Production, false, true)
 	if err != nil {
-		return Credentials{}, err
+		return err
 	}
-	account, err := credentialFile(c.AccountFile, "ACB_ACCOUNT_FILE", false)
-	if err != nil {
-		return Credentials{}, err
+	cfg.NineRouterCaptchaModel = strings.TrimSpace(os.Getenv("NINEROUTER_CAPTCHA_MODEL"))
+	if cfg.NineRouterCaptchaModel == "" || strings.ContainsAny(cfg.NineRouterCaptchaModel, "\r\n\x00") {
+		return errors.New("NINEROUTER_CAPTCHA_MODEL is required and must be a single model ID")
 	}
-	for _, char := range account {
-		if char < '0' || char > '9' {
-			return Credentials{}, errors.New("ACB_ACCOUNT_FILE must contain the exact account number using ASCII digits")
-		}
-	}
-	return Credentials{Username: username, Password: password, AccountNumber: account}, nil
+	cfg.NineRouterAPIKey, err = readToken("NINEROUTER_API_KEY", cfg.Production)
+	return err
 }
 
 // RunSingleton admits the real coordinator only after acquiring its own lock.
@@ -199,25 +180,6 @@ func RunSingleton(ctx context.Context, cfg Config, run func(context.Context) err
 		return err
 	}
 	return run(ctx)
-}
-
-func credentialFile(path, name string, password bool) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("%s cannot be read", name)
-	}
-	defer clear(data)
-	text := string(data)
-	if password {
-		text = strings.TrimSuffix(text, "\n")
-		text = strings.TrimSuffix(text, "\r")
-	} else {
-		text = strings.TrimSpace(text)
-	}
-	if text == "" || strings.ContainsAny(text, "\r\n\x00") {
-		return "", fmt.Errorf("%s must contain a nonempty single-line credential", name)
-	}
-	return text, nil
 }
 
 func readToken(name string, production bool) (string, error) {
