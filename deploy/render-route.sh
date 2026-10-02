@@ -58,6 +58,12 @@ http:
       priority: 200
       middlewares: [tunnel-only, security-headers]
       service: acb-service
+    acb-credentials-router:
+      rule: "Host(\`${route_host}\`) && Path(\`/admin/acb-credentials\`)"
+      entryPoints: [web]
+      priority: 250
+      middlewares: [tunnel-only, acb-credentials-security]
+      service: acb-frontend-service
     acb-public-frontend-router:
       rule: "Host(\`${viewer_host}\`)"
       entryPoints: [web]
@@ -78,6 +84,14 @@ http:
       rule: "Host(\`frontend-deploy.acb.internal.invalid\`)"
       entryPoints: [slot-probe]
       service: acb-frontend-service
+  middlewares:
+    acb-credentials-security:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "no-store"
+          Referrer-Policy: "no-referrer"
+          X-Frame-Options: "DENY"
+          Content-Security-Policy: "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; script-src-attr 'none'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'"
   services:
     acb-frontend-service:
       loadBalancer:

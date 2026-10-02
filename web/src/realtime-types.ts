@@ -26,6 +26,7 @@ export type Status = {
 export type Connection = {
   configured: boolean;
   connection?: { id: string; state: string; accountMasked: string; generation: number; updatedAt: string };
+  authRecovery?: { state: string; reasonCode: string; updatedAt: string } | null;
 };
 
 export type BarkConfig = {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
@@ -202,7 +203,11 @@ func TestSessionVerifier_GATE04_StoreErrorProducesZeroACBCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	loader := NewSessionLoader(store, nil, nil)
+	keyring, err := security.NewKeyring(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := NewSessionLoader(store, keyring, client)
 	verifier := NewSessionVerifier(loader, client)
 
 	// Close database to force database error during RestoreEnvelope

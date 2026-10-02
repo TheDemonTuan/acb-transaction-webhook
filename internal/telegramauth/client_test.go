@@ -177,3 +177,32 @@ func TestTelegramLongPollAndDurableReject(t *testing.T) {
 		t.Fatal("transient bank failure advanced offset")
 	}
 }
+
+func TestTelegramEditOutcomeClassification(t *testing.T) {
+	for _, tc := range []struct{ description, want string }{
+		{"Bad Request: message is not modified", ""},
+		{"Bad Request: message can't be edited", "TELEGRAM_MESSAGE_UNEDITABLE"},
+		{"Bad Request: message to edit not found", "TELEGRAM_MESSAGE_UNEDITABLE"},
+		{"secret provider body with message can't be edited", "TELEGRAM_API_ERROR"},
+	} {
+		t.Run(tc.want+tc.description, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 400, "description": tc.description})
+			}))
+			defer api.Close()
+			client, err := NewClient("123:synthetic", ClientOptions{BaseURL: api.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.EditText(context.Background(), 123, 456, "progress", nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal("unchanged progress treated as failure")
+				}
+			} else if err == nil || err.Error() != tc.want {
+				t.Fatalf("unexpected safe edit outcome: %v", err)
+			}
+		})
+	}
+}

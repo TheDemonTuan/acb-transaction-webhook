@@ -106,7 +106,6 @@ func TestProductionGatewayRequiresTTSToken(t *testing.T) {
 	t.Setenv("CLOUDFLARE_ACCESS_AUD", "aud123")
 	t.Setenv("CLOUDFLARE_ACCESS_JWKS_URL", "https://test.cloudflareaccess.com/certs")
 	t.Setenv("RUNTIME_ROLE", "gateway")
-	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN", "auth-browser-token")
 	t.Setenv("WORKER_RPC_URL", "http://worker:8190")
 	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
 	t.Setenv("TTS_GATEWAY_URL", "http://tts-gateway:8081")
@@ -132,7 +131,6 @@ func TestProductionGatewayDoesNotRequireBarkCredentials(t *testing.T) {
 	t.Setenv("CLOUDFLARE_ACCESS_AUD", "aud123")
 	t.Setenv("CLOUDFLARE_ACCESS_JWKS_URL", "https://test.cloudflareaccess.com/certs")
 	t.Setenv("RUNTIME_ROLE", "gateway")
-	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN", "auth-browser-token")
 	t.Setenv("WORKER_RPC_URL", "http://worker:8190")
 	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
 	t.Setenv("TTS_INTERNAL_TOKEN", "mock-tts-token")
@@ -231,7 +229,6 @@ func setupBaseProductionEnv(t *testing.T) {
 	t.Setenv("CF_ACCESS_ISSUER", "https://test.cloudflareaccess.com")
 	t.Setenv("CF_ACCESS_AUDIENCE", "aud123")
 	t.Setenv("CF_ACCESS_JWKS_URL", "https://test.cloudflareaccess.com/certs")
-	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN", "auth-browser-token")
 	t.Setenv("TTS_INTERNAL_TOKEN", "mock-tts-token")
 }
 
@@ -288,6 +285,9 @@ func TestProductionGatewayRequiresWorkerRPCAndToken(t *testing.T) {
 
 	// 3. Both present -> succeeds
 	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
+	// Gateway probes browser health without loading its private controller secret.
+	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN", "")
+	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN_FILE", filepath.Join(t.TempDir(), "not-mounted"))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("expected valid gateway config to succeed, got %v", err)

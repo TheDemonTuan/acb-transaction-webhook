@@ -57,7 +57,7 @@ type Finalizer struct{ options Options }
 func NewFinalizer(options Options) *Finalizer { return &Finalizer{options: options} }
 
 // Complete verifies and commits a browser handoff. OwnerSubject must be the owner
-// used for the attempt lookup; HTTP authorization remains the caller's responsibility.
+// used for the attempt lookup; operator authorization remains the caller's responsibility.
 // Cleanup and scheduling are best-effort: the transaction persists recovery intent
 // before either side effect, and subsequent calls retry both without another handoff.
 func (f *Finalizer) Complete(ctx context.Context, attempt storage.AuthAttempt) (storage.Connection, error) {

@@ -25,13 +25,14 @@ const (
 var ErrAuthenticatedFormStateUnavailable = errors.New("ACB authenticated form state is unavailable")
 
 type Client struct {
-	baseURL         *url.URL
-	bootstrap       *url.URL
-	bootstrapFields map[string]string
-	http            *http.Client
-	mu              sync.Mutex
-	now             func() time.Time
-	location        *time.Location
+	baseURL            *url.URL
+	bootstrap          *url.URL
+	bootstrapFields    map[string]string
+	http               *http.Client
+	mu                 sync.Mutex
+	operationMu        sync.Mutex
+	now                func() time.Time
+	location           *time.Location
 	historyDiagnostics map[string]int
 }
 
@@ -113,6 +114,25 @@ func (c *Client) RestoreSession(handoff authbrowser.Handoff) error {
 		c.bootstrap = action
 		c.bootstrapFields = cloneFields(handoff.Fields)
 	}
+	return nil
+}
+
+// SessionOperationMutex serializes fenced operations across loaders sharing this client.
+func (c *Client) SessionOperationMutex() *sync.Mutex { return &c.operationMu }
+
+// ClearSession removes all authentication state after any in-flight request finishes.
+func (c *Client) ClearSession() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return err
+	}
+	c.http.Jar = jar
+	c.bootstrap = nil
+	c.bootstrapFields = nil
+	c.historyDiagnostics = nil
+	c.http.CloseIdleConnections()
 	return nil
 }
 
@@ -384,39 +404,39 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		} else {
 			replayFields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
 		}
-				if err != nil {
-					return probeResp, fmt.Errorf("prepare history replay after conversation resync: %w", err)
-				}
-				if c.bootstrapFields != nil && c.bootstrapFields["AccountNbr"] != "" && replayFields["AccountNbr"] == "" {
-					replayFields["AccountNbr"] = c.bootstrapFields["AccountNbr"]
-				}
-				replayFields["dse_nextEventName"] = "byDate"
-				replayFields["activeDatetimeYN"] = "N"
-				delete(replayFields, "activeDatetimeByMonth")
-				delete(replayFields, "MonthCurr")
-				delete(replayFields, "YearCurr")
-				replayVals := url.Values{}
-			for k, v := range replayFields {
-				replayVals.Set(k, v)
-			}
-			replayURL := c.bootstrap
-			if replayURL == nil {
-				replayURL = requestURL
-			}
-			replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
-			if err != nil {
-				return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
-			}
-			replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			replayResp, replayErr := c.do(replayReq)
-			if replayErr != nil {
-				return Response{}, replayErr
-			}
-			c.logHistoryContract("replay", replayFields, replayResp)
-			if isAuthChallengeKind(replayResp.Kind) {
-				return replayResp, &AuthFailure{Kind: replayResp.Kind, Reason: replayResp.ClassifierReason}
-			}
-			return replayResp, nil
+		if err != nil {
+			return probeResp, fmt.Errorf("prepare history replay after conversation resync: %w", err)
+		}
+		if c.bootstrapFields != nil && c.bootstrapFields["AccountNbr"] != "" && replayFields["AccountNbr"] == "" {
+			replayFields["AccountNbr"] = c.bootstrapFields["AccountNbr"]
+		}
+		replayFields["dse_nextEventName"] = "byDate"
+		replayFields["activeDatetimeYN"] = "N"
+		delete(replayFields, "activeDatetimeByMonth")
+		delete(replayFields, "MonthCurr")
+		delete(replayFields, "YearCurr")
+		replayVals := url.Values{}
+		for k, v := range replayFields {
+			replayVals.Set(k, v)
+		}
+		replayURL := c.bootstrap
+		if replayURL == nil {
+			replayURL = requestURL
+		}
+		replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
+		if err != nil {
+			return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
+		}
+		replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		replayResp, replayErr := c.do(replayReq)
+		if replayErr != nil {
+			return Response{}, replayErr
+		}
+		c.logHistoryContract("replay", replayFields, replayResp)
+		if isAuthChallengeKind(replayResp.Kind) {
+			return replayResp, &AuthFailure{Kind: replayResp.Kind, Reason: replayResp.ClassifierReason}
+		}
+		return replayResp, nil
 	}
 	return resp, nil
 }

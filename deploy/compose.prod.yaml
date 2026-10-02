@@ -94,9 +94,6 @@ services:
       AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
-      ACB_USERNAME_FILE: /run/secrets/acb_username
-      ACB_PASSWORD_FILE: /run/secrets/acb_password
-      ACB_ACCOUNT_FILE: /run/secrets/acb_account
       TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
       TZ: Asia/Ho_Chi_Minh
@@ -111,15 +108,13 @@ services:
       - app_master_key
       - worker_internal_token
       - auth_browser_internal_token
-      - acb_username
-      - acb_password
-      - acb_account
       - telegram_bot_token
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     stop_grace_period: 30s
     labels:
       - "platform.workload.class=singleton"
+      - "platform.auth-control.schema=13"
     healthcheck:
       test: ["CMD", "/recovery-controller", "--readiness-check"]
       interval: 10s
@@ -155,7 +150,6 @@ services:
     environment:
       APP_ENV: production
       PORT: 8181
-      NOVNC_PORT: 6080
       DISPLAY: :99
       SCREEN_WIDTH: 1280
       SCREEN_HEIGHT: 800
@@ -164,7 +158,6 @@ services:
       AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
     expose:
       - "8181"
-      - "6080"
     secrets:
       - auth_browser_internal_token
     networks:
@@ -391,8 +384,6 @@ services:
       WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
-      AUTH_BROWSER_VNC_URL: http://auth-browser:6080
-      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -409,7 +400,6 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
-      - auth_browser_internal_token
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -461,8 +451,6 @@ services:
       WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       AUTH_BROWSER_URL: http://auth-browser:8181
-      AUTH_BROWSER_VNC_URL: http://auth-browser:6080
-      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -479,7 +467,6 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
-      - auth_browser_internal_token
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -567,11 +554,5 @@ secrets:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/bark_basic_auth_user
   bark_basic_auth_password:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/bark_basic_auth_password
-  acb_username:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/acb_username
-  acb_password:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/acb_password
-  acb_account:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/acb_account
   telegram_bot_token:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/telegram_bot_token

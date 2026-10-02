@@ -10,19 +10,11 @@ const (
 	MaxAttempts           = 3
 	MaxCaptchaSubmissions = 3
 	MaxOTPSubmissions     = 1
-	MaxAIRequests         = 1
+	MaxAIRequests         = 3
 	BrowserAttemptTTL     = 15 * time.Minute
 	ReconcileInterval     = 5 * time.Second
 	LoginCooldown         = 60 * time.Second
 )
-
-// Credentials live only for an attempt and must never be logged or persisted.
-// AccountNumber is the exact account number, not a masked display value.
-type Credentials struct {
-	Username      string
-	Password      string
-	AccountNumber string
-}
 
 // SessionVerifier verifies an encrypted session envelope in the worker; it does
 // not receive the account's login password.

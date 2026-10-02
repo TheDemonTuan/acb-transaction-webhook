@@ -52,7 +52,7 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
 
-	if t.generation > 0 && (conn.ID != t.connectionID || conn.Generation != t.generation) {
+	if conn.ID != t.connectionID || conn.Generation != t.generation {
 		slog.Info("stale keepalive task discarded due to generation mismatch",
 			"task_gen", t.generation, "current_gen", conn.Generation)
 		t.finishDone(nil)
@@ -104,7 +104,9 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 	}
 
 	// Bootstrap page only to keep session alive and rotate cookies - NEVER calls History!
-	resp, err := t.m.client.Bootstrap(ctx)
+	resp, err := t.m.sessionRequest(ctx, conn.ID, conn.Generation, func() (acb.Response, error) {
+		return t.m.client.Bootstrap(ctx)
+	})
 	if err != nil {
 		var authFail *acb.AuthFailure
 		if errors.As(err, &authFail) {

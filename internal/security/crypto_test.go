@@ -195,3 +195,24 @@ func TestDecryptEnvelopeValidation(t *testing.T) {
 		t.Fatalf("expected ErrInvalidCiphertext, got: %v", err)
 	}
 }
+
+func TestCredentialsEncryptionBindsConnectionRevisionAndDomain(t *testing.T) {
+	t.Parallel()
+	keyring, err := NewKeyring(bytes.Repeat([]byte{0x61}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := keyring.Encrypt([]byte("synthetic credential"), CredentialsAAD("conn-a", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := keyring.Decrypt(envelope, CredentialsAAD("conn-a", 1))
+	if err != nil || string(plaintext) != "synthetic credential" {
+		t.Fatalf("credential round trip: %v", err)
+	}
+	for _, aad := range [][]byte{CredentialsAAD("conn-b", 1), CredentialsAAD("conn-a", 2), SessionAAD("conn-a", 1), LegacySessionAAD("conn-a")} {
+		if _, err := keyring.Decrypt(envelope, aad); !errors.Is(err, ErrAuthenticationFailed) {
+			t.Fatalf("credential AAD isolation: %v", err)
+		}
+	}
+}

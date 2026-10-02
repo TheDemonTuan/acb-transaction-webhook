@@ -51,19 +51,22 @@ type TelegramAuthAction struct {
 	BotID, ChatID, UserID, MessageID     int64
 	EpisodeID                            string
 	ExpectedGeneration                   int64
+	ExpectedConfigRevision               int64
+	AttemptID, BrowserRevision           string
 	Action, Status, ExpiresAt, CreatedAt string
+	CredentialGrantToken                 string `json:"-"`
 }
 
-const actionColumns = `id,bot_id,chat_id,user_id,COALESCE(message_id,0),COALESCE(episode_id,''),expected_generation,action,status,expires_at,created_at`
+const actionColumns = `id,bot_id,chat_id,user_id,COALESCE(message_id,0),COALESCE(episode_id,''),expected_generation,action,status,expires_at,created_at,expected_config_revision,COALESCE(attempt_id,''),COALESCE(browser_revision,'')`
 
 func scanAuthAction(row recoveryScanner) (TelegramAuthAction, error) {
 	var a TelegramAuthAction
-	err := row.Scan(&a.ID, &a.BotID, &a.ChatID, &a.UserID, &a.MessageID, &a.EpisodeID, &a.ExpectedGeneration, &a.Action, &a.Status, &a.ExpiresAt, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.BotID, &a.ChatID, &a.UserID, &a.MessageID, &a.EpisodeID, &a.ExpectedGeneration, &a.Action, &a.Status, &a.ExpiresAt, &a.CreatedAt, &a.ExpectedConfigRevision, &a.AttemptID, &a.BrowserRevision)
 	return a, err
 }
 func (s *Store) CreateTelegramAuthAction(ctx context.Context, a TelegramAuthAction) (TelegramAuthAction, error) {
 	switch a.Action {
-	case "LOGIN", "RETRY", "CANCEL", "MANUAL", "PAUSE", "RESUME", "STATUS":
+	case "LOGIN", "RETRY", "CANCEL", "PAUSE", "RESUME", "LOGOUT", "UPDATE_CREDENTIALS", "CAPTCHA_IMAGE":
 	default:
 		return a, ErrChallengeMismatch
 	}
@@ -80,6 +83,9 @@ func (s *Store) CreateTelegramAuthAction(ctx context.Context, a TelegramAuthActi
 	a.ExpiresAt = time.Now().UTC().Add(60 * time.Second).Format(time.RFC3339Nano)
 	a.MessageID = 0
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		if a.EpisodeID != "" {
 			e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, a.EpisodeID))
 			if err != nil {
@@ -89,14 +95,34 @@ func (s *Store) CreateTelegramAuthAction(ctx context.Context, a TelegramAuthActi
 				return ErrRecoverySuperseded
 			}
 		}
-		var generation int64
-		if err := tx.QueryRowContext(ctx, `SELECT generation FROM connections ORDER BY created_at LIMIT 1`).Scan(&generation); err != nil {
+		var generation, revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT generation,config_revision FROM connections ORDER BY created_at LIMIT 1`).Scan(&generation, &revision); err != nil {
 			return err
 		}
 		if generation != a.ExpectedGeneration {
 			return ErrRecoverySuperseded
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO telegram_auth_actions(id,bot_id,chat_id,user_id,episode_id,expected_generation,action,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?,'DELIVERING',?,?)`, a.ID, a.BotID, a.ChatID, a.UserID, a.EpisodeID, a.ExpectedGeneration, a.Action, a.ExpiresAt, a.CreatedAt)
+		a.ExpectedConfigRevision = revision
+		if a.Action == "CAPTCHA_IMAGE" {
+			e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, a.EpisodeID))
+			if err != nil {
+				return err
+			}
+			if e.AttemptID != a.AttemptID || a.BrowserRevision == "" {
+				return ErrChallengeMismatch
+			}
+			if err := checkRecoveryAttemptTx(ctx, tx, e); err != nil {
+				return err
+			}
+			var current bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_challenges WHERE episode_id=? AND attempt_id=? AND browser_revision=? AND kind='CAPTCHA_TEXT' AND status IN ('DELIVERING','PENDING'))`, e.ID, a.AttemptID, a.BrowserRevision).Scan(&current); err != nil {
+				return err
+			}
+			if !current {
+				return ErrChallengeMismatch
+			}
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO telegram_auth_actions(id,bot_id,chat_id,user_id,episode_id,expected_generation,expected_config_revision,attempt_id,browser_revision,action,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),?,'DELIVERING',?,?)`, a.ID, a.BotID, a.ChatID, a.UserID, a.EpisodeID, a.ExpectedGeneration, a.ExpectedConfigRevision, a.AttemptID, a.BrowserRevision, a.Action, a.ExpiresAt, a.CreatedAt)
 		return err
 	})
 	return a, err
@@ -188,10 +214,15 @@ func applyTelegramAuthOperationTx(ctx context.Context, tx *sql.Tx, botID int64, 
 	switch operation {
 	case "STATUS":
 		return "STATUS", nil
+	case "LOGOUT":
+		if err := createACBLogoutTx(ctx, tx, botID, connectionID, generation); err != nil {
+			return "", err
+		}
+		return "LOGOUT_QUEUED", nil
 	case "RESUME":
 		_, err = tx.ExecContext(ctx, `UPDATE telegram_auth_state SET paused=0,updated_at=? WHERE bot_id=?`, now(), botID)
 		return "RESUMED", err
-	case "PAUSE", "MANUAL", "CANCEL":
+	case "PAUSE", "CANCEL":
 		if operation == "CANCEL" && e.RecoveryRunID != "" && state == "MONITORING" {
 			return "", ErrRecoveryCommitted
 		}
@@ -241,6 +272,9 @@ func applyTelegramAuthOperationTx(ctx context.Context, tx *sql.Tx, botID int64, 
 		}
 		return operation, nil
 	case "LOGIN", "RETRY":
+		if err := checkNoACBLogoutTx(ctx, tx, connectionID); err != nil {
+			return "", err
+		}
 		if state == "MONITORING" {
 			if operation == "RETRY" && e.ID != "" && e.FinishedAt == "" {
 				return "CATCHUP_RETRY", retryRecoveryCatchupTx(ctx, tx, e)
@@ -270,6 +304,16 @@ func applyTelegramAuthOperationTx(ctx context.Context, tx *sql.Tx, botID int64, 
 		if challenge {
 			return "", ErrChallengeMismatch
 		}
+		if err := recoveryDeadline(e.NextAttemptAt); err != nil {
+			return "", err
+		}
+		var credentials bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acb_credentials WHERE connection_id=?)`, connectionID).Scan(&credentials); err != nil {
+			return "", err
+		}
+		if !credentials {
+			return "", ErrRecoveryNotReady
+		}
 		if err := rearmAuthRecoveryTx(ctx, tx, e); err != nil {
 			return "", err
 		}
@@ -286,6 +330,11 @@ func (s *Store) ApplyTelegramAuthOperation(ctx context.Context, botID int64, epi
 	}
 	var disposition string
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if operation != "STATUS" {
+			if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+				return err
+			}
+		}
 		var err error
 		disposition, err = applyTelegramAuthOperationTx(ctx, tx, botID, episodeID, generation, operation)
 		return err
@@ -296,6 +345,9 @@ func (s *Store) ConsumeTelegramAuthAction(ctx context.Context, actionID string, 
 	var a TelegramAuthAction
 	var disposition string
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		var err error
 		a, err = scanAuthAction(tx.QueryRowContext(ctx, `SELECT `+actionColumns+` FROM telegram_auth_actions WHERE id=?`, actionID))
 		if err != nil {
@@ -308,12 +360,54 @@ func (s *Store) ConsumeTelegramAuthAction(ctx context.Context, actionID string, 
 			return ErrChallengeMismatch
 		}
 		expiry, err := time.Parse(time.RFC3339Nano, a.ExpiresAt)
-		if err != nil || !at.Before(expiry) {
+		if err != nil || !at.Before(expiry) || !time.Now().Before(expiry) {
 			return ErrChallengeExpired
 		}
-		disposition, err = applyTelegramAuthOperationTx(ctx, tx, botID, a.EpisodeID, a.ExpectedGeneration, a.Action)
-		if err != nil {
+		var revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT config_revision FROM connections ORDER BY created_at LIMIT 1`).Scan(&revision); err != nil {
 			return err
+		}
+		if revision != a.ExpectedConfigRevision {
+			return ErrRecoverySuperseded
+		}
+		if a.Action == "CAPTCHA_IMAGE" {
+			e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, a.EpisodeID))
+			if err != nil {
+				return err
+			}
+			if e.Generation != a.ExpectedGeneration || e.AttemptID != a.AttemptID || a.BrowserRevision == "" {
+				return ErrChallengeMismatch
+			}
+			if err := checkRecoveryAttemptTx(ctx, tx, e); err != nil {
+				return err
+			}
+			disposition = "CAPTCHA_IMAGE"
+		} else if a.Action == "UPDATE_CREDENTIALS" {
+			a.CredentialGrantToken, err = mintACBCredentialGrantTx(ctx, tx, a)
+			if err != nil {
+				return err
+			}
+			disposition = "CREDENTIAL_GRANT"
+		} else {
+			disposition, err = applyTelegramAuthOperationTx(ctx, tx, botID, a.EpisodeID, a.ExpectedGeneration, a.Action)
+			if err != nil {
+				return err
+			}
+		}
+		if disposition == "REARMED" {
+			// LOGIN can originate from a menu created before an episode exists.
+			// Bind this exact consumed action to the selected episode before consent.
+			if a.EpisodeID == "" {
+				if err := tx.QueryRowContext(ctx, `SELECT id FROM auth_recovery_episodes WHERE generation=? AND config_revision=? AND finished_at IS NULL ORDER BY created_at DESC LIMIT 1`, a.ExpectedGeneration, a.ExpectedConfigRevision).Scan(&a.EpisodeID); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE telegram_auth_actions SET episode_id=? WHERE id=?`, a.EpisodeID, a.ID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET consent_action_id=?,consent_expires_at=?,consent_consumed_at=NULL WHERE id=?`, a.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano), a.EpisodeID); err != nil {
+				return err
+			}
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE telegram_auth_actions SET status='CONSUMED' WHERE id=?`, a.ID)
 		if err != nil {
@@ -322,6 +416,9 @@ func (s *Store) ConsumeTelegramAuthAction(ctx context.Context, actionID string, 
 		a.Status = "CONSUMED"
 		return nil
 	})
+	if err != nil {
+		a.CredentialGrantToken = ""
+	}
 	return a, disposition, err
 }
 
@@ -352,5 +449,43 @@ func (s *Store) FinishAuthRecoveryNotice(ctx context.Context, noticeID string, m
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE auth_recovery_notices SET next_attempt_at=? WHERE id=? AND status='PENDING'`, nextAttemptAt.UTC().Format(time.RFC3339Nano), noticeID)
+	return err
+}
+
+// ReadTelegramAuthState does not initialize a row: navigation remains read-only
+// during deployment maintenance, including the first operator visit.
+func (s *Store) ReadTelegramAuthState(ctx context.Context, botID int64) (TelegramAuthState, error) {
+	state := TelegramAuthState{BotID: botID}
+	err := s.db.QueryRowContext(ctx, `SELECT bot_id,next_update_id,paused,updated_at FROM telegram_auth_state WHERE bot_id=?`, botID).Scan(&state.BotID, &state.NextUpdateID, &state.Paused, &state.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state, nil
+	}
+	return state, err
+}
+
+func (s *Store) HasACBCredentials(ctx context.Context, connectionID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acb_credentials WHERE connection_id=?)`, connectionID).Scan(&exists)
+	return exists, err
+}
+
+// SetAuthRecoveryStatusMessage binds delivery metadata to the current fence.
+func (s *Store) SetAuthRecoveryStatusMessage(ctx context.Context, episodeID string, generation, messageID int64) error {
+	if messageID <= 0 {
+		return ErrChallengeMismatch
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE auth_recovery_episodes SET status_message_id=? WHERE id=? AND generation=? AND EXISTS(SELECT 1 FROM connections c WHERE c.id=auth_recovery_episodes.connection_id AND c.generation=?)`, messageID, episodeID, generation, generation)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err == nil && n != 1 {
+		return ErrRecoverySuperseded
+	}
+	return err
+}
+
+func (s *Store) CoalesceAuthRecoveryNotice(ctx context.Context, noticeID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE auth_recovery_notices SET status='SENT',sent_at=? WHERE id=? AND status='PENDING'`, now(), noticeID)
 	return err
 }

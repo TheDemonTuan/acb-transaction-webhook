@@ -12,13 +12,13 @@ export const ACB_STATUS_MAP: Record<string, StatusDescriptor> = {
     label: 'Chưa kết nối ngân hàng',
     badge: 'Chưa kết nối',
     tone: 'neutral',
-    description: 'Vui lòng cấu hình số tài khoản và đăng nhập ACB để bắt đầu nhận giao dịch.',
+    description: 'Chạy setup/import trên VPS để khởi tạo, sau đó dùng menu Telegram để đăng nhập ACB.',
   },
   AUTH_REQUIRED: {
     label: 'Cần đăng nhập lại ACB',
     badge: 'Cần xác thực',
     tone: 'warning',
-    description: 'Phiên đăng nhập ngân hàng đã hết hạn hoặc cần xác thực lại để tiếp tục nhận giao dịch.',
+    description: 'Phiên ACB cần xác thực lại. Mở menu Telegram và bấm Đăng nhập; hệ thống chưa tự đăng nhập lại.',
   },
   MONITORING: {
     label: 'Đang cập nhật giao dịch',

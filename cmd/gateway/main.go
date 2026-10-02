@@ -340,8 +340,6 @@ func main() {
 			WithNotificationTester(workerClient).
 			WithProviderReader(workerClient).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
-			WithPostAuthRecoveryRequester(workerClient).
-			WithAuthVerifier(workerClient).
 			WithWorkerProber(workerClient)
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
@@ -458,18 +456,8 @@ func main() {
 			WithWakeDispatcher(func(ctx context.Context) error {
 				dispatcher.Wake()
 				return nil
-			}).
-			WithPostAuthRecoveryRequester(monolithRecoveryRequester{store: store, monitor: bankMonitor})
+			})
 
-		if keyring != nil {
-			verifierClient, verifierErr := acb.NewClient("https://online.acb.com.vn", nil)
-			if verifierErr != nil {
-				logger.Error("create ACB session verifier client", "error", verifierErr)
-				os.Exit(1)
-			}
-			verifierLoader := monitor.NewSessionLoader(store, keyring, verifierClient)
-			server.WithAuthVerifier(monitor.NewSessionVerifier(verifierLoader, verifierClient, bankMonitor.Scheduler()))
-		}
 	}
 
 	primaryAddr := cfg.Address
@@ -524,25 +512,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-}
-
-type monolithRecoveryRequester struct {
-	store   *storage.Store
-	monitor *monitor.Monitor
-}
-
-func (m monolithRecoveryRequester) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
-	if m.store == nil || m.monitor == nil {
-		return errors.New("recovery monitor not initialized")
-	}
-	conn, err := m.store.Connection(ctx)
-	if err != nil {
-		return err
-	}
-	if conn.ID != connectionID || conn.Generation != generation || conn.State != "MONITORING" {
-		return fmt.Errorf("stale recovery request: connection is %s at generation %d in state %s", conn.ID, conn.Generation, conn.State)
-	}
-	return m.monitor.ScheduleRecovery(ctx, connectionID, generation, eventKey)
 }
 
 type monolithHistoryJobManager struct {

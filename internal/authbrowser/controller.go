@@ -12,7 +12,6 @@ const ACBLoginURL = "https://online.acb.com.vn/acbib/Request"
 type BrowserSession struct {
 	AttemptID string `json:"attemptId"`
 	Status    string `json:"status"`
-	ScreenURL string `json:"screenUrl"`
 	ExpiresAt string `json:"expiresAt"`
 }
 
@@ -53,7 +52,7 @@ func (c *Controller) Start(ctx context.Context, attemptID string) (BrowserSessio
 	}
 	c.active = attemptID
 	c.expires = c.now().Add(c.ttl)
-	return BrowserSession{AttemptID: attemptID, Status: "AWAITING_USER_LOGIN", ScreenURL: "/api/v1/connection/auth/" + attemptID + "/screen/", ExpiresAt: c.expires.UTC().Format(time.RFC3339)}, nil
+	return BrowserSession{AttemptID: attemptID, Status: "AWAITING_USER_LOGIN", ExpiresAt: c.expires.UTC().Format(time.RFC3339)}, nil
 }
 
 func (c *Controller) Cancel(attemptID string) error {

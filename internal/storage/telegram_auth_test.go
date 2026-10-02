@@ -27,6 +27,7 @@ func TestTelegramAuthActionDurableDisposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	consentRecovery(t, s, ctx, e)
 	attempt, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
 	if err != nil {
 		t.Fatal(err)

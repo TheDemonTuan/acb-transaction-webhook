@@ -84,6 +84,15 @@ func (t *CatchUpTask) CoalesceKey() string {
 	return fmt.Sprintf("CATCH_UP:%s:%d", t.connectionID, t.generation)
 }
 
+func (t *CatchUpTask) sessionRequest(ctx context.Context, fn func() (acb.Response, error)) (acb.Response, error) {
+	response, err := t.m.sessionRequest(ctx, t.connectionID, t.generation, fn)
+	if errors.Is(err, storage.ErrGenerationFenceMismatch) {
+		t.nextAction, t.nextFields, t.cursor, t.currentResp = "", nil, nil, acb.Response{}
+		t.dayTxns = nil
+	}
+	return response, err
+}
+
 func (t *CatchUpTask) ensurePoll(ctx context.Context) error {
 	if t.poll.ID != "" || t.m == nil || t.m.store == nil {
 		return nil
@@ -151,11 +160,13 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
 	}
 	if conn.State != "MONITORING" {
+		t.nextAction, t.nextFields, t.cursor, t.currentResp = "", nil, nil, acb.Response{}
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
 
-	if t.generation > 0 && (conn.ID != t.connectionID || conn.Generation != t.generation) {
+	if conn.ID != t.connectionID || conn.Generation != t.generation {
+		t.nextAction, t.nextFields, t.cursor, t.currentResp = "", nil, nil, acb.Response{}
 		slog.Info("stale catch-up task discarded due to generation mismatch",
 			"task_gen", t.generation, "current_gen", conn.Generation,
 			"reason", t.reason, "run_id", t.runID)
@@ -428,7 +439,9 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 				return scheduler.TaskStepResult{Done: true, Error: authErr, Outcome: scheduler.OutcomeAuth}, authErr
 			}
 		}
-		resp, err := t.m.client.Bootstrap(ctx)
+		resp, err := t.sessionRequest(ctx, func() (acb.Response, error) {
+			return t.m.client.Bootstrap(ctx)
+		})
 		if err != nil {
 			var authFail *acb.AuthFailure
 			if errors.As(err, &authFail) {
@@ -510,7 +523,9 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			return scheduler.TaskStepResult{Done: false, Error: err, Outcome: scheduler.OutcomeTransient}, err
 		}
 
-		histResp, histErr := t.m.client.History(ctx, t.nextAction, t.nextFields)
+		histResp, histErr := t.sessionRequest(ctx, func() (acb.Response, error) {
+			return t.m.client.History(ctx, t.nextAction, t.nextFields)
+		})
 		if histErr != nil {
 			var authFail *acb.AuthFailure
 			if errors.As(histErr, &authFail) {
@@ -523,7 +538,9 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 					t.dayPageCount = 0
 					t.dayTxns = nil
 					t.cursor = nil
-					bootResp, bootErr := t.m.client.Bootstrap(ctx)
+					bootResp, bootErr := t.sessionRequest(ctx, func() (acb.Response, error) {
+						return t.m.client.Bootstrap(ctx)
+					})
 					if bootErr != nil {
 						var bAuthFail *acb.AuthFailure
 						if errors.As(bootErr, &bAuthFail) {

@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Landmark,
   Save,
-  LogIn,
   RotateCcw,
   RefreshCw,
 } from 'lucide-react';
@@ -19,20 +18,7 @@ export const BankConnectionPage: React.FC = () => {
   const [accountInput, setAccountInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
-  const {
-    activeAttempt,
-    hasActiveAuth,
-    browserUnavailable,
-    startAuth,
-    cancelAuth,
-    sync,
-    reloadScreen,
-    screenKey,
-    isStartingAuth,
-    isCancelling,
-    isSyncing,
-    setGlobalNotice,
-  } = useBankConnection();
+  const { sync, isSyncing, setGlobalNotice } = useBankConnection();
 
   const { data: connData, isLoading, refetch } = useQuery({
     queryKey: queryKeys.connection,
@@ -93,7 +79,7 @@ export const BankConnectionPage: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-stone-900">Kết nối ACB</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Cấu hình tài khoản ngân hàng và phiên đăng nhập bảo mật
+            Trạng thái phiên ACB, lịch theo dõi và mã QR nhận tiền
           </p>
         </div>
         <button
@@ -134,7 +120,7 @@ export const BankConnectionPage: React.FC = () => {
               role="button"
               aria-label="Sync"
               onClick={() => sync().catch(() => {})}
-              disabled={!isMonitoring || hasActiveAuth || isSyncing}
+              disabled={!isMonitoring || isSyncing}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 transition shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <RotateCcw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
@@ -183,85 +169,42 @@ export const BankConnectionPage: React.FC = () => {
         </div>
       )}
 
-      {/* Login & Verification section */}
-      <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-2xs space-y-4">
-        <div>
-          <h3 className="font-bold text-stone-900 text-base">
-            Đăng nhập &amp; Xác thực ACB
-          </h3>
-          <p className="text-xs text-stone-500 mt-0.5">
-            Mở phiên trình duyệt tự động để đăng nhập ACB an toàn.
+      <section className="bg-white p-6 rounded-2xl border border-stone-200 shadow-2xs space-y-3">
+        <h3 className="font-bold text-stone-900 text-base">
+          Phiên ACB được quản lý qua Telegram
+        </h3>
+        <p className="text-sm text-stone-600 leading-relaxed">
+          Mở menu bot trong chat riêng để đăng nhập, hủy lượt đăng nhập, đổi thông tin đã lưu
+          hoặc đăng xuất ACB. Hệ thống chỉ bắt đầu đăng nhập khi bạn bấm nút Đăng nhập trong Telegram;
+          mã OTP đăng nhập được trả lời trực tiếp vào tin nhắn yêu cầu của bot.
+        </p>
+        {!connected && (
+          <p className="text-sm text-amber-800">
+            Chưa khởi tạo — chạy setup/import trên VPS để lưu thông tin đăng nhập và số tài khoản theo dõi.
           </p>
-        </div>
-
-        {!activeAttempt ? (
-          <div>
-            <button
-              type="button"
-              onClick={startAuth}
-              disabled={isStartingAuth}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition shadow-xs cursor-pointer disabled:opacity-50"
-            >
-              <LogIn className="w-4 h-4" />
-              <span>
-                {isStartingAuth ? 'Đang mở trình duyệt...' : 'Bắt đầu đăng nhập ACB'}
-              </span>
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-4 border border-stone-200 rounded-2xl p-4 bg-stone-50/50">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-medium">
-                {browserUnavailable ? (
-                  <>
-                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                    <span className="text-amber-700">
-                      Dịch vụ trình duyệt ACB tạm thời gián đoạn. Đang kết nối lại...
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <span className="text-emerald-700">
-                      Trình duyệt ACB đã sẵn sàng. Bạn có thể thao tác qua VNC bên dưới.
-                    </span>
-                  </>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={reloadScreen}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-stone-100 text-stone-700 hover:bg-stone-200 transition cursor-pointer inline-flex items-center gap-1.5"
-                  title="Tải lại kết nối màn hình VNC nếu bị ngắt kết nối"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Tải lại VNC</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelAuth}
-                  disabled={isCancelling}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-50 text-rose-700 hover:bg-rose-100 transition cursor-pointer"
-                >
-                  Hủy phiên đăng nhập
-                </button>
-              </div>
+        )}
+        {connData?.authRecovery && (
+          <dl className="text-xs text-stone-600 space-y-2">
+            <div className="flex flex-wrap gap-2">
+              <dt>Trạng thái xử lý:</dt>
+              <dd className="font-mono break-all">{connData.authRecovery.state}</dd>
             </div>
-
-            {activeAttempt.screenUrl && (
-              <div className="rounded-xl overflow-hidden border border-stone-200 bg-white aspect-video max-h-[500px] w-full">
-                <iframe
-                  key={screenKey}
-                  title="Đăng nhập ACB"
-                  src={activeAttempt.screenUrl}
-                  className="w-full h-full border-0"
-                />
+            {connData.authRecovery.reasonCode && (
+              <div className="flex flex-wrap gap-2">
+                <dt>Mã trạng thái:</dt>
+                <dd className="font-mono break-all">{connData.authRecovery.reasonCode}</dd>
               </div>
             )}
-          </div>
+            <div className="flex flex-wrap gap-2">
+              <dt>Cập nhật lúc:</dt>
+              <dd>{connData.authRecovery.updatedAt}</dd>
+            </div>
+          </dl>
         )}
-      </div>
+        <p className="text-xs text-stone-500">
+          Trang này chỉ hiển thị trạng thái và thiết lập theo dõi; không có màn hình đăng nhập ngân hàng.
+        </p>
+      </section>
 
       {/* Schedule Polling Settings */}
       <ScheduleSettingsSection />

@@ -6,7 +6,6 @@ import fcntl
 import getpass
 import json
 import os
-import pwd
 from pathlib import Path
 import re
 import secrets
@@ -22,6 +21,34 @@ import urllib.request
 
 class SetupError(Exception):
     pass
+
+
+AI_STAGES = {"MODEL_DISCOVERY", "SYNTHETIC_OCR", "CAPTCHA_OCR"}
+AI_CODES = {"DNS", "TLS", "TIMEOUT", "CANCELLED", "NETWORK", "HTTP_AUTH", "HTTP_NOT_FOUND",
+            "HTTP_RATE_LIMIT", "HTTP_UPSTREAM", "MODEL_NOT_FOUND", "MODEL_COMBO_UNSUPPORTED",
+            "RESPONSE_TOO_LARGE", "RESPONSE_SCHEMA", "REFUSAL", "OCR_MISMATCH"}
+
+
+class AIPreflightError(SetupError):
+    def __init__(self, stage, code, http_status):
+        self.stage, self.code, self.http_status = stage, code, http_status
+        super().__init__(f"AI_VISION_PREFLIGHT_UNAVAILABLE stage={stage} code={code} http_status={http_status}")
+
+
+def ai_diagnostic(stderr):
+    # Only JSON fields with the controller's finite diagnostic contract are trusted.
+    for line in (stderr or "").splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(record, dict) or record.get("reason") != "AI_VISION_PREFLIGHT_UNAVAILABLE":
+            continue
+        stage, code, status = record.get("stage"), record.get("code"), record.get("http_status", 0)
+        if (isinstance(stage, str) and stage in AI_STAGES and isinstance(code, str) and code in AI_CODES
+                and type(status) is int and (status == 0 or 100 <= status <= 599)):
+            return AIPreflightError(stage, code, status)
+    return None
 
 
 def read_env(path):
@@ -187,13 +214,20 @@ def valid_setup_reply(message, user_id, prompt_id, code):
 
 
 class Setup:
-    def __init__(self, root, runner=None, ask=input, secret=getpass.getpass, telegram=Telegram):
+    def __init__(self, root, runner=None, ask=input, secret=getpass.getpass, telegram=Telegram, configure_ai=False, import_credentials=False):
         self.root = Path(root).resolve()
         self.runner = runner or self.run
         self.ask, self.secret, self.telegram = ask, secret, telegram
         self.env = self.root / "deploy/.env.production"
         self.secret_dir = self.root / "deploy/secrets"
         self.secrets_seen = []
+        self.configure_ai = configure_ai
+        self.import_credentials = import_credentials
+        self.stage = None
+        self.ai_key_path = self.secret_dir / "ninerouter_api_key"
+        self.old_ai_key = None
+        self.candidate_ai_key = None
+        self.key_snapshot_taken = False
 
     def sanitize(self, text):
         if not text:
@@ -256,20 +290,26 @@ class Setup:
             raise SetupError("Chưa có release đã commit hợp lệ trên VPS.")
         self.release = self.root / "releases" / self.sha
         for name in ("runtime.env", "images.env", "SHA256SUMS", "setup-recovery.sh", "setup-recovery.py",
-                     "simple-lib.sh", "deploy.sh", "compose.prod.yaml", "compose.auth-recovery-ai.yaml"):
+                     "simple-lib.sh", "deploy.sh", "healthcheck.sh", "compose.prod.yaml", "compose.auth-recovery-ai.yaml"):
             if not (self.release / name).is_file():
                 raise SetupError("Release thiếu " + name + "; chờ pipeline deploy bản mới.")
         self.checked(["sha256sum", "-c", "SHA256SUMS"], "Checksum release", cwd=self.release)
         self.checked(["docker", "info"], "Docker daemon")
         self.original, self.values = read_env(self.env)
-        if self.values.get("AUTH_RECOVERY_ENABLED", "false") == "true":
+        enabled = self.values.get("AUTH_RECOVERY_ENABLED", "false") == "true"
+        if enabled and not self.configure_ai and not self.import_credentials:
             self.checked(["docker", "exec", "acb-recovery-controller", "/recovery-controller", "--readiness-check"],
                          "Recovery đã cấu hình; readiness")
-            print("Recovery đã bật. Không thay secrets/config, không poll cạnh tranh. Dùng /acb_status trên Telegram.")
+            print("Recovery đã bật. Dùng /menu; sửa AI bằng --configure-ai, migrate bằng --import-credentials.")
             return False
-        inspect = self.runner(["docker", "inspect", "-f", "{{.State.Running}}", "acb-recovery-controller"])
-        if inspect.returncode == 0 and inspect.stdout.strip() == "true":
-            raise SetupError("Controller đang chạy dù flag tắt; cần reconcile deploy trước, không dừng OTP bằng setup.")
+        if self.configure_ai and not enabled:
+            raise SetupError("--configure-ai yêu cầu recovery đã bật; chạy setup ban đầu để cấu hình Telegram.")
+        if self.import_credentials and not enabled:
+            raise SetupError("--import-credentials yêu cầu recovery đã bật; chạy setup ban đầu nếu chưa cấu hình Telegram.")
+        if not enabled:
+            inspect = self.runner(["docker", "inspect", "-f", "{{.State.Running}}", "acb-recovery-controller"])
+            if inspect.returncode == 0 and inspect.stdout.strip() == "true":
+                raise SetupError("Controller đang chạy dù flag tắt; cần reconcile deploy trước, không dừng OTP bằng setup.")
         for name in ("app_master_key", "worker_internal_token", "auth_browser_internal_token"):
             if not (self.secret_dir / name).is_file():
                 raise SetupError("Thiếu secret vận hành " + name + "; không tự sinh/đổi token hoặc master key.")
@@ -277,128 +317,303 @@ class Setup:
         # Existing service image and migrations must already be installed by CI.
         _, runtime = read_env(self.release / "runtime.env")
         self.checked(["docker", "image", "inspect", runtime["WORKER_IMAGE_REF"]], "Worker image của release")
+        self.checked(["bash", "-c", 'source "$1/simple-lib.sh"; validate_recovery_controller_bundle "$1"',
+                      "setup", str(self.release)], "Admission controller Telegram v13")
         schema = self.checked(["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "1000:1000",
                                "-v", "bank-event-gateway_gateway_data:/data:ro", runtime["DBTOOL_IMAGE_REF"],
-                               "-path", "/data/gateway.db", "-readonly", "-schema-version"], "Schema recovery")
+                               "-path", "/data/gateway.db", "-readonly", "-schema-compat", "-min-version", "13"], "Schema recovery")
         try:
-            if json.loads(schema).get("version", 0) < 12:
-                raise SetupError("Cần migration v12 qua pipeline deploy trước setup.")
+            report = json.loads(schema)
+            if report.get("compatible") is not True or report.get("schemaVersion", 0) < 13:
+                raise SetupError("Cần migration v13/checksum hợp lệ qua pipeline deploy trước setup.")
         except (ValueError, TypeError):
             raise SetupError("Không đọc được schema report.") from None
         return True
 
+    def ai_settings(self, changes):
+        base = self.ask("9router base URL [/v1] [" + changes.get("NINEROUTER_BASE_URL", self.values.get("NINEROUTER_BASE_URL", "")) + "]: ").strip()
+        model = self.ask("Exact vision model ID [" + changes.get("NINEROUTER_CAPTCHA_MODEL", self.values.get("NINEROUTER_CAPTCHA_MODEL", "")) + "]: ").strip()
+        base = base or changes.get("NINEROUTER_BASE_URL", self.values.get("NINEROUTER_BASE_URL", ""))
+        model = model or changes.get("NINEROUTER_CAPTCHA_MODEL", self.values.get("NINEROUTER_CAPTCHA_MODEL", ""))
+        if not self.key_snapshot_taken:
+            if self.ai_key_path.exists() or self.ai_key_path.is_symlink():
+                secure_existing(self.ai_key_path, 0o600)
+                self.old_ai_key = self.ai_key_path.read_text(encoding="utf-8")
+            self.key_snapshot_taken = True
+        existing = self.candidate_ai_key if self.candidate_ai_key is not None else self.old_ai_key
+        replace = existing is None or self.ask("Đã có AI key. Thay bằng key mới? [y/N]: ").strip().lower() in ("y", "yes")
+        value = self.secret("9router API key mới (ẩn khi nhập): ") if replace else existing.removesuffix("\n").removesuffix("\r")
+        if not value or any(c in value for c in "\r\n\x00"):
+            raise SetupError("AI key phải là một dòng không rỗng.")
+        self.secrets_seen.append(value)
+        self.candidate_ai_key = value + "\n"
+        changes.update(AI_CAPTCHA_ENABLED="true", NINEROUTER_BASE_URL=base,
+                       NINEROUTER_CAPTCHA_MODEL=model, NINEROUTER_API_KEY_FILE="/run/secrets/ninerouter_api_key")
+
     def configure(self):
-        print("Thiết lập recovery ACB: không logout ngân hàng, không đổi master key/internal tokens.")
-        print("Bot chat không E2EE; chỉ dùng OTP đăng nhập. Mở bot riêng và gửi /start trước.")
-        token = self.secret_file("telegram_bot_token", "Bot token", r"[0-9]+:[A-Za-z0-9_-]+")
-        configured_id = self.values.get("TELEGRAM_USER_ID", "")
-        user = self.ask("Telegram user ID của bạn" + (" [" + configured_id + "]" if configured_id else "") + ": ").strip() or configured_id
-        if not re.fullmatch(r"[1-9][0-9]{0,18}", user) or int(user) > (1 << 63) - 1:
-            raise SetupError("Cần numeric user ID dương của private operator.")
-        self.telegram(token).verify_operator(int(user))
-        del token
-        for name, label, pattern in (("acb_username", "Username ACB", None),
-                                     ("acb_password", "Password ACB", None),
-                                     ("acb_account", "Số tài khoản ACB đầy đủ", r"[0-9]+")):
-            value = self.secret_file(name, label, pattern)
-            del value
-        changes = {
-            "AUTH_RECOVERY_ENABLED": "true", "AI_CAPTCHA_ENABLED": "false",
-            "TELEGRAM_CHAT_ID": user, "TELEGRAM_USER_ID": user,
-            "AUTH_RECOVERY_CAPTCHA_TTL_SECONDS": "180", "AUTH_RECOVERY_OTP_TTL_SECONDS": "120",
-            "TELEGRAM_BOT_TOKEN_FILE": "/run/secrets/telegram_bot_token",
-            "ACB_USERNAME_FILE": "/run/secrets/acb_username", "ACB_PASSWORD_FILE": "/run/secrets/acb_password",
-            "ACB_ACCOUNT_FILE": "/run/secrets/acb_account",
-        }
-        print("Human CAPTCHA hoạt động không cần AI. AI chỉ được bật nếu bạn đã kiểm tra logging/privacy của 9router và upstream.")
-        if self.ask("Bật AI CAPTCHA ngay? [y/N]: ").strip().lower() in ("y", "yes"):
-            base = self.ask("9router base URL [/v1; HTTPS hoặc hostname Docker private]: ").strip()
-            model = self.ask("Exact vision model ID: ").strip()
-            self.secret_file("ninerouter_api_key", "9router API key")
-            changes.update(AI_CAPTCHA_ENABLED="true", NINEROUTER_BASE_URL=base,
-                           NINEROUTER_CAPTCHA_MODEL=model, NINEROUTER_API_KEY_FILE="/run/secrets/ninerouter_api_key")
-        print("Adapter ACB hiện có mới được kiểm chứng fixture. Bật sẽ cho phép tự login khi durable AUTH_REQUIRED;")
-        print("không ép logout phiên đang khỏe. Nếu DOM/OTP ACB không hỗ trợ, bot dừng và hướng dẫn manual.")
-        if self.ask("Bạn là chủ tài khoản và cho phép thử recovery có kiểm soát? Gõ BAT để kích hoạt: ").strip() != "BAT":
-            raise SetupError("Chưa kích hoạt; secret files đã provision được giữ để chạy lại.")
-        self.candidate = update_env(self.original, changes,
-                                    removals=["APP_MASTER_KEY", "ACB_USERNAME", "ACB_PASSWORD",
-                                              "ACB_ACCOUNT", "TELEGRAM_BOT_TOKEN", "NINEROUTER_API_KEY"])
-        # Candidate config is used only by one-shot preflight, never runtime polling.
-        stage = Path(tempfile.mkdtemp(prefix=".recovery-preflight-", dir=self.root))
+        changes = {}
+        if self.configure_ai:
+            print("Chỉ cấu hình AI: không enrollment/poll Telegram, không đọc mật khẩu hoặc đăng nhập ACB.")
+            self.ai_settings(changes)
+        else:
+            print("Thiết lập recovery ACB: không logout ngân hàng, không đổi master key/internal tokens.")
+            print("Bot chat không E2EE; chỉ dùng OTP đăng nhập. Mở bot riêng và gửi /start trước.")
+            token = self.secret_file("telegram_bot_token", "Bot token", r"[0-9]+:[A-Za-z0-9_-]+")
+            configured_id = self.values.get("TELEGRAM_USER_ID", "")
+            user = self.ask("Telegram user ID của bạn" + (" [" + configured_id + "]" if configured_id else "") + ": ").strip() or configured_id
+            if not re.fullmatch(r"[1-9][0-9]{0,18}", user) or int(user) > (1 << 63) - 1:
+                raise SetupError("Cần numeric user ID dương của private operator.")
+            self.telegram(token).verify_operator(int(user))
+            del token
+            for name, label, pattern in (("acb_username", "Username ACB", None),
+                                         ("acb_password", "Password ACB", None),
+                                         ("acb_account", "Số tài khoản ACB đầy đủ", r"[0-9]+")):
+                self.secret_file(name, label, pattern)
+            changes.update(AUTH_RECOVERY_ENABLED="true", AI_CAPTCHA_ENABLED="false",
+                           TELEGRAM_CHAT_ID=user, TELEGRAM_USER_ID=user,
+                           AUTH_RECOVERY_CAPTCHA_TTL_SECONDS="180", AUTH_RECOVERY_OTP_TTL_SECONDS="120",
+                           TELEGRAM_BOT_TOKEN_FILE="/run/secrets/telegram_bot_token")
+            print("AI chỉ bật sau khi bạn kiểm tra logging/privacy của provider. Human CAPTCHA là dự phòng.")
+            if self.ask("Bật AI CAPTCHA ngay? [y/N]: ").strip().lower() in ("y", "yes"):
+                self.ai_settings(changes)
+            print("Bật bot không đăng nhập ACB. Mỗi lần đăng nhập chỉ bắt đầu sau nút Đăng nhập được xác thực.")
+            if self.ask("Bạn là chủ tài khoản? Gõ BAT để kích hoạt: ").strip() != "BAT":
+                raise SetupError("Chưa kích hoạt; secret files đã provision được giữ để chạy lại.")
+        while True:
+            self.candidate = update_env(self.original, changes,
+                                       removals=["APP_MASTER_KEY", "ACB_USERNAME", "ACB_PASSWORD", "ACB_ACCOUNT",
+                                                 "ACB_USERNAME_FILE", "ACB_PASSWORD_FILE", "ACB_ACCOUNT_FILE",
+                                                 "TELEGRAM_BOT_TOKEN", "NINEROUTER_API_KEY"])
+            try:
+                self.preflight()
+                break
+            except AIPreflightError as error:
+                self.explain_ai(error)
+                choice = self.ask("(1) Sửa URL/model/key và thử synthetic lại; (2) AI tắt, CAPTCHA thủ công; (3) Dừng [3]: ").strip()
+                if choice == "1":
+                    self.ai_settings(changes)
+                elif choice == "2":
+                    changes["AI_CAPTCHA_ENABLED"] = "false"
+                else:
+                    raise SetupError("AI chưa PASS; đã dừng, không thay cấu hình/key đang hoạt động.") from None
+        self.recheck(self.original, self.old_ai_key)
+
+    @staticmethod
+    def explain_ai(error):
+        print(str(error))
+        if error.code in {"DNS", "NETWORK", "TLS", "TIMEOUT", "CANCELLED"}:
+            print("Kiểm tra egress/DNS/chứng chỉ từ network controller; không tắt xác minh TLS.")
+        elif error.code == "HTTP_AUTH":
+            print("Sửa secret API key/quyền entitlement tại provider; không liên quan mật khẩu ACB.")
+        elif error.code == "HTTP_NOT_FOUND":
+            print("Kiểm tra base URL đúng /v1.")
+        elif error.code in {"MODEL_NOT_FOUND", "MODEL_COMBO_UNSUPPORTED"}:
+            print("Chọn exact model vision thực có; không dùng combo hoặc tự chọn model khác.")
+        elif error.code == "HTTP_RATE_LIMIT":
+            print("Chờ theo retry_after/quota của upstream, không retry mù.")
+        else:
+            print("Kiểm tra contract multimodal/JSON của model tại provider; AI chỉ bật khi synthetic AB12CD PASS.")
+        print("AI preflight không kiểm tra mật khẩu ACB. Sau import, đổi thông tin qua /menu → Đổi thông tin đăng nhập → HTTPS.")
+
+    def preflight(self):
+        self.cleanup()
+        self.stage = Path(tempfile.mkdtemp(prefix=".recovery-preflight-", dir=self.root))
         try:
-            os.chmod(stage, 0o755)
-            (stage / "deploy").mkdir(mode=0o755, exist_ok=True)
-            candidate_env = stage / "deploy/.env.production"
+            os.chmod(self.stage, 0o755)
+            (self.stage / "deploy").mkdir(mode=0o755)
+            candidate_env = self.stage / "deploy/.env.production"
             atomic_private(candidate_env, self.candidate)
             runtime_text, _ = read_env(self.release / "runtime.env")
-            candidate_runtime = stage / "runtime.env"
+            candidate_runtime = self.stage / "runtime.env"
             atomic_private(candidate_runtime, update_env(runtime_text, {
                 "ENV_FILE": str(candidate_env), "SECRETS_DIR": str(self.secret_dir)}))
-            self.compose(stage, candidate_runtime, "Compose config", "config", "--quiet")
-            preflight_name = f"acb-recovery-preflight-{secrets.token_hex(4)}"
-            self.compose(stage, candidate_runtime, "Preflight check-config",
-                         "run", "-T", "--rm", "--no-deps", "--name", preflight_name,
-                         "recovery-controller", "--check-config")
+            override_args = []
+            _, candidate = read_env(candidate_env)
+            if candidate.get("AI_CAPTCHA_ENABLED") == "true":
+                key = self.stage / "ninerouter_api_key"
+                atomic_private(key, self.candidate_ai_key)
+                override = self.stage / "candidate-ai.json"
+                atomic_private(override, json.dumps({"secrets": {"ninerouter_api_key": {"file": str(key)}}}))
+                override_args = ["-f", str(override)]
+            self.compose(self.stage, candidate_runtime, "Compose config", *override_args, "config", "--quiet")
+            if self.configure_ai and candidate.get("AI_CAPTCHA_ENABLED") == "false":
+                # Explicit degraded choice: no synthetic PASS claim and no Telegram polling/checks.
+                return
+            args = ["bash", "-c", 'source "$1/simple-lib.sh"; DEPLOY_PATH="$2"; compose_release "$1" "$3" "${@:4}"',
+                    "setup", str(self.release), str(self.stage), str(candidate_runtime), *override_args,
+                    "run", "-T", "--rm", "--no-deps", "--name", "acb-recovery-preflight-" + secrets.token_hex(4),
+                    "recovery-controller", "--check-ai" if self.configure_ai else "--check-config"]
+            result = self.runner(args)
+            if result.returncode:
+                diagnostic = ai_diagnostic(result.stderr)
+                if diagnostic is not None:
+                    raise diagnostic
+                raise SetupError("Preflight thất bại; không có diagnostic AI có cấu trúc hợp lệ. Chưa kích hoạt.")
         finally:
-            shutil.rmtree(stage)
-        # Recheck original bytes; never overwrite another actor's config.
-        if self.env.read_text(encoding="utf-8") != self.original:
-            raise SetupError("Cấu hình đã thay đổi trong lúc setup; chưa kích hoạt.")
-        atomic_private(self.env, self.candidate)
+            self.cleanup()
 
-    def deploy_reconcile(self):
-        # Preserve deployment UID and its Docker group; root is only for provisioning.
-        owner = pwd.getpwuid(1000).pw_name
-        self.checked(["runuser", "-u", owner, "--", "env", "DEPLOY_PATH=" + str(self.root),
-                      "bash", str(self.release / "deploy.sh"), "--reconcile", self.sha],
-                     "Recovery reconcile qua deploy admission")
+    def cleanup(self):
+        if self.stage is not None:
+            shutil.rmtree(self.stage)
+            self.stage = None
+
+    def recheck(self, expected_env, expected_key):
+        _, state = read_env(self.root / "state.env")
+        if state.get("RELEASE_SHA") != self.sha:
+            raise SetupError("Release đã thay đổi; không ghi hoặc rollback cấu hình của release mới.")
+        secure_existing(self.env, 0o600)
+        if self.env.read_text(encoding="utf-8") != expected_env:
+            raise SetupError("Cấu hình đã thay đổi đồng thời; không ghi đè hoặc rollback.")
+        if self.key_snapshot_taken:
+            actual = None
+            if self.ai_key_path.exists() or self.ai_key_path.is_symlink():
+                secure_existing(self.ai_key_path, 0o600)
+                actual = self.ai_key_path.read_text(encoding="utf-8")
+            if actual != expected_key:
+                raise SetupError("AI key đã thay đổi đồng thời; không ghi đè hoặc rollback.")
+
+    def dbtool(self, *args):
+        _, runtime = read_env(self.release / "runtime.env")
+        return self.checked(["bash", "-c", 'source "$1/simple-lib.sh"; DBTOOL_IMAGE_REF="$2"; dbtool rw "${@:3}"',
+                             "setup", str(self.release), runtime["DBTOOL_IMAGE_REF"], *args], "Deployment admission")
+
+    @contextlib.contextmanager
+    def admission(self):
+        owner = "recovery-setup-" + secrets.token_hex(8)
+        try:
+            lease = json.loads(self.dbtool("-gate-acquire", "-owner", owner, "-reason", "recovery-reconfigure",
+                                          "-lease-duration", "15m"))["leaseToken"]
+        except (ValueError, TypeError, KeyError):
+            raise SetupError("Deployment admission không trả lease hợp lệ; không thay cấu hình.") from None
+        if not isinstance(lease, str) or not lease:
+            raise SetupError("Deployment admission thiếu lease; không thay cấu hình.")
+        self.secrets_seen.append(lease)
+        try:
+            yield owner, lease
+        finally:
+            self.dbtool("-gate-release", "-owner", owner, "-lease-token", lease)
+
+    def stop_admitted(self):
+        inspect = self.runner(["docker", "inspect", "-f", "{{.State.Running}}", "acb-recovery-controller"])
+        if inspect.returncode == 0 and inspect.stdout.strip() == "true":
+            self.checked(["docker", "stop", "acb-recovery-controller"], "Dừng controller sau admission")
+
+    def start_runtime(self, enabled):
+        if enabled:
+            self.checked(["bash", "-c",
+                          'source "$1/simple-lib.sh"; DEPLOY_PATH="$2"; import_recovery_credentials "$1" "$3" "$4"',
+                          "setup", str(self.release), str(self.root), str(self.release / "runtime.env"),
+                          "true" if self.import_credentials else "false"], "Import thông tin ACB")
+            # Atomic key replacement changes inode; even a key-only rotation must remount it.
+            self.compose(self.root, self.release / "runtime.env", "Recovery force recreate",
+                         "up", "-d", "--no-deps", "--force-recreate", "recovery-controller")
+            _, runtime = read_env(self.release / "runtime.env")
+            self.checked(["env", "EXPECTED_IMAGE_REF=" + runtime["WORKER_IMAGE_REF"], "bash",
+                          str(self.release / "healthcheck.sh"), "container", "acb-recovery-controller", "120"],
+                         "Image và readiness sau recreate")
 
     def activate(self):
+        promote_key = self.candidate_ai_key is not None and "AI_CAPTCHA_ENABLED=true\n" in self.candidate
+        expected_env, expected_key = self.original, self.old_ai_key
+        stopped = False
         try:
-            self.deploy_reconcile()
-            self.checked(["docker", "exec", "acb-recovery-controller", "/recovery-controller", "--readiness-check"],
-                         "Readiness sau kích hoạt")
-        except (SetupError, subprocess.SubprocessError):
-            # Don't revert a concurrently changed config, and don't blindly stop an active login.
             with file_lock(self.root / ".deploy.lock"):
-                _, current = read_env(self.root / "state.env")
-                if current.get("RELEASE_SHA") != self.sha:
-                    raise SetupError("Deploy khác đã đổi release; không khôi phục cấu hình của release mới. Chạy lại setup để kiểm tra readiness.") from None
-                if self.env.read_text(encoding="utf-8") != self.candidate:
-                    raise SetupError("Cấu hình đã đổi đồng thời; giữ nguyên thay đổi đó, không rollback hoặc dừng controller.") from None
-                atomic_private(self.env, self.original)
-            # Existing admission path handles disable; it must wait if login is active.
+                self.recheck(expected_env, expected_key)
+                with self.admission() as (owner, lease):
+                    self.recheck(expected_env, expected_key)
+                    stopped = True
+                    self.stop_admitted()
+                    self.dbtool("-gate-renew", "-owner", owner, "-lease-token", lease, "-lease-duration", "15m")
+                    if promote_key:
+                        try:
+                            atomic_private(self.ai_key_path, self.candidate_ai_key)
+                        finally:
+                            # os.replace may succeed even if the following directory fsync fails.
+                            if not self.ai_key_path.is_symlink() and self.ai_key_path.exists():
+                                if self.ai_key_path.read_text(encoding="utf-8") == self.candidate_ai_key:
+                                    expected_key = self.candidate_ai_key
+                    try:
+                        atomic_private(self.env, self.candidate)
+                    finally:
+                        if not self.env.is_symlink() and self.env.read_text(encoding="utf-8") == self.candidate:
+                            expected_env = self.candidate
+                # Keep deployment lock through recreate/readiness; release mutation gate before runtime starts.
+                self.start_runtime(True)
+        except (SetupError, OSError, KeyboardInterrupt, subprocess.SubprocessError):
+            if not stopped:
+                raise
             try:
-                self.deploy_reconcile()
-            except (SetupError, subprocess.SubprocessError):
-                raise SetupError("Kích hoạt thất bại; cấu hình cũ đã khôi phục nếu không bị đổi đồng thời. Reconcile chưa hoàn tất; không force-cancel login.") from None
-            raise SetupError("Kích hoạt thất bại; cấu hình cũ đã khôi phục và reconcile hoàn tất.") from None
-        print("PASS: preflight + private operator reply + controller readiness. Recovery đã bật.")
-        print("Từ giờ chỉ reply CAPTCHA/OTP khi bot yêu cầu; /acb_status, /acb_pause, /acb_resume dùng trên Telegram.")
-        print("ACB live/catch-up chỉ được nghiệm thu sau lần recovery thật đầu tiên; readiness không phải bank success.")
+                with file_lock(self.root / ".deploy.lock"):
+                    self.recheck(expected_env, expected_key)
+                    with self.admission():
+                        self.recheck(expected_env, expected_key)
+                        self.stop_admitted()
+                        if promote_key:
+                            if self.old_ai_key is None:
+                                self.ai_key_path.unlink(missing_ok=True)
+                            else:
+                                atomic_private(self.ai_key_path, self.old_ai_key)
+                        atomic_private(self.env, self.original)
+                    self.start_runtime(self.values.get("AUTH_RECOVERY_ENABLED", "false") == "true")
+            except (SetupError, OSError, KeyboardInterrupt, subprocess.SubprocessError):
+                raise SetupError("Kích hoạt thất bại; rollback chưa hoàn tất (admission/concurrency/runtime). Không force-cancel đăng nhập; kiểm tra release/readiness rồi reconcile.") from None
+            raise SetupError("Kích hoạt thất bại; env và AI key cũ đã khôi phục, runtime cũ được admit/recreate nếu đã bật.") from None
+        if self.configure_ai:
+            print("PASS: synthetic preflight + controller readiness. AI đã cấu hình." if promote_key else
+                  "PASS: preflight + controller readiness. AI tắt theo lựa chọn rõ ràng; CAPTCHA thủ công.")
+        else:
+            print("PASS: preflight + private operator reply + controller readiness. Recovery đã bật.")
+        print("Dùng /menu trên Telegram. Chỉ nút Đăng nhập mới bắt đầu ACB; readiness không phải bank success.")
+
+    def import_existing(self):
+        # No enrollment/preflight or bank access. Admission refuses an active OTP
+        # attempt before stop, then releases the gate before the importer writes.
+        with file_lock(self.root / ".deploy.lock"):
+            self.recheck(self.original, self.old_ai_key)
+            with self.admission():
+                self.recheck(self.original, self.old_ai_key)
+                self.stop_admitted()
+            try:
+                self.start_runtime(True)
+            except (SetupError, OSError, KeyboardInterrupt, subprocess.SubprocessError):
+                # Keep the admitted controller available even if import is invalid.
+                # No legacy credential fallback is mounted in this runtime.
+                self.compose(self.root, self.release / "runtime.env", "Khởi động bot sau import thất bại",
+                             "up", "-d", "--no-deps", "--force-recreate", "recovery-controller")
+                raise
+        print("Import hoàn tất (record hiện hữu không ghi đè). Chưa đăng nhập ACB; dùng /menu.")
 
     def execute(self):
-        with file_lock(self.root / ".recovery-setup.lock"):
-            with file_lock(self.root / ".deploy.lock"):
-                if not self.prepare():
-                    return
-                self.configure()
-            self.activate()
+        try:
+            with file_lock(self.root / ".recovery-setup.lock"):
+                with file_lock(self.root / ".deploy.lock"):
+                    if not self.prepare():
+                        return
+                    if not self.import_credentials:
+                        self.configure()
+                if self.import_credentials:
+                    self.import_existing()
+                else:
+                    self.activate()
+        finally:
+            self.cleanup()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Setup recovery ACB trên release đã deploy: secrets nhập ẩn, private Telegram check, preflight, kích hoạt qua deploy admission.")
     parser.add_argument("--deploy-path", default=os.environ.get("DEPLOY_PATH", "/opt/bank-event-gateway"))
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--configure-ai", action="store_true", help="Sửa AI/rotate key đã bật, không enrollment hoặc poll Telegram")
+    modes.add_argument("--import-credentials", action="store_true", help="Import legacy files khi DB chưa cấu hình; không ghi đè hoặc đăng nhập")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SetupError("Chạy bằng sudo bash setup-recovery.sh; cần tạo secret owner 1000:1000.")
     if not sys.stdin.isatty():
         raise SetupError("Cần terminal tương tác; không pipe token/password qua command line.")
-    for tool in ("docker", "bash", "sha256sum", "python3", "runuser"):
+    for tool in ("docker", "bash", "sha256sum", "python3"):
         if not shutil.which(tool):
             raise SetupError("Thiếu dependency trên VPS: " + tool)
-    Setup(args.deploy_path).execute()
+    Setup(args.deploy_path, configure_ai=args.configure_ai, import_credentials=args.import_credentials).execute()
 
 
 if __name__ == "__main__":

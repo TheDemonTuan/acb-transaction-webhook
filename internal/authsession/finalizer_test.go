@@ -305,3 +305,63 @@ func TestFinalizerAdoptsCommitBeforeBrowserCleanup(t *testing.T) {
 		t.Fatalf("committed recovery intent was not resumed: %v", err)
 	}
 }
+
+func TestFinalizerRejectsInvalidAdmissionWithoutBankEffects(t *testing.T) {
+	for _, state := range []string{"cancelled", "failed", "expired", "superseded", "missing-keyring", "missing-verifier"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := context.Background()
+			s, keyring, attempt := finalizerStore(t)
+			want := ErrConflict
+			switch state {
+			case "cancelled", "failed":
+				if err := s.FinishAuthAttempt(ctx, attempt.ID, strings.ToUpper(state)); err != nil {
+					t.Fatal(err)
+				}
+			case "expired":
+				if _, err := s.DB().ExecContext(ctx, `UPDATE auth_attempts SET expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), attempt.ID); err != nil {
+					t.Fatal(err)
+				}
+				want = ErrExpired
+			case "superseded":
+				if _, err := s.TransitionConnection(ctx, "pause"); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				want = ErrUnavailable
+			}
+			before, err := s.Connection(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			browser := &browserFixture{}
+			verifications := 0
+			options := Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verifierFunc(func(context.Context, string, int64, []byte) error {
+				verifications++
+				return nil
+			})}
+			if state == "missing-keyring" {
+				options.Keyring = nil
+			}
+			if state == "missing-verifier" {
+				options.Verifier = nil
+			}
+			finalizer := NewFinalizer(options)
+			for range 2 {
+				if _, err := finalizer.Complete(ctx, attempt); !errors.Is(err, want) {
+					t.Fatalf("rejected admission returned %v, want %v", err, want)
+				}
+			}
+			after, err := s.Connection(ctx)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejected admission mutated connection: %+v %v", after, err)
+			}
+			var sessions, runs int
+			if err := s.DB().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM recovery_runs)`).Scan(&sessions, &runs); err != nil {
+				t.Fatal(err)
+			}
+			if browser.handoffs != 0 || browser.completions != 0 || verifications != 0 || sessions != 0 || runs != 0 {
+				t.Fatalf("rejected admission caused side effects: handoffs=%d cleanup=%d verify=%d sessions=%d recovery=%d", browser.handoffs, browser.completions, verifications, sessions, runs)
+			}
+		})
+	}
+}

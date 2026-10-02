@@ -17,6 +17,35 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestClientClearSessionRemovesAuthentication(t *testing.T) {
+	var method, path, cookie string
+	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		method, path, cookie = r.Method, r.URL.Path, r.Header.Get("Cookie")
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RestoreSession(authbrowser.Handoff{Version: 1, Action: "https://online.acb.com.vn/acbib/Request", Fields: map[string]string{"dse_sessionId": "synthetic", "dse_processorState": "synthetic"}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic", Domain: OfficialHost, Path: "/", Secure: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ClearSession(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ClearSession(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SnapshotSession(); !errors.Is(err, ErrAuthenticatedFormStateUnavailable) {
+		t.Fatalf("cleared snapshot=%v", err)
+	}
+	if _, err := client.Get(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if cookie != "" || method != http.MethodGet || path != "/acbib/" {
+		t.Fatalf("clear retained auth/form state: method=%s path=%s cookie=%s", method, path, cookie)
+	}
+}
+
 func TestClientRejectsNonOfficialBase(t *testing.T) {
 	if _, err := NewClient("https://example.test", nil); err == nil {
 		t.Fatal("accepted untrusted host")
@@ -373,24 +402,24 @@ func TestBootstrapReturnsLoginPageWhenSessionTrulyExpired(t *testing.T) {
 			"dse_sessionId":      "sess",
 		},
 		Cookies: []authbrowser.Cookie{{Name: "JSESSIONID", Value: "expired", Domain: "online.acb.com.vn", Path: "/", Secure: true}},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := client.Bootstrap(context.Background())
-		var authFail *AuthFailure
-		if !errors.As(err, &authFail) {
-			t.Fatalf("expected AuthFailure error for truly expired session, got: %v", err)
-		}
-		if authFail.Kind != LoginPage {
-			t.Fatalf("expected LoginPage for truly expired session, got %v", authFail.Kind)
-		}
-		if resp.Kind != LoginPage {
-			t.Fatalf("expected LoginPage response, got %v", resp.Kind)
-		}
-		if reqCount != 2 {
-			t.Fatalf("expected 2 requests (POST then GET confirmation), got %d", reqCount)
-		}
+	}); err != nil {
+		t.Fatal(err)
 	}
+	resp, err := client.Bootstrap(context.Background())
+	var authFail *AuthFailure
+	if !errors.As(err, &authFail) {
+		t.Fatalf("expected AuthFailure error for truly expired session, got: %v", err)
+	}
+	if authFail.Kind != LoginPage {
+		t.Fatalf("expected LoginPage for truly expired session, got %v", authFail.Kind)
+	}
+	if resp.Kind != LoginPage {
+		t.Fatalf("expected LoginPage response, got %v", resp.Kind)
+	}
+	if reqCount != 2 {
+		t.Fatalf("expected 2 requests (POST then GET confirmation), got %d", reqCount)
+	}
+}
 
 func TestHistoryLoginPageResyncsBeforeAuthRequired(t *testing.T) {
 	var requests []*http.Request
@@ -537,10 +566,10 @@ func TestHistoryLoginPageProbeTransportErrorDoesNotConfirmAuth(t *testing.T) {
 	if errors.As(err, &authFail) {
 		t.Fatalf("probe network failure must not be classified as AuthFailure: %v", err)
 	}
-		if err == nil {
-			t.Fatal("expected transport error, got nil")
-		}
+	if err == nil {
+		t.Fatal("expected transport error, got nil")
 	}
+}
 
 func TestHistoryReplayErrorPropagated(t *testing.T) {
 	var requests []*http.Request

@@ -74,7 +74,6 @@ type browserFormState struct {
 type browserSession struct {
 	AttemptID string    `json:"attemptId"`
 	Status    string    `json:"status"`
-	ScreenURL string    `json:"screenUrl"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	Error     string    `json:"error,omitempty"`
 	profile   string
@@ -98,7 +97,6 @@ type browserSession struct {
 type browserSessionResponse struct {
 	AttemptID string    `json:"attemptId"`
 	Status    string    `json:"status"`
-	ScreenURL string    `json:"screenUrl"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	Error     string    `json:"error,omitempty"`
 }
@@ -107,7 +105,6 @@ func sessionResponse(item *browserSession) browserSessionResponse {
 	return browserSessionResponse{
 		AttemptID: item.AttemptID,
 		Status:    item.Status,
-		ScreenURL: item.ScreenURL,
 		ExpiresAt: item.ExpiresAt,
 		Error:     item.Error,
 	}
@@ -117,6 +114,7 @@ type server struct {
 	mu                   sync.Mutex
 	opMu                 sync.Mutex // CDP observation/action/handoff serialization; not the session-map lock.
 	session              *browserSession
+	healthBrowser        *browserSession // Running Chromium, including revoke-only launches; protected by mu.
 	internalToken        string
 	internalAuthRequired bool
 	profiles             string
@@ -126,8 +124,9 @@ type server struct {
 	allocatePort func() (int, error)
 	cmdFunc      func(ctx context.Context, name string, args ...string) *exec.Cmd
 	// Test-only dependency injection; production always uses acbLoginURL and the closed adapter.
-	loginURL   string
-	fixtureDOM bool
+	loginURL     string
+	fixtureDOM   bool
+	revokeOrigin string // Unexported test injection; production revoke never uses ACB_LOGIN_URL.
 }
 
 func main() {
@@ -162,6 +161,7 @@ func main() {
 	mux.Handle("GET /sessions/{attemptID}/status", controller.requireInternal(http.HandlerFunc(controller.status)))
 	mux.Handle("POST /sessions/{attemptID}/handoff", controller.requireInternal(http.HandlerFunc(controller.handoff)))
 	mux.Handle("POST /sessions/{attemptID}/complete", controller.requireInternal(http.HandlerFunc(controller.complete)))
+	controller.registerRevocation(mux)
 	controller.registerAutomation(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Runtime-Role", "auth-browser")
@@ -176,7 +176,7 @@ func main() {
 			})
 			return
 		}
-		if err := desktopHealth(); err != nil {
+		if err := controller.desktopHealth(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}
@@ -196,7 +196,7 @@ func main() {
 			})
 			return
 		}
-		if err := desktopHealth(); err != nil {
+		if err := controller.desktopHealth(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
 			return
 		}
@@ -369,7 +369,6 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	item := &browserSession{
 		AttemptID: attemptID,
 		Status:    "STARTING",
-		ScreenURL: "/",
 		ExpiresAt: expiresAt,
 		profile:   profileDir,
 		cancel:    cancel,
@@ -380,7 +379,11 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	ready := make(chan error, 1)
-	go s.launch(ctx, item, port, ready)
+	loginURL := s.loginURL
+	if loginURL == "" {
+		loginURL = acbLoginURL()
+	}
+	go s.launch(ctx, item, port, ready, browserLaunchOptions{InitialURL: loginURL, ObserveLogin: true})
 	select {
 	case err := <-ready:
 		if err != nil {
@@ -404,7 +407,12 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) launch(ctx context.Context, item *browserSession, port int, ready chan<- error) {
+type browserLaunchOptions struct {
+	InitialURL   string
+	ObserveLogin bool
+}
+
+func (s *server) launch(ctx context.Context, item *browserSession, port int, ready chan<- error, options browserLaunchOptions) {
 	profile := filepath.Join(s.profiles, item.profile)
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		s.failStartup(item, ready, "cannot prepare Chromium profile", err)
@@ -433,11 +441,7 @@ func (s *server) launch(ctx context.Context, item *browserSession, port int, rea
 	if len(s.extraFlags) > 0 {
 		args = append(args, s.extraFlags...)
 	}
-	loginURL := s.loginURL
-	if loginURL == "" {
-		loginURL = acbLoginURL()
-	}
-	args = append(args, loginURL)
+	args = append(args, options.InitialURL)
 
 	cmdBuilder := s.cmdFunc
 	if cmdBuilder == nil {
@@ -459,16 +463,24 @@ func (s *server) launch(ctx context.Context, item *browserSession, port int, rea
 		item.exitOnce.Do(func() { close(item.done) })
 		return
 	}
+	s.mu.Lock()
+	s.healthBrowser = item
+	s.mu.Unlock()
 
 	go func() {
 		err := cmd.Wait()
 		item.exitErr = err
+		s.mu.Lock()
+		if s.healthBrowser == item {
+			s.healthBrowser = nil
+		}
+		s.mu.Unlock()
 		removeProfileDir(profile)
 		item.exitOnce.Do(func() { close(item.done) })
 	}()
 
 	startupCtx, startupCancel := context.WithTimeout(ctx, startupLimit)
-	err := waitBrowserReady(startupCtx, item.debugURL, item.done, item, loginURL)
+	err := waitBrowserReady(startupCtx, item.debugURL, item.done, item, options.InitialURL)
 	startupCancel()
 	if err != nil {
 		item.cancel()
@@ -483,7 +495,9 @@ func (s *server) launch(ctx context.Context, item *browserSession, port int, rea
 	}
 	s.mu.Unlock()
 	ready <- nil
-	go s.observeLogin(ctx, item.AttemptID, item.debugURL, item.done)
+	if options.ObserveLogin {
+		go s.observeLogin(ctx, item.AttemptID, item.debugURL, item.done)
+	}
 
 	<-item.done
 	s.mu.Lock()
@@ -1291,6 +1305,9 @@ func waitBrowserReady(ctx context.Context, debugURL string, done <-chan struct{}
 			if response.StatusCode != http.StatusOK || decodeErr != nil || version.WebSocketDebuggerURL == "" {
 				continue
 			}
+			if len(loginURL) > 0 && loginURL[0] == "about:blank" {
+				return nil
+			}
 			if err := waitACBTargetStable(ctx, client, debugURL, done, loginURL...); err != nil {
 				return err
 			}
@@ -1358,16 +1375,56 @@ func waitACBTargetStable(ctx context.Context, client *http.Client, debugURL stri
 	}
 }
 
-func desktopHealth() error {
-	if _, err := os.Stat("/tmp/.X11-unix/X99"); err != nil {
+func displayHealth(ctx context.Context, socketPath string) error {
+	info, err := os.Stat(socketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		return errors.New("X display is unavailable")
 	}
-	for _, address := range []string{"127.0.0.1:5900", "127.0.0.1:6080"} {
-		connection, err := net.DialTimeout("tcp", address, time.Second)
-		if err != nil {
-			return fmt.Errorf("desktop service %s is unavailable", address)
-		}
-		connection.Close()
+	dialer := net.Dialer{Timeout: time.Second}
+	connection, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return errors.New("X display is unavailable")
+	}
+	connection.Close()
+	return nil
+}
+
+func (s *server) desktopHealth(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := displayHealth(ctx, "/tmp/.X11-unix/X99"); err != nil {
+		return err
+	}
+	return s.browserHealth(ctx)
+}
+
+func (s *server) browserHealth(ctx context.Context) error {
+	s.mu.Lock()
+	item := s.healthBrowser
+	s.mu.Unlock()
+	if item == nil {
+		return nil
+	}
+	return chromiumHealth(ctx, item.debugURL)
+}
+
+func chromiumHealth(ctx context.Context, debugURL string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, debugURL+"/json/version", nil)
+	if err != nil {
+		return errors.New("Chromium CDP is unavailable")
+	}
+	client := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		return errors.New("Chromium CDP is unavailable")
+	}
+	defer response.Body.Close()
+	var version struct {
+		Browser              string `json:"Browser"`
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&version) != nil || version.Browser == "" || version.WebSocketDebuggerURL == "" {
+		return errors.New("Chromium CDP is unavailable")
 	}
 	return nil
 }

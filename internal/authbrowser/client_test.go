@@ -77,16 +77,40 @@ func TestClientSendsInternalToken(t *testing.T) {
 	}
 }
 
-func TestClientDecodesSession(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"attemptId":"auth_1","status":"AWAITING_USER_LOGIN","screenUrl":"/","expiresAt":"2026-09-10T13:15:00Z"}`))
+func TestRevocationRejectsUntrustedResultsWithoutLeakingPayload(t *testing.T) {
+	for _, body := range []string{
+		`{"status":"CONFIRMED","reasonCode":"LOGOUT_NO_SESSION"}`,
+		`{"status":"UNCONFIRMED","reasonCode":"SESSION_REVOKED"}`,
+		`{"status":"UNKNOWN","reasonCode":"LOGOUT_OUTCOME_UNKNOWN"}`,
+		`{"status":"CONFIRMED","reasonCode":"secret-cookie-value"}`,
+		`{"status":"CONFIRMED","reasonCode":"SESSION_REVOKED"} trailing secret-cookie-value`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+		result, err := NewClient(server.URL, "fixture-internal").RevokeSession(context.Background(), "logout", "", "")
+		server.Close()
+		if err == nil || result.Status != "" || strings.Contains(err.Error(), "secret-cookie-value") {
+			t.Fatalf("untrusted result escaped boundary: %+v %v", result, err)
+		}
+	}
+}
+
+func TestRevocationDoesNotFollowRedirectOrReplayUnknownOutcome(t *testing.T) {
+	calls, foreignCalls := 0, 0
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { foreignCalls++ }))
+	defer foreign.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, foreign.URL, http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-
-	session, err := NewClient(server.URL).Status(context.Background(), "auth_1")
-	if err != nil || session.Status != "AWAITING_USER_LOGIN" {
-		t.Fatalf("session=%+v err=%v", session, err)
+	_, err := NewClient(server.URL, "fixture-internal").RevokeSession(context.Background(), "logout", "", "synthetic-snapshot")
+	if !IsHTTPStatus(err, 307) || calls != 1 || foreignCalls != 0 {
+		t.Fatalf("revocation redirected/replayed: calls=%d foreign=%d err=%v", calls, foreignCalls, err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = NewClient(server.URL, "fixture-internal").RevokeSession(cancelled, "logout", "", "synthetic-snapshot")
+	if err == nil || calls != 1 || strings.Contains(err.Error(), "synthetic-snapshot") {
+		t.Fatal("cancelled revocation was dispatched or leaked its snapshot")
 	}
 }

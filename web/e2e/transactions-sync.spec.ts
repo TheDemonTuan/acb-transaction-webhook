@@ -1,5 +1,56 @@
 import { expect, test } from '@playwright/test';
 
+test('gates dashboard sync on observed monitoring state and retains its notice across routes', async ({ page }) => {
+  let currentState = 'AUTH_REQUIRED';
+  let syncCalls = 0;
+  await page.route('**/api/v1/connection', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        configured: true,
+        connection: { id: 'conn_sync', state: currentState, accountMasked: '***1234', generation: 1, updatedAt: '2026-10-03T00:00:00Z' },
+        authRecovery: null,
+      }),
+    });
+  });
+  await page.route('**/api/v1/status', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        service: 'HEALTHY', version: '2.0.0', uptimeSeconds: 200,
+        acb: { state: currentState, coverage: 'NOT_STARTED', accountMasked: '***1234', generation: 1 },
+        storage: { status: 'READY' }, webhooks: { pending: 0, deadLetter: 0 },
+      }),
+    });
+  });
+  await page.route('**/api/v1/csrf', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ token: 'test-csrf' }) });
+  });
+  await page.route('**/api/v1/connection/sync', async (route) => {
+    syncCalls++;
+    await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({ status: 'ACCEPTED' }) });
+  });
+
+  await page.goto('/admin/connection');
+  const sync = page.getByRole('button', { name: 'Sync', exact: true });
+  await expect(sync).toBeDisabled();
+  expect(syncCalls).toBe(0);
+
+  currentState = 'MONITORING';
+  await page.getByRole('button', { name: 'Làm mới', exact: true }).click();
+  await expect(sync).toBeEnabled();
+  await sync.click();
+  await expect(page.getByText('Đã tiếp nhận yêu cầu đồng bộ ACB.')).toBeVisible();
+  expect(syncCalls).toBe(1);
+
+  await page.getByRole('button', { name: 'Tổng quan', exact: true }).click();
+  await expect(page.getByText('Đã tiếp nhận yêu cầu đồng bộ ACB.')).toBeVisible();
+  await page.getByRole('button', { name: 'Kết nối ACB', exact: true }).click();
+  await expect(sync).toBeEnabled();
+});
+
 test('distinguishes cached refresh from ACB synchronization and shows sync errors', async ({ page }) => {
   let transactionReads = 0;
   let syncCalls = 0;

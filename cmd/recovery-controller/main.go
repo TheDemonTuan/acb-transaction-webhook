@@ -27,10 +27,19 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	readiness := flag.Bool("readiness-check", false, "check local recovery readiness")
 	preflight := flag.Bool("check-config", false, "check configured integrations without login or polling")
+	importCredentials := flag.Bool("import-credentials", false, "import legacy credentials once without polling or bank access")
+	aiOnly := flag.Bool("check-ai", false, "check only synthetic provider vision without bot, bank or database access")
 	flag.Parse()
-	if flag.NArg() != 0 || *readiness && *preflight {
+	modes := 0
+	for _, enabled := range []bool{*readiness, *preflight, *importCredentials, *aiOnly} {
+		if enabled {
+			modes++
+		}
+	}
+	if flag.NArg() != 0 || modes > 1 {
 		fmt.Fprintln(os.Stderr, "RECOVERY_ARGUMENT_INVALID")
 		os.Exit(2)
 	}
@@ -39,6 +48,25 @@ func main() {
 			fmt.Fprintln(os.Stderr, "RECOVERY_NOT_READY")
 			os.Exit(1)
 		}
+		return
+	}
+	if *importCredentials {
+		if err := runCredentialImport(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+	if *aiOnly {
+		cfg, err := authrecovery.LoadAIConfig()
+		if err == nil {
+			err = checkAI(context.Background(), cfg)
+		}
+		if err != nil {
+			logPreflightError(err)
+			os.Exit(1)
+		}
+		fmt.Println("PASS AI synthetic vision; not bank password verification")
 		return
 	}
 	cfg, err := authrecovery.LoadConfig()
@@ -54,7 +82,7 @@ func main() {
 	defer stop()
 	if *preflight {
 		if err := checkConfig(ctx, cfg); err != nil {
-			slog.Error("recovery preflight failed", "reason", err.Error())
+			logPreflightError(err)
 			os.Exit(1)
 		}
 		fmt.Println("PASS recovery configured integrations; vision is synthetic only")
@@ -86,16 +114,25 @@ func checkConfig(ctx context.Context, cfg authrecovery.Config) error {
 	if err := bot.CheckOperator(ctx, cfg.TelegramChatID, cfg.TelegramUserID); err != nil {
 		return err
 	}
+	return checkAI(ctx, cfg)
+}
+func checkAI(ctx context.Context, cfg authrecovery.Config) error {
 	solver, err := solverFor(cfg)
 	if err != nil {
 		return errors.New("AI_CONFIG_INVALID")
 	}
-	if solver != nil {
-		if err := solver.CheckConfig(ctx); err != nil {
-			return errors.New("AI_VISION_PREFLIGHT_UNAVAILABLE")
-		}
+	if solver == nil {
+		return nil
 	}
-	return nil
+	return solver.CheckConfig(ctx)
+}
+func logPreflightError(err error) {
+	var diagnostic *captchasolver.DiagnosticError
+	if errors.As(err, &diagnostic) {
+		slog.Error("recovery preflight failed", "reason", "AI_VISION_PREFLIGHT_UNAVAILABLE", "stage", diagnostic.Stage, "code", diagnostic.Code, "http_status", diagnostic.HTTPStatus)
+		return
+	}
+	slog.Error("recovery preflight failed", "reason", err.Error())
 }
 func run(ctx context.Context, cfg authrecovery.Config) error {
 	store, err := storage.OpenRuntime(ctx, cfg.DatabasePath)
@@ -104,33 +141,45 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 	}
 	defer store.Close()
 	schema, err := store.SchemaVersion(ctx)
-	if err != nil || schema.Version < 12 {
+	if err != nil || schema.Version < 13 {
 		return errors.New("RECOVERY_SCHEMA_REQUIRED")
 	}
 	var checksum string
-	if err := store.DB().QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version=12`).Scan(&checksum); err != nil || checksum != "2026-10-02-v12-auth-recovery" {
+	if err := store.DB().QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version=13`).Scan(&checksum); err != nil || checksum != "2026-10-02-v13-telegram-session-control" {
 		return errors.New("RECOVERY_SCHEMA_INCOMPATIBLE")
 	}
 	keyring, err := security.LoadKeyring(cfg.MasterKeyFile)
 	if err != nil {
 		return errors.New("RECOVERY_KEY_UNAVAILABLE")
 	}
+	store.WithKeyring(keyring)
 	browser := authbrowser.NewClient(cfg.AuthBrowserURL, cfg.AuthBrowserInternalToken)
 	worker := workerrpc.NewClient(cfg.WorkerRPCURL, cfg.WorkerInternalToken)
 	bot, err := telegramauth.NewClient(cfg.TelegramBotToken, telegramauth.ClientOptions{})
 	if err != nil {
 		return errors.New("TELEGRAM_CONFIG_INVALID")
 	}
+	if _, err := bot.CheckConfig(ctx); err != nil {
+		return err
+	}
+	if err := bot.SetCommands(ctx, cfg.TelegramChatID); err != nil {
+		return err
+	}
 	solver, err := solverFor(cfg)
 	if err != nil {
 		return errors.New("AI_CONFIG_INVALID")
 	}
 	broker := &challenge.Broker{Store: store, Browser: browser, Sender: bot, Config: challenge.Config{ChatID: cfg.TelegramChatID, CaptchaTTL: cfg.CaptchaTTL, OTPTTL: cfg.OTPTTL}}
-	handler, err := telegramauth.NewHandler(telegramauth.HandlerOptions{Store: store, Client: bot, ChatID: cfg.TelegramChatID, UserID: cfg.TelegramUserID, PublicOrigin: cfg.PublicOrigin, ReplyBroker: broker, Browser: browser, Scheduler: worker})
+	if err := broker.RecoverDelivery(ctx); err != nil {
+		return errors.New("RECOVERY_CHALLENGE_UNAVAILABLE")
+	}
+	handler, err := telegramauth.NewHandler(telegramauth.HandlerOptions{Store: store, Client: bot, ChatID: cfg.TelegramChatID, UserID: cfg.TelegramUserID, PublicOrigin: cfg.PublicOrigin, ReplyBroker: broker})
 	if err != nil {
 		return errors.New("TELEGRAM_HANDLER_CONFIG_INVALID")
 	}
 	options := authrecovery.CoordinatorOptions{Config: cfg, Store: store, Browser: browser, Broker: broker, Finalizer: authsession.NewFinalizer(authsession.Options{Store: store, Browser: browser, Keyring: keyring, Verifier: worker, Scheduler: worker}), Telegram: bot, Notices: handler, WorkerReady: worker.Ready}
+	options.Keyring = keyring
+	options.InvalidateSession = worker.InvalidateSession
 	if solver != nil {
 		options.Solver = solver
 	}
@@ -139,6 +188,7 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 		return errors.New("RECOVERY_COORDINATOR_INVALID")
 	}
 	handler.AIDegraded = coordinator.AIDegraded
+	handler.CoordinatorWake = coordinator.Wake
 	var initialized atomic.Bool
 	initialized.Store(true)
 	mux := http.NewServeMux()
@@ -164,7 +214,7 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 	go func() { serveErr <- health.ListenAndServe() }()
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	workersDone := make(chan struct{}, 2)
+	workersDone := make(chan struct{}, 3)
 	go func() {
 		defer func() { workersDone <- struct{}{} }()
 		if err := bot.RunPolling(runtimeCtx, store, handler); err != nil && runtimeCtx.Err() == nil {
@@ -172,6 +222,7 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 		}
 	}()
 	go func() { defer func() { workersDone <- struct{}{} }(); _ = coordinator.Run(runtimeCtx) }()
+	go func() { defer func() { workersDone <- struct{}{} }(); _ = handler.RunDelivery(runtimeCtx) }()
 	var runtimeErr error
 	select {
 	case <-ctx.Done():
@@ -185,7 +236,7 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 	shutdown, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelShutdown()
 	_ = health.Shutdown(shutdown)
-	for range 2 {
+	for range 3 {
 		select {
 		case <-workersDone:
 		case <-shutdown.Done():

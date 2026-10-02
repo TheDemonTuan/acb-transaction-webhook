@@ -22,7 +22,7 @@ check_required_secrets() {
   fi
   local required_secrets=(app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password)
   if [[ "$AUTH_RECOVERY_ENABLED" == true ]]; then
-    required_secrets+=(acb_username acb_password acb_account telegram_bot_token)
+    required_secrets+=(telegram_bot_token)
     if [[ "$AI_CAPTCHA_ENABLED" == true ]]; then required_secrets+=(ninerouter_api_key); fi
   fi
   local missing=()

@@ -56,7 +56,7 @@ func TestDBTool_ReadOnlyProbeFlags(t *testing.T) {
 	})
 
 	t.Run("dbtool -schema-compat -readonly verifies compatibility", func(t *testing.T) {
-		cmd := exec.Command("go", "run", ".", "-path", dbPath, "-readonly", "-schema-compat", "-min-version", "10")
+		cmd := exec.Command("go", "run", ".", "-path", dbPath, "-readonly", "-schema-compat", "-min-version", "13")
 		cmd.Dir = "."
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -111,4 +111,27 @@ func TestDBTool_ReadOnlyProbeFlags(t *testing.T) {
 			t.Fatalf("expected status:ok and connection_id in stdout, got: %s", stdout.String())
 		}
 	})
+}
+
+func TestDBTool_RejectsWrongTelegramControlChecksum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	store, err := storage.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec("UPDATE schema_migrations SET checksum='legacy-control' WHERE version=13"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "-path", path, "-readonly", "-schema-compat", "-min-version", "13")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err == nil {
+		t.Fatal("incompatible controller checksum admitted")
+	}
+	if !strings.Contains(stdout.String(), `"compatible":false`) {
+		t.Fatalf("missing rejection: %s", stdout.String())
+	}
 }

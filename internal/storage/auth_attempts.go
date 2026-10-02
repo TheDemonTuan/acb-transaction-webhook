@@ -118,6 +118,9 @@ func (s *Store) ActiveAuthAttemptForOwner(ctx context.Context, owner string) (Au
 
 func (s *Store) StartAuthAttempt(ctx context.Context, owner string, ttl time.Duration) (AuthAttempt, error) {
 	var attempt AuthAttempt
+	if owner == RecoveryOwner {
+		return attempt, ErrRecoveryConsentRequired
+	}
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := expireStaleAuthAttemptsTx(ctx, tx); err != nil {
 			return err
@@ -149,6 +152,9 @@ func (s *Store) startAuthAttemptTx(ctx context.Context, tx *sql.Tx, connectionID
 		return AuthAttempt{}, errors.New("auth attempt TTL must be positive")
 	}
 	if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+		return AuthAttempt{}, err
+	}
+	if err := checkNoACBLogoutTx(ctx, tx, connectionID); err != nil {
 		return AuthAttempt{}, err
 	}
 	var active bool

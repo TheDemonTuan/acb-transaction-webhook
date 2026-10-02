@@ -94,7 +94,7 @@ export const OverviewPage: React.FC = () => {
                 {isMonitoring
                   ? 'Phiên ACB đang hoạt động bình thường'
                   : acbState === 'AUTH_REQUIRED'
-                  ? 'ACB yêu cầu xác thực phiên'
+                  ? 'ACB chờ đăng nhập qua Telegram'
                   : desc.label}
               </h3>
               <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-white/80 border border-stone-200 text-stone-800 flex items-center gap-1.5">
@@ -116,7 +116,7 @@ export const OverviewPage: React.FC = () => {
               onClick={() => navigate('/admin/connection')}
               className="px-4 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white hover:bg-stone-800 transition shadow-xs cursor-pointer"
             >
-              Thiết lập tài khoản
+              Xem trạng thái kết nối
             </button>
           ) : (
             <button

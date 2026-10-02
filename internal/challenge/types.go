@@ -16,6 +16,7 @@ var (
 
 type Browser interface {
 	Observe(context.Context, string) (authbrowser.AuthObservation, error)
+	CaptureCaptcha(context.Context, string, string) ([]byte, error)
 }
 type Sender interface {
 	SendChallenge(context.Context, storage.AuthChallenge, []byte) (int64, error)

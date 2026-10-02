@@ -45,7 +45,8 @@ type TransportError struct {
 	Fatal      bool
 }
 
-func (e *TransportError) Error() string { return e.Code }
+func (e *TransportError) Error() string             { return e.Code }
+func (e *TransportError) RetryDelay() time.Duration { return e.RetryAfter }
 func NewClient(token string, options ClientOptions) (*Client, error) {
 	if token == "" {
 		return nil, errors.New("TELEGRAM_TOKEN_REQUIRED")
@@ -113,10 +114,11 @@ func (c *Client) request(ctx context.Context, method, contentType string, body i
 	defer res.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(res.Body, 1024*1024+1))
 	var envelope struct {
-		OK         bool            `json:"ok"`
-		Result     json.RawMessage `json:"result"`
-		ErrorCode  int             `json:"error_code"`
-		Parameters struct {
+		OK          bool            `json:"ok"`
+		Result      json.RawMessage `json:"result"`
+		ErrorCode   int             `json:"error_code"`
+		Description string          `json:"description"`
+		Parameters  struct {
 			RetryAfter int `json:"retry_after"`
 		} `json:"parameters"`
 	}
@@ -140,6 +142,15 @@ func (c *Client) request(ctx context.Context, method, contentType string, body i
 		failure = &TransportError{Code: "TELEGRAM_RATE_LIMITED", RetryAfter: time.Duration(seconds) * time.Second}
 	case readErr != nil || len(data) > 1024*1024 || decodeErr != nil:
 		failure = &TransportError{Code: "TELEGRAM_INVALID_RESPONSE"}
+	case method == "deleteMessage" && code == 400 && envelope.Description == "Bad Request: message to delete not found":
+		c.setTransport(nil)
+		return nil
+	case method == "editMessageText" && code == 400 && envelope.Description == "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message":
+		failure = &TransportError{Code: "TELEGRAM_MESSAGE_NOT_MODIFIED"}
+	case method == "editMessageText" && code == 400 && envelope.Description == "Bad Request: message is not modified":
+		failure = &TransportError{Code: "TELEGRAM_MESSAGE_NOT_MODIFIED"}
+	case method == "editMessageText" && code == 400 && (envelope.Description == "Bad Request: message can't be edited" || envelope.Description == "Bad Request: message to edit not found"):
+		failure = &TransportError{Code: "TELEGRAM_MESSAGE_UNEDITABLE"}
 	case res.StatusCode < 200 || res.StatusCode >= 300 || !envelope.OK:
 		failure = &TransportError{Code: "TELEGRAM_API_ERROR"}
 	}
@@ -208,16 +219,42 @@ func (c *Client) CheckOperator(ctx context.Context, chatID, userID int64) error 
 	}
 	return nil
 }
+
+// SetCommands scopes command discovery to the configured operator chat only.
+func (c *Client) SetCommands(ctx context.Context, chatID int64) error {
+	if chatID == 0 {
+		return errors.New("TELEGRAM_OPERATOR_INVALID")
+	}
+	return c.call(ctx, "setMyCommands", map[string]any{
+		"scope": map[string]any{"type": "chat", "chat_id": chatID},
+		"commands": []map[string]string{
+			{"command": "menu", "description": "Bảng điều khiển ACB"},
+			{"command": "acb_status", "description": "Trạng thái phiên ACB"},
+			{"command": "help", "description": "Hướng dẫn sử dụng"},
+		},
+	}, nil)
+}
+
+func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text string, markup any) error {
+	err := c.call(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": messageID, "text": text, "reply_markup": markup}, nil)
+	var transport *TransportError
+	if errors.As(err, &transport) && transport.Code == "TELEGRAM_MESSAGE_NOT_MODIFIED" {
+		c.setTransport(nil)
+		return nil
+	}
+	return err
+}
 func (c *Client) SendText(ctx context.Context, chatID int64, text string, markup any) (int64, error) {
 	var result struct {
 		ID int64 `json:"message_id"`
 	}
 	err := c.call(ctx, "sendMessage", struct {
-		ChatID  int64  `json:"chat_id"`
-		Text    string `json:"text"`
-		Markup  any    `json:"reply_markup,omitempty"`
-		Protect bool   `json:"protect_content"`
-	}{chatID, text, markup, true}, &result)
+		ChatID      int64           `json:"chat_id"`
+		Text        string          `json:"text"`
+		Markup      any             `json:"reply_markup,omitempty"`
+		Protect     bool            `json:"protect_content"`
+		LinkPreview map[string]bool `json:"link_preview_options"`
+	}{chatID, text, markup, true, map[string]bool{"is_disabled": true}}, &result)
 	if err == nil && result.ID <= 0 {
 		err = errors.New("TELEGRAM_INVALID_MESSAGE")
 	}
@@ -248,7 +285,16 @@ func (c *Client) SendChallenge(ctx context.Context, ch storage.AuthChallenge, im
 	if ch.Kind == "OTP" {
 		return c.SendText(ctx, ch.ChatID, "ACB cần OTP đăng nhập. Chỉ nhập mã do ACB cấp cho lần đăng nhập này, không phải OTP chuyển tiền. Trả lời trực tiếp tin này."+suffix, force)
 	}
-	if ch.Kind != "CAPTCHA_TEXT" || len(image) > 512*1024 || len(image) < 8 || !bytes.Equal(image[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
+	if ch.Kind != "CAPTCHA_TEXT" {
+		return 0, errors.New("TELEGRAM_CAPTCHA_INVALID")
+	}
+	return c.sendCaptchaPhoto(ctx, ch.ChatID, image, "ACB cần CAPTCHA. Trả lời trực tiếp ảnh này bằng ký tự trong ảnh."+suffix, force)
+}
+func (c *Client) SendCaptchaImage(ctx context.Context, chatID int64, image []byte) (int64, error) {
+	return c.sendCaptchaPhoto(ctx, chatID, image, "Ảnh captcha hiện hành. Ảnh này không tạo yêu cầu trả lời mới.", nil)
+}
+func (c *Client) sendCaptchaPhoto(ctx context.Context, chatID int64, image []byte, caption string, markup any) (int64, error) {
+	if len(image) > 512*1024 || len(image) < 8 || !bytes.Equal(image[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
 		return 0, errors.New("TELEGRAM_CAPTCHA_INVALID")
 	}
 	config, err := png.DecodeConfig(bytes.NewReader(image))
@@ -257,9 +303,11 @@ func (c *Client) SendChallenge(ctx context.Context, ch storage.AuthChallenge, im
 	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	fields := map[string]string{"chat_id": strconv.FormatInt(ch.ChatID, 10), "caption": "ACB cần CAPTCHA. Trả lời trực tiếp ảnh này bằng ký tự trong ảnh." + suffix, "protect_content": "true"}
-	markup, _ := json.Marshal(force)
-	fields["reply_markup"] = string(markup)
+	fields := map[string]string{"chat_id": strconv.FormatInt(chatID, 10), "caption": caption, "protect_content": "true"}
+	if markup != nil {
+		encoded, _ := json.Marshal(markup)
+		fields["reply_markup"] = string(encoded)
+	}
 	for name, value := range fields {
 		if err := writer.WriteField(name, value); err != nil {
 			return 0, errors.New("TELEGRAM_REQUEST_FAILED")

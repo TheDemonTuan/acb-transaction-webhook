@@ -1,10 +1,7 @@
 import { ApiError } from '../api';
 
 export const ERROR_MESSAGES_MAP: Record<string, string> = {
-  AUTH_SESSION_SUPERSEDED: 'Phiên đăng nhập ACB đã được thay thế. Vui lòng mở phiên mới.',
-  AUTH_SESSION_NOT_FOUND: 'Không tìm thấy phiên đăng nhập ACB. Vui lòng mở phiên mới.',
-  AUTH_SESSION_UNAVAILABLE: 'Dịch vụ ACB tạm thời không sẵn sàng. Vui lòng thử lại sau.',
-  SESSION_EXPIRED: 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.',
+  SESSION_EXPIRED: 'Phiên ACB đã hết hạn. Mở menu Telegram để đăng nhập lại.',
   ACB_RATE_LIMITED: 'ACB đang giới hạn tần suất truy cập. Hệ thống sẽ tự động thử lại sau ít phút.',
   ORIGIN_MISMATCH: 'Xác thực bảo mật Origin không khớp với cấu hình máy chủ. Vui lòng kiểm tra PUBLIC_ORIGIN.',
   CSRF_TOKEN_INVALID: 'Phiên bảo mật (CSRF) không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.',

@@ -66,9 +66,6 @@ func TestDisabledRecoveryDoesNotReadSecretsOrAcquireSingleton(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cfg.ReadCredentials(); !errors.Is(err, ErrRecoveryDisabled) {
-		t.Fatalf("disabled credentials: %v", err)
-	}
 	called := false
 	if err := RunSingleton(context.Background(), cfg, func(context.Context) error {
 		called = true
@@ -84,42 +81,22 @@ func TestDisabledRecoveryDoesNotReadSecretsOrAcquireSingleton(t *testing.T) {
 	}
 }
 
-func TestRecoveryCredentialsPreservePasswordAndRotate(t *testing.T) {
+func TestRecoveryConfigDoesNotRequireBankCredentialFiles(t *testing.T) {
 	productionRecoveryEnv(t)
-	// AI-off must not load a provisioned but unreadable key.
+	t.Setenv("ACB_USERNAME_FILE", t.TempDir())
+	t.Setenv("ACB_PASSWORD_FILE", t.TempDir())
+	t.Setenv("ACB_ACCOUNT_FILE", t.TempDir())
+	// AI-off does not load a provisioned but unreadable provider key either.
 	t.Setenv("NINEROUTER_API_KEY_FILE", t.TempDir())
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.PublicOrigin != "https://bank.example.com" {
-		t.Fatalf("noncanonical admin origin: %q", cfg.PublicOrigin)
+		t.Fatalf("noncanonical origin: %q", cfg.PublicOrigin)
 	}
 	if cfg.TelegramChatID != int64(9223372036854775807) || cfg.TelegramUserID != int64(-9223372036854775808) {
 		t.Fatal("operator IDs lost signed 64-bit precision")
-	}
-	credentials, err := cfg.ReadCredentials()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if credentials.Password != "  fixture password \t  " || credentials.AccountNumber != "0012345678" {
-		t.Fatal("credentials lost meaningful spaces or leading zeros")
-	}
-	if err := os.WriteFile(cfg.PasswordFile, []byte(" new password "), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	credentials, err = cfg.ReadCredentials()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if credentials.Password != " new password " {
-		t.Fatal("the next attempt did not reread the rotated password")
-	}
-	if err := os.Remove(cfg.PasswordFile); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cfg.ReadCredentials(); err == nil {
-		t.Fatal("missing rotated credentials were accepted")
 	}
 }
 
@@ -131,12 +108,10 @@ func TestEnabledRecoveryRejectsUnsafeConfiguration(t *testing.T) {
 	}{
 		{"missing bot token", "TELEGRAM_BOT_TOKEN_FILE", ""},
 		{"missing master key", "APP_MASTER_KEY_FILE", ""},
-		{"missing credential file", "ACB_PASSWORD_FILE", "/does-not-exist/acb_password"},
 		{"inline bot token", "TELEGRAM_BOT_TOKEN", "sensitive-marker"},
 		{"inline browser token", "AUTH_BROWSER_INTERNAL_TOKEN", "sensitive-marker"},
 		{"inline worker token", "WORKER_INTERNAL_TOKEN", "sensitive-marker"},
 		{"inline master key", "APP_MASTER_KEY", "sensitive-marker"},
-		{"inline password", "ACB_PASSWORD", "sensitive-marker"},
 		{"chat zero", "TELEGRAM_CHAT_ID", "0"},
 		{"user missing", "TELEGRAM_USER_ID", ""},
 		{"chat overflow", "TELEGRAM_CHAT_ID", "9223372036854775808"},
@@ -174,32 +149,6 @@ func TestEnabledRecoveryRejectsUnsafeConfiguration(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "sensitive-marker") {
 				t.Fatal("configuration error leaked a secret or URL")
-			}
-		})
-	}
-}
-
-func TestRecoveryCredentialValidation(t *testing.T) {
-	cases := []struct {
-		name string
-		file string
-		text string
-	}{
-		{"empty password", "ACB_PASSWORD_FILE", "\r\n"},
-		{"multiple terminal newlines", "ACB_PASSWORD_FILE", "secret\n\n"},
-		{"embedded newline", "ACB_PASSWORD_FILE", "secret\nother"},
-		{"NUL password", "ACB_PASSWORD_FILE", "secret\x00"},
-		{"masked account", "ACB_ACCOUNT_FILE", "***1234"},
-		{"empty username", "ACB_USERNAME_FILE", "  \n"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			productionRecoveryEnv(t)
-			if err := os.WriteFile(os.Getenv(tc.file), []byte(tc.text), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := LoadConfig(); err == nil {
-				t.Fatal("invalid credentials were accepted")
 			}
 		})
 	}

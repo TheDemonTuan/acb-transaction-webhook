@@ -222,6 +222,18 @@ func (w *workerService) VerifySession(ctx context.Context, account string, gener
 	}
 	return verifier.VerifySession(ctx, account, generation, password)
 }
+func (w *workerService) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
+	if w.store == nil || w.bankMonitor == nil || w.verifierSessionLoader == nil {
+		return errors.New("SESSION_INVALIDATION_UNAVAILABLE")
+	}
+	if err := w.store.CheckACBLogoutFence(ctx, connectionID, generation); err != nil {
+		return err
+	}
+	if err := w.bankMonitor.ClearSession(ctx, connectionID, generation); err != nil {
+		return err
+	}
+	return w.verifierSessionLoader.InvalidateSession(ctx, connectionID, generation)
+}
 
 func (w *workerService) TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error) {
 	if w.store == nil {

@@ -91,6 +91,19 @@ func automaticRecoveryEnv(t *testing.T, gap int) (*storage.Store, storage.Connec
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, conn.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	action, err := store.CreateTelegramAuthAction(ctx, storage.TelegramAuthAction{BotID: 123, ChatID: 456, UserID: 789, EpisodeID: episode.ID, ExpectedGeneration: episode.Generation, Action: "LOGIN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeliverTelegramAuthAction(ctx, action.ID, 44); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ConsumeTelegramAuthAction(ctx, action.ID, 123, 456, 789, 44, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	attempt, err := store.StartRecoveryAuthAttempt(ctx, episode.ID, conn.Generation, 15*time.Minute)
 	if err != nil {
 		t.Fatal(err)

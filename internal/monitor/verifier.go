@@ -25,6 +25,13 @@ func NewSessionVerifier(sessions *SessionLoader, client *acb.Client, sched ...*s
 	return v
 }
 
+func (v *SessionVerifier) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
+	if v == nil || v.sessions == nil {
+		return errors.New("ACB session verifier is unavailable")
+	}
+	return v.sessions.InvalidateSession(ctx, connectionID, generation)
+}
+
 type verifyTask struct {
 	id         string
 	generation int64
@@ -55,10 +62,19 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 	}
 
 	execFn := func(stepCtx context.Context) error {
-		if err := v.sessions.RestoreEnvelope(connectionID, generation, encrypted); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		response, err := v.client.Bootstrap(stepCtx)
+		stepCtx, cancel := context.WithCancel(stepCtx)
+		stop := context.AfterFunc(ctx, cancel)
+		defer stop()
+		defer cancel()
+		if err := v.sessions.RestoreEnvelope(stepCtx, connectionID, generation, encrypted); err != nil {
+			return err
+		}
+		response, err := sessionOperation(stepCtx, v.sessions.store, v.sessions, nil, connectionID, generation, true, func() (acb.Response, error) {
+			return v.client.Bootstrap(stepCtx)
+		})
 		if err != nil {
 			return err
 		}
@@ -92,6 +108,7 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 
 	select {
 	case <-ctx.Done():
+		v.scheduler.CancelTask(task.ID())
 		return ctx.Err()
 	case err := <-task.done:
 		return err

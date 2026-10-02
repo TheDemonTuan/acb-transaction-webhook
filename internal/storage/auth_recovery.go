@@ -11,9 +11,11 @@ import (
 var (
 	ErrRecoverySuperseded      = errors.New("authentication recovery superseded")
 	ErrRecoveryBudgetExhausted = errors.New("authentication recovery budget exhausted")
+	ErrRecoveryAIClaimed       = errors.New("authentication recovery AI revision already claimed")
 	ErrRecoveryPaused          = errors.New("authentication recovery is paused")
 	ErrRecoveryNotReady        = errors.New("authentication recovery is not ready")
 	ErrRecoveryCooldown        = errors.New("authentication recovery login cooldown")
+	ErrRecoveryConsentRequired = errors.New("authentication recovery button consent required")
 	ErrChallengeExpired        = errors.New("authentication challenge expired")
 	ErrChallengeConsumed       = errors.New("authentication challenge already consumed")
 	ErrChallengeMismatch       = errors.New("authentication challenge mismatch")
@@ -28,16 +30,18 @@ type AuthRecoveryEpisode struct {
 	AttemptCount, BudgetStartCount, CaptchaSubmissions, AIUsed, OTPSubmissions      int
 	NextAttemptAt, LastLoginAt, RequiredFrom, RequiredTo, ReasonCode, RecoveryRunID string
 	StatusMessageID                                                                 int64
+	ConsentActionID, ConsentExpiresAt, ConsentConsumedAt                            string
+	CredentialRevision                                                              int64
 	CreatedAt, UpdatedAt, FinishedAt                                                string
 }
 
-const episodeColumns = `id,connection_id,trigger_generation,generation,config_revision,COALESCE(attempt_id,''),state,attempt_count,budget_start_count,captcha_submissions,ai_used,otp_submissions,COALESCE(next_attempt_at,''),COALESCE(last_login_at,''),COALESCE(required_from,''),COALESCE(required_to,''),reason_code,COALESCE(recovery_run_id,''),COALESCE(status_message_id,0),created_at,updated_at,COALESCE(finished_at,'')`
+const episodeColumns = `id,connection_id,trigger_generation,generation,config_revision,COALESCE(attempt_id,''),state,attempt_count,budget_start_count,captcha_submissions,ai_used,otp_submissions,COALESCE(next_attempt_at,''),COALESCE(last_login_at,''),COALESCE(required_from,''),COALESCE(required_to,''),reason_code,COALESCE(recovery_run_id,''),COALESCE(status_message_id,0),created_at,updated_at,COALESCE(finished_at,''),COALESCE(consent_action_id,''),COALESCE(consent_expires_at,''),COALESCE(consent_consumed_at,''),credential_revision`
 
 type recoveryScanner interface{ Scan(...any) error }
 
 func scanEpisode(row recoveryScanner) (AuthRecoveryEpisode, error) {
 	var e AuthRecoveryEpisode
-	err := row.Scan(&e.ID, &e.ConnectionID, &e.TriggerGeneration, &e.Generation, &e.ConfigRevision, &e.AttemptID, &e.State, &e.AttemptCount, &e.BudgetStartCount, &e.CaptchaSubmissions, &e.AIUsed, &e.OTPSubmissions, &e.NextAttemptAt, &e.LastLoginAt, &e.RequiredFrom, &e.RequiredTo, &e.ReasonCode, &e.RecoveryRunID, &e.StatusMessageID, &e.CreatedAt, &e.UpdatedAt, &e.FinishedAt)
+	err := row.Scan(&e.ID, &e.ConnectionID, &e.TriggerGeneration, &e.Generation, &e.ConfigRevision, &e.AttemptID, &e.State, &e.AttemptCount, &e.BudgetStartCount, &e.CaptchaSubmissions, &e.AIUsed, &e.OTPSubmissions, &e.NextAttemptAt, &e.LastLoginAt, &e.RequiredFrom, &e.RequiredTo, &e.ReasonCode, &e.RecoveryRunID, &e.StatusMessageID, &e.CreatedAt, &e.UpdatedAt, &e.FinishedAt, &e.ConsentActionID, &e.ConsentExpiresAt, &e.ConsentConsumedAt, &e.CredentialRevision)
 	return e, err
 }
 func (s *Store) AuthRecoveryEpisode(ctx context.Context, episodeID string) (AuthRecoveryEpisode, error) {
@@ -185,11 +189,75 @@ func checkRecoveryUnpausedTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// Consent is checked against the action's pre-admission generation. The action
+// is bound to the new attempt atomically when that generation is advanced.
+func checkRecoveryConsentTx(ctx context.Context, tx *sql.Tx, e AuthRecoveryEpisode, admission bool) error {
+	if e.ConsentActionID == "" || e.ConsentExpiresAt == "" {
+		return ErrRecoveryConsentRequired
+	}
+	a, err := scanAuthAction(tx.QueryRowContext(ctx, `SELECT `+actionColumns+` FROM telegram_auth_actions WHERE id=?`, e.ConsentActionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrRecoveryConsentRequired
+	}
+	if err != nil {
+		return err
+	}
+	if a.Status != "CONSUMED" || (a.Action != "LOGIN" && a.Action != "RETRY") || a.EpisodeID != e.ID || a.ExpectedConfigRevision != e.ConfigRevision || a.BotID == 0 || a.ChatID == 0 || a.UserID == 0 || a.MessageID <= 0 {
+		return ErrRecoveryConsentRequired
+	}
+	expiry, err := time.Parse(time.RFC3339Nano, e.ConsentExpiresAt)
+	if err != nil {
+		return ErrRecoveryConsentRequired
+	}
+	if admission {
+		if e.ConsentConsumedAt != "" || a.AttemptID != "" || a.ExpectedGeneration != e.Generation || !time.Now().Before(expiry) {
+			return ErrRecoveryConsentRequired
+		}
+	} else {
+		consumed, err := time.Parse(time.RFC3339Nano, e.ConsentConsumedAt)
+		if err != nil || !consumed.Before(expiry) || a.ExpectedGeneration != e.Generation-1 || a.AttemptID != e.AttemptID || e.AttemptID == "" {
+			return ErrRecoveryConsentRequired
+		}
+		var revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM acb_credentials WHERE connection_id=?`, e.ConnectionID).Scan(&revision); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrRecoveryConsentRequired
+			}
+			return err
+		}
+		if revision != e.CredentialRevision {
+			return ErrRecoverySuperseded
+		}
+	}
+	return nil
+}
+
+// CheckRecoveryAuthAttempt fences external observation and secret reads without
+// authorizing a new browser attempt.
+func (s *Store) CheckRecoveryAuthAttempt(ctx context.Context, episodeID string, generation int64) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
+		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
+		if err != nil {
+			return err
+		}
+		if e.Generation != generation {
+			return ErrRecoverySuperseded
+		}
+		return checkRecoveryAttemptTx(ctx, tx, e)
+	})
+}
+
 func checkRecoveryAttemptTx(ctx context.Context, tx *sql.Tx, e AuthRecoveryEpisode) error {
 	if e.FinishedAt != "" {
 		return ErrRecoverySuperseded
 	}
 	if err := checkRecoveryCurrentTx(ctx, tx, e); err != nil {
+		return err
+	}
+	if err := checkRecoveryConsentTx(ctx, tx, e, false); err != nil {
 		return err
 	}
 	var expiry string
@@ -211,6 +279,9 @@ func checkRecoveryAttemptTx(ctx context.Context, tx *sql.Tx, e AuthRecoveryEpiso
 }
 
 func invalidateRecoveryInputsTx(ctx context.Context, tx *sql.Tx, episodeID string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET consent_action_id=NULL,consent_expires_at=NULL,consent_consumed_at=NULL WHERE id=?`, episodeID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE auth_challenges SET status='INVALIDATED' WHERE episode_id=? AND status IN ('DELIVERING','PENDING','CONSUMING')`, episodeID); err != nil {
 		return err
 	}
@@ -260,7 +331,7 @@ func recoveryRetryState(e AuthRecoveryEpisode) string {
 	if e.AttemptCount-e.BudgetStartCount >= 3 {
 		return "MANUAL_REQUIRED"
 	}
-	return "RETRY_WAIT"
+	return "WAIT_OPERATOR"
 }
 
 // Called only after the connection's confirmed auth-loss CAS has succeeded.
@@ -299,7 +370,13 @@ func (s *Store) StartRecoveryAuthAttempt(ctx context.Context, episodeID string, 
 	if ttl <= 0 {
 		return attempt, errors.New("auth attempt TTL must be positive")
 	}
+	if ttl > 15*time.Minute {
+		ttl = 15 * time.Minute
+	}
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
 		if err != nil {
 			return err
@@ -329,9 +406,25 @@ func (s *Store) StartRecoveryAuthAttempt(ctx context.Context, episodeID string, 
 		if err := tx.QueryRowContext(ctx, `SELECT state,COALESCE(account_masked,'') FROM connections WHERE id=?`, e.ConnectionID).Scan(&state, &masked); err != nil {
 			return err
 		}
-		if state != "AUTH_REQUIRED" && !(state == "UNCONFIGURED" && masked != "" && e.ReasonCode == "OPERATOR_CONFIRMED") {
+		if state != "AUTH_REQUIRED" && !(state == "UNCONFIGURED" && masked != "") {
 			return ErrRecoveryNotReady
 		}
+		if err := checkRecoveryConsentTx(ctx, tx, e, true); err != nil {
+			return err
+		}
+		var credentialRevision int64
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM acb_credentials WHERE connection_id=?`, e.ConnectionID).Scan(&credentialRevision); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrRecoveryNotReady
+			}
+			return err
+		}
+		consumedTime := time.Now().UTC()
+		consentExpiry, err := time.Parse(time.RFC3339Nano, e.ConsentExpiresAt)
+		if err != nil || !consumedTime.Before(consentExpiry) {
+			return ErrRecoveryConsentRequired
+		}
+		consumedAt := consumedTime.Format(time.RFC3339Nano)
 		attempt, err = s.startAuthAttemptTx(ctx, tx, e.ConnectionID, e.Generation, RecoveryOwner, ttl)
 		if err != nil {
 			return err
@@ -339,7 +432,10 @@ func (s *Store) StartRecoveryAuthAttempt(ctx context.Context, episodeID string, 
 		if err := invalidateRecoveryInputsTx(ctx, tx, e.ID); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET generation=?,attempt_id=?,state='STARTING',attempt_count=attempt_count+1,captcha_submissions=0,otp_submissions=0,ai_used=0,next_attempt_at=NULL,reason_code='',recovery_run_id=NULL,updated_at=? WHERE id=? AND generation=? AND finished_at IS NULL`, attempt.Generation, attempt.ID, now(), e.ID, e.Generation)
+		if _, err := tx.ExecContext(ctx, `UPDATE telegram_auth_actions SET attempt_id=? WHERE id=? AND status='CONSUMED' AND attempt_id IS NULL`, attempt.ID, e.ConsentActionID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET generation=?,attempt_id=?,state='STARTING',attempt_count=attempt_count+1,captcha_submissions=0,otp_submissions=0,ai_used=0,next_attempt_at=NULL,reason_code='',recovery_run_id=NULL,consent_action_id=?,consent_expires_at=?,consent_consumed_at=?,credential_revision=?,updated_at=? WHERE id=? AND generation=? AND finished_at IS NULL`, attempt.Generation, attempt.ID, e.ConsentActionID, e.ConsentExpiresAt, consumedAt, credentialRevision, now(), e.ID, e.Generation)
 		if err != nil {
 			return err
 		}
@@ -402,9 +498,12 @@ func finishRecoveryAuthAttemptTx(ctx context.Context, tx *sql.Tx, e AuthRecovery
 	if err := finishAuthAttemptTx(ctx, tx, e.AttemptID, attemptStatus); err != nil {
 		return err
 	}
-	if (toState == "RETRY_WAIT" || toState == "MAINTENANCE_WAIT") && e.AttemptCount-e.BudgetStartCount >= 3 {
+	if (toState == "RETRY_WAIT" || toState == "MAINTENANCE_WAIT" || toState == "WAIT_OPERATOR") && e.AttemptCount-e.BudgetStartCount >= 3 {
 		toState = "MANUAL_REQUIRED"
 		reasonCode = "ATTEMPT_BUDGET_EXHAUSTED"
+	}
+	if toState == "RETRY_WAIT" || toState == "MAINTENANCE_WAIT" {
+		toState = "WAIT_OPERATOR"
 	}
 	var finished, next any
 	if recoveryTerminal(toState) {
@@ -445,6 +544,9 @@ func (s *Store) TransitionAuthRecovery(ctx context.Context, episodeID string, ge
 		return errors.New("invalid recovery transition")
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
 		if err != nil {
 			return err
@@ -532,12 +634,15 @@ func rearmAuthRecoveryTx(ctx context.Context, tx *sql.Tx, e AuthRecoveryEpisode)
 	if err := invalidateRecoveryInputsTx(ctx, tx, e.ID); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET state='DETECTED',finished_at=NULL,budget_start_count=attempt_count,next_attempt_at=NULL,reason_code='OPERATOR_CONFIRMED',updated_at=? WHERE id=? AND generation=?`, now(), e.ID, e.Generation)
+	_, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET state='DETECTED',finished_at=NULL,budget_start_count=CASE WHEN state IN ('MANUAL_REQUIRED','CANCELLED') OR (state='WAIT_OPERATOR' AND attempt_count-budget_start_count>=3) THEN attempt_count ELSE budget_start_count END,reason_code='',updated_at=? WHERE id=? AND generation=?`, now(), e.ID, e.Generation)
 	return err
 }
 
 func (s *Store) RearmAuthRecovery(ctx context.Context, episodeID string, generation int64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
 		if err != nil {
 			return err
@@ -549,8 +654,14 @@ func (s *Store) RearmAuthRecovery(ctx context.Context, episodeID string, generat
 	})
 }
 
-func (s *Store) ClaimRecoveryAI(ctx context.Context, episodeID string, generation int64) error {
+func (s *Store) ClaimRecoveryAI(ctx context.Context, episodeID string, generation int64, revision string) error {
+	if revision == "" {
+		return ErrChallengeMismatch
+	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
 		if err != nil {
 			return err
@@ -564,7 +675,20 @@ func (s *Store) ClaimRecoveryAI(ctx context.Context, episodeID string, generatio
 		if e.State != "LOGIN" && e.State != "WAITING_CAPTCHA" {
 			return ErrRecoveryNotReady
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET ai_used=1,updated_at=? WHERE id=? AND ai_used=0`, now(), e.ID)
+		var claimed bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_recovery_ai_claims WHERE attempt_id=? AND browser_revision=?)`, e.AttemptID, revision).Scan(&claimed); err != nil {
+			return err
+		}
+		if claimed {
+			return ErrRecoveryAIClaimed
+		}
+		if e.AIUsed >= 3 {
+			return ErrRecoveryBudgetExhausted
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO auth_recovery_ai_claims(attempt_id,browser_revision,created_at) VALUES(?,?,?)`, e.AttemptID, revision, now()); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET ai_used=ai_used+1,updated_at=? WHERE id=? AND ai_used<3`, now(), e.ID)
 		if err != nil {
 			return err
 		}
@@ -580,6 +704,9 @@ func (s *Store) ReserveRecoverySubmission(ctx context.Context, episodeID string,
 		return errors.New("invalid recovery submission")
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
 		if err != nil {
 			return err
@@ -618,6 +745,9 @@ func (s *Store) ReserveRecoverySubmission(ctx context.Context, episodeID string,
 
 func (s *Store) RecordRecoveryLogin(ctx context.Context, episodeID string, generation int64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
 		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE id=?`, episodeID))
 		if err != nil {
 			return err
