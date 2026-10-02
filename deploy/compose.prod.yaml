@@ -84,6 +84,7 @@ services:
       - ${ENV_FILE:?ENV_FILE is required}
     environment:
       APP_ENV: production
+      APP_MASTER_KEY: ""
       AUTH_RECOVERY_ENABLED: ${AUTH_RECOVERY_ENABLED:-false}
       AI_CAPTCHA_ENABLED: ${AI_CAPTCHA_ENABLED:-false}
       RELEASE_COMMIT: ${WORKER_RELEASE_COMMIT:?WORKER_RELEASE_COMMIT is required}

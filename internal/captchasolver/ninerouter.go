@@ -86,7 +86,7 @@ func validAnswer(text string) bool {
 	return true
 }
 func (n *NineRouter) request(ctx context.Context, method, path string, body []byte, max int) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, n.base+path, bytes.NewReader(body))
 	if err != nil {
@@ -162,34 +162,33 @@ func (n *NineRouter) Solve(ctx context.Context, crop []byte) (string, error) {
 // CheckConfig sends only a synthetic non-bank PNG. It proves the configured
 // model's image wire contract, not its accuracy on ACB CAPTCHA.
 func (n *NineRouter) CheckConfig(ctx context.Context) error {
+	findModel := func(d []byte) bool {
+		var discovery struct {
+			Data []struct {
+				ID      string `json:"id"`
+				OwnedBy string `json:"owned_by"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(d, &discovery) != nil {
+			return false
+		}
+		for _, m := range discovery.Data {
+			if m.ID == n.model && m.OwnedBy != "combo" {
+				return true
+			}
+		}
+		return false
+	}
+
 	data, status, err := n.request(ctx, http.MethodGet, "/models/image-to-text", nil, 64<<10)
-	if status == http.StatusNotFound {
-		data, _, err = n.request(ctx, http.MethodGet, "/models", nil, 64<<10)
-	}
-	if err != nil {
-		return ErrUnavailable
-	}
-	defer clear(data)
-	// Decode explicit tags because provider snake_case metadata must not change
-	// exact model identity or silently select a combo.
-	var discovery struct {
-		Data []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(data, &discovery) != nil {
-		return ErrUnavailable
-	}
-	found := false
-	for _, m := range discovery.Data {
-		if m.ID == n.model && m.OwnedBy != "combo" {
-			found = true
+	found := err == nil && status == http.StatusOK && findModel(data)
+	if !found {
+		data, status, err = n.request(ctx, http.MethodGet, "/models", nil, 64<<10)
+		if err != nil || status != http.StatusOK || !findModel(data) {
+			return ErrUnavailable
 		}
 	}
-	if !found {
-		return ErrUnavailable
-	}
+	defer clear(data)
 	answer, err := n.Solve(ctx, SyntheticPNG())
 	if err != nil || answer != "AB12CD" {
 		return ErrUnavailable
