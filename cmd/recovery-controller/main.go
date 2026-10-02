@@ -43,7 +43,7 @@ func main() {
 	}
 	cfg, err := authrecovery.LoadConfig()
 	if err != nil {
-		slog.Error("recovery configuration invalid")
+		slog.Error("recovery configuration invalid", "error", err.Error())
 		os.Exit(2)
 	}
 	if !cfg.Enabled {
