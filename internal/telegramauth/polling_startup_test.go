@@ -15,7 +15,9 @@ import (
 )
 
 func TestRuntimePollingRegistersCommandsOnlyAfterConfig(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// Cancellation is driven by the first poll; this is only a deadlock watchdog,
+	// not a one-second performance requirement for race-instrumented CI.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var mu sync.Mutex
 	var calls []string
