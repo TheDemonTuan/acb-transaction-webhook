@@ -190,6 +190,17 @@ class Setup:
         self.ask, self.secret, self.telegram = ask, secret, telegram
         self.env = self.root / "deploy/.env.production"
         self.secret_dir = self.root / "deploy/secrets"
+        self.secrets_seen = []
+
+    def sanitize(self, text):
+        if not text:
+            return ""
+        for s in sorted(set(self.secrets_seen), key=lambda x: len(x), reverse=True):
+            if s and len(s) >= 4:
+                text = text.replace(s, "[REDACTED]")
+        text = re.sub(r"[0-9]+:[A-Za-z0-9_-]{8,}", "[REDACTED_TELEGRAM_TOKEN]", text)
+        text = re.sub(r"(token|password|secret|key)[=:\s]+[^\s]+", r"\1=[REDACTED]", text, flags=re.IGNORECASE)
+        return text
 
     @staticmethod
     def run(args, **kwargs):
@@ -198,7 +209,11 @@ class Setup:
     def checked(self, args, label, **kwargs):
         result = self.runner(args, **kwargs)
         if result.returncode:
-            raise SetupError(label + " thất bại. Không in output có thể chứa secret; kiểm tra prerequisite của release.")
+            detail = self.sanitize((result.stderr or result.stdout or "").strip())
+            if detail:
+                summary = " ".join(detail.split())[-400:]
+                raise SetupError(f"{label} thất bại (mã {result.returncode}): {summary}")
+            raise SetupError(f"{label} thất bại (mã {result.returncode}).")
         return result.stdout.strip()
 
     def secret_file(self, name, label, pattern=None):
@@ -215,13 +230,19 @@ class Setup:
             atomic_private(path, value + "\n")
         if not value or (pattern and not re.fullmatch(pattern, value)):
             raise SetupError("Secret không hợp lệ: " + name)
+        self.secrets_seen.append(value)
+        if ":" in value:
+            self.secrets_seen.append(value.split(":", 1)[1])
+        if value.strip() != value:
+            self.secrets_seen.append(value.strip())
         return value
 
-    def compose(self, stage_root, runtime, *args):
+    def compose(self, stage_root, runtime, label, *args):
         return self.checked(["bash", "-c",
                              'source "$1/simple-lib.sh"; DEPLOY_PATH="$2"; compose_release "$1" "$3" "${@:4}"',
                              "setup", str(self.release), str(stage_root), str(runtime), *args],
-                            "Compose/preflight")
+                            label)
+
 
     def prepare(self):
         secure_existing(self.env, 0o600)
@@ -301,15 +322,19 @@ class Setup:
         # Candidate config is used only by one-shot preflight, never runtime polling.
         stage = Path(tempfile.mkdtemp(prefix=".recovery-preflight-", dir=self.root))
         try:
-            (stage / "deploy").mkdir()
+            os.chmod(stage, 0o755)
+            (stage / "deploy").mkdir(mode=0o755, exist_ok=True)
             candidate_env = stage / "deploy/.env.production"
             atomic_private(candidate_env, self.candidate)
             runtime_text, _ = read_env(self.release / "runtime.env")
             candidate_runtime = stage / "runtime.env"
             atomic_private(candidate_runtime, update_env(runtime_text, {
                 "ENV_FILE": str(candidate_env), "SECRETS_DIR": str(self.secret_dir)}))
-            self.compose(stage, candidate_runtime, "config", "--quiet")
-            self.compose(stage, candidate_runtime, "run", "--rm", "--no-deps", "recovery-controller", "--check-config")
+            self.compose(stage, candidate_runtime, "Compose config", "config", "--quiet")
+            preflight_name = f"acb-recovery-preflight-{secrets.token_hex(4)}"
+            self.compose(stage, candidate_runtime, "Preflight check-config",
+                         "run", "-T", "--rm", "--no-deps", "--name", preflight_name,
+                         "recovery-controller", "--check-config")
         finally:
             shutil.rmtree(stage)
         # Recheck original bytes; never overwrite another actor's config.
