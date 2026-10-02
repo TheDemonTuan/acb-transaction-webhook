@@ -159,12 +159,6 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 	if err != nil {
 		return errors.New("TELEGRAM_CONFIG_INVALID")
 	}
-	if _, err := bot.CheckConfig(ctx); err != nil {
-		return err
-	}
-	if err := bot.SetCommands(ctx, cfg.TelegramChatID); err != nil {
-		return err
-	}
 	solver, err := solverFor(cfg)
 	if err != nil {
 		return errors.New("AI_CONFIG_INVALID")
@@ -217,7 +211,7 @@ func run(ctx context.Context, cfg authrecovery.Config) error {
 	workersDone := make(chan struct{}, 3)
 	go func() {
 		defer func() { workersDone <- struct{}{} }()
-		if err := bot.RunPolling(runtimeCtx, store, handler); err != nil && runtimeCtx.Err() == nil {
+		if err := bot.RunPolling(runtimeCtx, store, handler, cfg.TelegramChatID); err != nil && runtimeCtx.Err() == nil {
 			slog.Warn("Telegram transport stopped; recovery requires operator repair")
 		}
 	}()
