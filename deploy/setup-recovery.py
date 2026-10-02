@@ -39,16 +39,19 @@ def read_env(path):
     return text, values
 
 
-def update_env(text, changes):
+def update_env(text, changes, removals=None):
     # Only setup-owned keys are replaced; unrelated deployment config stays verbatim.
     for key, value in changes.items():
         if not re.fullmatch(r"[A-Z_]+", key) or not value or any(c in value for c in "\r\n\x00$'\"# "):
             raise SetupError("Giá trị cấu hình không an toàn: " + key)
+    removals_set = set(removals or ())
     output = []
     remaining = dict(changes)
     seen = set()
     for line in text.splitlines():
         key, sep, _ = line.partition("=")
+        if sep and key in removals_set:
+            continue
         if sep and key in changes:
             if key in seen:
                 raise SetupError("Cấu hình có key trùng: " + key)
@@ -318,7 +321,9 @@ class Setup:
         print("không ép logout phiên đang khỏe. Nếu DOM/OTP ACB không hỗ trợ, bot dừng và hướng dẫn manual.")
         if self.ask("Bạn là chủ tài khoản và cho phép thử recovery có kiểm soát? Gõ BAT để kích hoạt: ").strip() != "BAT":
             raise SetupError("Chưa kích hoạt; secret files đã provision được giữ để chạy lại.")
-        self.candidate = update_env(self.original, changes)
+        self.candidate = update_env(self.original, changes,
+                                    removals=["APP_MASTER_KEY", "ACB_USERNAME", "ACB_PASSWORD",
+                                              "ACB_ACCOUNT", "TELEGRAM_BOT_TOKEN", "NINEROUTER_API_KEY"])
         # Candidate config is used only by one-shot preflight, never runtime polling.
         stage = Path(tempfile.mkdtemp(prefix=".recovery-preflight-", dir=self.root))
         try:

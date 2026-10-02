@@ -117,6 +117,15 @@ class SetupTests(unittest.TestCase):
             self.configure()
         self.assertEqual((self.root / "deploy/secrets/acb_password").read_text(), existing_value + "\n")
 
+    def test_inline_app_master_key_stripped_from_candidate(self):
+        self.original = "PUBLIC_ORIGIN=https://bank.example\nAPP_MASTER_KEY=sensitive-key\nOTHER='value with spaces'\n"
+        self.env.write_text(self.original)
+        self.driver.original, self.driver.values = setup.read_env(self.env)
+        self.configure()
+        text, values = setup.read_env(self.env)
+        self.assertNotIn("APP_MASTER_KEY", values)
+        self.assertNotIn("sensitive-key", text)
+
     def test_failed_activation_restores_config_without_removing_credentials(self):
         self.configure()
         self.deploy_fail = True
