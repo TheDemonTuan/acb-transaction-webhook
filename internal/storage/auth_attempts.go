@@ -24,49 +24,69 @@ type AuthAttempt struct {
 // ExpireStaleAuthAttempts marks any active auth attempts whose TTL has elapsed as EXPIRED,
 // and resets connection state to AUTH_REQUIRED if it was still in AUTH_STARTING for that generation.
 func (s *Store) ExpireStaleAuthAttempts(ctx context.Context) (int64, error) {
-	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
-	var expiredCount int64
+	var count int64
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `
-			SELECT id, connection_id, generation FROM auth_attempts
-			WHERE status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING') AND expires_at <= ?
-		`, nowStr)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-
-		type staleAttempt struct {
-			id           string
-			connectionID string
-			generation   int64
-		}
-		var stale []staleAttempt
-		for rows.Next() {
-			var it staleAttempt
-			if err := rows.Scan(&it.id, &it.connectionID, &it.generation); err != nil {
-				return err
-			}
-			stale = append(stale, it)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-
-		for _, it := range stale {
-			_, err = tx.ExecContext(ctx, `UPDATE auth_attempts SET status='EXPIRED', finished_at=? WHERE id=?`, now(), it.id)
-			if err != nil {
-				return err
-			}
-			_, _ = tx.ExecContext(ctx, `
-				UPDATE connections SET state='AUTH_REQUIRED', generation=generation+1, updated_at=?
-				WHERE id=? AND generation=? AND state='AUTH_STARTING'
-			`, now(), it.connectionID, it.generation)
-			expiredCount++
-		}
-		return nil
+		var err error
+		count, err = expireStaleAuthAttemptsTx(ctx, tx)
+		return err
 	})
-	return expiredCount, err
+	return count, err
+}
+
+func expireStaleAuthAttemptsTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	nowTime := time.Now().UTC()
+	rows, err := tx.QueryContext(ctx, `SELECT id,connection_id,generation,expires_at FROM auth_attempts WHERE status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING')`)
+	if err != nil {
+		return 0, err
+	}
+	var stale []AuthAttempt
+	for rows.Next() {
+		var a AuthAttempt
+		if err := rows.Scan(&a.ID, &a.ConnectionID, &a.Generation, &a.ExpiresAt); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		expires, err := time.Parse(time.RFC3339Nano, a.ExpiresAt)
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !nowTime.Before(expires) {
+			stale = append(stale, a)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	for _, a := range stale {
+		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE attempt_id=? AND finished_at IS NULL`, a.ID))
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if err == nil {
+			if err := checkRecoveryCurrentTx(ctx, tx, e); err != nil {
+				if !errors.Is(err, ErrRecoverySuperseded) {
+					return 0, err
+				}
+				if err := supersedeAuthRecoveryTx(ctx, tx, e); err != nil {
+					return 0, err
+				}
+			} else if err := finishRecoveryAuthAttemptTx(ctx, tx, e, "EXPIRED", "WAIT_OPERATOR", "ATTEMPT_EXPIRED", time.Time{}); err != nil {
+				return 0, err
+			}
+		} else {
+			// Stale generations are terminalized without touching the new connection.
+			if _, err := tx.ExecContext(ctx, `UPDATE connections SET state='AUTH_REQUIRED',generation=generation+1,updated_at=? WHERE id=? AND generation=? AND state='AUTH_STARTING'`, now(), a.ConnectionID, a.Generation); err != nil {
+				return 0, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE auth_attempts SET status='EXPIRED',finished_at=? WHERE id=?`, now(), a.ID); err != nil {
+			return 0, err
+		}
+	}
+	return int64(len(stale)), nil
 }
 
 // ActiveAuthAttemptForOwner returns the current non-expired active auth attempt for the connection, if any.
@@ -97,63 +117,68 @@ func (s *Store) ActiveAuthAttemptForOwner(ctx context.Context, owner string) (Au
 }
 
 func (s *Store) StartAuthAttempt(ctx context.Context, owner string, ttl time.Duration) (AuthAttempt, error) {
+	var attempt AuthAttempt
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := expireStaleAuthAttemptsTx(ctx, tx); err != nil {
+			return err
+		}
+		var connectionID string
+		var generation int64
+		if err := tx.QueryRowContext(ctx, `SELECT id,generation FROM connections ORDER BY created_at LIMIT 1`).Scan(&connectionID, &generation); err != nil {
+			return err
+		}
+		var err error
+		attempt, err = s.startAuthAttemptTx(ctx, tx, connectionID, generation, owner, ttl)
+		if err != nil {
+			return err
+		}
+		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE connection_id=? AND finished_at IS NULL`, connectionID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return supersedeAuthRecoveryTx(ctx, tx, e)
+	})
+	return attempt, err
+}
+
+func (s *Store) startAuthAttemptTx(ctx context.Context, tx *sql.Tx, connectionID string, generation int64, owner string, ttl time.Duration) (AuthAttempt, error) {
 	if ttl <= 0 {
 		return AuthAttempt{}, errors.New("auth attempt TTL must be positive")
 	}
-	// Expire stale attempts first to prevent stale locks
-	_, _ = s.ExpireStaleAuthAttempts(ctx)
-
-	connection, err := s.Connection(ctx)
+	if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+		return AuthAttempt{}, err
+	}
+	var active bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_attempts WHERE connection_id=? AND status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING'))`, connectionID).Scan(&active); err != nil {
+		return AuthAttempt{}, err
+	}
+	if active {
+		return AuthAttempt{}, ErrAuthAttemptActive
+	}
+	attempt := AuthAttempt{ID: id("auth"), ConnectionID: connectionID, Generation: generation + 1, OwnerSubject: owner, Status: "STARTING", ExpiresAt: time.Now().UTC().Add(ttl).Format(time.RFC3339Nano), CreatedAt: now()}
+	result, err := tx.ExecContext(ctx, `UPDATE connections SET state='AUTH_STARTING',generation=?,updated_at=? WHERE id=? AND generation=?`, attempt.Generation, now(), connectionID, generation)
 	if err != nil {
 		return AuthAttempt{}, err
 	}
-
-	// Check if an active attempt already exists
-	hasActive, err := s.HasActiveAuthAttempt(ctx, connection.ID)
-	if err == nil && hasActive {
-		return AuthAttempt{}, ErrAuthAttemptActive
+	if err := requireRecoveryRow(result, ErrAuthAttemptActive); err != nil {
+		return AuthAttempt{}, err
 	}
-
-	attempt := AuthAttempt{
-		ID:           id("auth"),
-		ConnectionID: connection.ID,
-		Generation:   connection.Generation + 1,
-		Status:       "STARTING",
-		ExpiresAt:    time.Now().UTC().Add(ttl).Format(time.RFC3339Nano),
-		CreatedAt:    now(),
-		OwnerSubject: owner,
+	_, err = tx.ExecContext(ctx, `INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`, attempt.ID, connectionID, attempt.Generation, owner, attempt.Status, attempt.ExpiresAt, attempt.CreatedAt)
+	if err != nil && (strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "one_active_auth_attempt")) {
+		err = ErrAuthAttemptActive
 	}
-
-	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE connections SET state='AUTH_STARTING',generation=?,updated_at=? WHERE id=? AND generation=?`, attempt.Generation, now(), connection.ID, connection.Generation)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil || changed != 1 {
-			return ErrAuthAttemptActive
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`, attempt.ID, attempt.ConnectionID, attempt.Generation, owner, attempt.Status, attempt.ExpiresAt, attempt.CreatedAt)
-		if err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "one_active_auth_attempt") || strings.Contains(err.Error(), "database is locked") {
-				return ErrAuthAttemptActive
-			}
-			return err
-		}
-		return nil
-	})
 	return attempt, err
 }
 
 func (s *Store) MarkAuthAttemptInProgress(ctx context.Context, attemptID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE auth_attempts SET status='IN_PROGRESS'
-		WHERE id=? AND status='STARTING' AND EXISTS (
+		WHERE id=? AND status='STARTING' AND julianday(expires_at)>julianday(?) AND EXISTS (
 			SELECT 1 FROM connections c WHERE c.id=auth_attempts.connection_id
 			AND c.generation=auth_attempts.generation AND c.state='AUTH_STARTING'
-		)`, attemptID)
+		)`, attemptID, now())
 	if err != nil {
 		return err
 	}
@@ -168,30 +193,43 @@ func (s *Store) MarkAuthAttemptInProgress(ctx context.Context, attemptID string)
 }
 
 func (s *Store) FinishAuthAttempt(ctx context.Context, attemptID, status string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE attempt_id=? AND finished_at IS NULL`, attemptID))
+		if err == nil {
+			state := "RETRY_WAIT"
+			if status == "CANCELLED" {
+				state = "CANCELLED"
+			}
+			if status == "EXPIRED" {
+				state = "WAIT_OPERATOR"
+			}
+			return finishRecoveryAuthAttemptTx(ctx, tx, e, status, state, "ATTEMPT_"+status, time.Now().UTC().Add(30*time.Second))
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return finishAuthAttemptTx(ctx, tx, attemptID, status)
+	})
+}
+
+func finishAuthAttemptTx(ctx context.Context, tx *sql.Tx, attemptID, status string) error {
 	if status != "CANCELLED" && status != "EXPIRED" && status != "FAILED" {
 		return errors.New("invalid auth attempt finish status")
 	}
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		var connectionID string
-		var generation int64
-		err := tx.QueryRowContext(ctx, `SELECT connection_id,generation FROM auth_attempts WHERE id=? AND status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING')`, attemptID).Scan(&connectionID, &generation)
-		if err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE connections SET state='AUTH_REQUIRED',generation=generation+1,updated_at=? WHERE id=? AND generation=?`, now(), connectionID, generation)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return ErrGenerationFenceMismatch
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE auth_attempts SET status=?,finished_at=? WHERE id=?`, status, now(), attemptID)
+	var connectionID string
+	var generation int64
+	if err := tx.QueryRowContext(ctx, `SELECT connection_id,generation FROM auth_attempts WHERE id=? AND status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING')`, attemptID).Scan(&connectionID, &generation); err != nil {
 		return err
-	})
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE connections SET state='AUTH_REQUIRED',generation=generation+1,updated_at=? WHERE id=? AND generation=? AND state='AUTH_STARTING'`, now(), connectionID, generation)
+	if err != nil {
+		return err
+	}
+	if err := requireRecoveryRow(result, ErrGenerationFenceMismatch); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE auth_attempts SET status=?,finished_at=? WHERE id=?`, status, now(), attemptID)
+	return err
 }
 
 // HasActiveAuthAttempt checks whether an interactive browser authentication attempt

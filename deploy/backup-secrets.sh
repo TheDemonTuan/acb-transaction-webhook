@@ -7,6 +7,13 @@ umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/simple-lib.sh
 source "$SCRIPT_DIR/simple-lib.sh"
+DEPLOY_PATH="${DEPLOY_PATH:-$(dirname "$SCRIPT_DIR")}"
+if [[ -f "$DEPLOY_PATH/deploy/.env.production" ]]; then
+  load_recovery_flags
+else
+  AUTH_RECOVERY_ENABLED=false
+  AI_CAPTCHA_ENABLED=false
+fi
 
 check_required_secrets() {
   if [[ ! -d "$SECRETS_DIR" ]]; then
@@ -14,6 +21,10 @@ check_required_secrets() {
     return 1
   fi
   local required_secrets=(app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password)
+  if [[ "$AUTH_RECOVERY_ENABLED" == true ]]; then
+    required_secrets+=(acb_username acb_password acb_account telegram_bot_token)
+    if [[ "$AI_CAPTCHA_ENABLED" == true ]]; then required_secrets+=(ninerouter_api_key); fi
+  fi
   local missing=()
   for s in "${required_secrets[@]}"; do
     local s_file="$SECRETS_DIR/$s"
@@ -25,6 +36,10 @@ check_required_secrets() {
     log_error "Missing or empty required production secrets: [${missing[*]}]"
     return 1
   fi
+  # The archive below includes all provisioned files, even when recovery is paused/disabled.
+  for s in acb_username acb_password acb_account telegram_bot_token ninerouter_api_key; do
+    check_secret_permissions "$SECRETS_DIR/$s" || return 1
+  done
   return 0
 }
 

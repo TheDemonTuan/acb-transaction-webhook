@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -498,6 +499,10 @@ func (m *Monitor) RequestSync(ctx context.Context) error {
 	if conn.State != "MONITORING" {
 		return ErrSyncUnavailable
 	}
+	blocked, err := m.store.HasBlockingAuthRecovery(ctx, conn.ID, conn.Generation)
+	if err != nil || blocked {
+		return ErrSyncUnavailable
+	}
 
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
@@ -659,12 +664,22 @@ func (m *Monitor) ScheduleRecovery(ctx context.Context, connectionID string, gen
 		return fmt.Errorf("stale recovery request: connection is %s at generation %d in state %s", conn.ID, conn.Generation, conn.State)
 	}
 	reason := storage.RecoveryReasonReauth
-	if existingRun, err := m.store.GetRecoveryRunByEvent(ctx, connectionID, generation, eventKey); err == nil && existingRun.Reason != "" {
-		reason = existingRun.Reason
-	}
-	plan, err := m.recoveryPlan(ctx, connectionID, generation, reason)
-	if err != nil {
+	var plan storage.RecoveryRunPlan
+	existingRun, err := m.store.GetRecoveryRunByEvent(ctx, connectionID, generation, eventKey)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	if err == nil {
+		if existingRun.Reason != "" {
+			reason = existingRun.Reason
+		}
+		plan = storage.RecoveryRunPlan{Reason: reason, RangeFrom: existingRun.RangeFrom, RangeTo: existingRun.RangeTo, NextDay: existingRun.NextDay}
+	}
+	if plan.RangeFrom == "" || plan.RangeTo == "" {
+		plan, err = m.recoveryPlan(ctx, connectionID, generation, reason)
+		if err != nil {
+			return err
+		}
 	}
 	run, _, err := m.store.EnsureRecoveryRunWithPlan(ctx, connectionID, generation, eventKey, plan)
 	if err != nil {
@@ -828,7 +843,8 @@ func (m *Monitor) Run(ctx context.Context) {
 				conn, err := m.store.Connection(ctx)
 				if err == nil && conn.State == "MONITORING" {
 					openRun, recErr := m.openRecoveryRun(ctx, conn.ID, conn.Generation)
-					if recErr == nil && openRun == nil {
+					blocked, gateErr := m.store.HasBlockingAuthRecovery(ctx, conn.ID, conn.Generation)
+					if recErr == nil && openRun == nil && gateErr == nil && !blocked {
 						if s := m.Scheduler(); s != nil {
 							_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
 						}
@@ -872,7 +888,13 @@ func (m *Monitor) Run(ctx context.Context) {
 			}
 			deadline = time.Time{}
 			conn, err := m.store.Connection(ctx)
+			blocked := true
 			if err == nil && conn.State == "MONITORING" {
+				var gateErr error
+				blocked, gateErr = m.store.HasBlockingAuthRecovery(ctx, conn.ID, conn.Generation)
+				blocked = blocked || gateErr != nil
+			}
+			if err == nil && conn.State == "MONITORING" && !blocked {
 				if s := m.Scheduler(); s != nil {
 					_ = s.Enqueue(NewRealtimeTask(m, PriorityRealtimePoll, conn.ID, conn.Generation))
 				}
@@ -904,6 +926,10 @@ func (m *Monitor) Run(ctx context.Context) {
 			m.lastMode = schedule.Mode
 			conn, err := m.store.Connection(ctx)
 			if err != nil || conn.State != "MONITORING" {
+				continue
+			}
+			blocked, gateErr := m.store.HasBlockingAuthRecovery(ctx, conn.ID, conn.Generation)
+			if gateErr != nil || blocked {
 				continue
 			}
 

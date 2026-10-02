@@ -82,6 +82,12 @@ type browserSession struct {
 	debugURL  string
 	handoff   string
 	verified  bool
+	// Protected by server.opMu, never persisted or returned by status.
+	automated     bool
+	accountNumber string
+	revision      string
+	fingerprint   string
+	consumed      bool
 
 	cmd      *exec.Cmd
 	done     chan struct{}
@@ -109,6 +115,7 @@ func sessionResponse(item *browserSession) browserSessionResponse {
 
 type server struct {
 	mu                   sync.Mutex
+	opMu                 sync.Mutex // CDP observation/action/handoff serialization; not the session-map lock.
 	session              *browserSession
 	internalToken        string
 	internalAuthRequired bool
@@ -118,6 +125,9 @@ type server struct {
 	extraFlags   []string
 	allocatePort func() (int, error)
 	cmdFunc      func(ctx context.Context, name string, args ...string) *exec.Cmd
+	// Test-only dependency injection; production always uses acbLoginURL and the closed adapter.
+	loginURL   string
+	fixtureDOM bool
 }
 
 func main() {
@@ -152,6 +162,7 @@ func main() {
 	mux.Handle("GET /sessions/{attemptID}/status", controller.requireInternal(http.HandlerFunc(controller.status)))
 	mux.Handle("POST /sessions/{attemptID}/handoff", controller.requireInternal(http.HandlerFunc(controller.handoff)))
 	mux.Handle("POST /sessions/{attemptID}/complete", controller.requireInternal(http.HandlerFunc(controller.complete)))
+	controller.registerAutomation(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Runtime-Role", "auth-browser")
 		expectedRole := r.URL.Query().Get("role")
@@ -297,6 +308,8 @@ func (s *server) setStatus(id, newStatus, errMsg string) bool {
 }
 
 func (s *server) start(w http.ResponseWriter, r *http.Request) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	var input struct {
 		AttemptID string `json:"attemptId"`
 	}
@@ -420,7 +433,11 @@ func (s *server) launch(ctx context.Context, item *browserSession, port int, rea
 	if len(s.extraFlags) > 0 {
 		args = append(args, s.extraFlags...)
 	}
-	args = append(args, acbLoginURL())
+	loginURL := s.loginURL
+	if loginURL == "" {
+		loginURL = acbLoginURL()
+	}
+	args = append(args, loginURL)
 
 	cmdBuilder := s.cmdFunc
 	if cmdBuilder == nil {
@@ -451,7 +468,7 @@ func (s *server) launch(ctx context.Context, item *browserSession, port int, rea
 	}()
 
 	startupCtx, startupCancel := context.WithTimeout(ctx, startupLimit)
-	err := waitBrowserReady(startupCtx, item.debugURL, item.done, item)
+	err := waitBrowserReady(startupCtx, item.debugURL, item.done, item, loginURL)
 	startupCancel()
 	if err != nil {
 		item.cancel()
@@ -493,6 +510,7 @@ func (s *server) failStartup(item *browserSession, ready chan<- error, message s
 
 func (s *server) requireInternal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		provided := r.Header.Get(authbrowser.InternalTokenHeader)
 		if s.internalAuthRequired && (s.internalToken == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(s.internalToken)) != 1) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -504,6 +522,8 @@ func (s *server) requireInternal(next http.Handler) http.Handler {
 
 func (s *server) cancel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("attemptID")
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
 	if s.session == nil || s.session.AttemptID != id {
 		s.mu.Unlock()
@@ -537,7 +557,24 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handoff(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	id := r.PathValue("attemptID")
+	s.mu.Lock()
+	item := s.session
+	s.mu.Unlock()
+	if item != nil && item.AttemptID == id && item.automated {
+		if !time.Now().Before(item.ExpiresAt) {
+			automationError(w, 410)
+			return
+		}
+		observation, _, _, err := s.observeAutomation(r.Context(), item)
+		if err != nil || observation.State != authbrowser.Authenticated {
+			automationError(w, 409)
+			return
+		}
+	}
 	s.mu.Lock()
 	if s.session == nil || s.session.AttemptID != id || !s.session.verified || s.session.handoff == "" {
 		s.mu.Unlock()
@@ -551,6 +588,8 @@ func (s *server) handoff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) complete(w http.ResponseWriter, r *http.Request) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	id := r.PathValue("attemptID")
 	s.mu.Lock()
 	if s.session == nil || s.session.AttemptID != id || !s.session.verified {
@@ -655,13 +694,23 @@ func (s *server) runObserverCycle(ctx context.Context, id, debugURL string, done
 		}
 		s.mu.Unlock()
 
+		s.opMu.Lock()
+		s.mu.Lock()
+		automated := s.session == nil || s.session.AttemptID != id || s.session.automated
+		s.mu.Unlock()
+		if automated {
+			s.opMu.Unlock()
+			continue
+		}
 		checkCtx, cancel := context.WithTimeout(executor, 5*time.Second)
 		currentURL, signals, cookies, form, reason, err := browserLoginState(checkCtx, browserCtx)
 		cancel()
 		if err != nil {
+			s.opMu.Unlock()
 			continue
 		}
 		if !authenticatedACB(currentURL, signals, cookies) || !validHistoryForm(form) {
+			s.opMu.Unlock()
 			if reason != "" && (reason != lastReason || time.Since(lastLogTime) >= 10*time.Second) {
 				slog.Info("ACB observer waiting", "attempt_id", id, "reason", reason)
 				lastReason = reason
@@ -672,6 +721,7 @@ func (s *server) runObserverCycle(ctx context.Context, id, debugURL string, done
 		handoff, err := encodeHandoff(currentURL, cookies, form)
 		if err != nil {
 			slog.Warn("encode ACB browser handoff", "attempt_id", id, "error", err)
+			s.opMu.Unlock()
 			continue
 		}
 		s.mu.Lock()
@@ -682,6 +732,7 @@ func (s *server) runObserverCycle(ctx context.Context, id, debugURL string, done
 			slog.Info("ACB login verified via page DOM signals", "attempt_id", id)
 		}
 		s.mu.Unlock()
+		s.opMu.Unlock()
 		return true, true
 	}
 }
@@ -1206,7 +1257,7 @@ func encodeHandoff(currentURL string, cookies []*network.Cookie, form browserFor
 	return authbrowser.EncodeHandoff(authbrowser.Handoff{Version: 1, URL: currentURL, Action: form.Action, Fields: form.Fields, Cookies: serializable}, nonce)
 }
 
-func waitBrowserReady(ctx context.Context, debugURL string, done <-chan struct{}, item *browserSession) error {
+func waitBrowserReady(ctx context.Context, debugURL string, done <-chan struct{}, item *browserSession, loginURL ...string) error {
 	client := &http.Client{Timeout: time.Second}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -1240,7 +1291,7 @@ func waitBrowserReady(ctx context.Context, debugURL string, done <-chan struct{}
 			if response.StatusCode != http.StatusOK || decodeErr != nil || version.WebSocketDebuggerURL == "" {
 				continue
 			}
-			if err := waitACBTargetStable(ctx, client, debugURL, done); err != nil {
+			if err := waitACBTargetStable(ctx, client, debugURL, done, loginURL...); err != nil {
 				return err
 			}
 			return nil
@@ -1248,7 +1299,7 @@ func waitBrowserReady(ctx context.Context, debugURL string, done <-chan struct{}
 	}
 }
 
-func waitACBTargetStable(ctx context.Context, client *http.Client, debugURL string, done <-chan struct{}) error {
+func waitACBTargetStable(ctx context.Context, client *http.Client, debugURL string, done <-chan struct{}, expectedURL ...string) error {
 	const stableFor = 2 * time.Second
 	stableSince := time.Time{}
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -1279,7 +1330,11 @@ func waitACBTargetStable(ctx context.Context, client *http.Client, debugURL stri
 		response.Body.Close()
 		found := false
 		if response.StatusCode == http.StatusOK && decodeErr == nil {
-			loginLocation, _ := url.Parse(acbLoginURL())
+			loginURL := acbLoginURL()
+			if len(expectedURL) > 0 && expectedURL[0] != "" {
+				loginURL = expectedURL[0]
+			}
+			loginLocation, _ := url.Parse(loginURL)
 			for _, targetInfo := range targets {
 				targetLocation, parseErr := url.Parse(targetInfo.URL)
 				if targetInfo.Type == "page" && parseErr == nil && loginLocation != nil &&

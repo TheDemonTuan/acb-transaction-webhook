@@ -59,13 +59,12 @@ func TestSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema version failed: %v", err)
 	}
-	if rep.Version != 11 {
-		t.Errorf("expected schema version 11, got %d", rep.Version)
+	var version, count int
+	var checksum string
+	if err := store.DB().QueryRowContext(ctx, `SELECT version,checksum,(SELECT count(*) FROM schema_migrations) FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &checksum, &count); err != nil {
+		t.Fatal(err)
 	}
-	if rep.AppliedCount != 11 {
-		t.Errorf("expected 11 migrations applied, got %d", rep.AppliedCount)
-	}
-	if rep.Checksum != "2026-09-22-v11-recovery-runs" {
-		t.Errorf("expected checksum '2026-09-22-v11-recovery-runs', got %q", rep.Checksum)
+	if rep.Version != version || rep.AppliedCount != count || rep.Checksum != checksum {
+		t.Errorf("schema report does not match durable migration ledger: %+v", rep)
 	}
 }

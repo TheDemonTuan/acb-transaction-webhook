@@ -56,7 +56,7 @@ case "${1:-}" in
     ;;
   container)
     [[ $# == 3 && "$3" =~ ^[1-9][0-9]*$ ]] || fail 'usage: container <name> <positive-timeout-seconds>'
-    [[ "$2" =~ ^acb-(worker|auth-browser|tts-gateway|bark|gateway-(blue|green)|frontend-(blue|green))$ ]] || fail 'unknown container'
+    [[ "$2" =~ ^acb-(worker|recovery-controller|auth-browser|tts-gateway|bark|gateway-(blue|green)|frontend-(blue|green))$ ]] || fail 'unknown container'
     [[ "${EXPECTED_IMAGE_REF:-}" =~ @sha256:[0-9a-f]{64}$ ]] || fail 'EXPECTED_IMAGE_REF must be an immutable digest'
     expected_id="$(docker image inspect --format '{{.Id}}' "$EXPECTED_IMAGE_REF")" || fail 'expected image unavailable'
     case "$2" in
@@ -82,6 +82,7 @@ case "${1:-}" in
             frontend_identity "$result" "$EXPECTED_RELEASE_SHA" && exit 0
             ;;
           acb-worker) docker exec acb-worker /worker --readiness-check >/dev/null && exit 0 ;;
+          acb-recovery-controller) docker exec acb-recovery-controller /recovery-controller --readiness-check >/dev/null && exit 0 ;;
           *) exit 0 ;;
         esac
       fi

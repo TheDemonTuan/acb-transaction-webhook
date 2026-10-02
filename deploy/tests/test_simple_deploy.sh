@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$images_env" && -n "$bundle" ]] || fail 'Usage: test_simple_deploy.sh --images-env /absolute/images.env --bundle /absolute/bundle [--suite all|lifecycle|fault-matrix]'
-[[ -f "$images_env" && -f "$bundle/deploy.sh" && -f "$bundle/import-baseline.py" && -f "$bundle/compose.prod.yaml" ]] || fail 'Missing images.env or complete bundle'
+[[ -f "$images_env" && -f "$bundle/deploy.sh" && -f "$bundle/import-baseline.py" && -f "$bundle/compose.prod.yaml" && -s "$bundle/SHA256SUMS" ]] || fail 'Missing images.env or complete checksummed bundle'
 [[ -z "$(docker ps -aq --filter name='^/acb-' --filter name='^/edge-traefik$')" ]] || fail 'Unsafe Docker daemon: ACB or edge-traefik container exists'
 for name in bank-event-gateway_gateway_data bank-event-gateway_bark_data; do
   ! docker volume inspect "$name" >/dev/null 2>&1 || fail "Unsafe Docker daemon: $name exists"
@@ -162,10 +162,28 @@ PY
 )"
 target="$root/releases/$release_sha"
 mkdir -p "$target"
-cp "$bundle/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,import-baseline.py} "$target/"
-chmod 644 "$target/bark-entrypoint.sh"
+cp "$bundle/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py} "$target/"
+chmod 644 "$target/bark-entrypoint.sh" "$target/compose.prod.yaml" "$target/compose.auth-recovery-ai.yaml"
 cp "$images_env" "$target/images.env"
-[[ ! -f "$bundle/SHA256SUMS" ]] || cp "$bundle/SHA256SUMS" "$target/"
+cp "$bundle/SHA256SUMS" "$target/"
+log_test_start "Uploaded release contains complete checksummed setup bundle"
+python3 - "$target/SHA256SUMS" <<'PY'
+import sys
+expected={'deploy.sh','simple-lib.sh','healthcheck.sh','render-route.sh','backup-db.sh','import-baseline.py','setup-recovery.sh','setup-recovery.py','compose.prod.yaml','compose.auth-recovery-ai.yaml','seccomp-auth-browser.json','bark-entrypoint.sh','images.env'}
+names=[line.rstrip('\n').split('  ',1)[1] for line in open(sys.argv[1])]
+assert len(names)==len(expected) and set(names)==expected, ('incomplete uploaded checksum manifest',names)
+PY
+(cd "$target" && sha256sum -c SHA256SUMS) || fail 'Uploaded release checksum verification failed'
+[[ -x "$target/setup-recovery.sh" && -x "$target/setup-recovery.py" ]] || fail 'Packaged setup scripts are not executable'
+bash "$target/setup-recovery.sh" --help > "$root/setup-help.log"
+[[ ! -e "$root/state.env" ]] || fail 'Setup help mutated deployment state'
+cp "$target/setup-recovery.py" "$root/setup-recovery.py.saved"
+printf '\n# deliberate upload corruption\n' >> "$target/setup-recovery.py"
+if (cd "$target" && sha256sum -c SHA256SUMS) >"$root/corrupt-setup.log" 2>&1; then fail 'Corrupted uploaded setup passed checksum verification'; fi
+cp "$root/setup-recovery.py.saved" "$target/setup-recovery.py"
+(cd "$target" && sha256sum -c SHA256SUMS) || fail 'Restored uploaded setup checksum verification failed'
+[[ ! -e "$legacy/setup-recovery.sh" && ! -e "$legacy/setup-recovery.py" && ! -e "$legacy/compose.auth-recovery-ai.yaml" ]] || fail 'Historical baseline unexpectedly contains recovery setup'
+log_test_pass "Packaged setup resolves Python companion, detects corruption, and remains absent from legacy"
 
 python3 - "$root" <<'PY'
 import os,secrets,sys
@@ -461,7 +479,28 @@ verify_baseline() {
   [[ "$(docker inspect -f '{{.Config.Image}}' acb-worker)" == "$WORKER_IMAGE_REF" ]] || fail "$1 changed worker image"
 }
 
+set_recovery_flags() {
+  python3 - "$root/deploy/.env.production" "$1" "$2" <<'PY'
+import sys
+path,recovery,ai=sys.argv[1:]
+lines=[line for line in open(path) if not line.startswith(('AUTH_RECOVERY_ENABLED=','AI_CAPTCHA_ENABLED='))]
+with open(path,'w') as f:
+    f.writelines(lines)
+    f.write('AUTH_RECOVERY_ENABLED='+recovery+'\nAI_CAPTCHA_ENABLED='+ai+'\n')
+PY
+}
+
 run_suite_lifecycle() {
+  log_test_start "Strict recovery flags reject ambiguous values"
+  cp "$root/deploy/.env.production" "$root/base-production.env"
+  printf 'AUTH_RECOVERY_ENABLED=yes\n' >> "$root/deploy/.env.production"
+  expect_unchanged_failure 'invalid recovery flag' bash "$target/deploy.sh" --check "$release_sha"
+  cp "$root/base-production.env" "$root/deploy/.env.production"
+  printf 'AUTH_RECOVERY_ENABLED=false\nAUTH_RECOVERY_ENABLED=true\n' >> "$root/deploy/.env.production"
+  expect_unchanged_failure 'duplicate recovery flag' bash "$target/deploy.sh" --check "$release_sha"
+  cp "$root/base-production.env" "$root/deploy/.env.production"
+  log_test_pass "Recovery flags are strict and fail before mutation"
+
   log_step "Starting suite: lifecycle"
 
   log_test_start "Preflight negative checks (invalid SHA, digest, missing/world-readable secret, failover)"
@@ -491,7 +530,12 @@ run_suite_lifecycle() {
   [[ "$(docker volume inspect --format '{{.Name}}:{{.CreatedAt}}' bank-event-gateway_gateway_data)" == "$gateway_volume_id" ]] || fail 'Gateway data volume changed during deployment'
   [[ "$(sed -n 's/^FRONTEND_SLOT=//p' "$root/state.env")" == green ]] || fail 'Frontend did not flip to green'
   DEPLOY_PATH="$root" bash "$target/healthcheck.sh" route green "$release_sha" "$release_sha"
+  ln -s "$target/setup-recovery.sh" "$root/deploy/setup-recovery.sh"
+  bash "$root/deploy/setup-recovery.sh" --help > "$root/stable-setup-help.log"
+  cmp "$root/setup-help.log" "$root/stable-setup-help.log" || fail 'Stable setup command did not resolve the packaged Python companion'
   log_test_pass "Baseline deploy committed successfully to green slot"
+  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller 2>/dev/null || true)" != true ]] || fail 'Default-off deployment started recovery controller'
+
 
   log_test_start "Stale frontend service rejection"
   cp "$root/edge/dynamic/acb.yml" "$root/valid-acb.yml"
@@ -565,14 +609,115 @@ PY
   [[ "$(sha256sum "$root/state.env")" == "$state_before" ]] || fail 'Same SHA rewrote committed state'
   [[ "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$route_before" ]] || fail 'Same SHA rewrote app route'
   log_test_pass "No-op deployment rerun passed (no mutation)"
+  log_test_start "Recovery controller opt-in, shared worker digest, human mode without AI key"
+  python3 - "$root/deploy/secrets" <<'PY'
+import os,sys
+root=sys.argv[1]
+values={'acb_username':'fixture-operator','acb_password':'fixture-password','acb_account':'123456789', 'telegram_bot_token':'123456:fixture-token'}
+for name,value in values.items():
+    path=root+'/'+name
+    with open(path,'w') as f: f.write(value+'\n')
+    os.chmod(path,0o600); os.chown(path,1000,1000)
+PY
+  printf 'TELEGRAM_CHAT_ID=123456\nTELEGRAM_USER_ID=123456\n' >> "$root/deploy/.env.production"
+  set_recovery_flags true false
+  [[ ! -e "$root/deploy/secrets/ninerouter_api_key" ]] || fail 'Human-mode fixture unexpectedly has AI key'
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
+  candidate_worker_ref="$(docker inspect -f '{{.Config.Image}}' acb-worker)"
+  [[ "$(docker inspect -f '{{.Config.Image}}' acb-recovery-controller)" == "$candidate_worker_ref" ]] || fail 'Controller does not share worker digest'
+  EXPECTED_IMAGE_REF="$candidate_worker_ref" bash "$target/healthcheck.sh" container acb-recovery-controller 120
+  [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Opting into recovery restarted worker'
+  docker inspect acb-recovery-controller | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert set(c["NetworkSettings"]["Networks"])=={"acb-core","acb-egress"}; assert not c["HostConfig"]["PortBindings"]; assert c["HostConfig"]["ReadonlyRootfs"]; assert not any(m["Destination"].endswith("ninerouter_api_key") for m in c["Mounts"])'
+  log_test_pass "Human-mode controller healthy with shared worker image and no AI key"
+
+  log_test_start "AI override and conditional secret admission"
+  set_recovery_flags true true
+  mv "$target/compose.auth-recovery-ai.yaml" "$root/ai-override.tmp"
+  # Exercise conditional admission, not the bundle-integrity guard tested above.
+  mv "$target/SHA256SUMS" "$root/recovery-checksums.tmp"
+  if bash "$target/deploy.sh" --check "$release_sha" >"$root/missing-ai-override.log" 2>&1; then fail 'Enabled AI accepted missing override'; fi
+  mv "$root/ai-override.tmp" "$target/compose.auth-recovery-ai.yaml"
+  mv "$root/recovery-checksums.tmp" "$target/SHA256SUMS"
+  if bash "$target/deploy.sh" --check "$release_sha" >"$root/missing-ai-secret.log" 2>&1; then fail 'Enabled AI accepted missing key'; fi
+  printf 'synthetic-api-key\n' > "$root/deploy/secrets/ninerouter_api_key"
+  chmod 600 "$root/deploy/secrets/ninerouter_api_key"
+  (
+    source "$target/simple-lib.sh"
+    compose_release "$target" "$target/runtime.env" config --format json
+  ) | python3 -c 'import json,sys; c=json.load(sys.stdin); s=c["services"]["recovery-controller"]; assert s["environment"]["AI_CAPTCHA_ENABLED"]=="true"; assert any(x["source"]=="ninerouter_api_key" for x in s["secrets"])'
+  rm "$root/deploy/secrets/ninerouter_api_key"
+  set_recovery_flags true false
+  log_test_pass "AI key and override required only when enabled"
+
+  log_test_start "Enabled recovery rerun cannot interrupt active authentication awaiting OTP"
+  recovery_before="$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)"
+  reconfigure_state_before="$(sha256sum "$root/state.env")"
+  reconfigure_route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
+  # Seed durable OTP metadata on a later fixture connection so controller reconciliation
+  # of the original UNCONFIGURED connection cannot race the deployment admission probe.
+  # This exercises real deploy/worker fencing, not an upstream browser OTP exchange.
+  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
+import datetime,sqlite3
+db=sqlite3.connect("/data/gateway.db"); now=datetime.datetime.now(datetime.timezone.utc)
+db.execute("INSERT INTO connections(id,created_at,updated_at) VALUES(?,?,?)",("disable-auth",now.isoformat(),now.isoformat()))
+db.execute("INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",("disable-attempt","disable-auth",0,"system:acb-recovery","IN_PROGRESS",(now+datetime.timedelta(minutes=10)).isoformat(),now.isoformat()))
+revision=db.execute("SELECT config_revision FROM connections WHERE id=?",("disable-auth",)).fetchone()[0]
+db.execute("INSERT INTO auth_recovery_episodes(id,connection_id,trigger_generation,generation,config_revision,attempt_id,state,attempt_count,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",("disable-episode","disable-auth",0,0,revision,"disable-attempt","WAITING_OTP",1,now.isoformat(),now.isoformat()))
+db.execute("INSERT INTO auth_challenges(id,episode_id,connection_id,generation,attempt_id,browser_revision,kind,status,chat_id,prompt_message_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",("disable-otp","disable-episode","disable-auth",0,"disable-attempt","fixture-revision","OTP","PENDING",123456,42,(now+datetime.timedelta(seconds=120)).isoformat(),now.isoformat()))
+db.commit()'
+  if bash "$target/deploy.sh" "$release_sha" >"$root/reconfigure-active-auth.log" 2>&1; then fail 'Enabled recovery rerun bypassed active-auth deploy gate'; fi
+  [[ "$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)" == "$recovery_before" && "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Enabled rerun restarted or stopped controller holding active authentication'
+  [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" && "$(sha256sum "$root/state.env")" == "$reconfigure_state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$reconfigure_route_before" ]] || fail 'Rejected enabled rerun mutated committed runtime'
+  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data:ro python:3.13-alpine python -c '
+import sqlite3
+db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
+assert db.execute("SELECT status,generation,owner_subject FROM auth_attempts WHERE id=?",("disable-attempt",)).fetchone()==("IN_PROGRESS",0,"system:acb-recovery")
+assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)
+assert db.execute("SELECT status,prompt_message_id,consumed_at FROM auth_challenges WHERE id=?",("disable-otp",)).fetchone()==("PENDING",42,None)'
+  log_test_pass "Enabled rerun preserves active attempt and running controller without cancellation"
+
+  log_test_start "Reconciliation rejects a non-current release without redeploying"
+  if bash "$target/deploy.sh" --reconcile "$base_sha" >"$root/reconcile-wrong-release.log" 2>&1; then fail 'Reconciliation accepted a non-current release'; fi
+  [[ ! -d "$root/.deploy-pending" ]] || fail 'Mismatched reconciliation started deployment mutation'
+  [[ "$(sha256sum "$root/state.env")" == "$reconfigure_state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$reconfigure_route_before" && "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Mismatched reconciliation changed worker/state/route'
+  [[ "$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)" == "$recovery_before" && "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Mismatched reconciliation interrupted recovery controller'
+  log_test_pass "Non-current reconciliation preserves the current release and singleton processes"
+
+  log_test_start "Disabling new controller and re-enabling without worker disruption"
+  set_recovery_flags false false
+  if bash "$target/deploy.sh" "$release_sha" >"$root/disable-active-auth.log" 2>&1; then fail 'Disabling recovery bypassed active-auth deploy gate'; fi
+  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Failed admission stopped controller holding live authentication'
+  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
+import sqlite3
+db=sqlite3.connect("/data/gateway.db")
+assert db.execute("SELECT status FROM auth_attempts WHERE id=?",("disable-attempt",)).fetchone()[0]=="IN_PROGRESS"
+assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)
+assert db.execute("SELECT status,prompt_message_id,consumed_at FROM auth_challenges WHERE id=?",("disable-otp",)).fetchone()==("PENDING",42,None)
+db.execute("DELETE FROM auth_challenges WHERE id=?",("disable-otp",)); db.execute("DELETE FROM auth_recovery_episodes WHERE id=?",("disable-episode",))
+db.execute("DELETE FROM auth_attempts WHERE id=?",("disable-attempt",)); db.execute("DELETE FROM connections WHERE id=?",("disable-auth",)); db.commit()'
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
+  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'Disabled controller still running'
+  [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Disabling recovery restarted worker'
+  set_recovery_flags true false
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
+  log_test_pass "New-bundle disable stops controller and opt-in restarts it"
+
 
   log_test_start "Deployment rollback check"
   DEPLOY_PATH="$root" bash "$target/deploy.sh" --rollback
   [[ "$(curl -s -o /dev/null -w '%{http_code}' https://transactions.tuannguyenviet.site/)" == 200 ]] || fail 'Public transactions fixture not healthy after rollback'
   [[ "$(sed -n 's/^RELEASE_SHA=//p' "$root/state.env")" == "$base_sha" ]] || fail 'Rollback did not restore baseline'
   [[ "$(docker inspect --format '{{.Config.Image}}' acb-worker)" == "$WORKER_IMAGE_REF" ]] || fail 'Rollback did not restore worker digest'
+  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'Legacy rollback left new controller running'
+  (
+    source "$target/simple-lib.sh"
+    load_recovery_flags "$root/releases/$base_sha"
+    [[ "$RECOVERY_SERVICE_SUPPORTED" == false && "$AUTH_RECOVERY_ENABLED" == false && "$AI_CAPTCHA_ENABLED" == false ]]
+    compose_release "$root/releases/$base_sha" "$root/releases/$base_sha/runtime.env" config --quiet
+  ) || fail 'Legacy rollback applied unsupported recovery profile/override'
   DEPLOY_PATH="$root" bash "$target/deploy.sh" --rollback
   log_test_pass "Deployment rollback and no-op rollback passed"
+  set_recovery_flags false false
 
   state_before="$(sha256sum "$root/state.env")"
   route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
@@ -623,7 +768,7 @@ db.commit()' "$migration_checksum"
   unpullable_sha=ffffffffffffffffffffffffffffffffffffffff
   unpullable="$root/releases/$unpullable_sha"
   mkdir "$unpullable"
-  cp "$target/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,import-baseline.py} "$unpullable/"
+  cp "$target/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py} "$unpullable/"
   python3 - "$target/images.env" "$unpullable/images.env" "$unpullable_sha" <<'PY'
 import sys
 src,dst,sha=sys.argv[1:]

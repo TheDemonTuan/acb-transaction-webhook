@@ -237,6 +237,19 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		t.finishDone(nil)
 		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 	}
+	blocked, gateErr := t.m.store.HasBlockingAuthRecovery(ctx, conn.ID, conn.Generation)
+	if gateErr != nil {
+		return scheduler.TaskStepResult{Done: false, RequeueAt: time.Now().Add(5 * time.Second), Outcome: scheduler.OutcomeTransient}, nil
+	}
+	if blocked {
+		if t.started && t.poll.ID != "" && !t.finished {
+			return t.finishPoll(ctx, "PARTIAL", "AUTOMATIC_RECOVERY_IN_PROGRESS")
+		}
+		t.m.clearSyncRequest(t.connectionID, t.generation)
+		t.m.notifyPollWaiters(nil)
+		t.finishDone(nil)
+		return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
+	}
 
 	openRun, err := t.m.openRecoveryRun(ctx, conn.ID, conn.Generation)
 	if err != nil {

@@ -30,6 +30,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gate
 
 FROM go-base AS worker-builder
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recovery-controller ./cmd/recovery-controller
 
 FROM go-base AS auth-browser-builder
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/auth-browser ./cmd/auth-browser
@@ -46,6 +47,7 @@ ENTRYPOINT ["/gateway"]
 FROM gcr.io/distroless/static-debian12:nonroot AS worker
 COPY --from=worker-builder --chown=1000:1000 /data /data
 COPY --from=worker-builder /out/worker /worker
+COPY --from=worker-builder /out/recovery-controller /recovery-controller
 USER 1000:1000
 ENTRYPOINT ["/worker"]
 
