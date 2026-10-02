@@ -452,8 +452,8 @@ func (c *Client) pollOnce(ctx context.Context, store *storage.Store, handler Upd
 	}
 	return nil
 }
-func (c *Client) RunPolling(ctx context.Context, store *storage.Store, handler UpdateHandler) error {
-	if store == nil || handler == nil {
+func (c *Client) RunPolling(ctx context.Context, store *storage.Store, handler UpdateHandler, chatID int64) error {
+	if store == nil || handler == nil || chatID == 0 {
 		return errors.New("TELEGRAM_POLLING_DEPENDENCY_REQUIRED")
 	}
 	c.mu.Lock()
@@ -465,6 +465,7 @@ func (c *Client) RunPolling(ctx context.Context, store *storage.Store, handler U
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); c.polling = false; c.mu.Unlock() }()
 	failures := 0
+	commandsRegistered := false
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -472,6 +473,10 @@ func (c *Client) RunPolling(ctx context.Context, store *storage.Store, handler U
 		var err error
 		if c.Readiness().BotID == 0 {
 			_, err = c.CheckConfig(ctx)
+		}
+		if err == nil && !commandsRegistered {
+			err = c.SetCommands(ctx, chatID)
+			commandsRegistered = err == nil
 		}
 		if err == nil {
 			err = c.pollOnce(ctx, store, handler)
