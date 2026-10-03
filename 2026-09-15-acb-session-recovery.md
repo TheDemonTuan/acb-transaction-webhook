@@ -215,22 +215,36 @@ Worker completion checks durable coverage; midnight/stopped-worker gaps add an i
 
 ## Observed evidence and remaining acceptance
 
-**Current execution evidence (2026-10-03), not the previous 2026-10-02 harness:**
+**Earlier local implementation evidence (2026-10-03), followed by current release evidence below:**
 
-- Changed Go boundary suites passed. An earlier integrated `go test -count=1 ./...` passed, but the **latest aggregate run was not clean**: unchanged `internal/realtimestream` `TestClientHeartbeatPreventsIdleTimeout` expected caller deadline but got stream idle timeout, and unchanged `internal/ttsclient` `TestClientSynthesizeStream` got zero `FirstByteDuration` instead of a positive value. All affected/new packages passed in that run. These timing failures were not rerun or hidden; no final full-suite PASS is claimed and no temporary package counts are pinned.
+- Changed Go boundary suites passed. An earlier native Windows aggregate run failed unchanged `internal/realtimestream` `TestClientHeartbeatPreventsIdleTimeout` (stream idle timeout instead of caller deadline) and `internal/ttsclient` `TestClientSynthesizeStream` (zero `FirstByteDuration`). Those failures were recorded, not hidden or repeatedly rerun. The newer Linux release CI full-repository race/vet gate passed; this does not prove the Windows timing issues were fixed.
 - Final native Windows CGO/GCC `go test -race -count=1 ./internal/storage ./internal/telegramauth ./internal/challenge ./internal/authrecovery ./internal/monitor ./internal/workerrpc ./cmd/worker` passed for all seven scoped packages after review fixes. This is not a full-repository race claim. Scoped storage/recovery regressions also passed for legacy session AAD logout and three failed clicks followed by a fourth fresh consent.
 - Final actual Edge Chromium run passed `TestBrowserAutomationInitialCaptchaAndOTP`, `TestBrowserSessionRevocation`, `TestBrowserHealthRealChromium` and `TestRevokeFormPermitRejectsUnrelatedAndDuplicateRequests`. Tightened guards rejected an unrelated background POST with zero server arrivals and permitted the exact native logout form once. Actual browser about:blank/CDP health passed after VNC removal. These are browser/HTTP fixtures, not live ACB logout evidence.
 - Actual gateway + Vite sandbox browser on desktop/mobile showed masked account, fragment/history cleanup and no grant in browser storage. Save preserved leading/trailing password spaces encrypted at revision 2, kept the account unchanged, created zero login attempts, and removed password fields after success. Dashboard showed Telegram-only status without iframe/old auth calls; removed current-auth route returned 404.
 - Frontend existing suite passed (26 files, 181 tests) and frontend build passed. This does not replace the exercised browser surface above.
 - Actual `--check-ai` process against local HTTP fixtures passed synthetic OCR with exactly one completion. A 401 emitted finite `AI_VISION_PREFLIGHT_UNAVAILABLE` / `MODEL_DISCOVERY` / `HTTP_AUTH` / 401 with zero completions and no raw secret.
 - Actual blue/green route rendering emitted the exact priority-250 credential route and CSP/no-referrer/no-store middleware with the exercised green frontend/blue gateway targets. Shell syntax and dbtool suite passed; this is not live edge/Docker proof.
+**Current production/release audit (2026-10-03):**
+
+- [Release #37103028250](https://github.com/TheDemonTuan/acb-transaction-webhook/actions/runs/37103028250) deployed `39980fc42b33e9008b569654b8495cfa2216a6dd`. Its actual verify-job step results passed Linux recovery setup safety, frontend typecheck/build/tests, `go test -race ./...` and `go vet ./...`, TTS/failover tests, encrypted backup/restore drill and supply-chain validators. Gateway/auth-browser/TTS Docker smoke, ARM64 image builds, vulnerability scans and immutable-bundle deployment passed. Optional lifecycle/fault-matrix rehearsal was **skipped**, not passed.
+- SSH verified release SHA, healthy controller/browser and `/recovery-controller --readiness-check`. Actual `/recovery-controller --check-config` passed configured Telegram integrations and enabled vision's synthetic preflight without polling or bank login. This proves configuration/provider reachability for the synthetic request, not provider retention/privacy or bank CAPTCHA accuracy.
+- The repaired handler delivered a real private Telegram menu without changing bank state/generation. Real anonymous ACB DOM recognition and Chromium synthetic authenticated fixtures are recorded above; no real password/OTP was submitted.
+- Actual HTTPS browser navigation to `/admin/acb-credentials` was redirected to Cloudflare Access sign-in. Anonymous access is gated; no Access login code was requested. This does not prove an authenticated OWNER's final page headers or public-viewer role denial.
+
 
 **Not observed / prerequisites still missing:**
 
-- Linux Python deployment suite and Docker Compose/image/deploy rehearsal, including actual key-only AI rotation/remount and activation rollback. Native Windows lacks `fcntl`; MSYS noacl reports the 0600 fixture as 0644, so that permission-fixture failure is not a passing Linux suite. Docker/WSL/VPS access is unavailable in this execution.
-- Final HTTPS response through production nginx/Traefik/Cloudflare, actual Access OWNER authorization/public-viewer denial and exact-path Rocket Loader/analytics settings.
-- Real private Telegram menu/progress/photo/OTP interaction, real vision provider synthetic/privacy acceptance, and owner-authorized live ACB login/exact-account verification/catch-up/logout. No real secrets were read and no production session was disrupted.
+- Optional lifecycle/fault-matrix Docker rehearsal, actual key-only AI rotation/remount and activation rollback remain unobserved. Linux setup safety and real deployment are now verified; the earlier Windows permission/`fcntl` limits are not current VPS access blockers.
+- Authenticated final HTTPS response through production nginx/Traefik/Cloudflare, actual Access OWNER authorization/public-viewer denial and exact-path Rocket Loader/analytics settings. Anonymous Access gating alone is insufficient.
+- Owner-operated private Telegram progress/photo/OTP interaction, provider privacy/retention acceptance and owner-authorized live ACB login/exact-account verification/catch-up/logout. Real menu delivery and synthetic provider preflight passed; no healthy production bank session was deliberately disrupted.
 
 For live acceptance, use an owner-selected window or naturally expired session; **do not evict a healthy payment-monitoring session just to test**. Observe a warning then wait/restart safely and establish no login before a fresh button. The owner presses LOGIN, replies to login OTP, and verifies catch-up before realtime readiness. Change only the stored credentials through HTTPS and prove save itself does not log in. Exercise live logout only after the owner's explicit confirmation and report bank/local outcomes separately; unsupported DOM means bank logout remains unaccepted, never an invented success.
+
+### Owner-only live acceptance checklist
+
+- [ ] The owner presses the current private Telegram LOGIN button when ready for a login OTP; observe progress, reply only to the current OTP prompt and establish exact-account verification/full catch-up before claiming realtime readiness. Do not send passwords/OTPs to the coding assistant.
+- [ ] The owner opens the credential page with an authenticated Cloudflare Access OWNER session; verify final security headers and viewer denial. Any stored-credential save or bank logout needs its own explicit owner confirmation; no destructive acceptance action is implied by deployment.
+- [ ] Confirm provider privacy/retention policy before treating safe bank CAPTCHA transmission as accepted production use.
+
 
 The historical harness demonstrated an earlier implementation, including a retry policy that is now removed. Its counts and output are not current end-to-end proof. Keep fixture/UI/race evidence, latest aggregate timing failures, Linux Docker acceptance, live Telegram, live provider and live ACB results separate.
