@@ -27,6 +27,9 @@ Initial username/password/exact account input is hidden. Import-only host files 
 
 The importer writes AES-GCM ciphertext to the authoritative DB only when no credential record exists. It never overwrites a username/password subsequently changed through HTTPS. If a decryptable stored session exists, its exact `AccountNbr` must match the imported account; otherwise import fails `CREDENTIAL_ACCOUNT_MISMATCH`. Without a verified session, import does not prove the account or password correct; exact-account verification occurs during a later button-authorized login.
 
+For `CREDENTIAL_ACCOUNT_MISMATCH`, do not delete the stored session or bypass exact-account verification. The production deployment workflow accepts an optional `import_account` value on an explicit `workflow_dispatch` with `deploy=true`. Only the owner-approved initial import file is atomically replaced under the setup/deployment locks, preserving regular-file checks, mode `0600` and owner `1000:1000`; DB credentials, checkpoints and sessions are unchanged. The normal importer must still match the stored account before accepting the record. Leave this input empty for ordinary releases; it is not an account-switch API.
+
+
 For an already enabled installation needing legacy-file migration:
 
 ```bash

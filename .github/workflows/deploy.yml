@@ -10,6 +10,11 @@ on:
         type: boolean
         required: true
         default: false
+      import_account:
+        description: Optional owner-approved correction of the initial import-only account file (never DB credentials)
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -341,8 +346,13 @@ jobs:
           VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
+          RECOVERY_IMPORT_ACCOUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.import_account || '' }}
         run: |
           set -euo pipefail
+          if [[ -n "$RECOVERY_IMPORT_ACCOUNT" ]]; then
+            [[ "$RECOVERY_IMPORT_ACCOUNT" =~ ^[0-9]{1,32}$ ]] || { echo 'INVALID_IMPORT_ACCOUNT' >&2; exit 1; }
+            printf '::add-mask::%s\n' "$RECOVERY_IMPORT_ACCOUNT"
+          fi
           ssh_opts=(-i "$HOME/.ssh/id_ed25519" -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=10)
           remote="$VPS_USER@$VPS_HOST"
           stage="$DEPLOY_PATH/releases/.stage-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -350,7 +360,7 @@ jobs:
           trap 'ssh "${ssh_opts[@]}" "$remote" "rm -rf '\''$stage'\''" || true' EXIT
           scp -i "$HOME/.ssh/id_ed25519" -P "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,images.env,SHA256SUMS} "$remote:$stage/"
           [[ "$DASHBOARD_OWNER_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { echo "Invalid dashboard owner email" >&2; exit 1; }
-          { printf '%s\n' "$GH_TOKEN"; cat <<'REMOTE'
+          { printf '%s\n%s\n' "$GH_TOKEN" "$RECOVERY_IMPORT_ACCOUNT"; cat <<'REMOTE'
           set -euo pipefail
           target="$DEPLOY_PATH/releases/$SHA"
           (cd "$STAGE" && sha256sum -c SHA256SUMS)
@@ -367,6 +377,48 @@ jobs:
           trap 'rm -rf "$auth"' EXIT
           printf '%s' "$GH_TOKEN" | DOCKER_CONFIG="$auth" docker login ghcr.io -u '${{ github.actor }}' --password-stdin
           unset GH_TOKEN
+          if [[ -n "$RECOVERY_IMPORT_ACCOUNT" ]]; then
+            (
+              exec 8>"$DEPLOY_PATH/.recovery-setup.lock"
+              flock -w 30 8 || { echo 'Recovery setup lock unavailable' >&2; exit 1; }
+              exec 9>"$DEPLOY_PATH/.deploy.lock"
+              flock -w 30 9 || { echo 'Deploy lock unavailable for import repair' >&2; exit 1; }
+              python3 - <<'PY'
+          import os, re, stat, tempfile
+          from pathlib import Path
+          account = os.environ['RECOVERY_IMPORT_ACCOUNT']
+          if not re.fullmatch(r'[0-9]{1,32}', account):
+              raise SystemExit('INVALID_IMPORT_ACCOUNT')
+          directory = Path(os.environ['DEPLOY_PATH']) / 'deploy' / 'secrets'
+          st = directory.lstat()
+          if not stat.S_ISDIR(st.st_mode) or (stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid) != (0o700, 1000, 1000):
+              raise SystemExit('CREDENTIAL_IMPORT_DIRECTORY_INVALID')
+          destination = directory / 'acb_account'
+          st = destination.lstat()
+          if not stat.S_ISREG(st.st_mode) or (stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid) != (0o600, 1000, 1000):
+              raise SystemExit('CREDENTIAL_IMPORT_FILE_INVALID')
+          fd, temporary = tempfile.mkstemp(prefix='.account-import-', dir=directory)
+          try:
+              os.fchmod(fd, 0o600)
+              os.fchown(fd, 1000, 1000)
+              with os.fdopen(fd, 'w', encoding='ascii') as stream:
+                  stream.write(account + '\n')
+                  stream.flush()
+                  os.fsync(stream.fileno())
+              os.replace(temporary, destination)
+              directory_fd = os.open(directory, os.O_DIRECTORY)
+              try:
+                  os.fsync(directory_fd)
+              finally:
+                  os.close(directory_fd)
+          finally:
+              if os.path.exists(temporary):
+                  os.unlink(temporary)
+          print('IMPORT_ACCOUNT_FILE_UPDATED; DB account and session unchanged; importer verification remains required')
+          PY
+            )
+          fi
+          unset RECOVERY_IMPORT_ACCOUNT
           DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" DASHBOARD_OWNER_EMAIL="$DASHBOARD_OWNER_EMAIL" bash "$target/deploy.sh" "$SHA"
           # Fence publication against another deploy/rollback after deploy.sh releases its lock.
           exec 9>"$DEPLOY_PATH/.deploy.lock"
@@ -405,7 +457,7 @@ jobs:
           fi
           printf 'DEPLOY_SUMMARY: Internal ACK: passed\nDEPLOY_SUMMARY: Public smoke: passed\nDEPLOY_SUMMARY: Rollback: not required\n'
           REMOTE
-          } | ssh "${ssh_opts[@]}" "$remote" "read -r GH_TOKEN; export GH_TOKEN; DEPLOY_PATH='$DEPLOY_PATH' STAGE='$stage' SHA='$GITHUB_SHA' DASHBOARD_OWNER_EMAIL='$DASHBOARD_OWNER_EMAIL' bash -s" 2>&1 | tee "$RUNNER_TEMP/acb-deploy-output"
+          } | ssh "${ssh_opts[@]}" "$remote" "read -r GH_TOKEN; read -r RECOVERY_IMPORT_ACCOUNT; export GH_TOKEN RECOVERY_IMPORT_ACCOUNT; DEPLOY_PATH='$DEPLOY_PATH' STAGE='$stage' SHA='$GITHUB_SHA' DASHBOARD_OWNER_EMAIL='$DASHBOARD_OWNER_EMAIL' bash -s" 2>&1 | tee "$RUNNER_TEMP/acb-deploy-output"
           while IFS= read -r line; do
             if [[ "$line" == 'DEPLOY_SUMMARY: '* ]]; then printf '%s\n' "${line#DEPLOY_SUMMARY: }" >> "$GITHUB_STEP_SUMMARY"; fi
           done < "$RUNNER_TEMP/acb-deploy-output"
