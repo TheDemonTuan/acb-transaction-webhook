@@ -24,6 +24,33 @@ var (
 	ErrRecoveryIntentMissing = errors.New("ACB session recovery intent was not found")
 )
 
+// VerificationError carries only a finite, safe verification result across RPC.
+type VerificationError struct{ Code string }
+
+func (e *VerificationError) Error() string {
+	if code := VerificationCode(e); code != "" {
+		return code
+	}
+	return "VERIFICATION_UNAVAILABLE"
+}
+
+// VerificationCode never interprets error text or exposes an underlying cause.
+func VerificationCode(err error) string {
+	var verification *VerificationError
+	if !errors.As(err, &verification) || verification == nil {
+		return ""
+	}
+	switch verification.Code {
+	case "VERIFICATION_ACCOUNT_MISMATCH", "VERIFICATION_ACCOUNT_MISSING",
+		"VERIFICATION_FORM_INVALID", "VERIFICATION_AUTH_REQUIRED",
+		"VERIFICATION_PAGE_UNSUPPORTED", "VERIFICATION_MAINTENANCE",
+		"VERIFICATION_UNAVAILABLE", "VERIFICATION_SUPERSEDED", "VERIFICATION_TIMEOUT":
+		return verification.Code
+	default:
+		return ""
+	}
+}
+
 type Store interface {
 	AuthAttemptStatusForOwner(context.Context, string, string) (storage.AuthAttempt, error)
 	Connection(context.Context) (storage.Connection, error)
@@ -106,6 +133,12 @@ func (f *Finalizer) Complete(ctx context.Context, attempt storage.AuthAttempt) (
 			return f.resume(ctx, latest, latestConn)
 		}
 		// Never wrap the verifier's error: RPC errors may contain envelope or bank data.
+		if code := VerificationCode(err); code != "" {
+			if code == "VERIFICATION_SUPERSEDED" {
+				return storage.Connection{}, ErrConflict
+			}
+			return storage.Connection{}, &VerificationError{Code: code}
+		}
 		return storage.Connection{}, ErrVerificationPending
 	}
 	current, conn, err = f.current(ctx, attempt)

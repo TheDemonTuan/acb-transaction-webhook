@@ -118,13 +118,13 @@ func TestRecoveryFinalizeCrashBoundaries(t *testing.T) {
 			t.Fatalf("incorrect encrypted handoff: %v", err)
 		}
 		if reject {
-			return errors.New("cookie=synthetic-secret; OTP=001234")
+			return &VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
 		}
 		return nil
 	})
 	f := NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify, Scheduler: scheduler})
-	if _, err := f.Complete(ctx, a); !errors.Is(err, ErrVerificationPending) {
-		t.Fatalf("expected retryable verification, got %v", err)
+	if _, err := f.Complete(ctx, a); VerificationCode(err) != "VERIFICATION_ACCOUNT_MISMATCH" {
+		t.Fatalf("expected deterministic verification rejection, got %v", err)
 	}
 	oldSession, err := s.Session(ctx, previous.ConnectionID, previous.Generation)
 	if err != nil || string(oldSession.Envelope) != "previous-encrypted-session" {
@@ -256,6 +256,25 @@ func TestFinalizerSanitizesTransportErrors(t *testing.T) {
 	}
 }
 
+func TestFinalizerConcurrentVerifiedWinsRejection(t *testing.T) {
+	ctx := context.Background()
+	s, keyring, a := finalizerStore(t)
+	browser := &browserFixture{}
+	verify := verifierFunc(func(ctx context.Context, _ string, _ int64, encrypted []byte) error {
+		if _, err := s.CompleteAuthSession(ctx, a.ID, encrypted); err != nil {
+			t.Fatal(err)
+		}
+		return &VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+	})
+	conn, err := NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify}).Complete(ctx, a)
+	if err != nil || conn.State != "MONITORING" {
+		t.Fatalf("concurrent verified commit lost to rejection: %v", err)
+	}
+	if _, err := s.GetRecoveryRunByEvent(ctx, a.ConnectionID, a.Generation, a.ID); err != nil {
+		t.Fatalf("verified commit lost its recovery intent: %v", err)
+	}
+}
+
 type crashAfterCommitStore struct{ *storage.Store }
 
 func (s crashAfterCommitStore) CompleteAuthSession(ctx context.Context, attemptID string, encrypted []byte) (storage.Connection, error) {
@@ -361,6 +380,37 @@ func TestFinalizerRejectsInvalidAdmissionWithoutBankEffects(t *testing.T) {
 			}
 			if browser.handoffs != 0 || browser.completions != 0 || verifications != 0 || sessions != 0 || runs != 0 {
 				t.Fatalf("rejected admission caused side effects: handoffs=%d cleanup=%d verify=%d sessions=%d recovery=%d", browser.handoffs, browser.completions, verifications, sessions, runs)
+			}
+		})
+	}
+}
+
+func TestFinalizerFiniteVerificationFailures(t *testing.T) {
+	for _, code := range []string{"VERIFICATION_ACCOUNT_MISSING", "VERIFICATION_FORM_INVALID", "VERIFICATION_AUTH_REQUIRED", "VERIFICATION_PAGE_UNSUPPORTED", "VERIFICATION_MAINTENANCE", "VERIFICATION_UNAVAILABLE", "VERIFICATION_SUPERSEDED", "VERIFICATION_TIMEOUT", "cookie-secret-001234"} {
+		t.Run(code, func(t *testing.T) {
+			ctx := context.Background()
+			s, keyring, a := finalizerStore(t)
+			verify := verifierFunc(func(context.Context, string, int64, []byte) error {
+				return &VerificationError{Code: code}
+			})
+			_, err := NewFinalizer(Options{Store: s, Browser: &browserFixture{}, Keyring: keyring, Verifier: verify}).Complete(ctx, a)
+			switch code {
+			case "VERIFICATION_SUPERSEDED":
+				if !errors.Is(err, ErrConflict) {
+					t.Fatalf("fence lost: %v", err)
+				}
+			case "cookie-secret-001234":
+				if !errors.Is(err, ErrVerificationPending) || strings.Contains(err.Error(), code) {
+					t.Fatalf("invalid code escaped contract: %v", err)
+				}
+			default:
+				if VerificationCode(err) != code || errors.Unwrap(err) != nil {
+					t.Fatalf("finite rejection lost: %v", err)
+				}
+			}
+			var sessions, runs int
+			if err := s.DB().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM recovery_runs)`).Scan(&sessions, &runs); err != nil || sessions != 0 || runs != 0 {
+				t.Fatalf("rejection committed session/recovery: %d/%d %v", sessions, runs, err)
 			}
 		})
 	}

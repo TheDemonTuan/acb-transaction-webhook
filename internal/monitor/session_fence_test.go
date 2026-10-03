@@ -12,6 +12,7 @@ import (
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -175,6 +176,7 @@ func TestSessionInvalidationWaitsForRequestAndBlocksContinuation(t *testing.T) {
 }
 
 func TestSessionVerifierTimeoutThenLogoutBeforeQueuedDispatch(t *testing.T) {
+	logs := captureVerificationLogs(t)
 	store, conn, keyring, encoded := sessionFenceFixture(t)
 	var calls atomic.Int32
 	client, err := acb.NewClient("https://online.acb.com.vn", &verifierMockTransport{roundTripFn: func(req *http.Request) (*http.Response, error) {
@@ -210,9 +212,11 @@ func TestSessionVerifierTimeoutThenLogoutBeforeQueuedDispatch(t *testing.T) {
 	verifier := NewSessionVerifier(loader, client, sched)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := verifier.VerifySession(ctx, conn.ID, conn.Generation, encoded); !errors.Is(err, context.DeadlineExceeded) {
+	if err := verifier.VerifySession(ctx, conn.ID, conn.Generation, encoded); authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
 		t.Fatalf("timeout=%v", err)
 	}
+	logs.assertResult(t, conn.Generation, "RESTORE", "VERIFICATION_UNAVAILABLE", false, false, false, false)
+	logs.reset()
 	generation := installLogoutFence(t, store, conn)
 	if err := verifier.InvalidateSession(context.Background(), conn.ID, generation); err != nil {
 		t.Fatal(err)
@@ -224,7 +228,7 @@ func TestSessionVerifierTimeoutThenLogoutBeforeQueuedDispatch(t *testing.T) {
 	close(release)
 	select {
 	case err := <-queuedDone:
-		if !errors.Is(err, storage.ErrGenerationFenceMismatch) {
+		if authsession.VerificationCode(err) != "VERIFICATION_SUPERSEDED" {
 			t.Fatalf("queued verify=%v", err)
 		}
 	case <-time.After(2 * time.Second):
@@ -233,6 +237,7 @@ func TestSessionVerifierTimeoutThenLogoutBeforeQueuedDispatch(t *testing.T) {
 	if calls.Load() != 0 || loader.loadedID != "" {
 		t.Fatalf("session resurrected: calls=%d loaded=%s", calls.Load(), loader.loadedID)
 	}
+	logs.assertResult(t, conn.Generation, "RESTORE", "VERIFICATION_SUPERSEDED", false, false, false, false)
 }
 
 func TestRealtimeTaskLogoutBetweenPagesDropsContinuation(t *testing.T) {

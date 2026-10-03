@@ -27,6 +27,8 @@ type catchUpInterleaveMockClient struct {
 	historyCalls atomic.Int32
 	historyLogMu sync.Mutex
 	historyLog   []string
+	firstStarted chan struct{}
+	firstRelease chan struct{}
 }
 
 func (m *catchUpInterleaveMockClient) Bootstrap(ctx context.Context) (acb.Response, error) {
@@ -40,6 +42,14 @@ func (m *catchUpInterleaveMockClient) Bootstrap(ctx context.Context) (acb.Respon
 
 func (m *catchUpInterleaveMockClient) History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
 	call := int(m.historyCalls.Add(1))
+	if call == 1 && m.firstStarted != nil {
+		close(m.firstStarted)
+		select {
+		case <-m.firstRelease:
+		case <-ctx.Done():
+			return acb.Response{}, ctx.Err()
+		}
+	}
 	isPage2 := fields["dse_nextEventName"] == "nextPage"
 	page := "page1"
 	if isPage2 {
@@ -208,12 +218,15 @@ func TestCatchUpTask_DayAtomicAndPreemptedAtDayBoundary(t *testing.T) {
 	conn, _ := store.ConfigureConnection(ctx, "***1234")
 	_, _ = store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'")
 
-	client := &catchUpInterleaveMockClient{}
+	client := &catchUpInterleaveMockClient{firstStarted: make(chan struct{}), firstRelease: make(chan struct{})}
 	mon := New(store, client, 5*time.Second, 15*time.Second)
 
 	sched := mon.Scheduler()
 	sched.Start(ctx)
 	defer sched.Stop()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(client.firstRelease) }) }
+	defer release()
 
 	// Step 1: Enqueue CatchUpTask (priority 50)
 	cuTask := newTestCatchUpTask(mon, conn.ID, conn.Generation)
@@ -221,13 +234,11 @@ func TestCatchUpTask_DayAtomicAndPreemptedAtDayBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait until Day 1 catch-up has started
-	deadline := time.Now().Add(2 * time.Second)
-	for client.historyCalls.Load() < 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for catch-up day 1 to begin")
-		}
-		time.Sleep(5 * time.Millisecond)
+	// Hold day one's first request until the higher-priority task is queued.
+	select {
+	case <-client.firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for catch-up day 1 to begin")
 	}
 
 	// Enqueue RealtimeTask (priority 80) while Day 1 is executing or right as it yields
@@ -243,6 +254,7 @@ func TestCatchUpTask_DayAtomicAndPreemptedAtDayBoundary(t *testing.T) {
 	if err := sched.Enqueue(rtTask); err != nil {
 		t.Fatal(err)
 	}
+	release()
 
 	// Realtime poll must execute before catch-up finishes completely
 	select {
@@ -252,7 +264,7 @@ func TestCatchUpTask_DayAtomicAndPreemptedAtDayBoundary(t *testing.T) {
 	}
 
 	// Wait for queue to drain
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for sched.TotalQueueDepth() > 0 || sched.IsBusy() {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for scheduler queue to drain")

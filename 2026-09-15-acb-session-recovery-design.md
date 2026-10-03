@@ -68,6 +68,7 @@ All action/grant/save/logout mutation transactions call `checkMutationAllowedTx`
 | --- | --- |
 | Consent | One browser attempt per authenticated button; pending admission expires after 60 seconds. |
 | Browser attempt | TTL 15 minutes. |
+| Verification | 60 seconds from the first unique VERIFYING notice for this attempt, capped by attempt expiry; restart/worker failure never resets it. |
 | Login cooldown | At least 60 seconds between login submissions, durable across restart. |
 | CAPTCHA | At most 3 submissions per attempt, including AI answers. |
 | AI | At most 3 calls per attempt, at most one call for each distinct browser CAPTCHA revision. |
@@ -88,6 +89,8 @@ Navigation callbacks `nav:menu`, `nav:status`, `nav:help`, `nav:credentials`, `n
 Authorized callbacks are acknowledged immediately using a separate bounded two-second timeout before longer processing. Menu/status read DB without bank HTTP; callback response goals do not promise bank latency. Poll offsets advance only after durable disposition, including safe rejection. There is one long-poll consumer; an existing webhook is refused with `TELEGRAM_WEBHOOK_CONFLICT`, never deleted automatically.
 
 Coordinator commits then calls `Wake()`; a separate single delivery loop handles notices/progress and `Broker.DeliverPending`, using a buffered wake plus one-second tick. Telegram I/O never holds the coordinator's bank-operation mutex. One episode progress message is CAS-bound by generation and edited at most once/second/chat, coalescing observed states. Prompt/terminal messages take priority; transport respects retry-after. `TELEGRAM_MESSAGE_NOT_MODIFIED` is a successful no-op; `TELEGRAM_MESSAGE_UNEDITABLE` permits a replacement. A timeout alone does not justify another status message. Failed CAS of a newly sent message causes best-effort deletion.
+
+Each current terminal notice sends a fresh result panel, independently of canonical editability. Its controls bind to the new message; only successful send/bind/current-fence checks acknowledge that new ID as SENT. Canonical StatusMessageID is unchanged and progress still updates. Old generation/attempt events coalesce; SENT incident notices are not backfilled at deployment. Transport backoff remains durable. Acceptance-before-ack can duplicate a result after crash; this is not exactly-once Telegram delivery.
 
 The session-loss notice explicitly says the system has **not logged in again** and offers LOGIN/status/credential changes. Credential rejection offers a credential link, not an automatic password retry. Stale outbox progress coalesces to current state instead of replaying obsolete steps after bot reconnection. Delivery is at least once: a crash between sending and DB acknowledgement can duplicate a notice, never duplicate its bank authorization.
 
@@ -161,6 +164,10 @@ Preflight discovery `/v1/models/image-to-text` falls back to `/v1/models` for 40
 ## Verification, catch-up and data continuity
 
 `Finalizer.Complete` is idempotent. Worker verification failure cannot overwrite the session/checkpoint or report success. Once verified commit exists, restart resumes durable intent rather than exporting a second handoff or requesting another OTP. Session encryption remains generation-bound; logout/save fences make stale finalizers unable to commit.
+
+`authsession.VerificationError` is the finite error contract; `VerificationCode` accepts typed allowlisted codes only, never raw exception text. The verify RPC bounds non-success bodies to 4096 bytes and maps malformed/unknown/unauthorized/transport failures to UNAVAILABLE without payload exposure. Account mismatch/missing, invalid form and unsupported page stop MANUAL_REQUIRED; confirmed auth rejection stops WAIT_OPERATOR; maintenance/unavailable and alternate-finalizer failures retry only within the same verification deadline. SUPERSEDED preserves generation/logout conflict semantics. Re-read concurrent VERIFIED before classifying rejection. Only nil verification result can commit.
+
+`RecoveryVerificationStartedAt` guards episode/current generation/config revision and reads the unique `episode:VERIFYING:AttemptCount` notice's RFC3339Nano created_at. No schema migration or refreshed UpdatedAt/memory clock is used. Coordinator checks `min(start+60s, attempt expiry)` during post-OTP navigation and before finalization, using a child context for remaining budget. Missing/corrupt timestamp fails closed with STATE_INVALID. VERIFYING timeout is VERIFICATION_TIMEOUT, never a claim that consumed OTP was incorrect/expired. Transient failures retain OTP_REQUEST_SENT and never authorize a bank action replay.
 
 Atomic session commit sets `MONITORING`, durable recovery run/required range and episode `CATCHING_UP`. The linked recovery gate blocks realtime/payment boost, keepalive, sync admission and queued history before bank I/O, allowing verification/catch-up. Controller/Telegram outage and failed/cancelled catch-up do not release it; unrelated QR/config/history behavior is retained.
 

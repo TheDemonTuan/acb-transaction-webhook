@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
@@ -67,6 +68,7 @@ func isSafeRequestID(s string) bool {
 
 type ErrorResponse struct {
 	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
 	RequestID string `json:"requestId,omitempty"`
 }
 
@@ -909,10 +911,10 @@ func (s *Server) routes() {
 			return
 		}
 		if err := s.checkWorkAllowed(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"error":     err.Error(),
-				"code":      "WORKER_DRAINING",
-				"requestId": reqID,
+			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+				Error:     "VERIFICATION_UNAVAILABLE",
+				Code:      "VERIFICATION_UNAVAILABLE",
+				RequestID: reqID,
 			})
 			return
 		}
@@ -926,7 +928,18 @@ func (s *Server) routes() {
 			return
 		}
 		if err := s.handler.VerifySession(r.Context(), req.Account, req.Generation, req.Password); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), reqID)
+			code := authsession.VerificationCode(err)
+			status := http.StatusUnprocessableEntity
+			switch code {
+			case "VERIFICATION_SUPERSEDED":
+				status = http.StatusConflict
+			case "VERIFICATION_MAINTENANCE", "VERIFICATION_UNAVAILABLE":
+				status = http.StatusServiceUnavailable
+			case "":
+				code = "VERIFICATION_UNAVAILABLE"
+				status = http.StatusServiceUnavailable
+			}
+			writeJSON(w, status, ErrorResponse{Error: code, Code: code, RequestID: reqID})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
@@ -1028,6 +1041,9 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bodyReader)
 	if err != nil {
+		if path == "/rpc/verify-session" {
+			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+		}
 		return err
 	}
 	if body != nil {
@@ -1044,11 +1060,25 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		if path == "/rpc/verify-session" {
+			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+		}
 		return fmt.Errorf("worker rpc %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if path == "/rpc/verify-session" {
+			errBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 4097))
+			var errResp ErrorResponse
+			if readErr == nil && len(errBytes) <= 4096 && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && json.Unmarshal(errBytes, &errResp) == nil {
+				verificationErr := &authsession.VerificationError{Code: errResp.Code}
+				if authsession.VerificationCode(verificationErr) != "" {
+					return verificationErr
+				}
+			}
+			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+		}
 		errBytes, _ := io.ReadAll(resp.Body)
 		var errResp ErrorResponse
 		if err := json.Unmarshal(errBytes, &errResp); err == nil && errResp.Error != "" {

@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -56,6 +58,171 @@ func consentRecovery(t *testing.T, s *Store, ctx context.Context, e AuthRecovery
 		t.Fatal(err)
 	}
 	return a
+}
+
+func startRecoveryVerification(t *testing.T, s *Store, ctx context.Context, e AuthRecoveryEpisode) AuthRecoveryEpisode {
+	t.Helper()
+	consentRecovery(t, s, ctx, e)
+	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TransitionAuthRecovery(ctx, e.ID, a.Generation, "STARTING", "VERIFYING", "OTP_REQUEST_SENT"); err != nil {
+		t.Fatal(err)
+	}
+	e, err = s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestRecoveryVerificationStartedAtSurvivesUpdatesAndReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "verification-clock.db")
+	s, ctx, e := recoveryStoreAt(t, path)
+	e = startRecoveryVerification(t, s, ctx, e)
+	want := time.Date(2026, time.October, 3, 11, 12, 50, 123456789, time.UTC)
+	eventKey := fmt.Sprintf("%s:VERIFYING:%d", e.ID, e.AttemptCount)
+	if _, err := s.DB().ExecContext(ctx, `UPDATE auth_recovery_notices SET created_at=? WHERE event_key=?`, want.Format(time.RFC3339Nano), eventKey); err != nil {
+		t.Fatal(err)
+	}
+	for _, reason := range []string{"OTP_REQUEST_SENT", "TRANSIENT_FIXTURE", "OTP_REQUEST_SENT"} {
+		if err := s.TransitionAuthRecovery(ctx, e.ID, e.Generation, "VERIFYING", "VERIFYING", reason); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.RecoveryVerificationStartedAt(ctx, e.ID, e.Generation)
+		if err != nil || !got.Equal(want) {
+			t.Fatalf("first timestamp moved after reason update: got=%v want=%v err=%v", got, want, err)
+		}
+	}
+	var count int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_recovery_notices WHERE event_key=?`, eventKey).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("duplicate VERIFYING notices: %d", count)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.RecoveryVerificationStartedAt(ctx, e.ID, e.Generation)
+	if err != nil || !got.Equal(want) {
+		t.Fatalf("first timestamp lost after reopen: got=%v want=%v err=%v", got, want, err)
+	}
+}
+
+func TestRecoveryVerificationStartedAtMissingAndCorrupt(t *testing.T) {
+	for _, fixture := range []string{"missing-episode", "missing-notice", "corrupt-timestamp"} {
+		t.Run(fixture, func(t *testing.T) {
+			s, ctx, e := recoveryStore(t)
+			e = startRecoveryVerification(t, s, ctx, e)
+			eventKey := fmt.Sprintf("%s:VERIFYING:%d", e.ID, e.AttemptCount)
+			episodeID := e.ID
+			switch fixture {
+			case "missing-episode":
+				episodeID = "missing-episode"
+			case "missing-notice":
+				if _, err := s.DB().ExecContext(ctx, `DELETE FROM auth_recovery_notices WHERE event_key=?`, eventKey); err != nil {
+					t.Fatal(err)
+				}
+			case "corrupt-timestamp":
+				if _, err := s.DB().ExecContext(ctx, `UPDATE auth_recovery_notices SET created_at='synthetic-private-timestamp' WHERE event_key=?`, eventKey); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := s.RecoveryVerificationStartedAt(ctx, episodeID, e.Generation)
+			if !got.IsZero() {
+				t.Fatalf("invalid state returned a timestamp: %v", got)
+			}
+			if fixture == "corrupt-timestamp" {
+				if err == nil || err.Error() != "invalid recovery verification timestamp" {
+					t.Fatalf("corrupt timestamp was not sanitized: %v", err)
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("missing timestamp: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoveryVerificationStartedAtHonorsFences(t *testing.T) {
+	for _, fence := range []string{"argument-generation", "episode-generation", "connection-generation", "config-revision"} {
+		t.Run(fence, func(t *testing.T) {
+			s, ctx, e := recoveryStore(t)
+			e = startRecoveryVerification(t, s, ctx, e)
+			generation := e.Generation
+			switch fence {
+			case "argument-generation":
+				generation--
+			case "episode-generation":
+				if _, err := s.DB().ExecContext(ctx, `UPDATE auth_recovery_episodes SET generation=generation+1 WHERE id=?`, e.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "connection-generation":
+				if _, err := s.DB().ExecContext(ctx, `UPDATE connections SET generation=generation+1 WHERE id=?`, e.ConnectionID); err != nil {
+					t.Fatal(err)
+				}
+			case "config-revision":
+				if _, err := s.DB().ExecContext(ctx, `UPDATE connections SET config_revision=config_revision+1 WHERE id=?`, e.ConnectionID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := s.RecoveryVerificationStartedAt(ctx, e.ID, generation)
+			if !errors.Is(err, ErrRecoverySuperseded) || !got.IsZero() {
+				t.Fatalf("stale verification timestamp crossed %s: got=%v err=%v", fence, got, err)
+			}
+		})
+	}
+}
+
+func TestRecoveryVerificationStartedAtNeverAdoptsOlderAttempt(t *testing.T) {
+	s, ctx, e := recoveryStore(t)
+	e = startRecoveryVerification(t, s, ctx, e)
+	oldCount := e.AttemptCount
+	oldKey := fmt.Sprintf("%s:VERIFYING:%d", e.ID, oldCount)
+	oldStart := time.Date(2026, time.October, 3, 10, 0, 0, 0, time.UTC)
+	if _, err := s.DB().ExecContext(ctx, `UPDATE auth_recovery_notices SET created_at=? WHERE event_key=?`, oldStart.Format(time.RFC3339Nano), oldKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, e.Generation, "FAILED", "RETRY_WAIT", "BROWSER_UNAVAILABLE", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consentRecovery(t, s, ctx, e)
+	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RecoveryVerificationStartedAt(ctx, e.ID, a.Generation)
+	if !errors.Is(err, sql.ErrNoRows) || !got.IsZero() {
+		t.Fatalf("older attempt supplied a timestamp: got=%v err=%v", got, err)
+	}
+	if err := s.TransitionAuthRecovery(ctx, e.ID, a.Generation, "STARTING", "VERIFYING", "OTP_REQUEST_SENT"); err != nil {
+		t.Fatal(err)
+	}
+	e, err = s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.AttemptCount != oldCount+1 {
+		t.Fatalf("attempt ordinal did not advance: old=%d current=%d", oldCount, e.AttemptCount)
+	}
+	want := oldStart.Add(time.Minute)
+	if _, err := s.DB().ExecContext(ctx, `UPDATE auth_recovery_notices SET created_at=? WHERE event_key=?`, want.Format(time.RFC3339Nano), fmt.Sprintf("%s:VERIFYING:%d", e.ID, e.AttemptCount)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.RecoveryVerificationStartedAt(ctx, e.ID, e.Generation)
+	if err != nil || !got.Equal(want) {
+		t.Fatalf("current attempt timestamp not selected: got=%v want=%v err=%v", got, want, err)
+	}
 }
 
 func TestRecoveryEpisodeBudgetSurvivesGenerationChanges(t *testing.T) {

@@ -19,15 +19,17 @@ import (
 )
 
 type botFixture struct {
-	mu         sync.Mutex
-	requests   []string
-	messages   []map[string]json.RawMessage
-	edits      []map[string]json.RawMessage
-	updates    []Update
-	messageID  int64
-	webhook    string
-	failCode   int
-	retryAfter int
+	mu           sync.Mutex
+	requests     []string
+	messages     []map[string]json.RawMessage
+	edits        []map[string]json.RawMessage
+	updates      []Update
+	messageID    int64
+	webhook      string
+	failCode     int
+	retryAfter   int
+	failEditCode int
+	afterSend    func()
 }
 
 func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +37,11 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 	f.requests = append(f.requests, method)
+	if method == "editMessageText" && f.failEditCode != 0 {
+		w.WriteHeader(f.failEditCode)
+		fmt.Fprintf(w, `{"ok":false,"error_code":%d,"description":"message cannot be edited"}`, f.failEditCode)
+		return
+	}
 	if f.failCode != 0 {
 		w.WriteHeader(f.failCode)
 		fmt.Fprintf(w, `{"ok":false,"error_code":%d,"description":"secret token 123:secret and raw bank error","parameters":{"retry_after":%d}}`, f.failCode, f.retryAfter)
@@ -62,6 +69,9 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 		f.messages = append(f.messages, body)
 		f.messageID++
 		result = map[string]int64{"message_id": f.messageID}
+		if f.afterSend != nil {
+			f.afterSend()
+		}
 	case "getUpdates":
 		result = f.updates
 	}
@@ -679,8 +689,8 @@ func TestTelegramStoppedProgressKeepsSafeReasonAndUsableControls(t *testing.T) {
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.messages) != beforeMessages {
-		t.Fatal("terminal result duplicated progress as a new notice")
+	if len(f.messages) != beforeMessages+1 {
+		t.Fatal("terminal event did not send one fresh result")
 	}
 	edited := f.edits[len(f.edits)-1]
 	var id int64
@@ -932,6 +942,7 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 		t.Fatal("accepted OTP added more than the broker receipt or reverted to waiting", err)
 	}
 	pending := h.progressText
+	receiptID := f.messageID
 	before = len(f.messages)
 	if err := h.HandleUpdate(ctx, command("/acb_login")); err != nil {
 		t.Fatal(err)
@@ -946,11 +957,64 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 	if h.progressText == pending || h.progressText == waiting || h.progressEpisode != id {
 		t.Fatal("verification did not advance the canonical pending stage")
 	}
-	if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, e.Generation, "FAILED", "MANUAL_REQUIRED", "UNRECOGNIZED_PAGE", time.Time{}); err != nil {
+	if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, e.Generation, "FAILED", "MANUAL_REQUIRED", "VERIFICATION_ACCOUNT_MISMATCH", time.Time{}); err != nil {
 		t.Fatal(err)
 	}
+	beforeTerminal := len(f.messages)
 	if err := h.DeliverNotices(ctx); err != nil {
 		t.Fatal(err)
+	}
+	terminalID := f.messageID
+	if len(f.messages) != beforeTerminal+1 || terminalID <= receiptID || terminalID <= current.StatusMessageID {
+		t.Fatal("terminal result was not sent below the accepted-OTP receipt")
+	}
+	var resultText string
+	var resultKeyboard inlineKeyboard
+	if err := json.Unmarshal(f.messages[len(f.messages)-1]["text"], &resultText); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(f.messages[len(f.messages)-1]["reply_markup"], &resultKeyboard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(resultText, "001234") || strings.Contains(resultText, e.ID) {
+		t.Fatal("new result exposed OTP or internal identity")
+	}
+	terminalConnection, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundLogin := false
+	for _, row := range resultKeyboard.Rows {
+		for _, button := range row {
+			if !strings.HasPrefix(button.Data, "ar:") {
+				continue
+			}
+			var operation string
+			if err := s.DB().QueryRowContext(ctx, `SELECT action FROM telegram_auth_actions WHERE id=? AND message_id=? AND expected_generation=?`, strings.TrimPrefix(button.Data, "ar:"), terminalID, terminalConnection.Generation).Scan(&operation); err != nil {
+				t.Fatal("new terminal control not bound to result message", err)
+			}
+			boundLogin = boundLogin || operation == "LOGIN"
+		}
+	}
+	if !boundLogin {
+		t.Fatal("terminal failure omitted actionable next-attempt control")
+	}
+	var sentID int64
+	if err := s.DB().QueryRowContext(ctx, `SELECT message_id FROM auth_recovery_notices WHERE episode_id=? AND kind='MANUAL_REQUIRED' AND status='SENT'`, e.ID).Scan(&sentID); err != nil || sentID != terminalID {
+		t.Fatal("terminal ack did not persist fresh message ID", err)
+	}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.DeliverNotices(ctx); err != nil || f.messageID != terminalID {
+		t.Fatal("next delivery tick replayed SENT terminal", err)
+	}
+	restarted, err := NewHandler(h.HandlerOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.DeliverNotices(ctx); err != nil || f.messageID != terminalID {
+		t.Fatal("restart replayed SENT terminal", err)
 	}
 	terminal := h.progressText
 	before = len(f.messages)

@@ -26,10 +26,16 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telegramauth"
 )
 
-type coordinatorFinalizer struct{ calls int }
+type coordinatorFinalizer struct {
+	calls    int
+	complete func(context.Context, storage.AuthAttempt) (storage.Connection, error)
+}
 
-func (f *coordinatorFinalizer) Complete(context.Context, storage.AuthAttempt) (storage.Connection, error) {
+func (f *coordinatorFinalizer) Complete(ctx context.Context, a storage.AuthAttempt) (storage.Connection, error) {
 	f.calls++
+	if f.complete != nil {
+		return f.complete(ctx, a)
+	}
 	return storage.Connection{}, errors.New("synthetic verifier unavailable")
 }
 
@@ -227,6 +233,12 @@ func newUnconsentedCoordinatorFixture(t *testing.T) *coordinatorFixture {
 			f.otpStates = append(f.otpStates, state)
 			f.otpReasons = append(f.otpReasons, reason)
 			f.otpChallengeStatuses = append(f.otpChallengeStatuses, status)
+			// Storage uses wall time in production. Align this durable transition
+			// with the fixture clock before returning any post-OTP navigation.
+			if _, err := f.store.DB().ExecContext(f.ctx, `UPDATE auth_recovery_notices SET created_at=? WHERE event_key=(SELECT id||':VERIFYING:'||attempt_count FROM auth_recovery_episodes WHERE attempt_id=?)`, f.now.UTC().Format(time.RFC3339Nano), strings.Split(r.URL.Path, "/")[2]); err != nil {
+				http.Error(w, "missing verification clock", 500)
+				return
+			}
 			if f.otpFail {
 				http.Error(w, "synthetic OTP outcome unavailable", 503)
 				return
@@ -1874,5 +1886,362 @@ func TestRecoveryCoordinatorObservationOutageRemainsBounded(t *testing.T) {
 	f.reconcile()
 	if f.starts != 1 || f.observes != 10 {
 		t.Fatal("terminal observation outage resumed without new consent")
+	}
+}
+
+func (f *coordinatorFixture) verificationOTP() storage.AuthChallenge {
+	f.t.Helper()
+	f.loginReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-ready"}}
+	f.reconcile()
+	return f.pending()
+}
+
+func (f *coordinatorFixture) startVerification() time.Time {
+	f.t.Helper()
+	ch := f.verificationOTP()
+	if err := f.broker.HandleReply(f.ctx, 22, ch.PromptMessageID, 901, "001234"); err != nil {
+		f.t.Fatal(err)
+	}
+	e := f.episode()
+	started, err := f.store.RecoveryVerificationStartedAt(f.ctx, e.ID, e.Generation)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return started
+}
+
+func TestRecoveryCoordinatorVerificationDeadlineSurvivesRestart(t *testing.T) {
+	for _, failure := range []error{
+		&authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"},
+		&authsession.VerificationError{Code: "VERIFICATION_MAINTENANCE"},
+		authsession.ErrVerificationPending, authsession.ErrHandoff,
+		authsession.ErrEncryption, authsession.ErrStorage, authsession.ErrUnavailable,
+		errors.New("SYNTHETIC_SECRET_transport"),
+	} {
+		t.Run(fmt.Sprintf("%T/%v", failure, failure), func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			f.finalizer.complete = func(context.Context, storage.AuthAttempt) (storage.Connection, error) {
+				return storage.Connection{}, failure
+			}
+			started := f.startVerification()
+			f.now = started.Add(59 * time.Second)
+			f.restart(false)
+			if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if e := f.episode(); e.State != "VERIFYING" || e.ReasonCode != "OTP_REQUEST_SENT" || f.finalizer.calls != 2 || f.cancels != 0 {
+				t.Fatalf("transient verification lost request fence or budget: %+v", e)
+			}
+			// A restart and a recognized page cannot move the first notice.
+			f.restart(false)
+			f.now = started.Add(VerificationTimeout)
+			if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "VERIFICATION_TIMEOUT" || f.finalizer.calls != 2 || f.cancels != 1 || f.starts != 1 || f.logins != 1 || f.requests != 1 || f.otps != 1 {
+				t.Fatalf("verification extended beyond sixty seconds or replayed a bank action: %+v", e)
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorVerificationBoundsNavigation(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.otpReplies = []authbrowser.AuthObservation{{State: authbrowser.Unknown, Revision: "loading", ReasonCode: "UNRECOGNIZED_PAGE"}}
+	started := f.startVerification()
+	f.observeStatus = http.StatusServiceUnavailable
+	f.now = started.Add(59 * time.Second)
+	f.restart(false)
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.episode().State != "VERIFYING" || f.finalizer.calls != 0 {
+		t.Fatal("post-OTP navigation did not retain its remaining verification budget")
+	}
+	observes := f.observes
+	f.now = started.Add(VerificationTimeout)
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "VERIFICATION_TIMEOUT" || f.observes != observes || f.otps != 1 || f.requests != 1 {
+		t.Fatalf("navigation escaped durable verification timeout: %+v", e)
+	}
+}
+
+func TestRecoveryCoordinatorVerificationInvalidTimestampFailsClosed(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			f.startVerification()
+			e := f.episode()
+			key := fmt.Sprintf("%s:VERIFYING:%d", e.ID, e.AttemptCount)
+			query, args := `DELETE FROM auth_recovery_notices WHERE event_key=?`, []any{key}
+			if corrupt {
+				query, args = `UPDATE auth_recovery_notices SET created_at=? WHERE event_key=?`, []any{"SYNTHETIC_SECRET_timestamp", key}
+			}
+			if _, err := f.store.DB().ExecContext(f.ctx, query, args...); err != nil {
+				t.Fatal(err)
+			}
+			f.restart(false)
+			if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if e := f.episode(); e.State != "MANUAL_REQUIRED" || e.ReasonCode != "VERIFICATION_STATE_INVALID" || f.finalizer.calls != 1 || f.cancels != 1 || f.otps != 1 {
+				t.Fatalf("invalid durable deadline was recreated or ignored: %+v", e)
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorVerificationFinalizerContextExpires(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	started := f.startVerification()
+	f.now = started.Add(59 * time.Second)
+	f.restart(false)
+	f.finalizer.complete = func(ctx context.Context, _ storage.AuthAttempt) (storage.Connection, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > time.Second {
+			t.Fatal("finalizer did not receive the remaining one-second budget")
+		}
+		<-ctx.Done()
+		return storage.Connection{}, ctx.Err()
+	}
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "VERIFICATION_TIMEOUT" || f.cancels != 1 {
+		t.Fatalf("child context cancellation did not terminate verification: %+v", e)
+	}
+}
+
+func TestRecoveryCoordinatorVerificationParentCancellationDoesNotFinish(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	started := f.startVerification()
+	f.now = started.Add(59 * time.Second)
+	f.restart(false)
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	f.finalizer.complete = func(context.Context, storage.AuthAttempt) (storage.Connection, error) {
+		cancel()
+		return storage.Connection{}, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+	}
+	if err := f.controller.ReconcileOnce(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation lost priority: %v", err)
+	}
+	if e := f.episode(); e.State != "VERIFYING" || e.ReasonCode != "OTP_REQUEST_SENT" || f.cancels != 0 {
+		t.Fatalf("parent cancellation wrote a false terminal result: %+v", e)
+	}
+}
+
+func TestRecoveryCoordinatorVerificationHonorsEarlierAttemptExpiry(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	started := f.startVerification()
+	e := f.episode()
+	expiry := started.Add(40 * time.Second)
+	if _, err := f.store.DB().ExecContext(f.ctx, `UPDATE auth_attempts SET expires_at=? WHERE id=?`, expiry.UTC().Format(time.RFC3339Nano), e.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	f.now = expiry
+	f.restart(false)
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "VERIFICATION_TIMEOUT" || f.finalizer.calls != 1 {
+		t.Fatalf("hard expiry was ignored or blamed consumed OTP: %+v", e)
+	}
+}
+
+func TestRecoveryCoordinatorLateOTPReceivesFullVerificationBudget(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	ch := f.verificationOTP()
+	f.now = f.now.Add(90 * time.Second)
+	if err := f.broker.HandleReply(f.ctx, 22, ch.PromptMessageID, 901, "001234"); err != nil {
+		t.Fatal(err)
+	}
+	e := f.episode()
+	started, err := f.store.RecoveryVerificationStartedAt(f.ctx, e.ID, e.Generation)
+	if err != nil || !started.Equal(f.now) {
+		t.Fatalf("verification began before OTP consumption: %v %v", started, err)
+	}
+	f.now = started.Add(59 * time.Second)
+	f.restart(false)
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.episode().State != "VERIFYING" || f.finalizer.calls != 2 {
+		t.Fatal("waiting for the owner shortened post-OTP verification")
+	}
+	f.now = started.Add(VerificationTimeout)
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.episode().ReasonCode != "VERIFICATION_TIMEOUT" || f.otps != 1 {
+		t.Fatal("late OTP escaped its finite verification budget")
+	}
+}
+
+func TestRecoveryCoordinatorDeterministicVerificationRejections(t *testing.T) {
+	for _, code := range []string{"VERIFICATION_ACCOUNT_MISMATCH", "VERIFICATION_ACCOUNT_MISSING", "VERIFICATION_FORM_INVALID", "VERIFICATION_PAGE_UNSUPPORTED", "VERIFICATION_AUTH_REQUIRED", "VERIFICATION_TIMEOUT"} {
+		t.Run(code, func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			ch := f.verificationOTP()
+			e := f.episode()
+			previous := []byte("previous-encrypted-envelope")
+			stamp := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := f.store.DB().ExecContext(f.ctx, `INSERT INTO sessions(connection_id,generation,envelope,key_id,verified_at,updated_at) VALUES(?,?,?,'k1',?,?)`, e.ConnectionID, e.Generation, previous, stamp, stamp); err != nil {
+				t.Fatal(err)
+			}
+			f.finalizer.complete = func(context.Context, storage.AuthAttempt) (storage.Connection, error) {
+				return storage.Connection{}, &authsession.VerificationError{Code: code}
+			}
+			if err := f.broker.HandleReply(f.ctx, 22, ch.PromptMessageID, 901, "001234"); err != nil {
+				t.Fatal(err)
+			}
+			want := "MANUAL_REQUIRED"
+			if code == "VERIFICATION_AUTH_REQUIRED" || code == "VERIFICATION_TIMEOUT" {
+				want = "WAIT_OPERATOR"
+			}
+			if e := f.episode(); e.State != want || e.ReasonCode != code || f.finalizer.calls != 1 || f.cancels != 1 || f.otps != 1 {
+				t.Fatalf("deterministic rejection was swallowed: %+v", e)
+			}
+			var saved []byte
+			var runs int
+			if err := f.store.DB().QueryRowContext(f.ctx, `SELECT envelope FROM sessions WHERE connection_id=?`, e.ConnectionID).Scan(&saved); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.DB().QueryRowContext(f.ctx, `SELECT count(*) FROM recovery_runs`).Scan(&runs); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(saved, previous) || runs != 0 {
+				t.Fatal("rejected verification replaced the encrypted session or scheduled catchup")
+			}
+			f.restart(false)
+			f.reconcile()
+			if f.starts != 1 || f.logins != 1 || f.requests != 1 || f.otps != 1 {
+				t.Fatal("terminal verification failure replayed authentication")
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorVerificationConcurrentCommitWins(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	ch := f.verificationOTP()
+	keyring, err := security.NewKeyring(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.store.WithKeyring(keyring)
+	committer := authsession.NewFinalizer(authsession.Options{Store: f.store, Browser: f.browser, Keyring: keyring, Verifier: coordinatorVerifier(func(context.Context, string, int64, []byte) error { return nil })})
+	f.finalizer.complete = func(ctx context.Context, a storage.AuthAttempt) (storage.Connection, error) {
+		conn, err := committer.Complete(ctx, a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conn, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+	}
+	if err := f.broker.HandleReply(f.ctx, 22, ch.PromptMessageID, 901, "001234"); err != nil {
+		t.Fatal(err)
+	}
+	if e := f.episode(); e.State != "CATCHING_UP" || e.RecoveryRunID == "" || f.cancels != 0 || f.handoffs != 1 {
+		t.Fatalf("late rejection overwrote a committed session: %+v", e)
+	}
+}
+
+func TestRecoveryCoordinatorVerificationFenceAndConflictDoNotFinish(t *testing.T) {
+	for _, mode := range []string{"generation", "config", "conflict", "superseded", "missing-attempt"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			started := f.startVerification()
+			e := f.episode()
+			f.now = started.Add(59 * time.Second)
+			f.restart(false)
+			f.finalizer.complete = func(context.Context, storage.AuthAttempt) (storage.Connection, error) {
+				var err error
+				switch mode {
+				case "generation":
+					_, err = f.store.DB().ExecContext(f.ctx, `UPDATE connections SET generation=generation+1,state='AUTH_REQUIRED' WHERE id=?`, e.ConnectionID)
+				case "config":
+					_, err = f.store.DB().ExecContext(f.ctx, `UPDATE connections SET config_revision=config_revision+1 WHERE id=?`, e.ConnectionID)
+				case "missing-attempt":
+					_, err = f.store.DB().ExecContext(f.ctx, `UPDATE auth_attempts SET owner_subject='another-owner' WHERE id=?`, e.AttemptID)
+				case "conflict":
+					return storage.Connection{}, authsession.ErrConflict
+				case "superseded":
+					return storage.Connection{}, &authsession.VerificationError{Code: "VERIFICATION_SUPERSEDED"}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return storage.Connection{}, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+			}
+			if err := f.controller.ReconcileOnce(f.ctx); err == nil {
+				t.Fatal("superseded verification did not report conflict")
+			}
+			latest, err := f.store.AuthRecoveryEpisode(f.ctx, e.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if latest.State != "VERIFYING" || latest.ReasonCode != "OTP_REQUEST_SENT" || latest.Generation != e.Generation || f.cancels != 0 || f.otps != 1 {
+				t.Fatalf("stale verifier wrote a terminal result: %+v", latest)
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorBrowserGoneDoesNotBlameConsumedOTP(t *testing.T) {
+	for _, consumed := range []bool{false, true} {
+		t.Run(fmt.Sprint(consumed), func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			if consumed {
+				f.startVerification()
+			} else {
+				f.verificationOTP()
+			}
+			f.now = f.now.Add(2 * time.Second)
+			f.observeStatus = http.StatusGone
+			if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			want := "CHALLENGE_EXPIRED"
+			if consumed {
+				want = "VERIFICATION_TIMEOUT"
+			}
+			if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != want {
+				t.Fatalf("browser expiry mislabeled OTP consumption: %+v", e)
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorVerificationReentryCannotResetDeadline(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	started := f.startVerification()
+	e := f.episode()
+	// The event key is unique per attempt, including a later VERIFYING entry.
+	if err := f.store.TransitionAuthRecovery(f.ctx, e.ID, e.Generation, "VERIFYING", "LOGIN", "OTP_REQUEST_SENT"); err != nil {
+		t.Fatal(err)
+	}
+	f.now = started.Add(VerificationTimeout)
+	f.restart(false)
+	if err := f.controller.ReconcileOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "VERIFICATION_TIMEOUT" || f.finalizer.calls != 1 || f.otps != 1 || f.requests != 1 || f.logins != 1 {
+		t.Fatalf("VERIFYING transition reset the durable timestamp or called the worker after deadline: %+v", e)
+	}
+}
+
+func TestRecoveryCoordinatorVerificationMissingCurrentDoesNotFinish(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.startVerification()
+	e := f.episode()
+	missing := e
+	missing.ConnectionID = "missing-current-connection"
+	if err := f.controller.finalizerError(f.ctx, missing, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}); !errors.Is(err, storage.ErrRecoverySuperseded) {
+		t.Fatalf("missing current connection did not preserve fence: %v", err)
+	}
+	if latest := f.episode(); latest.State != "VERIFYING" || latest.ReasonCode != "OTP_REQUEST_SENT" || latest.Generation != e.Generation || f.cancels != 0 {
+		t.Fatalf("missing current connection wrote a terminal failure: %+v", latest)
 	}
 }

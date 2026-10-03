@@ -13,6 +13,7 @@ const (
 	MaxAIRequests         = 3
 	BrowserAttemptTTL     = 15 * time.Minute
 	ReconcileInterval     = 5 * time.Second
+	VerificationTimeout   = 60 * time.Second
 	LoginCooldown         = 60 * time.Second
 )
 

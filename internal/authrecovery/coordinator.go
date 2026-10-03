@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/captchasolver"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/challenge"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
@@ -339,13 +341,20 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 		_, err = c.Finalizer.Complete(ctx, a)
 		return c.finalizerError(ctx, e, err)
 	}
+	if e.State == "VERIFYING" {
+		if _, proceed, err := c.verificationRemaining(ctx, e, a); err != nil || !proceed {
+			return err
+		}
+	}
 	expiry, err := time.Parse(time.RFC3339Nano, a.ExpiresAt)
 	if err != nil {
 		return err
 	}
 	if !c.Now().Before(expiry) {
 		reason := "BROWSER_EXPIRED"
-		if e.State == "WAITING_OTP" || e.State == "WAITING_CAPTCHA" || e.State == "VERIFYING" {
+		if e.State == "VERIFYING" || e.OTPSubmissions > 0 {
+			reason = "VERIFICATION_TIMEOUT"
+		} else if e.State == "WAITING_OTP" || e.State == "WAITING_CAPTCHA" {
 			reason = "CHALLENGE_EXPIRED"
 		}
 		return c.finish(ctx, e, "WAIT_OPERATOR", reason, c.retryEligibleAt(e))
@@ -380,8 +389,13 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if authbrowser.IsHTTPStatus(err, http.StatusGone) && (e.State == "WAITING_OTP" || e.State == "WAITING_CAPTCHA" || e.State == "VERIFYING") {
-			return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_EXPIRED", time.Time{})
+		if authbrowser.IsHTTPStatus(err, http.StatusGone) {
+			if e.State == "VERIFYING" || e.OTPSubmissions > 0 {
+				return c.finish(ctx, e, "WAIT_OPERATOR", "VERIFICATION_TIMEOUT", time.Time{})
+			}
+			if e.State == "WAITING_OTP" || e.State == "WAITING_CAPTCHA" {
+				return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_EXPIRED", time.Time{})
+			}
 		}
 		if authbrowser.IsHTTPStatus(err, http.StatusServiceUnavailable) {
 			// A failed read during navigation is not an authentication failure.
@@ -506,19 +520,32 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		if err := c.transition(ctx, &e, "VERIFYING", ""); err != nil {
 			return err
 		}
-		if c.Now().Before(c.verifyAfter[e.AttemptID]) {
-			return nil
-		}
-		c.verifyAfter[e.AttemptID] = c.Now().Add(5 * time.Second)
-		if err := c.current(ctx, e, true); err != nil {
-			return err
-		}
-		a, err := c.Store.AuthAttemptForOwner(ctx, e.AttemptID, AutomaticOwner)
+		a, err := c.Store.AuthAttemptStatusForOwner(ctx, e.AttemptID, AutomaticOwner)
 		if err != nil {
 			return err
 		}
 		a.OwnerSubject = AutomaticOwner
-		_, err = c.Finalizer.Complete(ctx, a)
+		if a.Status == "VERIFIED" {
+			_, err = c.Finalizer.Complete(ctx, a)
+			return c.finalizerError(ctx, e, err)
+		}
+		remaining, proceed, err := c.verificationRemaining(ctx, e, a)
+		if err != nil || !proceed {
+			return err
+		}
+		if c.Now().Before(c.verifyAfter[e.AttemptID]) {
+			return nil
+		}
+		if err := c.current(ctx, e, true); err != nil {
+			return err
+		}
+		c.verifyAfter[e.AttemptID] = c.Now().Add(5 * time.Second)
+		verificationCtx, cancel := context.WithTimeout(ctx, remaining)
+		defer cancel()
+		_, err = c.Finalizer.Complete(verificationCtx, a)
+		if err != nil && errors.Is(verificationCtx.Err(), context.DeadlineExceeded) {
+			err = &authsession.VerificationError{Code: "VERIFICATION_TIMEOUT"}
+		}
 		return c.finalizerError(ctx, e, err)
 	case authbrowser.LoginForm:
 		if o.ReasonCode == "CAPTCHA_REJECTED" || o.ReasonCode == "INVALID_CAPTCHA" {
@@ -988,15 +1015,55 @@ func (c *Coordinator) SubmitChallenge(ctx context.Context, ch storage.AuthChalle
 	}
 	return observation, nil
 }
+
+// verificationRemaining uses the first durable VERIFYING notice, never an
+// observation/retry timestamp. Re-read the attempt before any terminal write so
+// a concurrently committed session wins over a late verification failure.
+func (c *Coordinator) verificationRemaining(ctx context.Context, e storage.AuthRecoveryEpisode, a storage.AuthAttempt) (time.Duration, bool, error) {
+	if ctx.Err() != nil {
+		return 0, false, ctx.Err()
+	}
+	latest, err := c.Store.AuthAttemptStatusForOwner(ctx, a.ID, AutomaticOwner)
+	if err != nil {
+		return 0, false, err
+	}
+	if latest.Status == "VERIFIED" {
+		return 0, false, nil
+	}
+	if err := c.current(ctx, e, false); err != nil {
+		return 0, false, err
+	}
+	started, err := c.Store.RecoveryVerificationStartedAt(ctx, e.ID, e.Generation)
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, false, ctx.Err()
+		}
+		if errors.Is(err, storage.ErrRecoverySuperseded) {
+			return 0, false, err
+		}
+		return 0, false, c.finish(ctx, e, "MANUAL_REQUIRED", "VERIFICATION_STATE_INVALID", time.Time{})
+	}
+	expiry, err := time.Parse(time.RFC3339Nano, latest.ExpiresAt)
+	if err != nil {
+		return 0, false, c.finish(ctx, e, "MANUAL_REQUIRED", "VERIFICATION_STATE_INVALID", time.Time{})
+	}
+	deadline := started.Add(VerificationTimeout)
+	if expiry.Before(deadline) {
+		deadline = expiry
+	}
+	remaining := deadline.Sub(c.Now())
+	if remaining <= 0 {
+		return 0, false, c.finish(ctx, e, "WAIT_OPERATOR", "VERIFICATION_TIMEOUT", time.Time{})
+	}
+	return remaining, true, nil
+}
+
 func (c *Coordinator) finalizerError(ctx context.Context, e storage.AuthRecoveryEpisode, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if err == nil {
 		return nil
-	}
-	if errors.Is(err, storage.ErrRecoverySuperseded) {
-		return err
 	}
 	// A committed session must not be finished/rolled back after a cleanup or
 	// scheduling error. Discover it on the next reconcile via VERIFIED status.
@@ -1007,8 +1074,27 @@ func (c *Coordinator) finalizerError(ctx context.Context, e storage.AuthRecovery
 	if a.Status == "VERIFIED" {
 		return nil
 	}
-	// Worker RPC unavailable is retried at most once per five seconds, within TTL.
-	return nil
+	if err := c.current(ctx, e, false); err != nil {
+		return err
+	}
+	code := authsession.VerificationCode(err)
+	if errors.Is(err, authsession.ErrConflict) || errors.Is(err, storage.ErrRecoverySuperseded) || errors.Is(err, storage.ErrGenerationFenceMismatch) || code == "VERIFICATION_SUPERSEDED" {
+		return storage.ErrRecoverySuperseded
+	}
+	switch code {
+	case "VERIFICATION_ACCOUNT_MISMATCH", "VERIFICATION_ACCOUNT_MISSING", "VERIFICATION_FORM_INVALID", "VERIFICATION_PAGE_UNSUPPORTED":
+		return c.finish(ctx, e, "MANUAL_REQUIRED", code, time.Time{})
+	case "VERIFICATION_AUTH_REQUIRED", "VERIFICATION_TIMEOUT":
+		return c.finish(ctx, e, "WAIT_OPERATOR", code, time.Time{})
+	}
+	if code == "" {
+		code = "VERIFICATION_UNAVAILABLE"
+	}
+	slog.Info("ACB recovery verification pending", "generation", e.Generation, "code", code)
+	// Keep OTP_REQUEST_SENT intact: transient errors never release the request
+	// reservation. All retries, including handoff/storage errors, share the budget.
+	_, _, budgetErr := c.verificationRemaining(ctx, e, a)
+	return budgetErr
 }
 func (c *Coordinator) catchup(ctx context.Context, e storage.AuthRecoveryEpisode) error {
 	delete(c.windows, e.AttemptID)

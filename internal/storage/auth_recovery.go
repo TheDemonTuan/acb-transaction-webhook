@@ -50,6 +50,37 @@ func (s *Store) AuthRecoveryEpisode(ctx context.Context, episodeID string) (Auth
 func (s *Store) LatestAuthRecoveryEpisode(ctx context.Context, connectionID string) (AuthRecoveryEpisode, error) {
 	return scanEpisode(s.db.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE connection_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1`, connectionID))
 }
+
+// RecoveryVerificationStartedAt returns the first VERIFYING notice timestamp for
+// the current attempt. Notice deduplication keeps this deadline source durable.
+func (s *Store) RecoveryVerificationStartedAt(ctx context.Context, episodeID string, generation int64) (time.Time, error) {
+	var startedAt time.Time
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var e AuthRecoveryEpisode
+		if err := tx.QueryRowContext(ctx, `SELECT id,connection_id,generation,config_revision,attempt_count FROM auth_recovery_episodes WHERE id=?`, episodeID).Scan(&e.ID, &e.ConnectionID, &e.Generation, &e.ConfigRevision, &e.AttemptCount); err != nil {
+			return err
+		}
+		if e.Generation != generation {
+			return ErrRecoverySuperseded
+		}
+		if err := checkRecoveryCurrentTx(ctx, tx, e); err != nil {
+			return err
+		}
+		var createdAt string
+		eventKey := fmt.Sprintf("%s:VERIFYING:%d", e.ID, e.AttemptCount)
+		if err := tx.QueryRowContext(ctx, `SELECT n.created_at FROM auth_recovery_episodes e JOIN auth_recovery_notices n ON n.episode_id=e.id WHERE e.id=? AND e.generation=? AND e.attempt_count=? AND n.event_key=?`, e.ID, generation, e.AttemptCount, eventKey).Scan(&createdAt); err != nil {
+			return err
+		}
+		var err error
+		startedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return errors.New("invalid recovery verification timestamp")
+		}
+		return nil
+	})
+	return startedAt, err
+}
+
 func enqueueRecoveryNoticeTx(ctx context.Context, tx *sql.Tx, e AuthRecoveryEpisode, event string) error {
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO auth_recovery_notices(id,episode_id,event_key,kind,status,created_at) VALUES(?,?,?,?,'PENDING',?)`, id("arn"), e.ID, fmt.Sprintf("%s:%s:%d", e.ID, event, e.AttemptCount), event, now())
 	return err

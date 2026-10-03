@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
@@ -21,17 +23,28 @@ type verifierAccountTransport func(*http.Request) (*http.Response, error)
 
 func (f verifierAccountTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestSessionVerifierRejectsDifferentReturnedAccount(t *testing.T) {
+func TestSessionVerifierFiniteResultsAndExactAccountGate(t *testing.T) {
 	for _, tc := range []struct {
-		name, account string
-		accepted      bool
+		name, account, body, code, phase string
+		cookieOnly                       bool
+		upstreamErr                      error
 	}{
-		{"exact", "222222222", true},
-		{"other", "111111111", false},
-		{"masked", "***2222", false},
-		{"missing", "", false},
+		{name: "exact", account: "222222222", phase: "COMPLETE"},
+		{name: "other", account: "111111111", code: "VERIFICATION_ACCOUNT_MISMATCH", phase: "ACCOUNT"},
+		{name: "masked", account: "***2222", code: "VERIFICATION_ACCOUNT_MISMATCH", phase: "ACCOUNT"},
+		{name: "missing", code: "VERIFICATION_ACCOUNT_MISSING", phase: "ACCOUNT"},
+		{name: "empty", body: `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="AccountNbr" value=""></form>`, code: "VERIFICATION_ACCOUNT_MISSING", phase: "ACCOUNT"},
+		{name: "invalid_form", body: `<div>ibkacctDetailProc AccountNbr synthetic-private-body</div>`, code: "VERIFICATION_FORM_INVALID", phase: "ACCOUNT"},
+		{name: "login", body: `<input name="username"><input name="password">`, code: "VERIFICATION_AUTH_REQUIRED", phase: "BOOTSTRAP"},
+		{name: "otp", body: `<input name="otp">`, code: "VERIFICATION_AUTH_REQUIRED", phase: "BOOTSTRAP"},
+		{name: "captcha", body: `<input name="captcha">`, code: "VERIFICATION_AUTH_REQUIRED", phase: "BOOTSTRAP"},
+		{name: "maintenance", body: `maintenance synthetic-private-body`, code: "VERIFICATION_MAINTENANCE", phase: "BOOTSTRAP"},
+		{name: "unsupported", body: `synthetic-private-body`, code: "VERIFICATION_PAGE_UNSUPPORTED", phase: "BOOTSTRAP"},
+		{name: "network", upstreamErr: errors.New("synthetic-secret-error https://private.example/credential"), code: "VERIFICATION_UNAVAILABLE", phase: "BOOTSTRAP"},
+		{name: "cookie_only", account: "111111111", cookieOnly: true, phase: "COMPLETE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			logs := captureVerificationLogs(t)
 			ctx := context.Background()
 			store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "verify.db"))
 			if err != nil {
@@ -50,7 +63,11 @@ func TestSessionVerifierRejectsDifferentReturnedAccount(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handoff, err := authbrowser.EncodeHandoff(authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Action: "https://online.acb.com.vn/acbib/Request", Fields: map[string]string{"dse_sessionId": "synthetic-session", "dse_processorState": "acctDetailPage", "dse_operationName": "ibkacctDetailProc", "AccountNbr": "222222222"}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic-cookie", Domain: acb.OfficialHost, Path: "/", Secure: true}}}, []byte("synthetic-nonce"))
+			candidate := authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Action: "https://online.acb.com.vn/acbib/Request", Fields: map[string]string{"dse_sessionId": "synthetic-session", "dse_processorState": "acctDetailPage", "dse_operationName": "ibkacctDetailProc", "AccountNbr": "222222222"}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic-cookie", Domain: acb.OfficialHost, Path: "/", Secure: true}}}
+			if tc.cookieOnly {
+				candidate.Action, candidate.Fields = "", nil
+			}
+			handoff, err := authbrowser.EncodeHandoff(candidate, []byte("synthetic-nonce"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +84,13 @@ func TestSessionVerifierRejectsDifferentReturnedAccount(t *testing.T) {
 				accountField = `<input type="hidden" name="AccountNbr" value="` + tc.account + `">`
 			}
 			body := `<form action="/acbib/Request" method="post"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session">` + accountField + `</form>`
+			if tc.body != "" {
+				body = tc.body
+			}
 			client, err := acb.NewClient("https://online.acb.com.vn", verifierAccountTransport(func(r *http.Request) (*http.Response, error) {
+				if tc.upstreamErr != nil {
+					return nil, tc.upstreamErr
+				}
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 			}))
 			if err != nil {
@@ -75,15 +98,20 @@ func TestSessionVerifierRejectsDifferentReturnedAccount(t *testing.T) {
 			}
 			verifier := NewSessionVerifier(NewSessionLoader(store, keyring, client), client)
 			err = verifier.VerifySession(ctx, conn.ID, attempt.Generation, encoded)
-			if tc.accepted && err != nil {
-				t.Fatal(err)
+			if got := authsession.VerificationCode(err); got != tc.code {
+				t.Fatalf("verification code=%q, want %q", got, tc.code)
 			}
-			if !tc.accepted && err == nil {
-				t.Fatal("authenticated page for another/missing account was verified")
+			if tc.code == "" && err != nil {
+				t.Fatalf("accepted candidate failed: %v", err)
 			}
-			if err != nil && (strings.Contains(err.Error(), tc.account) && tc.account != "" || strings.Contains(err.Error(), "222222222") || strings.Contains(err.Error(), "synthetic-session")) {
-				t.Fatal("verification error exposed private account or session")
+			if err != nil && err.Error() != tc.code {
+				t.Fatalf("error must contain only finite code: %v", err)
 			}
+			logCode := tc.code
+			if logCode == "" {
+				logCode = "VERIFIED"
+			}
+			logs.assertResult(t, attempt.Generation, tc.phase, logCode, tc.upstreamErr == nil, tc.code == "" && !tc.cookieOnly || tc.code == "VERIFICATION_ACCOUNT_MISSING" || tc.code == "VERIFICATION_ACCOUNT_MISMATCH", tc.account != "" && tc.phase != "BOOTSTRAP" && !tc.cookieOnly, tc.name == "exact")
 			current, err := store.AuthAttemptStatusForOwner(ctx, attempt.ID, "fixture-owner")
 			if err != nil {
 				t.Fatal(err)

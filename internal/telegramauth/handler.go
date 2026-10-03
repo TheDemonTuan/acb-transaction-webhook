@@ -684,7 +684,29 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; chưa cần nhập ký tự. Nếu cần bạn nhập tay, bot sẽ gửi ảnh yêu cầu riêng."
 		}
 	case "VERIFYING":
-		text = "5/6 · Đang xác minh phiên và đúng tài khoản ACB.\nChưa xác nhận thành công; bạn chờ, không cần gửi thêm mã."
+		text = "5/6 · Đang xác minh phiên và đúng tài khoản ACB.\nChưa xác nhận thành công; không gửi thêm mã."
+		started, err := h.Store.RecoveryVerificationStartedAt(ctx, e.ID, e.Generation)
+		if errors.Is(err, storage.ErrRecoverySuperseded) {
+			return "", err
+		}
+		if err != nil {
+			text += "\n" + reasonLabel("VERIFICATION_STATE_INVALID")
+		} else {
+			deadline := started.Add(60 * time.Second)
+			attempt, err := h.Store.AuthAttemptStatusForOwner(ctx, e.AttemptID, storage.RecoveryOwner)
+			if err != nil {
+				return "", err
+			}
+			expiry, err := time.Parse(time.RFC3339Nano, attempt.ExpiresAt)
+			if err != nil {
+				text += "\n" + reasonLabel("VERIFICATION_STATE_INVALID")
+			} else {
+				if expiry.Before(deadline) {
+					deadline = expiry
+				}
+				text += "\nHạn xác minh: " + localExpiry(deadline.UTC().Format(time.RFC3339Nano)) + " (giờ Việt Nam)."
+			}
+		}
 	case "CATCHING_UP":
 		text = "6/6 · Phiên đã xác minh, đang lấy giao dịch còn thiếu.\nChưa tiếp tục theo dõi cho đến khi lấy đủ giao dịch."
 		if e.RecoveryRunID != "" {
@@ -711,7 +733,7 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 			text = "Phiên đã xác minh nhưng chưa lấy đủ giao dịch.\n" + reasonLabel(e.ReasonCode) + "\nChưa tiếp tục theo dõi; không cần đăng nhập hoặc lấy OTP lại."
 		}
 	}
-	if timed && progressKind(e.State) && e.AttemptID != "" && e.State != "CATCHING_UP" {
+	if timed && progressKind(e.State) && e.AttemptID != "" && e.State != "CATCHING_UP" && e.State != "VERIFYING" {
 		attempt, err := h.Store.AuthAttemptStatusForOwner(ctx, e.AttemptID, storage.RecoveryOwner)
 		if err == nil {
 			if started, parseErr := time.Parse(time.RFC3339Nano, attempt.CreatedAt); parseErr == nil {
@@ -769,6 +791,26 @@ func connectionLabel(state string) string {
 }
 func reasonLabel(reason string) string {
 	switch reason {
+	case "VERIFICATION_ACCOUNT_MISMATCH":
+		return "ACB trả về tài khoản khác số tài khoản đã lưu. Bot đã dừng, chưa lưu phiên; kiểm tra số tài khoản và nhờ người quản lý kiểm tra. Không gửi lại mã."
+	case "VERIFICATION_ACCOUNT_MISSING":
+		return "Trang ACB không cung cấp số tài khoản để đối chiếu. Bot chưa lưu phiên; nhờ người quản lý kiểm tra. Không gửi lại mã."
+	case "VERIFICATION_FORM_INVALID":
+		return "Không đọc được biểu mẫu giao dịch ACB để xác minh phiên. Bot đã dừng an toàn; nhờ người quản lý kiểm tra giao diện ACB. Không gửi lại mã."
+	case "VERIFICATION_AUTH_REQUIRED":
+		return "ACB chưa giữ phiên đăng nhập và yêu cầu xác thực lại. Chưa xác nhận thành công; kiểm tra app ACB trước khi chọn lần đăng nhập mới. Không gửi lại mã đã dùng."
+	case "VERIFICATION_PAGE_UNSUPPORTED":
+		return "ACB trả về trang bot chưa nhận diện được để xác minh phiên. Bot đã dừng; nhờ người quản lý kiểm tra giao diện ACB. Không gửi lại mã."
+	case "VERIFICATION_MAINTENANCE":
+		return "ACB đang bảo trì nên chưa xác minh được phiên. Chờ ngân hàng hoạt động lại; không gửi thêm mã."
+	case "VERIFICATION_UNAVAILABLE":
+		return "Dịch vụ chưa xác minh được phiên ACB do kết nối hoặc xử lý chưa sẵn sàng. Chưa xác nhận thành công; không gửi thêm mã."
+	case "VERIFICATION_SUPERSEDED":
+		return "Lần xác minh này đã được thay thế bởi thay đổi phiên mới hơn. Xem trạng thái hiện tại; không gửi lại mã cũ."
+	case "VERIFICATION_TIMEOUT":
+		return "Hệ thống chưa xác minh được phiên ACB trong thời gian cho phép. Không kết luận OTP sai hoặc hết hạn. Nhờ người quản lý kiểm tra trước khi chọn lần đăng nhập mới; không gửi lại mã đã dùng."
+	case "VERIFICATION_STATE_INVALID":
+		return "Mốc thời gian xác minh đã lưu bị thiếu hoặc không hợp lệ. Bot dừng an toàn; nhờ người quản lý kiểm tra dữ liệu. Không gửi lại mã."
 	case "CREDENTIALS_REJECTED":
 		return "ACB từ chối tên đăng nhập hoặc mật khẩu. Kiểm tra trong app ACB, rồi dùng Thông tin đăng nhập để lưu lại trước khi thử."
 	case "CREDENTIALS_NOT_CONFIGURED", "CREDENTIALS_UNAVAILABLE":
@@ -934,8 +976,13 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 		}
 		// Actionable notices use the same fence-aware operator menu. No nonce
 		// is created while maintenance locks mutations.
+		terminal := false
+		switch n.Kind {
+		case "COMPLETED", "WAIT_OPERATOR", "MANUAL_REQUIRED", "FAILED", "CANCELLED", "CANCELED", "RETRY_WAIT", "MAINTENANCE_WAIT":
+			terminal = true
+		}
 		beforeID := int64(0)
-		if n.Kind != "CREDENTIALS_UPDATED" && (e.StatusMessageID > 0 || e.AttemptCount > 0) {
+		if !terminal && n.Kind != "CREDENTIALS_UPDATED" && (e.StatusMessageID > 0 || e.AttemptCount > 0) {
 			err = h.deliverProgress(ctx)
 			if err == nil {
 				updated, readErr := h.Store.AuthRecoveryEpisode(ctx, e.ID)
@@ -946,6 +993,17 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 			}
 		} else {
 			err = h.sendNoticePanel(ctx, c, e, text, &beforeID)
+		}
+		if err == nil && terminal {
+			latestConnection, latestEpisode, readErr := h.snapshot(ctx)
+			if readErr != nil {
+				err = readErr
+			} else if latestConnection.ID != c.ID || latestConnection.Generation != c.Generation || latestEpisode.ID != e.ID || latestEpisode.Generation != e.Generation || latestEpisode.ConfigRevision != e.ConfigRevision || latestEpisode.AttemptID != e.AttemptID || latestEpisode.AttemptCount != e.AttemptCount || latestEpisode.State != e.State {
+				err = storage.ErrRecoverySuperseded
+			}
+			if err != nil {
+				_ = h.Client.DeleteMessage(ctx, h.ChatID, beforeID)
+			}
 		}
 		if err != nil {
 			if persistErr := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, 0, time.Now().Add(deliveryDelay(err))); persistErr != nil {

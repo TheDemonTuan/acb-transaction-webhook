@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
@@ -46,28 +49,45 @@ func TestWorkerService_VerifySession_GenerationGuard(t *testing.T) {
 		store: store,
 	}
 
-	// 1. Invalid generation <= 0
-	if err := ws.VerifySession(ctx, conn.ID, 0, []byte("pw")); err == nil {
-		t.Fatal("expected error for generation <= 0, got nil")
-	}
-	if err := ws.VerifySession(ctx, conn.ID, -1, []byte("pw")); err == nil {
-		t.Fatal("expected error for generation < 0, got nil")
-	}
-
-	// 2. Stale generation (< 5) rejected by generation guard
-	if err := ws.VerifySession(ctx, conn.ID, 4, []byte("pw")); err == nil {
-		t.Fatal("expected error for stale generation 4 < current 5, got nil")
-	}
-
-	// 3. Mismatched future generation (> 5) rejected by strict equality fence
-	if err := ws.VerifySession(ctx, conn.ID, 6, []byte("pw")); err == nil {
-		t.Fatal("expected error for mismatched generation 6 != current 5, got nil")
-	}
-
-	// 4. Exact matching generation 5 proceeds past guard (fails on unconfigured verifier in this test)
-	err = ws.VerifySession(ctx, conn.ID, 5, []byte("pw"))
-	if err == nil || err.Error() != "session verifier not configured" {
-		t.Fatalf("expected 'session verifier not configured' error when generation guard passes, got: %v", err)
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	defer slog.SetDefault(previous)
+	for _, tc := range []struct {
+		account    string
+		generation int64
+		code       string
+	}{
+		{conn.ID, 0, "VERIFICATION_UNAVAILABLE"},
+		{conn.ID, -1, "VERIFICATION_UNAVAILABLE"},
+		{conn.ID, 4, "VERIFICATION_SUPERSEDED"},
+		{conn.ID, 6, "VERIFICATION_SUPERSEDED"},
+		{conn.ID, 5, "VERIFICATION_UNAVAILABLE"},
+		{"synthetic-private-account", 5, "VERIFICATION_SUPERSEDED"},
+	} {
+		output.Reset()
+		err := ws.VerifySession(ctx, tc.account, tc.generation, []byte("synthetic-private-password"))
+		if authsession.VerificationCode(err) != tc.code || err.Error() != tc.code {
+			t.Fatalf("generation=%d code=%q error=%v", tc.generation, tc.code, err)
+		}
+		decoder := json.NewDecoder(&output)
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatal(err)
+		}
+		if len(record) != 6 || record["msg"] != "ACB session verification result" || record["generation"] != float64(tc.generation) || record["phase"] != "RESTORE" || record["code"] != tc.code {
+			t.Fatalf("unsafe or incorrect verification log fields: %v", record)
+		}
+		for key := range record {
+			switch key {
+			case "time", "level", "msg", "generation", "phase", "code":
+			default:
+				t.Fatalf("unsafe verification field %q", key)
+			}
+		}
+		if decoder.More() {
+			t.Fatal("worker guard emitted multiple result events")
+		}
 	}
 }
 
@@ -169,11 +189,8 @@ func TestWorkerService_VerifySession_FailsClosedOnStoreError(t *testing.T) {
 	store.Close()
 
 	err = ws.VerifySession(ctx, conn.ID, 1, []byte("pw"))
-	if err == nil {
-		t.Fatal("expected VerifySession to fail closed on store error, got nil")
-	}
-	if !strings.Contains(err.Error(), "failed to lookup connection for session verification") {
-		t.Fatalf("expected wrapped store error, got: %v", err)
+	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
+		t.Fatalf("expected safe unavailable store failure, got %v", err)
 	}
 	if upstreamCalls.Load() != 0 {
 		t.Fatalf("expected zero upstream calls on store error, got %d", upstreamCalls.Load())

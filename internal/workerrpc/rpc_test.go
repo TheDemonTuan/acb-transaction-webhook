@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
@@ -29,6 +32,7 @@ type mockWorkerHandler struct {
 	recoveryEventKey      string
 	verifiedAccount       string
 
+	verifyErr    error
 	createJobErr error
 	cancelJobErr error
 	settingsErr  error
@@ -109,6 +113,9 @@ func (m *mockWorkerHandler) ScheduleRecovery(ctx context.Context, connectionID s
 }
 
 func (m *mockWorkerHandler) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
+	if m.verifyErr != nil {
+		return m.verifyErr
+	}
 	if string(password) == "wrong" {
 		return errors.New("invalid password")
 	}
@@ -636,8 +643,8 @@ func TestWorkerRPC_DrainingRejectsUpstreamCommands(t *testing.T) {
 	if _, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02"); err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("expected CreateHistoryJob to be rejected with 503 during drain, got: %v", err)
 	}
-	if err := client.VerifySession(ctx, "12345", 1, []byte("pw")); err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("expected VerifySession to be rejected with 503 during drain, got: %v", err)
+	if err := client.VerifySession(ctx, "12345", 1, []byte("pw")); authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
+		t.Fatalf("expected verification unavailable during drain, got: %v", err)
 	}
 
 	// 4. Non-upstream calls (wake-dispatcher, notify-settings) still succeed
@@ -891,5 +898,194 @@ func TestWorkerRPC_PaymentBoost(t *testing.T) {
 	// 3. StopPaymentBoost call
 	if err := client.StopPaymentBoost(ctx, res.SessionID); err != nil {
 		t.Fatalf("expected StopPaymentBoost success, got error: %v", err)
+	}
+}
+
+func TestWorkerRPC_VerificationErrorRoundtrip(t *testing.T) {
+	const secret = "synthetic-verification-secret"
+	tests := []struct {
+		name   string
+		err    error
+		code   string
+		status int
+	}{
+		{"account_mismatch", &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}, "VERIFICATION_ACCOUNT_MISMATCH", http.StatusUnprocessableEntity},
+		{"account_missing", &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISSING"}, "VERIFICATION_ACCOUNT_MISSING", http.StatusUnprocessableEntity},
+		{"form_invalid", &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}, "VERIFICATION_FORM_INVALID", http.StatusUnprocessableEntity},
+		{"auth_required", &authsession.VerificationError{Code: "VERIFICATION_AUTH_REQUIRED"}, "VERIFICATION_AUTH_REQUIRED", http.StatusUnprocessableEntity},
+		{"page_unsupported", &authsession.VerificationError{Code: "VERIFICATION_PAGE_UNSUPPORTED"}, "VERIFICATION_PAGE_UNSUPPORTED", http.StatusUnprocessableEntity},
+		{"maintenance", &authsession.VerificationError{Code: "VERIFICATION_MAINTENANCE"}, "VERIFICATION_MAINTENANCE", http.StatusServiceUnavailable},
+		{"unavailable", &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}, "VERIFICATION_UNAVAILABLE", http.StatusServiceUnavailable},
+		{"superseded", &authsession.VerificationError{Code: "VERIFICATION_SUPERSEDED"}, "VERIFICATION_SUPERSEDED", http.StatusConflict},
+		{"timeout", &authsession.VerificationError{Code: "VERIFICATION_TIMEOUT"}, "VERIFICATION_TIMEOUT", http.StatusUnprocessableEntity},
+		{"wrapped", fmt.Errorf("%s: %w", secret, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}), "VERIFICATION_ACCOUNT_MISMATCH", http.StatusUnprocessableEntity},
+		{"untyped", errors.New(secret + " VERIFICATION_ACCOUNT_MISMATCH"), "VERIFICATION_UNAVAILABLE", http.StatusServiceUnavailable},
+		{"invalid_typed", &authsession.VerificationError{Code: secret}, "VERIFICATION_UNAVAILABLE", http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, err := workerrpc.NewServer(&mockWorkerHandler{verifyErr: tt.err}, "synthetic-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ts := httptest.NewServer(server.Handler())
+			defer ts.Close()
+
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/rpc/verify-session", strings.NewReader(`{"account":"synthetic-account","generation":1,"password":"cHc="}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(workerrpc.HeaderInternalToken, "synthetic-token")
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var wire workerrpc.ErrorResponse
+			if err := json.Unmarshal(body, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tt.status || wire.Code != tt.code || wire.Error != tt.code {
+				t.Fatalf("status=%d response=%+v, want status=%d code=%s", resp.StatusCode, wire, tt.status, tt.code)
+			}
+			if strings.Contains(string(body), secret) {
+				t.Fatal("handler secret leaked to HTTP response")
+			}
+			client := workerrpc.NewClient(ts.URL, "synthetic-token")
+			err = client.VerifySession(context.Background(), "synthetic-account", 1, []byte("pw"))
+			var verificationErr *authsession.VerificationError
+			if !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != tt.code || err.Error() != tt.code {
+				t.Fatalf("unexpected verification error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerRPC_VerificationErrorBodySanitization(t *testing.T) {
+	const secret = "synthetic-response-secret"
+	valid := `{"code":"VERIFICATION_ACCOUNT_MISSING","error":"` + secret + `"}`
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		code   string
+	}{
+		{"valid", http.StatusUnprocessableEntity, valid, "VERIFICATION_ACCOUNT_MISSING"},
+		{"limit", http.StatusUnprocessableEntity, valid + strings.Repeat(" ", 4096-len(valid)), "VERIFICATION_ACCOUNT_MISSING"},
+		{"oversized", http.StatusUnprocessableEntity, valid + strings.Repeat(" ", 4097-len(valid)), "VERIFICATION_UNAVAILABLE"},
+		{"oversized_raw", http.StatusServiceUnavailable, strings.Repeat(secret, 300), "VERIFICATION_UNAVAILABLE"},
+		{"malformed", http.StatusServiceUnavailable, `{"code":"VERIFICATION_ACCOUNT_MISMATCH","error":"` + secret, "VERIFICATION_UNAVAILABLE"},
+		{"trailing_json", http.StatusServiceUnavailable, valid + `{}`, "VERIFICATION_UNAVAILABLE"},
+		{"unknown", http.StatusServiceUnavailable, `{"code":"` + secret + `","error":"VERIFICATION_ACCOUNT_MISMATCH"}`, "VERIFICATION_UNAVAILABLE"},
+		{"missing", http.StatusServiceUnavailable, `{"error":"VERIFICATION_ACCOUNT_MISMATCH ` + secret + `"}`, "VERIFICATION_UNAVAILABLE"},
+		{"unauthorized", http.StatusUnauthorized, valid, "VERIFICATION_UNAVAILABLE"},
+		{"forbidden", http.StatusForbidden, valid, "VERIFICATION_UNAVAILABLE"},
+		{"non_json", http.StatusBadGateway, secret, "VERIFICATION_UNAVAILABLE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/rpc/verify-session" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer ts.Close()
+			client := workerrpc.NewClient(ts.URL, "synthetic-token")
+			err := client.VerifySession(context.Background(), "synthetic-account", 1, []byte("pw"))
+			var verificationErr *authsession.VerificationError
+			if !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != tt.code || err.Error() != tt.code {
+				t.Fatalf("unexpected verification error: %v", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatal("response secret leaked to client error")
+			}
+		})
+	}
+}
+
+func TestWorkerRPC_VerificationTransportSanitization(t *testing.T) {
+	const secret = "synthetic-transport-secret"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "synthetic-invalid-scheme://"+secret)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer ts.Close()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name string
+		url  string
+		ctx  context.Context
+	}{
+		{"redirect_failure", ts.URL, context.Background()},
+		{"invalid_request_url", "://" + secret, context.Background()},
+		{"canceled", ts.URL, canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := workerrpc.NewClient(tt.url, "synthetic-token")
+			err := client.VerifySession(tt.ctx, "synthetic-account", 1, []byte("pw"))
+			var verificationErr *authsession.VerificationError
+			if !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
+				t.Fatalf("unexpected transport error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerRPC_VerificationRequestValidation(t *testing.T) {
+	mock := &mockWorkerHandler{}
+	server, err := workerrpc.NewServer(mock, "synthetic-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		status int
+	}{
+		{"method", http.MethodGet, "", http.StatusMethodNotAllowed},
+		{"malformed", http.MethodPost, "{", http.StatusBadRequest},
+		{"generation", http.MethodPost, `{"account":"synthetic-account","generation":0,"password":"cHc="}`, http.StatusBadRequest},
+		{"account", http.MethodPost, `{"generation":1,"password":"cHc="}`, http.StatusBadRequest},
+		{"password", http.MethodPost, `{"account":"synthetic-account","generation":1}`, http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(tt.method, ts.URL+"/rpc/verify-session", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(workerrpc.HeaderInternalToken, "synthetic-token")
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tt.status || mock.verifiedAccount != "" {
+				t.Fatalf("status=%d verified=%t, want status=%d without verification", resp.StatusCode, mock.verifiedAccount != "", tt.status)
+			}
+		})
+	}
+}
+
+func TestWorkerRPC_NonVerificationErrorBehaviorUnchanged(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"existing-endpoint-error","code":"VERIFICATION_ACCOUNT_MISMATCH"}`)
+	}))
+	defer ts.Close()
+	err := workerrpc.NewClient(ts.URL, "synthetic-token").RequestSync(context.Background())
+	if err == nil || authsession.VerificationCode(err) != "" || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "existing-endpoint-error") {
+		t.Fatalf("non-verification error behavior changed: %v", err)
 	}
 }

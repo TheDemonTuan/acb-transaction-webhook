@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 type SessionVerifier struct {
@@ -51,51 +54,112 @@ func (t *verifyTask) Step(ctx context.Context) (scheduler.TaskStepResult, error)
 	default:
 	}
 	if err != nil {
-		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeAuth}, err
+		outcome := scheduler.ClassifyOutcome(err, nil)
+		switch authsession.VerificationCode(err) {
+		case "VERIFICATION_AUTH_REQUIRED":
+			outcome = scheduler.OutcomeAuth
+		case "VERIFICATION_ACCOUNT_MISMATCH", "VERIFICATION_ACCOUNT_MISSING", "VERIFICATION_FORM_INVALID", "VERIFICATION_PAGE_UNSUPPORTED":
+			outcome = scheduler.OutcomeFatal
+		case "VERIFICATION_MAINTENANCE", "VERIFICATION_UNAVAILABLE", "VERIFICATION_TIMEOUT":
+			outcome = scheduler.OutcomeTransient
+		}
+		return scheduler.TaskStepResult{Done: true, Error: err, Outcome: outcome}, err
 	}
 	return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 }
 
-func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string, generation int64, encrypted []byte) error {
+func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string, generation int64, encrypted []byte) (resultErr error) {
+	// The scheduler may still finish a canceled task after this call returns.
+	// Guard the finite diagnostic fields, and emit only at the caller boundary.
+	var result struct {
+		sync.Mutex
+		phase          string
+		hasResponse    bool
+		status         int
+		kind           acb.PageKind
+		formValid      bool
+		accountPresent bool
+		accountMatch   bool
+	}
+	result.phase = "RESTORE"
+	defer func() {
+		code := "VERIFIED"
+		if resultErr != nil {
+			code = authsession.VerificationCode(resultErr)
+			if code == "" {
+				code = "VERIFICATION_UNAVAILABLE"
+			}
+		}
+		result.Lock()
+		defer result.Unlock()
+		if result.hasResponse {
+			slog.Info("ACB session verification result", "generation", generation, "phase", result.phase, "code", code, "status", result.status, "kind", result.kind, "form_valid", result.formValid, "account_present", result.accountPresent, "account_match", result.accountMatch)
+		} else {
+			slog.Info("ACB session verification result", "generation", generation, "phase", result.phase, "code", code)
+		}
+	}()
 	if v == nil || v.sessions == nil || v.client == nil {
-		return errors.New("ACB session verifier is unavailable")
+		return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
 	}
 
 	execFn := func(stepCtx context.Context) error {
 		if err := ctx.Err(); err != nil {
-			return err
+			return verificationFailure(err)
 		}
 		stepCtx, cancel := context.WithCancel(stepCtx)
 		stop := context.AfterFunc(ctx, cancel)
 		defer stop()
 		defer cancel()
 		if err := v.sessions.RestoreEnvelope(stepCtx, connectionID, generation, encrypted); err != nil {
-			return err
+			return verificationFailure(err)
 		}
+		result.Lock()
+		result.phase = "BOOTSTRAP"
+		result.Unlock()
 		var expectedAccount string
 		response, err := sessionOperation(stepCtx, v.sessions.store, v.sessions, nil, connectionID, generation, true, func() (acb.Response, error) {
 			expectedAccount = v.client.SessionAccountNumber()
 			return v.client.Bootstrap(stepCtx)
 		})
+		if response.StatusCode != 0 {
+			result.Lock()
+			result.hasResponse, result.status, result.kind = true, response.StatusCode, response.Kind
+			result.Unlock()
+		}
 		if err != nil {
-			return err
+			return verificationFailure(err)
 		}
 		switch response.Kind {
 		case acb.AccountDetailPage, acb.HistoryPage:
 			if expectedAccount != "" {
+				result.Lock()
+				result.phase = "ACCOUNT"
+				result.Unlock()
 				form, err := acb.ExtractHistoryForm(response.Body)
-				if err != nil || form.Fields["AccountNbr"] != expectedAccount {
-					return errors.New("ACB returned account does not match the candidate session")
+				if err != nil {
+					return &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}
+				}
+				account := form.Fields["AccountNbr"]
+				result.Lock()
+				result.formValid, result.accountPresent, result.accountMatch = true, account != "", account == expectedAccount
+				result.Unlock()
+				if account == "" {
+					return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISSING"}
+				}
+				if account != expectedAccount {
+					return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
 				}
 			}
-			slog.Info("ACB session bootstrap verified", "kind", response.Kind, "classifier_reason", response.ClassifierReason, "status", response.StatusCode, "path", acb.SafePath(response.URL))
+			result.Lock()
+			result.phase = "COMPLETE"
+			result.Unlock()
 			return nil
 		case acb.LoginPage, acb.OTPChallenge, acb.CaptchaPage:
-			return errors.New("ACB authentication was not preserved")
+			return &authsession.VerificationError{Code: "VERIFICATION_AUTH_REQUIRED"}
 		case acb.MaintenancePage:
-			return errors.New("ACB is under maintenance")
+			return &authsession.VerificationError{Code: "VERIFICATION_MAINTENANCE"}
 		default:
-			return errors.New("ACB authenticated page is not recognized")
+			return &authsession.VerificationError{Code: "VERIFICATION_PAGE_UNSUPPORTED"}
 		}
 	}
 
@@ -111,14 +175,26 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 	}
 
 	if err := v.scheduler.Enqueue(task); err != nil {
-		return err
+		return verificationFailure(err)
 	}
 
 	select {
 	case <-ctx.Done():
 		v.scheduler.CancelTask(task.ID())
-		return ctx.Err()
+		return verificationFailure(ctx.Err())
 	case err := <-task.done:
 		return err
 	}
+}
+
+func verificationFailure(err error) error {
+	code := "VERIFICATION_UNAVAILABLE"
+	var authFailure *acb.AuthFailure
+	switch {
+	case errors.Is(err, storage.ErrGenerationFenceMismatch), errors.Is(err, storage.ErrRecoverySuperseded):
+		code = "VERIFICATION_SUPERSEDED"
+	case errors.As(err, &authFailure):
+		code = "VERIFICATION_AUTH_REQUIRED"
+	}
+	return &authsession.VerificationError{Code: code}
 }

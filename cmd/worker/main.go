@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
@@ -197,22 +198,24 @@ func (w *workerService) WakeDispatcher(ctx context.Context) error {
 }
 
 func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
+	reject := func(code string) error {
+		slog.Info("ACB session verification result", "generation", generation, "phase", "RESTORE", "code", code)
+		return &authsession.VerificationError{Code: code}
+	}
 	if generation <= 0 {
-		return fmt.Errorf("invalid generation %d", generation)
+		return reject("VERIFICATION_UNAVAILABLE")
 	}
 	if w.store != nil {
 		conn, err := w.store.Connection(ctx)
 		if err != nil {
-			slog.Error("session verification fail-closed: failed to lookup connection", "account", account, "generation", generation, "error", err)
-			return fmt.Errorf("failed to lookup connection for session verification: %w", err)
+			return reject("VERIFICATION_UNAVAILABLE")
 		}
-		if conn.Generation != generation {
-			slog.Error("session verification generation mismatch", "account", account, "generation", generation, "current_generation", conn.Generation)
-			return fmt.Errorf("stale session verification generation: requested %d, current is %d", generation, conn.Generation)
+		if conn.ID != account || conn.Generation != generation {
+			return reject("VERIFICATION_SUPERSEDED")
 		}
 	}
 	if w.verifierSessionLoader == nil || w.verifierClient == nil {
-		return fmt.Errorf("session verifier not configured")
+		return reject("VERIFICATION_UNAVAILABLE")
 	}
 	var verifier *monitor.SessionVerifier
 	if w.bankMonitor != nil {

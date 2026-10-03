@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -182,6 +183,7 @@ func TestSessionVerifier_NoConcurrentACBRequests(t *testing.T) {
 }
 
 func TestSessionVerifier_GATE04_StoreErrorProducesZeroACBCalls(t *testing.T) {
+	logs := captureVerificationLogs(t)
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "verifier_gate04.db"))
 	if err != nil {
@@ -215,9 +217,10 @@ func TestSessionVerifier_GATE04_StoreErrorProducesZeroACBCalls(t *testing.T) {
 
 	// Attempt verification
 	err = verifier.VerifySession(ctx, conn.ID, 1, []byte("some-encrypted-envelope"))
-	if err == nil {
-		t.Fatal("expected error from failed store, got nil")
+	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
+		t.Fatalf("expected safe unavailable error from failed store, got %v", err)
 	}
+	logs.assertResult(t, 1, "RESTORE", "VERIFICATION_UNAVAILABLE", false, false, false, false)
 
 	// Invariant GATE-04: zero ACB upstream calls
 	if acbCallCount.Load() != 0 {
