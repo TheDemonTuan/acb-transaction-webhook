@@ -12,6 +12,9 @@ Manage ACB session status, login, stored username/password and logout through th
 - AI receives only an established safe CAPTCHA crop, never credentials, OTP, cookies, DOM, account, balance, history or handoff. It is not a page classifier or autonomous browser agent.
 - Missing credentials allow the bot's degraded setup/import menu but not LOGIN or an empty-connection credential grant. Credential decrypt/DB failure is fail-closed, without password-file fallback.
 - Unknown outcomes are not retried as if they failed. A time/retry state can allow a fresh button, never grant a new unattended attempt.
+- Recognized states clear the previous unknown-page streak before challenge holds and accepted-reply advancement. Read-only observation HTTP 503 remains within the same attempt's ten-observation/30-second unknown bound; expiry still wins, and persistent outage waits for new consent. Login/OTP-request/OTP submission is never replayed. Durable `VERIFYING` precedes OTP I/O and describes pending verification, not a verified session.
+- Browser authentication requires a complete unframed page with rendered positive evidence and an exact-account form. Account selection rejects ambiguity before navigation and records its single native action against rerender replay. The worker separately compares the returned history account with the candidate's exact account before commit.
+- Owned-action `UNKNOWN` emits a bounded allowlist-only structural summary to controller logs before cancellation (12 distinct structures/session, 8192 bytes/summary, four forms, 24 controls, three protocol identifiers). No raw DOM, values, labels, secrets or arbitrary identifiers enter the diagnostic. An already canceled real post-OTP page without that evidence remains unrecognized until a new owner-triggered attempt; synthetic acceptance is not proof of its support.
 
 ## Components and flow
 

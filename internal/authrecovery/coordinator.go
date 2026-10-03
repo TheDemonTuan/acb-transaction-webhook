@@ -383,11 +383,17 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 		if authbrowser.IsHTTPStatus(err, http.StatusGone) && (e.State == "WAITING_OTP" || e.State == "WAITING_CAPTCHA" || e.State == "VERIFYING") {
 			return c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_EXPIRED", time.Time{})
 		}
+		if authbrowser.IsHTTPStatus(err, http.StatusServiceUnavailable) {
+			// A failed read during navigation is not an authentication failure.
+			// Keep the same attempt and poll only; never replay a bank action.
+			return c.unknown(ctx, e, "BROWSER_UNAVAILABLE")
+		}
 		return c.retry(ctx, e, "BROWSER_UNAVAILABLE")
 	}
 	if err := c.current(ctx, e, true); err != nil {
 		return err
 	}
+	c.resetUnknownWindow(e.AttemptID, observation)
 	hold, err := c.recoverChallenge(ctx, e, observation)
 	if err != nil || hold {
 		return err
@@ -494,6 +500,7 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	c.resetUnknownWindow(e.AttemptID, o)
 	switch o.State {
 	case authbrowser.Authenticated:
 		if err := c.transition(ctx, &e, "VERIFYING", ""); err != nil {
@@ -619,6 +626,27 @@ func (c *Coordinator) requestOTP(ctx context.Context, e storage.AuthRecoveryEpis
 	}
 	return c.advance(ctx, e, next)
 }
+
+// Recognized pages end an unknown streak, including while a human prompt holds
+// reconciliation. Keep next: resetting the streak must not bypass poll throttling.
+func (c *Coordinator) resetUnknownWindow(attemptID string, o authbrowser.AuthObservation) {
+	switch o.State {
+	case authbrowser.Authenticated, authbrowser.LoginForm, authbrowser.CaptchaRequired, authbrowser.OTPRequestRequired, authbrowser.OTPRequired, authbrowser.Maintenance, authbrowser.UnsupportedChallenge:
+	case authbrowser.LoginRejected:
+		switch o.ReasonCode {
+		case "CAPTCHA_REJECTED", "INVALID_CAPTCHA", "OTP_REJECTED", "OTP_EXPIRED", "INVALID_OTP", "ACCOUNT_LOCKED", "CREDENTIALS_REJECTED":
+		default:
+			return
+		}
+	default:
+		return
+	}
+	w := c.windows[attemptID]
+	w.first = time.Time{}
+	w.count = 0
+	c.windows[attemptID] = w
+}
+
 func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode, reason string) error {
 	w := c.windows[e.AttemptID]
 	if w.first.IsZero() {
@@ -627,6 +655,9 @@ func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode
 	w.count++
 	c.windows[e.AttemptID] = w
 	if w.count >= 10 || c.Now().Sub(w.first) >= 30*time.Second {
+		if reason == "BROWSER_UNAVAILABLE" {
+			return c.retry(ctx, e, reason)
+		}
 		// Only adapter-owned codes may leave the runtime. Never expose bank text,
 		// arbitrary DOM data or browser transport errors as an operator reason.
 		switch reason {
@@ -903,6 +934,7 @@ func (c *Coordinator) SubmitChallenge(ctx context.Context, ch storage.AuthChalle
 	if observation.Revision != ch.BrowserRevision {
 		return authbrowser.AuthObservation{}, storage.ErrChallengeMismatch
 	}
+	c.resetUnknownWindow(e.AttemptID, observation)
 	if ch.Kind == "CAPTCHA_TEXT" && observation.State == authbrowser.LoginForm && observation.CaptchaRequired {
 		err = c.submitLogin(ctx, e, observation, value, false, ch.ID)
 		value = ""
@@ -922,6 +954,16 @@ func (c *Coordinator) SubmitChallenge(ctx context.Context, ch storage.AuthChalle
 	}
 	if s := c.submissions[e.AttemptID]; s != nil && s.revisions[ch.BrowserRevision] {
 		return authbrowser.AuthObservation{}, storage.ErrChallengeConsumed
+	}
+	if ch.Kind == "OTP" {
+		// Consumption is durable before entering this method. Publish pending
+		// verification before external I/O without releasing the request fence.
+		if err := c.transition(ctx, &e, "VERIFYING", ""); err != nil {
+			return authbrowser.AuthObservation{}, errors.New("RECOVERY_STORAGE_UNAVAILABLE")
+		}
+		if err := c.current(ctx, e, true); err != nil {
+			return authbrowser.AuthObservation{}, storage.ErrChallengeMismatch
+		}
 	}
 	c.rememberSubmission(e.AttemptID, ch.BrowserRevision, false)
 	if ch.Kind == "OTP" {

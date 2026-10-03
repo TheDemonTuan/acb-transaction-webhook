@@ -95,7 +95,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 		}
 		if errors.Is(err, challenge.ErrOutcomeUnknown) {
 			h.wakeCoordinator()
-			return h.refreshPanel(ctx, "Chưa xác định được ACB có nhận mã hay không. Bot không gửi lại mã. Chờ kết quả dừng/xác minh; kiểm tra app ACB trước khi bắt đầu lần mới.")
+			return h.replyExplanation(ctx, "Chưa xác định được ACB có nhận mã hay không. Bot không gửi lại mã. Chờ kết quả dừng/xác minh; kiểm tra app ACB trước khi bắt đầu lần mới.")
 		}
 		if rejectedDisposition(err) {
 			h.wakeCoordinator()
@@ -105,7 +105,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 			} else if errors.Is(err, storage.ErrChallengeConsumed) {
 				text = "Câu trả lời cho yêu cầu này đã được xử lý hoặc đang chờ kết quả. Bot không gửi lại mã; hãy theo dõi tiến độ bên dưới."
 			}
-			return h.refreshPanel(ctx, text)
+			return h.replyExplanation(ctx, text)
 		}
 		return err
 	}
@@ -131,6 +131,15 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 func (h *Handler) say(ctx context.Context, text string) error {
 	_, err := h.Client.SendText(ctx, h.ChatID, text, nil)
 	return err
+}
+
+// Reply dispositions are finite explanations, not another mutable stage snapshot.
+// The broker alone owns the immediate receipt; progress always uses its durable ID.
+func (h *Handler) replyExplanation(ctx context.Context, text string) error {
+	if err := h.say(ctx, text); err != nil {
+		return err
+	}
+	return h.deliverProgress(ctx)
 }
 func (h *Handler) snapshot(ctx context.Context) (storage.Connection, storage.AuthRecoveryEpisode, error) {
 	c, err := h.Store.Connection(ctx)
@@ -457,9 +466,15 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 				return h.refreshPanel(ctx, "Người quản lý đang đăng nhập ở nơi khác. Bot chờ và không hủy lần đó.")
 			}
 		}
+		if e.State == "VERIFYING" || progressKind(e.State) && e.OTPSubmissions > 0 {
+			return h.deliverProgress(ctx)
+		}
 		if e.AttemptID != "" {
 			ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
 			if err == nil {
+				if ch.Status == "CONSUMING" || e.OTPSubmissions > 0 {
+					return h.deliverProgress(ctx)
+				}
 				expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
 				if parseErr == nil && time.Now().Before(expiry) {
 					return h.refreshPanel(ctx, "Đang chờ captcha hoặc OTP còn hạn. Trả lời trực tiếp yêu cầu đó; không tạo thêm lần đăng nhập.")
@@ -642,27 +657,31 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 			text = "4/6 · Đang xác nhận phương thức OTP đăng nhập và chờ trang nhập OTP của ACB.\nBạn chưa cần gửi mã; chỉ trả lời khi bot gửi tin yêu cầu OTP riêng."
 		}
 	case "WAITING_CAPTCHA", "WAITING_OTP":
-		if e.State == "WAITING_OTP" {
-			text = "4/6 · Chờ OTP đăng nhập.\nMở app ACB lấy mã cho lần đăng nhập này, rồi trả lời trực tiếp tin yêu cầu OTP riêng (không trả lời tin tiến độ này). Không dùng OTP chuyển tiền."
-		} else {
-			text = "2/6 · Chờ bạn nhập captcha.\nTrả lời trực tiếp ảnh yêu cầu captcha bằng ký tự trong ảnh (không trả lời tin tiến độ này)."
-		}
+		text = "Đang chờ ACB và chuẩn bị yêu cầu riêng; bạn chưa cần gửi mã vào chat."
 		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
-		if err == nil {
-			text += "\nHạn trả lời: " + localExpiry(ch.ExpiresAt) + " (giờ Việt Nam)."
-			if expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt); parseErr == nil && !time.Now().Before(expiry) {
-				text += " Mã đã hết hạn; đừng gửi mã cũ. Đang chờ kết quả dừng lần này."
-			} else if ch.Status == "CONSUMING" {
-				text += "\nĐã nhận câu trả lời, đang chờ ACB kiểm tra. Không gửi lại mã."
-			} else if ch.PromptMessageID == 0 {
-				text += "\nĐang gửi yêu cầu riêng; hãy chờ tin/ảnh đó trước khi trả lời."
-			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return "", err
+		}
+		// The OTP reservation survives CONSUMED and prompt deletion. A lagging
+		// episode must not turn an already accepted answer into another request.
+		if e.State == "WAITING_OTP" && e.OTPSubmissions > 0 || err == nil && ch.Status == "CONSUMING" {
+			text = "Đang chờ ACB kiểm tra câu trả lời và xác minh phiên.\nChưa xác nhận thành công; bạn chờ, không gửi lại mã."
+		} else if err == nil {
+			expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
+			if parseErr != nil || !time.Now().Before(expiry) {
+				text = "Yêu cầu mã đã hết thời gian trả lời. Không gửi mã cũ; đang chờ kết quả dừng lần này."
+			} else if ch.PromptMessageID == 0 {
+				text = "Đang gửi yêu cầu riêng; hãy chờ tin/ảnh đó trước khi trả lời."
+			} else {
+				if e.State == "WAITING_OTP" {
+					text = "4/6 · Chờ OTP đăng nhập.\nMở app ACB lấy mã cho lần đăng nhập này, rồi trả lời trực tiếp tin yêu cầu OTP riêng (không trả lời tin tiến độ này). Không dùng OTP chuyển tiền."
+				} else {
+					text = "2/6 · Chờ bạn nhập captcha.\nTrả lời trực tiếp ảnh yêu cầu captcha bằng ký tự trong ảnh (không trả lời tin tiến độ này)."
+				}
+				text += "\nHạn trả lời: " + localExpiry(ch.ExpiresAt) + " (giờ Việt Nam)."
+			}
 		} else if e.State == "WAITING_CAPTCHA" && e.AIUsed > e.CaptchaSubmissions {
 			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; chưa cần nhập ký tự. Nếu cần bạn nhập tay, bot sẽ gửi ảnh yêu cầu riêng."
-		} else {
-			text += "\nĐang chờ ACB và chuẩn bị yêu cầu; chưa gửi mã vào chat."
 		}
 	case "VERIFYING":
 		text = "5/6 · Đang xác minh phiên và đúng tài khoản ACB.\nChưa xác nhận thành công; bạn chờ, không cần gửi thêm mã."
@@ -672,6 +691,13 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 			run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
 			if err != nil {
 				return "", err
+			}
+			if run.Status == storage.RecoveryRunStatusFailed || run.Status == storage.RecoveryRunStatusCanceled {
+				reason := "CATCHUP_FAILED"
+				if run.ErrorCode == "INVALID_CHECKPOINT" {
+					reason = "INVALID_CHECKPOINT"
+				}
+				text = "Phiên đã xác minh nhưng chưa lấy đủ giao dịch.\n" + reasonLabel(reason) + "\nChưa tiếp tục theo dõi; không cần đăng nhập hoặc lấy OTP lại."
 			}
 			text += "\nKhoảng " + run.RangeFrom + " đến " + run.RangeTo + "; ngày đang xử lý: " + run.NextDay + "."
 		}

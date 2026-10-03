@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/png"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -286,6 +287,7 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 	defer upstream.Close()
 	s := &server{profiles: t.TempDir(), browserExec: browser, extraFlags: []string{"--headless=new"}, loginURL: upstream.URL + "/acbib/Request", internalToken: "fixture-internal", internalAuthRequired: true}
 	mux := http.NewServeMux()
+	mux.Handle("DELETE /sessions/{attemptID}", s.requireInternal(http.HandlerFunc(s.cancel)))
 	mux.Handle("POST /sessions", s.requireInternal(http.HandlerFunc(s.start)))
 	mux.Handle("POST /sessions/{attemptID}/handoff", s.requireInternal(http.HandlerFunc(s.handoff)))
 	s.registerAutomation(mux)
@@ -303,6 +305,10 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		t.Helper()
 		for range 20 {
 			o, err := client.Observe(ctx, attempt)
+			if authbrowser.IsHTTPStatus(err, http.StatusServiceUnavailable) {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -704,6 +710,196 @@ inspectRecovery(false).fingerprint`, &afterPrivateChange))
 		t.Fatal("failed pre-click inspection permitted replay")
 	}
 	assertNoExtraPosts()
+	t.Run("authentication requires rendered loaded top-level evidence", func(t *testing.T) {
+		for _, html := range []string{
+			`<html><body><div style="display:none"><a href="?op=ibkLogoutOp">Đăng xuất</a><h2>Thông tin tài khoản</h2><span>Xin chào</span><input name="AccountNbr"><input name="dse_operationName" value="ibkacctDetailProc"></div></body></html>`,
+			`<html><body><div><span style="display:none">Xin chào Đăng xuất Thông tin tài khoản</span><p>Ordinary visible content</p></div></body></html>`,
+			`<html><body><input type="hidden" name="dse_operationName" value="ibkLogoutOp"><input type="hidden" name="AccountNbr"><div style="display:none">Xin chào</div></body></html>`,
+			strings.Replace(string(authenticated), "</body>", `<iframe src="about:blank"></iframe></body>`, 1),
+			`<html><body><a href="?op=ibkLogoutOp">Đăng xuất</a><input type="hidden" name="dse_operationName" value="ibkacctDetailProc"><input type="hidden" name="dse_processorState" value="accountPage"></body></html>`,
+			strings.Replace(string(authenticated), "</body>", `<iframe style="display:none" src="about:blank"></iframe></body>`, 1),
+		} {
+			navigateConfirmation(html)
+			var signals domSignals
+			evaluateOTP(acbDOMCheckScript, &signals)
+			if signals.isAuthenticated() {
+				t.Fatal("non-rendered or framed evidence authenticated the page")
+			}
+			if o := observe(); o.State == authbrowser.Authenticated {
+				t.Fatal("observer overrode unsupported page evidence")
+			}
+		}
+		navigateConfirmation(string(authenticated))
+		evaluateOTP(`Object.defineProperty(document,'readyState',{configurable:true,get:()=> 'loading'});`, nil)
+		var signals domSignals
+		evaluateOTP(acbDOMCheckScript, &signals)
+		if signals.isAuthenticated() {
+			t.Fatal("partial document authenticated")
+		}
+		evaluateOTP(`delete document.readyState;`, nil)
+		evaluateOTP(acbDOMCheckScript, &signals)
+		if !signals.isAuthenticated() {
+			t.Fatal("complete rendered synthetic history contract was rejected")
+		}
+	})
+	t.Run("account ambiguity has no onchange and navigation never replays", func(t *testing.T) {
+		form := `<form method="post" action="/acbib/Request"><input type="hidden" name="dse_operationName" value="ibkacctDetailProc"><select name="AccountNbr" onchange="window.accountChanges=(window.accountChanges||0)+1"><option value="111111111">Other</option><option value="222222222">Target</option></select></form>`
+		for _, html := range []string{form + form, strings.Replace(form, "</form>", `<input type="hidden" name="AccountNbr" value="222222222"></form>`, 1)} {
+			navigateConfirmation(html)
+			var unchanged bool
+			evaluateOTP(automaticHistoryScript+`('222222222',true); !window.accountChanges && document.querySelector('select').value==='111111111'`, &unchanged)
+			if !unchanged {
+				t.Fatal("ambiguous target caused selection side effect")
+			}
+		}
+		navigateConfirmation(`<html><body><a href="?op=ibkLogoutOp">Đăng xuất</a><h2>Thông tin tài khoản</h2>` + form + `</body></html>`)
+		s.opMu.Lock()
+		s.session.accountNavigation = false
+		s.opMu.Unlock()
+		if o := observe(); o.ReasonCode != "ACCOUNT_SELECTION_PENDING" {
+			t.Fatalf("selection did not begin: %+v", o)
+		}
+		evaluateOTP(`const previous=document.querySelector('select');previous.replaceWith(previous.cloneNode(true));document.querySelector('select').value='111111111';`, nil)
+		for range 3 {
+			if o := observe(); o.ReasonCode != "ACCOUNT_SELECTION_PENDING" {
+				t.Fatalf("rerendered selection not pending: %+v", o)
+			}
+		}
+		var noSelectionReplay bool
+		evaluateOTP(`window.accountChanges===1 && document.querySelector('select').value==='111111111'`, &noSelectionReplay)
+		if !noSelectionReplay {
+			t.Fatal("rerendered exact account selection repeated onchange")
+		}
+		navigateConfirmation(`<a href="/acbib/Request?dse_operationName=ibkacctDetailProc&AccountNbr=222222222" onclick="event.preventDefault();window.accountClicks=(window.accountClicks||0)+1">Exact target</a><h2>Thông tin tài khoản</h2><a href="?op=ibkLogoutOp">Đăng xuất</a>`)
+		s.opMu.Lock()
+		s.session.accountNavigation = false
+		s.opMu.Unlock()
+		for range 3 {
+			if o := observe(); o.ReasonCode != "ACCOUNT_SELECTION_PENDING" {
+				t.Fatalf("navigation outcome: %+v", o)
+			}
+		}
+		evaluateOTP(`document.querySelector('a').replaceWith(document.querySelector('a').cloneNode(true));`, nil)
+		observe()
+		var once bool
+		evaluateOTP(`window.accountClicks===1`, &once)
+		if !once {
+			t.Fatal("unchanged or rerendered account navigation replayed")
+		}
+		assertNoExtraPosts()
+	})
+	t.Run("recorded structures and unknown evidence survive cancellation privately", func(t *testing.T) {
+		for _, html := range []string{string(confirmation), string(otp)} {
+			navigateConfirmation(html)
+			var summary automationDiagnosticSummary
+			evaluateOTP(automationDiagnosticScript+"("+acbDOMCheckScript+")", &summary)
+			data := string(summary.boundedJSON())
+			if !strings.Contains(data, "detectLoginNewDeviceProc") || !strings.Contains(data, "OK_NATIVE") {
+				t.Fatal("recorded protocol/native structure missing")
+			}
+			for _, private := range []string{"synthetic-private-session", "synthetic-selected-method", "synthetic-unfilled-code", "synthetic-resend", "synthetic-signature", "synthetic-plaintext"} {
+				if strings.Contains(data, private) {
+					t.Fatal("recorded fixture private value leaked")
+				}
+			}
+		}
+		var oversized automationDiagnosticSummary
+		navigateConfirmation(`<form method="post" action="/private-path"><input type="hidden" name="dse_operationName" value="a9fc28bProc"></form>`)
+		evaluateOTP(`for(let i=0;i<100;i++){const el=document.createElement('input');el.name='token-'+i+'-private';el.id='123456789-'+i;el.value='private-secret';document.body.append(el);}for(let i=0;i<6;i++)document.body.append(document.createElement('form'));`+automationDiagnosticScript+"("+acbDOMCheckScript+")", &oversized)
+		if len(oversized.Controls) > 24 || len(oversized.Forms) > 4 || !oversized.Truncated || len(oversized.boundedJSON()) > maxAutomationDiagnosticBytes {
+			t.Fatal("browser metadata was not bounded at capture")
+		}
+		if data, _ := json.Marshal(oversized); bytes.Contains(data, []byte("private-secret")) || bytes.Contains(data, []byte("a9fc28bProc")) || bytes.Contains(data, []byte("123456789")) {
+			t.Fatal("browser capture returned token metadata")
+		}
+		const private = "private-123456789-account-session-password"
+		navigateConfirmation(`<html><body>` + private + `<form name="` + private + `" id="` + private + `" method="post" action="/acbib/Request?secret=` + private + `"><input name="` + private + `" id="` + private + `" value="` + private + `"><input type="password" value="` + private + `"><input type="hidden" name="dse_operationName" value="` + private + `Proc"><input type="hidden" name="dse_processorState" value="` + private + `Page"><input type="hidden" name="dse_pageId" value="123456"><button onclick="throw '` + private + `'">` + private + `</button></form></body></html>`)
+		var logs bytes.Buffer
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		defer slog.SetDefault(previous)
+		s.opMu.Lock()
+		s.session.diagnostics = automationDiagnostics{owned: true}
+		s.opMu.Unlock()
+		if o := observe(); o.State != authbrowser.Unknown {
+			t.Fatal("unknown structure was admitted")
+		}
+		before := logs.String()
+		if !strings.Contains(before, "ACB automation unknown page structure") || !strings.Contains(before, "UNKNOWN_IDENTIFIER") || !strings.Contains(before, "UNKNOWN_PROTOCOL") {
+			t.Fatal("unknown did not persist classified structural evidence before return")
+		}
+		observe()
+		if logs.String() != before {
+			t.Fatal("unchanged structure repeated diagnostic")
+		}
+		evaluateOTP(`document.querySelector('input').value='different-private-value';document.querySelector('form').name='different-private-name';document.querySelector('button').textContent='different-private-text';`, nil)
+		observe()
+		if logs.String() != before {
+			t.Fatal("private values influenced structural diagnostics")
+		}
+		if err := client.Cancel(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(logs.String(), before) || strings.Contains(logs.String(), private) || strings.Contains(logs.String(), "different-private") {
+			t.Fatal("cancellation lost evidence or leaked private data")
+		}
+		assertNoExtraPosts()
+	})
 }
 
 func jsString(value string) string { payload, _ := json.Marshal(value); return string(payload) }
+
+func TestAutomationDiagnosticsPrivateAndBounded(t *testing.T) {
+	const secret = "private-123456789-password-cookie-session"
+	summary := automationDiagnosticSummary{ReadyState: secret, FrameCount: 1000}
+	for range 100 {
+		summary.Forms = append(summary.Forms, automationDiagnosticForm{Tag: secret, Name: secret, ID: secret, Method: secret, Action: "https://user:" + secret + "@example.invalid/private?token=" + secret})
+		summary.Controls = append(summary.Controls, automationDiagnosticControl{Tag: secret, Name: secret, ID: secret, Type: secret, Native: secret, MaxLength: 100000})
+		summary.Protocol = append(summary.Protocol, automationDiagnosticProtocol{Name: "dse_operationName", Identifier: secret + "Proc"})
+	}
+	data := summary.boundedJSON()
+	if len(data) > maxAutomationDiagnosticBytes || bytes.Contains(data, []byte(secret)) {
+		t.Fatal("unbounded or private diagnostic output")
+	}
+	var bounded automationDiagnosticSummary
+	if err := json.Unmarshal(data, &bounded); err != nil {
+		t.Fatal(err)
+	}
+	if !bounded.Truncated || len(bounded.Forms) > 4 || len(bounded.Controls) > 24 || len(bounded.Protocol) > 3 || bounded.FrameCount != 100 {
+		t.Fatal("metadata caps not applied")
+	}
+	for _, tc := range []struct{ name, value, want string }{
+		{"dse_operationName", "detectLoginNewDeviceProc", "detectLoginNewDeviceProc"},
+		{"dse_operationName", "ibkacctDetailProc", "ibkacctDetailProc"},
+		{"dse_processorState", "otpPage", "otpPage"},
+		{"dse_processorState", "confirmPage", "confirmPage"},
+		{"dse_pageId", "5", "5"},
+		{"dse_pageId", "001234", "UNKNOWN_PROTOCOL"},
+		{"dse_operationName", "a8fbb718Op", "UNKNOWN_PROTOCOL"},
+		{"dse_processorState", "arbitraryPrivateValueState", "UNKNOWN_PROTOCOL"},
+		{"dse_operationName", strings.Repeat("login", 30) + "Proc", "UNKNOWN_PROTOCOL"},
+	} {
+		if got := diagnosticProtocol(tc.name, tc.value); got != tc.want {
+			t.Fatalf("protocol classification %s: %s", tc.name, got)
+		}
+	}
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	diagnostics := automationDiagnostics{}
+	if diagnostics.record(summary) || logs.Len() != 0 {
+		t.Fatal("unowned session emitted evidence")
+	}
+	diagnostics.owned = true
+	if !diagnostics.record(summary) || diagnostics.record(summary) {
+		t.Fatal("distinct snapshot not deduplicated")
+	}
+	for i := range maxAutomationDiagnostics + 5 {
+		distinct := automationDiagnosticSummary{ReadyState: "complete", FrameCount: i}
+		diagnostics.record(distinct)
+	}
+	if diagnostics.count != maxAutomationDiagnostics || strings.Count(logs.String(), "ACB automation unknown page structure") != maxAutomationDiagnostics || strings.Contains(logs.String(), secret) {
+		t.Fatal("finite diagnostic log cap/privacy violated")
+	}
+}

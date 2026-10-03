@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/challenge"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
@@ -828,7 +830,271 @@ func TestFreshLoginConsentStartsNewProgressMessage(t *testing.T) {
 	}
 }
 
-func TestTelegramOTPRequestProgressWaitsForActualOTPForm(t *testing.T) {
+type replyFlowBrowser struct {
+	observation authbrowser.AuthObservation
+	observeErr  error
+	submits     int
+	onSubmit    func(storage.AuthChallenge)
+	submitErr   error
+}
+
+func (b *replyFlowBrowser) Observe(context.Context, string) (authbrowser.AuthObservation, error) {
+	return b.observation, b.observeErr
+}
+func (b *replyFlowBrowser) CaptureCaptcha(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("unexpected captcha capture in OTP flow")
+}
+func (b *replyFlowBrowser) SubmitChallenge(_ context.Context, ch storage.AuthChallenge, _ string) (authbrowser.AuthObservation, error) {
+	b.submits++
+	if b.onSubmit != nil {
+		b.onSubmit(ch)
+	}
+	return authbrowser.AuthObservation{State: authbrowser.Unknown}, b.submitErr
+}
+
+func telegramOTPFlow(t *testing.T) (context.Context, *storage.Store, *Handler, *botFixture, storage.AuthRecoveryEpisode, storage.AuthChallenge, *replyFlowBrowser) {
+	t.Helper()
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := h.menu(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	data, id := menuLogin(t, f)
+	if err := h.HandleUpdate(ctx, callback(data, id)); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.LatestAuthRecoveryEpisode(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='WAITING_OTP',reason_code='OTP_REQUEST_SENT' WHERE id=?`, e.ID)
+	e, err = s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := s.CreateAuthChallenge(ctx, storage.AuthChallenge{EpisodeID: e.ID, ConnectionID: e.ConnectionID, Generation: e.Generation, AttemptID: e.AttemptID, BrowserRevision: "otp-revision", Kind: "OTP", ChatID: h.ChatID, ExpiresAt: time.Now().Add(45 * time.Second).UTC().Format(time.RFC3339Nano)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err = h.Client.SendChallenge(ctx, ch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeliverAuthChallenge(ctx, ch.ID, h.ChatID, id); err != nil {
+		t.Fatal(err)
+	}
+	ch, err = s.AuthChallengeForPrompt(ctx, h.ChatID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &replyFlowBrowser{observation: authbrowser.AuthObservation{State: authbrowser.OTPRequired, Revision: ch.BrowserRevision, OTPLength: 6}}
+	h.ReplyBroker = &challenge.Broker{Store: s, Browser: b, Sender: h.Client, Submitter: b, Config: challenge.Config{ChatID: h.ChatID}}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, s, h, f, e, ch, b
+}
+
+func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T) {
+	ctx, s, h, f, e, ch, b := telegramOTPFlow(t)
+	waiting := h.progressText
+	id := h.progressEpisode
+	b.onSubmit = func(consuming storage.AuthChallenge) {
+		if consuming.Status != "CONSUMING" {
+			t.Fatal("bank submit did not receive a durable reservation")
+		}
+		if err := h.deliverProgress(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if h.progressText == waiting {
+			t.Fatal("CONSUMING retained the wait-for-code stage")
+		}
+	}
+	reply := command("001234")
+	reply.Message.ReplyTo = &Message{ID: ch.PromptMessageID}
+	before := len(f.messages)
+	if err := h.HandleUpdate(ctx, reply); err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := s.AuthChallengeForPrompt(ctx, h.ChatID, ch.PromptMessageID)
+	if err != nil || consumed.Status != "CONSUMED" || consumed.PromptDeletedAt == "" {
+		t.Fatal("accepted OTP did not preserve durable consumption and prompt cleanup", err)
+	}
+	current, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || current.OTPSubmissions != 1 || h.progressText == waiting || len(f.messages) != before+1 || b.submits != 1 {
+		t.Fatal("accepted OTP added more than the broker receipt or reverted to waiting", err)
+	}
+	pending := h.progressText
+	before = len(f.messages)
+	if err := h.HandleUpdate(ctx, command("/acb_login")); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != before || h.progressText != pending {
+		t.Fatal("consumed OTP offered another login/code action instead of pending progress")
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='VERIFYING' WHERE id=?`, e.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h.progressText == pending || h.progressText == waiting || h.progressEpisode != id {
+		t.Fatal("verification did not advance the canonical pending stage")
+	}
+	if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, e.Generation, "FAILED", "MANUAL_REQUIRED", "UNRECOGNIZED_PAGE", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.DeliverNotices(ctx); err != nil {
+		t.Fatal(err)
+	}
+	terminal := h.progressText
+	before = len(f.messages)
+	if err := h.HandleUpdate(ctx, reply); err != nil {
+		t.Fatal(err)
+	}
+	if b.submits != 1 || h.progressText != terminal || len(f.messages) != before+1 {
+		t.Fatal("replay changed the bank submission or terminal stage")
+	}
+	var explanation string
+	if err := json.Unmarshal(f.messages[len(f.messages)-1]["text"], &explanation); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(explanation, terminal) || strings.Contains(explanation, waiting) || strings.Contains(explanation, "001234") || len(f.messages[len(f.messages)-1]["reply_markup"]) > 0 {
+		t.Fatal("replay explanation created a newer copied stage, menu or code echo")
+	}
+	latest, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || latest.StatusMessageID != current.StatusMessageID || latest.OTPSubmissions != 1 {
+		t.Fatal("replay replaced durable canonical progress or OTP fence", err)
+	}
+}
+
+func TestTelegramRejectedOTPRepliesDoNotCopyActiveStage(t *testing.T) {
+	for _, outcome := range []string{"expired", "revision changed", "observe outcome unknown", "submit outcome unknown", "invalid format"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx, s, h, f, e, ch, b := telegramOTPFlow(t)
+			waiting := h.progressText
+			reply := command("001234")
+			reply.Message.ReplyTo = &Message{ID: ch.PromptMessageID}
+			wantStatus, wantSubmits, wantMessages := "INVALIDATED", 0, 1
+			switch outcome {
+			case "expired":
+				mustExec(t, s, `UPDATE auth_challenges SET expires_at=? WHERE id=?`, time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano), ch.ID)
+				wantStatus = "EXPIRED"
+			case "revision changed":
+				b.observation.Revision = "new-revision"
+			case "observe outcome unknown":
+				b.observeErr = errors.New("observation unavailable")
+			case "submit outcome unknown":
+				b.submitErr = errors.New("response unavailable")
+				wantSubmits, wantMessages = 1, 2 // Broker receipt, then finite disposition.
+			case "invalid format":
+				reply.Message.Text = "123"
+				wantStatus = "PENDING"
+			}
+			before := len(f.messages)
+			if err := h.HandleUpdate(ctx, reply); err != nil {
+				t.Fatal(err)
+			}
+			current, err := s.AuthChallengeForPrompt(ctx, h.ChatID, ch.PromptMessageID)
+			if err != nil || current.Status != wantStatus || b.submits != wantSubmits || len(f.messages) != before+wantMessages {
+				t.Fatal("reply disposition did not preserve challenge/submission boundaries", err)
+			}
+			if outcome == "invalid format" {
+				if h.progressText != waiting || current.PromptDeletedAt != "" {
+					t.Fatal("format correction invalidated an active OTP prompt")
+				}
+			} else if h.progressText == waiting {
+				t.Fatal("disposed OTP still instructed operator to answer the inactive prompt")
+			}
+			for _, message := range f.messages[before:] {
+				var text string
+				if err := json.Unmarshal(message["text"], &text); err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(text, waiting) || strings.Contains(text, "001234") || len(message["reply_markup"]) > 0 {
+					t.Fatal("reply created a copied stage, new menu or code echo")
+				}
+			}
+			latest, err := s.AuthRecoveryEpisode(ctx, e.ID)
+			if err != nil || latest.OTPSubmissions != wantSubmits {
+				t.Fatal("reply changed OTP reservation without a bank submit", err)
+			}
+		})
+	}
+}
+
+func TestTelegramCatchupFailureAdvancesCanonicalBeforeEpisodePoll(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.EnsureAuthRecoveryEpisode(ctx, c.ID, c.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := s.EnsureRecoveryRunWithPlan(ctx, c.ID, c.Generation, "telegram-catchup", storage.RecoveryRunPlan{RangeFrom: "2026-10-01", RangeTo: "2026-10-02", NextDay: "2026-10-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `UPDATE connections SET state='MONITORING' WHERE id=?`, c.ID)
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='CATCHING_UP',recovery_run_id=? WHERE id=?`, run.ID, e.ID)
+	if _, err := s.ClaimRecoveryRun(ctx, run.ID, c.ID, c.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	running := h.progressText
+	before := len(f.messages)
+	if _, err := s.UpdateRecoveryRunProgress(ctx, run.ID, c.ID, c.Generation, storage.RecoveryRunStatusFailed, "{}", "UPSTREAM_UNAVAILABLE", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h.progressText == running || len(f.messages) != before {
+		t.Fatal("durable failed run kept the running snapshot or created another message")
+	}
+	current, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || current.State != "CATCHING_UP" {
+		t.Fatal("fixture did not retain the pre-poll episode boundary", err)
+	}
+	var editedID int64
+	if err := json.Unmarshal(f.edits[len(f.edits)-1]["message_id"], &editedID); err != nil || editedID != current.StatusMessageID {
+		t.Fatal("failure did not edit the authoritative progress message", err)
+	}
+	var keyboard inlineKeyboard
+	if err := json.Unmarshal(f.edits[len(f.edits)-1]["reply_markup"], &keyboard); err != nil {
+		t.Fatal(err)
+	}
+	retry := false
+	for _, row := range keyboard.Rows {
+		for _, button := range row {
+			if !strings.HasPrefix(button.Data, "ar:") {
+				continue
+			}
+			var operation string
+			if err := s.DB().QueryRowContext(ctx, `SELECT action FROM telegram_auth_actions WHERE id=? AND message_id=?`, strings.TrimPrefix(button.Data, "ar:"), current.StatusMessageID).Scan(&operation); err != nil {
+				t.Fatal(err)
+			}
+			if operation == "LOGIN" {
+				t.Fatal("catchup failure offered another bank login")
+			}
+			retry = retry || operation == "RETRY"
+		}
+	}
+	if !retry {
+		t.Fatal("catchup failure lost its session-preserving retry action")
+	}
+}
+
+func TestTelegramOTPRequestReservationEditsWithoutCreatingPrompt(t *testing.T) {
 	ctx, s, h, f, _ := testTelegram(t)
 	c, err := s.Connection(ctx)
 	if err != nil {
@@ -843,53 +1109,30 @@ func TestTelegramOTPRequestProgressWaitsForActualOTPForm(t *testing.T) {
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var text string
-	if err := json.Unmarshal(f.messages[len(f.messages)-1]["text"], &text); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(text, "3/6") {
-		t.Fatal("initial login progress did not represent the login reservation")
-	}
+	login := h.progressText
 	mustExec(t, s, `UPDATE auth_recovery_episodes SET reason_code='OTP_REQUEST_SENT' WHERE id=?`, e.ID)
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.messages) != 1 || len(f.edits) != 1 {
-		t.Fatal("same-state OTP request reservation did not edit the current progress")
-	}
-	if err := json.Unmarshal(f.edits[0]["text"], &text); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"4/6", "xác nhận phương thức OTP đăng nhập", "chờ trang nhập OTP", "chưa cần gửi mã"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("OTP request progress missing %q", want)
-		}
-	}
-	for _, unsafe := range []string{"Mở app ACB lấy mã", "Chờ OTP đăng nhập.", "OTP_REQUEST_SENT", e.ID, c.ID} {
-		if strings.Contains(text, unsafe) {
-			t.Fatal("confirmation progress asked for OTP prematurely or exposed internal metadata")
-		}
+	request := h.progressText
+	if request == login || len(f.messages) != 1 || len(f.edits) != 1 {
+		t.Fatal("same-state OTP request reservation did not advance canonical progress")
 	}
 	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='WAIT_OPERATOR',reason_code='OTP_REQUEST_OUTCOME_UNKNOWN' WHERE id=?`, e.ID)
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(f.edits[len(f.edits)-1]["text"], &text); err != nil {
+	if h.progressText == request || len(f.messages) != 1 || len(f.edits) != 2 {
+		t.Fatal("lost OTP request outcome did not replace the canonical pending stage")
+	}
+	var prompts, attempts int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_challenges`).Scan(&prompts); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, reasonLabel("OTP_REQUEST_OUTCOME_UNKNOWN")) || !strings.Contains(text, "Bot không tự đăng nhập lại") || strings.Contains(text, "OTP_REQUEST_OUTCOME_UNKNOWN") {
-		t.Fatal("stopped OTP request progress lost the safe finite reason")
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM auth_attempts`).Scan(&attempts); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestTelegramOTPRequestUnknownHasSafeVietnameseNextStep(t *testing.T) {
-	text := reasonLabel("OTP_REQUEST_OUTCOME_UNKNOWN")
-	for _, want := range []string{"yêu cầu OTP đăng nhập", "không yêu cầu lại", "kiểm tra app ACB", "Đăng nhập cho lần mới", "Không gửi mã cũ"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("unknown OTP request next step missing %q", want)
-		}
-	}
-	if strings.Contains(text, "OTP_REQUEST_OUTCOME_UNKNOWN") || strings.Contains(text, "mã chuyển tiền") {
-		t.Fatal("OTP request next step exposed an internal reason or requested a payment code")
+	if prompts != 0 || attempts != 0 {
+		t.Fatal("progress delivery requested a code or began bank authentication")
 	}
 }

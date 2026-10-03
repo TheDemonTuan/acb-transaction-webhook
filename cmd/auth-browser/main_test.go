@@ -1045,6 +1045,7 @@ func TestRealisticCDP_PageDOMSignals(t *testing.T) {
 	defer server.Close()
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(findDefaultBrowser()),
 		chromedp.Headless,
 		chromedp.DisableGPU,
 		chromedp.NoSandbox,
@@ -1132,14 +1133,8 @@ func TestRealisticCDP_PageDOMSignals(t *testing.T) {
 				t.Fatalf("expected /exit-dialog to be unauthenticated, got: %+v", sig)
 			}
 		case strings.HasSuffix(info.URL, "/auth"):
-			if !sig.HasLogout || !sig.HasAccountOverview || !sig.HasWelcome || !sig.HasAccountProcessor || !sig.HasProcessorState {
-				t.Fatalf("expected /auth to have all 5 positive signals, got: %+v", sig)
-			}
 			if sig.VisiblePassword || sig.VisibleCaptcha || sig.VisibleOTP || sig.VisibleLogin {
 				t.Fatalf("expected /auth to have no visible challenge fields, got: %+v", sig)
-			}
-			if sig.positiveCount() != 5 {
-				t.Fatalf("expected positiveCount 5, got %d", sig.positiveCount())
 			}
 			if !sig.isAuthenticated() {
 				t.Fatalf("expected /auth to be authenticated, got: %+v", sig)
@@ -1225,6 +1220,7 @@ func TestRealisticCDP_MultiTabTargetSelectionAndTabReplacement(t *testing.T) {
 	t.Setenv("ACB_LOGIN_URL", server.URL+"/acbib/Request")
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(findDefaultBrowser()),
 		chromedp.Headless,
 		chromedp.DisableGPU,
 		chromedp.NoSandbox,

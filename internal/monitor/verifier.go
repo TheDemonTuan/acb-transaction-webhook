@@ -72,15 +72,23 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 		if err := v.sessions.RestoreEnvelope(stepCtx, connectionID, generation, encrypted); err != nil {
 			return err
 		}
+		var expectedAccount string
 		response, err := sessionOperation(stepCtx, v.sessions.store, v.sessions, nil, connectionID, generation, true, func() (acb.Response, error) {
+			expectedAccount = v.client.SessionAccountNumber()
 			return v.client.Bootstrap(stepCtx)
 		})
 		if err != nil {
 			return err
 		}
-		slog.Info("ACB session bootstrap verified", "kind", response.Kind, "classifier_reason", response.ClassifierReason, "status", response.StatusCode, "path", acb.SafePath(response.URL))
 		switch response.Kind {
 		case acb.AccountDetailPage, acb.HistoryPage:
+			if expectedAccount != "" {
+				form, err := acb.ExtractHistoryForm(response.Body)
+				if err != nil || form.Fields["AccountNbr"] != expectedAccount {
+					return errors.New("ACB returned account does not match the candidate session")
+				}
+			}
+			slog.Info("ACB session bootstrap verified", "kind", response.Kind, "classifier_reason", response.ClassifierReason, "status", response.StatusCode, "path", acb.SafePath(response.URL))
 			return nil
 		case acb.LoginPage, acb.OTPChallenge, acb.CaptchaPage:
 			return errors.New("ACB authentication was not preserved")

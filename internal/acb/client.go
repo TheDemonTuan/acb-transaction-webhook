@@ -186,6 +186,14 @@ func (c *Client) SnapshotSession() (authbrowser.Handoff, error) {
 	return snapshot, nil
 }
 
+// SessionAccountNumber returns the exact account captured in the current form,
+// without copying cookies or the complete session handoff.
+func (c *Client) SessionAccountNumber() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bootstrapFields["AccountNbr"]
+}
+
 func (c *Client) updateFormState(response Response) {
 	if response.Kind != AccountDetailPage && response.Kind != HistoryPage {
 		return

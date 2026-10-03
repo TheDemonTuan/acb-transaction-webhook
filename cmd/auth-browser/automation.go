@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -165,6 +166,7 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 	}
 	// Consume before any side effect. Neither timeout nor ambiguous CDP result permits replay.
 	item.consumed = true
+	item.diagnostics.owned = true
 	if action == "login" {
 		item.accountNumber = login.AccountNumber
 	}
@@ -404,10 +406,19 @@ func (s *server) observeAutomation(ctx context.Context, item *browserSession) (a
 			account, _ := json.Marshal(item.accountNumber)
 			var selection struct {
 				browserFormState
-				Pending bool `json:"pending"`
+				Pending            bool `json:"pending"`
+				NavigationRequired bool `json:"navigationRequired"`
 			}
-			if err := chromedp.Run(tab, chromedp.Evaluate(automaticHistoryScript+"("+string(account)+")", &selection)); err != nil {
+			inspect := automaticHistoryScript + "(" + string(account) + ",false)"
+			if err := chromedp.Run(tab, chromedp.Evaluate(inspect, &selection)); err != nil {
 				return err
+			}
+			if selection.NavigationRequired && !item.accountNavigation {
+				// Consume the session's navigation before CDP: lost outcomes never replay.
+				item.accountNavigation = true
+				if err := chromedp.Run(tab, chromedp.Evaluate(automaticHistoryScript+"("+string(account)+",true)", &selection)); err != nil {
+					return err
+				}
 			}
 			form := selection.browserFormState
 			if selection.Pending {
@@ -481,6 +492,17 @@ func (s *server) observeAutomation(ctx context.Context, item *browserSession) (a
 		dom.State = authbrowser.Unknown
 		dom.Reason = "ACTION_OUTCOME_UNKNOWN"
 	}
+	if dom.State == authbrowser.Unknown && item.diagnostics.owned && item.diagnostics.count < maxAutomationDiagnostics {
+		// Persist a read-only, sanitized structural snapshot before returning UNKNOWN.
+		// Coordinator cancellation cannot erase the controller's diagnostic log.
+		var summary automationDiagnosticSummary
+		err := s.withAutomationTab(ctx, item, func(tab context.Context, _ target.ID) error {
+			return chromedp.Run(tab, chromedp.Evaluate(automationDiagnosticScript+"("+acbDOMCheckScript+")", &summary))
+		})
+		if err == nil {
+			item.diagnostics.record(summary)
+		}
+	}
 	return authbrowser.AuthObservation{State: dom.State, Revision: item.revision, CaptchaRequired: dom.Captcha, OTPLength: dom.OTPLength, ReasonCode: dom.Reason, ExpiresAt: item.ExpiresAt}, dom, png, nil
 }
 
@@ -492,6 +514,188 @@ func fixtureCookies(cookies []*network.Cookie) []authbrowser.Cookie {
 	}
 	return result
 }
+
+const maxAutomationDiagnostics = 12
+const maxAutomationDiagnosticBytes = 8192
+
+// Finite vocabularies: arbitrary names/IDs can themselves contain private tokens.
+const diagnosticIdentifierPattern = `^(?:|form|loginOp|user-name|UserName|username|user|password|PassWord|SecurityCode|security-code|captcha|otp|authcode|AuthTyp|safekey|digit-[1-6]|EdtOtp|button|button2|resend-otp|dse_sessionId|dse_applicationId|dse_operationName|dse_pageId|dse_processorState|dse_processorId|dse_errorPage|dse_nextEventName|countDownTimeLeft|Certificate|Thumprint|Signature|PlainText|AccountNbr|AccountMasked|virtualAccount|storeName|CheckRef|EdtRef|CheckDoiUng|activeDatetimeYN|FromDate|ToDate|submit|confirm|cancel|login|logout)$`
+const diagnosticOperationPattern = `^(?:ibk|detect)?(?:login|new|device|acct|account|detail|summary|auth|confirm|otp|logout|history|transaction|list|select|verify|error|home|welcome){1,6}(?:Op|Proc)$`
+const diagnosticStatePattern = `^(?:login|otp|confirm|auth|account|acct|detail|summary|history|transaction|list|select|verify|error|home|welcome|success|result){1,4}(?:Page|State)$`
+
+var diagnosticIdentifierRE = regexp.MustCompile(diagnosticIdentifierPattern)
+var diagnosticOperationRE = regexp.MustCompile("(?i)" + diagnosticOperationPattern)
+var diagnosticStateRE = regexp.MustCompile("(?i)" + diagnosticStatePattern)
+var diagnosticPageRE = regexp.MustCompile(`^[0-9]{1,3}$`)
+
+type automationDiagnosticForm struct {
+	Tag    string `json:"tag"`
+	Name   string `json:"name"`
+	ID     string `json:"id"`
+	Method string `json:"method"`
+	Action string `json:"action"`
+}
+type automationDiagnosticControl struct {
+	Tag       string `json:"tag"`
+	Name      string `json:"name"`
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Visible   bool   `json:"visible"`
+	Enabled   bool   `json:"enabled"`
+	ReadOnly  bool   `json:"readOnly"`
+	MaxLength int    `json:"maxLength"`
+	Native    string `json:"native"`
+}
+type automationDiagnosticProtocol struct {
+	Name       string `json:"name"`
+	Identifier string `json:"identifier"`
+}
+type automationDiagnosticSummary struct {
+	ReadyState string                         `json:"readyState"`
+	Forms      []automationDiagnosticForm     `json:"forms"`
+	Controls   []automationDiagnosticControl  `json:"controls"`
+	Protocol   []automationDiagnosticProtocol `json:"protocol"`
+	FrameCount int                            `json:"frameCount"`
+	Signals    domSignals                     `json:"domSignals"`
+	Truncated  bool                           `json:"truncated"`
+}
+type automationDiagnostics struct {
+	owned bool
+	count int
+	seen  [maxAutomationDiagnostics][sha256.Size]byte
+}
+
+func diagnosticEnum(value string, allowed ...string) string {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	return "UNKNOWN_METADATA"
+}
+func diagnosticIdentifier(value string) string {
+	if len(value) <= 40 && diagnosticIdentifierRE.MatchString(value) {
+		return value
+	}
+	return "UNKNOWN_IDENTIFIER"
+}
+func diagnosticProtocol(name, value string) string {
+	if len(value) > 64 {
+		return "UNKNOWN_PROTOCOL"
+	}
+	switch name {
+	case "dse_operationName":
+		if diagnosticOperationRE.MatchString(value) {
+			return value
+		}
+	case "dse_processorState":
+		if diagnosticStateRE.MatchString(value) {
+			return value
+		}
+	case "dse_pageId":
+		if diagnosticPageRE.MatchString(value) {
+			return value
+		}
+	}
+	return "UNKNOWN_PROTOCOL"
+}
+
+// Revalidate CDP metadata before logging; no arbitrary string escapes this schema.
+func (summary automationDiagnosticSummary) boundedJSON() []byte {
+	summary.ReadyState = diagnosticEnum(summary.ReadyState, "loading", "interactive", "complete")
+	if summary.FrameCount < 0 {
+		summary.FrameCount = 0
+	}
+	if summary.FrameCount > 100 {
+		summary.FrameCount = 100
+		summary.Truncated = true
+	}
+	if len(summary.Forms) > 4 {
+		summary.Forms = summary.Forms[:4]
+		summary.Truncated = true
+	}
+	if len(summary.Controls) > 24 {
+		summary.Controls = summary.Controls[:24]
+		summary.Truncated = true
+	}
+	if len(summary.Protocol) > 3 {
+		summary.Protocol = summary.Protocol[:3]
+		summary.Truncated = true
+	}
+	for i := range summary.Forms {
+		f := &summary.Forms[i]
+		f.Tag = diagnosticEnum(f.Tag, "FORM")
+		f.Name, f.ID = diagnosticIdentifier(f.Name), diagnosticIdentifier(f.ID)
+		f.Method = diagnosticEnum(f.Method, "post", "get", "dialog")
+		f.Action = diagnosticEnum(f.Action, "/acbib/Request", "UNKNOWN_PATH", "CROSS_ORIGIN", "INVALID_ACTION")
+	}
+	for i := range summary.Controls {
+		c := &summary.Controls[i]
+		c.Tag = diagnosticEnum(c.Tag, "INPUT", "BUTTON", "SELECT", "TEXTAREA", "A")
+		c.Name, c.ID = diagnosticIdentifier(c.Name), diagnosticIdentifier(c.ID)
+		c.Type = diagnosticEnum(c.Type, "text", "password", "hidden", "radio", "checkbox", "button", "submit", "reset", "number", "tel", "email", "select-one", "select-multiple", "textarea", "")
+		c.Native = diagnosticEnum(c.Native, "", "LOGIN_NATIVE", "OK_NATIVE", "CLOSE_NATIVE", "UNKNOWN_HANDLER")
+		if c.MaxLength < -1 || c.MaxLength > 4096 {
+			c.MaxLength = -1
+			summary.Truncated = true
+		}
+	}
+	for i := range summary.Protocol {
+		p := &summary.Protocol[i]
+		p.Name = diagnosticEnum(p.Name, "dse_operationName", "dse_processorState", "dse_pageId")
+		p.Identifier = diagnosticProtocol(p.Name, p.Identifier)
+	}
+	data, _ := json.Marshal(summary)
+	for len(data) > maxAutomationDiagnosticBytes && len(summary.Controls) > 0 {
+		summary.Controls = summary.Controls[:len(summary.Controls)-1]
+		summary.Truncated = true
+		data, _ = json.Marshal(summary)
+	}
+	return data
+}
+
+func (diagnostics *automationDiagnostics) record(summary automationDiagnosticSummary) bool {
+	if !diagnostics.owned || diagnostics.count >= maxAutomationDiagnostics {
+		return false
+	}
+	data := summary.boundedJSON()
+	digest := sha256.Sum256(data)
+	for i := range diagnostics.count {
+		if diagnostics.seen[i] == digest {
+			return false
+		}
+	}
+	diagnostics.seen[diagnostics.count] = digest
+	diagnostics.count++
+	slog.Info("ACB automation unknown page structure", "diagnostic_index", diagnostics.count, "structure", string(data))
+	return true
+}
+
+// Read-only: no values, labels, arbitrary handlers, URLs, or body text returned.
+// Only three named protocol fields can supply strictly semantic identifiers.
+const automationDiagnosticScript = `(signals => {
+ const identifierRE=new RegExp(` + "`" + diagnosticIdentifierPattern + "`" + `), operationRE=new RegExp(` + "`" + diagnosticOperationPattern + "`" + `,'i'), stateRE=new RegExp(` + "`" + diagnosticStatePattern + "`" + `,'i');
+ const identifier=v=>typeof v==='string' && v.length<=40 && identifierRE.test(v)?v:'UNKNOWN_IDENTIFIER';
+ const tag=e=>['FORM','INPUT','BUTTON','SELECT','TEXTAREA','A'].includes(e.tagName)?e.tagName:'UNKNOWN_METADATA';
+ const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.visibility==='visible' && s.display!=='none' && s.opacity!=='0' && e.getClientRects().length>0 && r.width>0 && r.height>0;};
+ const action=form=>{try{const u=new URL(form.action,location.href);if(u.origin!==location.origin || u.username || u.password)return 'CROSS_ORIGIN';return u.pathname==='/acbib/Request'?u.pathname:'UNKNOWN_PATH';}catch(e){return 'INVALID_ACTION';}};
+ const forms=[...document.forms], controls=[...document.querySelectorAll('input,button,select,textarea,a[onclick],[role="button"]')], frames=document.querySelectorAll('iframe,frame');
+ const protocol=[...document.querySelectorAll('input[name]')].filter(e=>['dse_operationName','dse_processorState','dse_pageId'].includes(e.name)).slice(0,3).map(field=>{
+  const name=field.name;
+  if(field.type!=='hidden' || field.disabled)return {name,identifier:'UNKNOWN_PROTOCOL'};
+  const value=field.value;
+  const valid=value.length<=64 && (name==='dse_operationName'?operationRE.test(value):name==='dse_processorState'?stateRE.test(value):/^[0-9]{1,3}$/.test(value));
+  return {name,identifier:valid?value:'UNKNOWN_PROTOCOL'};
+ });
+ const native=e=>{
+  const handler=e.getAttribute('onclick');if(!handler)return '';
+  if(e.tagName==='INPUT' && e.type==='button' && e.id==='button' && e.name==='button' && ['Tiếp tục','Xác nhận'].includes(e.value) && handler==="submitForm('ok');")return 'OK_NATIVE';
+  if(e.tagName==='INPUT' && e.type==='button' && e.id==='button2' && e.name==='button2' && e.value==='Hủy' && handler==="submitForm('close');")return 'CLOSE_NATIVE';
+  if(e.tagName==='A' && e.matches('a.button-blue.acbone-submit-button[href="#"]') && /^\s*submitFormLogin\(\);\s*sendInsider\('ins_login_start'\);?\s*$/.test(handler))return 'LOGIN_NATIVE';
+  return 'UNKNOWN_HANDLER';
+ };
+ return {readyState:document.readyState,forms:forms.slice(0,4).map(f=>({tag:tag(f),name:identifier(f.name),id:identifier(f.id),method:f.method,action:action(f)})),controls:controls.slice(0,24).map(e=>({tag:tag(e),name:identifier(e.name||''),id:identifier(e.id),type:e.type||'',visible:visible(e),enabled:!e.disabled,readOnly:!!e.readOnly,maxLength:e.maxLength>=-1 && e.maxLength<=4096?e.maxLength:-1,native:native(e)})),protocol,frameCount:Math.min(frames.length,100),domSignals:signals,truncated:forms.length>4 || controls.length>24 || frames.length>100};
+})`
 
 // The loginOp/UserName/PassWord/SecurityCode login, detectLoginNewDeviceProc /
 // confirmPage AuthTyp radio, and otpPage six digit controls/native buttons were
@@ -611,11 +815,27 @@ function inspectRecovery(fixture) {
 `
 
 // Exact AccountNbr only. AccountMasked and arbitrary first links are intentionally excluded.
-const automaticHistoryScript = `(account => {
+const automaticHistoryScript = `((account,navigate) => {
  const allowed=new Set(['dse_applicationId','dse_operationName','dse_pageId','dse_processorState','dse_errorPage','dse_nextEventName','dse_sessionId','dse_processorId','dse_processorIdForGenMenu','AccountNbr','virtualAccount','storeName','CheckRef','EdtRef','CheckDoiUng','activeDatetimeYN','FromDate','ToDate']);
- const matches=[];
- for(const form of document.forms){const accountFields=[...form.elements].filter(e=>e.name==='AccountNbr' && !e.disabled);if(accountFields.length!==1)continue;const el=accountFields[0];if(el.tagName==='SELECT'){const choices=[...el.options].filter(o=>o.value===account && !o.disabled);if(choices.length!==1)continue;if(el.value!==account){el.value=account;el.dispatchEvent(new Event('change',{bubbles:true}));return {action:'',fields:{},pending:true};}}if(el.value!==account)continue;const fields={};let duplicate=false;for(const e of form.elements){if(!e.name || !allowed.has(e.name) || e.disabled)continue;if(e.name in fields){duplicate=true;break}fields[e.name]=e.value||'';}if(!duplicate && fields.dse_operationName==='ibkacctDetailProc')matches.push({action:form.action,fields});}
- if(matches.length===1)return matches[0];
- if(matches.length===0 && !window.__acbRecoveryAccountNavigation){const links=[...document.querySelectorAll('a[href]')].filter(e=>{const u=new URL(e.href,location.href);return u.origin===location.origin && u.searchParams.get('AccountNbr')===account && /ibkacctDetailProc/i.test(u.search)});if(links.length===1 && links[0].getClientRects().length){window.__acbRecoveryAccountNavigation=true;links[0].click();return {action:'',fields:{},pending:true};}}
+ const candidates=[];let targetForms=0;
+ for(const form of document.forms){
+  const controls=[...form.elements].filter(e=>e.name==='AccountNbr' && !e.disabled);
+  const targets=controls.filter(e=>e.tagName==='SELECT'?[...e.options].some(o=>o.value===account && !o.disabled):e.value===account);
+  if(!targets.length)continue;
+  if(++targetForms>1)return {action:'',fields:{}};
+  if(controls.length!==1 || targets.length!==1)return {action:'',fields:{}};
+  const el=targets[0];
+  if(el.tagName==='SELECT' && [...el.options].filter(o=>o.value===account && !o.disabled).length!==1)return {action:'',fields:{}};
+  const fields={};let duplicate=false;
+  for(const e of form.elements){if(!e.name || !allowed.has(e.name) || e.disabled)continue;if(e.name in fields){duplicate=true;break}fields[e.name]=e.value||'';}
+  const action=new URL(form.action,location.href);
+  if(duplicate || fields.dse_operationName!=='ibkacctDetailProc' || form.method.toLowerCase()!=='post' || action.origin!==location.origin || action.username || action.password || action.pathname!=='/acbib/Request' || action.search || action.hash)continue;
+  candidates.push({form,el,action:form.action,fields});
+ }
+ if(candidates.length>1)return {action:'',fields:{}};
+ if(candidates.length===1){const c=candidates[0];if(c.el.value!==account){if(navigate){c.el.value=account;c.el.dispatchEvent(new Event('change',{bubbles:true}));}return {action:'',fields:{},pending:true,navigationRequired:true};}return {action:c.action,fields:c.fields};}
+ if(targetForms)return {action:'',fields:{}};
+ const links=[...document.querySelectorAll('a[href]')].filter(e=>{const u=new URL(e.href,location.href);return u.origin===location.origin && !u.username && !u.password && u.searchParams.getAll('AccountNbr').length===1 && u.searchParams.get('AccountNbr')===account && u.searchParams.get('dse_operationName')==='ibkacctDetailProc' && e.getClientRects().length>0;});
+ if(links.length===1){if(navigate)links[0].click();return {action:'',fields:{},pending:true,navigationRequired:true};}
  return {action:'',fields:{}};
 })`

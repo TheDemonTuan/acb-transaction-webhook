@@ -82,11 +82,13 @@ type browserSession struct {
 	handoff   string
 	verified  bool
 	// Protected by server.opMu, never persisted or returned by status.
-	automated     bool
-	accountNumber string
-	revision      string
-	fingerprint   string
-	consumed      bool
+	automated         bool
+	accountNumber     string
+	revision          string
+	fingerprint       string
+	consumed          bool
+	diagnostics       automationDiagnostics
+	accountNavigation bool
 
 	cmd      *exec.Cmd
 	done     chan struct{}
@@ -800,6 +802,9 @@ func (s domSignals) isAuthenticated() bool {
 }
 
 const acbDOMCheckScript = `(() => {
+	// A partial document or framed authentication surface cannot verify a login.
+	if (document.readyState !== 'complete' || window.top !== window ||
+		document.querySelector('iframe,frame')) return {};
 	function isVisible(el) {
 		if (!el) return false;
 		try {
@@ -819,8 +824,9 @@ const acbDOMCheckScript = `(() => {
 		const logoutElements = document.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"], span, div');
 		for (let i = 0; i < logoutElements.length; i++) {
 			const el = logoutElements[i];
+			if (!isVisible(el)) continue;
 			if (el.children.length > 2) continue;
-			const text = (el.textContent || '').trim().toLowerCase();
+			const text = (el.innerText || '').trim().toLowerCase();
 			const href = (el.getAttribute('href') || '').toLowerCase();
 			const onclick = (el.getAttribute('onclick') || '').toLowerCase();
 			const val = (el.value || '').toLowerCase();
@@ -833,9 +839,6 @@ const acbDOMCheckScript = `(() => {
 				break;
 			}
 		}
-		if (!hasLogout) {
-			hasLogout = document.querySelector('input[value*="ibkLogoutOp" i], [name="dse_operationName"][value*="ibkLogoutOp" i]') !== null;
-		}
 	} catch (e) {}
 
 	let hasAccountOverview = false;
@@ -843,8 +846,9 @@ const acbDOMCheckScript = `(() => {
 		const overviewElements = document.querySelectorAll('a, button, [role="tab"], h1, h2, h3, h4, span, td, th, div');
 		for (let i = 0; i < overviewElements.length; i++) {
 			const el = overviewElements[i];
+			if (!isVisible(el)) continue;
 			if (el.children.length > 2) continue;
-			const text = (el.textContent || '').trim().toLowerCase();
+			const text = (el.innerText || '').trim().toLowerCase();
 			const href = (el.getAttribute('href') || '').toLowerCase();
 			const id = (el.id || '').toLowerCase();
 			if (text.includes('thông tin tài khoản') || text.includes('thong tin tai khoan') ||
@@ -857,7 +861,7 @@ const acbDOMCheckScript = `(() => {
 			}
 		}
 		if (!hasAccountOverview) {
-			hasAccountOverview = document.querySelector('[name="AccountNbr" i], [id*="AccountNbr" i], select[name*="account" i]') !== null;
+			hasAccountOverview = [...document.querySelectorAll('[name="AccountNbr" i], [id*="AccountNbr" i], select[name*="account" i]')].some(isVisible);
 		}
 	} catch (e) {}
 
@@ -866,8 +870,9 @@ const acbDOMCheckScript = `(() => {
 		const welcomeElements = document.querySelectorAll('h1, h2, h3, h4, span, p, div, [class*="welcome" i], [id*="welcome" i], [class*="user" i], [id*="user" i]');
 		for (let i = 0; i < welcomeElements.length; i++) {
 			const el = welcomeElements[i];
+			if (!isVisible(el)) continue;
 			if (el.children.length > 2) continue;
-			const text = (el.textContent || '').trim().toLowerCase();
+			const text = (el.innerText || '').trim().toLowerCase();
 			if (text.startsWith('xin chào') || text.startsWith('xin chao') ||
 				text.startsWith('chào mừng') || text.startsWith('chao mung') ||
 				text.startsWith('chào,') || text.startsWith('chao,') ||
@@ -885,6 +890,7 @@ const acbDOMCheckScript = `(() => {
 		const procElements = document.querySelectorAll('input, form, a, [name="dse_operationName"]');
 		for (let i = 0; i < procElements.length; i++) {
 			const el = procElements[i];
+			if (!isVisible(el)) continue;
 			const val = (el.value || '').toLowerCase();
 			const action = (el.getAttribute('action') || '').toLowerCase();
 			const href = (el.getAttribute('href') || '').toLowerCase();
@@ -897,7 +903,7 @@ const acbDOMCheckScript = `(() => {
 
 	let hasProcessorState = false;
 	try {
-		hasProcessorState = document.querySelector('input[name*="processorState" i], [name="dse_processorState"], [name="dse_processorstate"]') !== null;
+		hasProcessorState = [...document.querySelectorAll('input[name*="processorState" i], [name="dse_processorState"], [name="dse_processorstate"]')].some(isVisible);
 	} catch (e) {}
 
 	let visiblePassword = false;
