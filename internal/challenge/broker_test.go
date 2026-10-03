@@ -47,6 +47,7 @@ type fixtureSender struct {
 	onSend     func(storage.AuthChallenge)
 	mu         sync.Mutex
 	deleted    map[int64]int
+	texts      []string
 }
 
 func (f *fixtureSender) SendChallenge(_ context.Context, c storage.AuthChallenge, _ []byte) (int64, error) {
@@ -77,8 +78,11 @@ func (f *fixtureSender) wasDeleted(id int64) bool {
 	defer f.mu.Unlock()
 	return f.deleted[id] > 0
 }
-func (f *fixtureSender) SendText(context.Context, int64, string, any) (int64, error) {
+func (f *fixtureSender) SendText(_ context.Context, _ int64, text string, _ any) (int64, error) {
 	f.reminders.Add(1)
+	f.mu.Lock()
+	f.texts = append(f.texts, text)
+	f.mu.Unlock()
 	return 457, nil
 }
 
@@ -682,6 +686,162 @@ func TestAcceptedReplyAcknowledgesBeforeWaitingForBank(t *testing.T) {
 				}
 			default:
 				t.Fatal("accepted reply was silent while waiting for the bank")
+			}
+		})
+	}
+}
+
+func assertOTPChallengeState(t *testing.T, b *Broker, e storage.AuthRecoveryEpisode, c storage.AuthChallenge, status string, submissions int) {
+	t.Helper()
+	current, err := b.Store.AuthRecoveryEpisode(context.Background(), e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := b.Store.AuthChallengeForPrompt(context.Background(), c.ChatID, c.PromptMessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.OTPSubmissions != submissions || persisted.Status != status || (persisted.ConsumedAt != "") != (submissions > 0) {
+		t.Fatal("durable OTP consumption or submission budget changed unexpectedly")
+	}
+	if persisted.BrowserRevision != c.BrowserRevision || persisted.ExpiresAt != c.ExpiresAt || persisted.PromptMessageID != c.PromptMessageID {
+		t.Fatal("OTP correction changed the revision, expiry, or prompt binding")
+	}
+}
+
+func TestObservedOTPLengthCorrectionKeepsPromptAndConsumesOnce(t *testing.T) {
+	b, e, path := brokerFixture(t, "OTP")
+	ctx := context.Background()
+	browser := b.Browser.(*fixtureBrowser)
+	browser.observation.OTPLength = 6
+	c := promptFixture(t, b, e, "OTP")
+	sender, submitter := b.Sender.(*fixtureSender), b.Submitter.(*fixtureSubmitter)
+	for i, value := range []string{"0023", "00123", "0012345", "12xx"} {
+		incomingID := int64(1000 + i)
+		err := b.HandleReply(ctx, 123, c.PromptMessageID, incomingID, value)
+		if !errors.Is(err, ErrInvalidResponse) || strings.Contains(err.Error(), value) {
+			t.Fatal("length rejection was not a private format correction")
+		}
+		assertOTPChallengeState(t, b, e, c, "PENDING", 0)
+		if !sender.wasDeleted(incomingID) || sender.wasDeleted(c.PromptMessageID) || submitter.submits.Load() != 0 {
+			t.Fatal("length rejection retained the reply, destroyed the prompt, or submitted to the bank")
+		}
+	}
+	if sender.reminders.Load() != 1 || len(sender.texts) != 1 {
+		t.Fatal("format corrections repeated the prompt reminder")
+	}
+	submitter.after = func() { assertOTPChallengeState(t, b, e, c, "CONSUMING", 1) }
+	if err := b.HandleReply(ctx, 123, c.PromptMessageID, 1010, " 001234 "); err != nil {
+		t.Fatal(err)
+	}
+	assertOTPChallengeState(t, b, e, c, "CONSUMED", 1)
+	if submitter.submits.Load() != 1 || !sender.wasDeleted(1010) || !sender.wasDeleted(c.PromptMessageID) {
+		t.Fatal("corrected OTP did not submit once and dispose terminal messages")
+	}
+	for _, text := range sender.texts {
+		for _, value := range []string{"0023", "00123", "0012345", "12xx", "001234"} {
+			if strings.Contains(text, value) {
+				t.Fatal("OTP correction or receipt exposed a private code")
+			}
+		}
+	}
+	s, err := storage.OpenRuntime(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	restarted := &Broker{Store: s, Browser: browser, Sender: sender, Submitter: submitter, Config: b.Config}
+	if err := restarted.HandleReply(ctx, 123, c.PromptMessageID, 1011, "001234"); !errors.Is(err, storage.ErrChallengeConsumed) {
+		t.Fatal(err)
+	}
+	assertOTPChallengeState(t, restarted, e, c, "CONSUMED", 1)
+	if submitter.submits.Load() != 1 || !sender.wasDeleted(1011) {
+		t.Fatal("restart replayed the corrected OTP or retained the replay")
+	}
+}
+
+func TestObservedOTPLengthSharesGenericFormatReminder(t *testing.T) {
+	b, e, _ := brokerFixture(t, "OTP")
+	b.Browser.(*fixtureBrowser).observation.OTPLength = 6
+	c := promptFixture(t, b, e, "OTP")
+	for i, value := range []string{"12xx", "00123"} {
+		if err := b.HandleReply(context.Background(), 123, c.PromptMessageID, int64(1000+i), value); !errors.Is(err, ErrInvalidResponse) {
+			t.Fatal(err)
+		}
+	}
+	assertOTPChallengeState(t, b, e, c, "PENDING", 0)
+	if b.Sender.(*fixtureSender).reminders.Load() != 1 || b.Submitter.(*fixtureSubmitter).submits.Load() != 0 {
+		t.Fatal("generic and observed-length errors used separate reminder or submission paths")
+	}
+}
+
+func TestObservedOTPLengthUsesCurrentMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		length int
+		value  string
+	}{{"generic_short", 0, "0023"}, {"generic_long", 0, "0012345678"}, {"exact_four", 4, "0023"}, {"exact_ten", 10, "0012345678"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, e, _ := brokerFixture(t, "OTP")
+			browser := b.Browser.(*fixtureBrowser)
+			browser.observation.OTPLength = 6
+			c := promptFixture(t, b, e, "OTP")
+			browser.observation.OTPLength = tc.length
+			if err := b.HandleReply(context.Background(), 123, c.PromptMessageID, 1000, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			assertOTPChallengeState(t, b, e, c, "CONSUMED", 1)
+			if b.Submitter.(*fixtureSubmitter).submits.Load() != 1 {
+				t.Fatal("current observed length did not control the single submission")
+			}
+		})
+	}
+}
+
+func TestObservedOTPLengthRejectsMalformedMetadata(t *testing.T) {
+	for _, length := range []int{-1, 11} {
+		b, e, _ := brokerFixture(t, "OTP")
+		c := promptFixture(t, b, e, "OTP")
+		b.Browser.(*fixtureBrowser).observation.OTPLength = length
+		if err := b.HandleReply(context.Background(), 123, c.PromptMessageID, 1000, "001234"); !errors.Is(err, storage.ErrChallengeMismatch) {
+			t.Fatal(err)
+		}
+		assertOTPChallengeState(t, b, e, c, "INVALIDATED", 0)
+		sender := b.Sender.(*fixtureSender)
+		if b.Submitter.(*fixtureSubmitter).submits.Load() != 0 || !sender.wasDeleted(1000) || !sender.wasDeleted(c.PromptMessageID) {
+			t.Fatal("malformed OTP metadata fell back to a bank submission or retained private messages")
+		}
+	}
+}
+
+func TestObservedOTPLengthCannotBypassReplyFences(t *testing.T) {
+	for _, mode := range []string{"revision", "page_expired", "prompt_expired"} {
+		t.Run(mode, func(t *testing.T) {
+			b, e, _ := brokerFixture(t, "OTP")
+			ctx := context.Background()
+			browser := b.Browser.(*fixtureBrowser)
+			browser.observation.OTPLength = 6
+			c := promptFixture(t, b, e, "OTP")
+			wantErr, wantStatus := storage.ErrChallengeMismatch, "INVALIDATED"
+			switch mode {
+			case "revision":
+				browser.observation.Revision = "next-otp"
+			case "page_expired":
+				browser.observation.ExpiresAt = time.Now().Add(-time.Second)
+			case "prompt_expired":
+				c.ExpiresAt = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+				if _, err := b.Store.DB().Exec(`UPDATE auth_challenges SET expires_at=? WHERE id=?`, c.ExpiresAt, c.ID); err != nil {
+					t.Fatal(err)
+				}
+				wantErr, wantStatus = storage.ErrChallengeExpired, "EXPIRED"
+			}
+			if err := b.HandleReply(ctx, 123, c.PromptMessageID, 1000, "00123"); !errors.Is(err, wantErr) {
+				t.Fatal(err)
+			}
+			assertOTPChallengeState(t, b, e, c, wantStatus, 0)
+			sender := b.Sender.(*fixtureSender)
+			if sender.reminders.Load() != 0 || !sender.wasDeleted(1000) || !sender.wasDeleted(c.PromptMessageID) || b.Submitter.(*fixtureSubmitter).submits.Load() != 0 {
+				t.Fatal("length correction revived a fenced prompt or submitted a stale OTP")
 			}
 		})
 	}

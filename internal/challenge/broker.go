@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"image/png"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -298,6 +299,28 @@ func (b *Broker) DeliverPending(ctx context.Context) error {
 	return b.deliverCaptchaImages(ctx)
 }
 
+func (b *Broker) remindFormat(ctx context.Context, c storage.AuthChallenge, otpLength int) {
+	b.mu.Lock()
+	if b.reminded == nil {
+		b.reminded = make(map[string]bool)
+	}
+	first := !b.reminded[c.ID]
+	b.reminded[c.ID] = true
+	b.mu.Unlock()
+	if !first {
+		return
+	}
+	message := "Mã trong ảnh chỉ gồm 1–16 chữ cái hoặc chữ số. Bấm Trả lời vào tin có ảnh mã xác thực rồi nhập lại; mã này chưa được gửi tới ACB."
+	if c.Kind == "OTP" {
+		length := "4–10"
+		if otpLength > 0 && otpLength <= 10 {
+			length = strconv.Itoa(otpLength)
+		}
+		message = "Mã đăng nhập cho yêu cầu hiện tại phải gồm " + length + " chữ số. Bấm Trả lời vào yêu cầu mã đăng nhập hiện tại rồi nhập mã từ ứng dụng ACB, giữ nguyên số 0 đầu. Không nhập mã chuyển tiền; mã này chưa được gửi tới ACB."
+	}
+	_, _ = b.Sender.SendText(ctx, c.ChatID, message, nil)
+}
+
 func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID int64, text string) error {
 	if b.Store == nil || b.Browser == nil || b.Sender == nil || b.Submitter == nil || chatID != b.Config.ChatID {
 		return storage.ErrChallengeMismatch
@@ -332,23 +355,10 @@ func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID i
 		return err
 	}
 	value := strings.TrimSpace(text)
-	if !ValidResponse(c.Kind, value) {
+	if c.Kind != "OTP" && !ValidResponse(c.Kind, value) {
 		// Format rejection is a finite disposition; it never submits to ACB.
 		deleteReply()
-		b.mu.Lock()
-		if b.reminded == nil {
-			b.reminded = make(map[string]bool)
-		}
-		first := !b.reminded[c.ID]
-		b.reminded[c.ID] = true
-		b.mu.Unlock()
-		if first {
-			message := "Mã trong ảnh chỉ gồm 1–16 chữ cái hoặc chữ số. Bấm Trả lời vào tin có ảnh mã xác thực rồi nhập lại; mã này chưa được gửi tới ACB."
-			if c.Kind == "OTP" {
-				message = "Mã đăng nhập phải gồm 4–10 chữ số. Bấm Trả lời vào yêu cầu mã đăng nhập hiện tại rồi nhập mã từ ứng dụng ACB, giữ nguyên số 0 đầu. Không nhập mã chuyển tiền; mã này chưa được gửi tới ACB."
-			}
-			_, _ = b.Sender.SendText(ctx, chatID, message, nil)
-		}
+		b.remindFormat(ctx, c, 0)
 		return ErrInvalidResponse
 	}
 	observation, err := b.Browser.Observe(ctx, c.AttemptID)
@@ -359,12 +369,19 @@ func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID i
 		deleteReply()
 		return ErrOutcomeUnknown
 	}
-	if !observationMatches(c, observation) || !observation.ExpiresAt.IsZero() && !time.Now().Before(observation.ExpiresAt) {
+	if !observationMatches(c, observation) || !observation.ExpiresAt.IsZero() && !time.Now().Before(observation.ExpiresAt) || c.Kind == "OTP" && (observation.OTPLength < 0 || observation.OTPLength > 10) {
 		if err := b.invalidate(ctx, c, "INVALIDATED"); err != nil {
 			return err
 		}
 		deleteReply()
 		return storage.ErrChallengeMismatch
+	}
+	// Only the current, revision-fenced observation determines an exact OTP
+	// length; zero retains the generic format without persisting page metadata.
+	if c.Kind == "OTP" && (!ValidResponse(c.Kind, value) || observation.OTPLength > 0 && len(value) != observation.OTPLength) {
+		deleteReply()
+		b.remindFormat(ctx, c, observation.OTPLength)
+		return ErrInvalidResponse
 	}
 	consumed, err := b.Store.ConsumeAuthChallenge(ctx, c.ID, c.Generation, c.BrowserRevision, chatID, promptID, time.Now())
 	if err != nil {

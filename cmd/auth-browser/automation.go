@@ -149,6 +149,10 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 		automationError(w, 400)
 		return
 	}
+	if action == "otp" && dom.OTPLength > 0 && !validAutomationAnswer(value, dom.OTPLength, dom.OTPLength, true) {
+		automationError(w, 400)
+		return
+	}
 	if !time.Now().Before(item.ExpiresAt) {
 		automationError(w, 410)
 		return
@@ -166,6 +170,22 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
   if(!d.choice.checked) d.choice.click();
   const current=inspectRecovery(` + fixtureBool(s.fixtureDOM) + `);
   if(current.state!=='OTP_REQUEST_REQUIRED' || current.fingerprint!==input.fingerprint || current.form!==d.form || current.choice!==d.choice || current.submit!==d.submit || !current.choice.checked) return false;
+  current.submit.click(); return true;
+ }
+ if(input.action==='otp' && d.otpLength===6){
+  if(d.state!=='OTP_REQUIRED' || !/^[0-9]{6}$/.test(input.value) || d.digits?.length!==6) return false;
+  for(let i=0;i<6;i++){
+   const el=d.digits[i], key=input.value[i];
+   el.focus();
+   el.dispatchEvent(new KeyboardEvent('keydown',{key,code:'Digit'+key,keyCode:key.charCodeAt(0),which:key.charCodeAt(0),bubbles:true}));
+   el.dispatchEvent(new KeyboardEvent('keypress',{key,code:'Digit'+key,keyCode:key.charCodeAt(0),which:key.charCodeAt(0),charCode:key.charCodeAt(0),bubbles:true}));
+   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,key);
+   el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:key}));
+   el.dispatchEvent(new Event('change',{bubbles:true}));
+   el.dispatchEvent(new KeyboardEvent('keyup',{key,code:'Digit'+key,keyCode:key.charCodeAt(0),which:key.charCodeAt(0),bubbles:true}));
+  }
+  const current=inspectRecovery(` + fixtureBool(s.fixtureDOM) + `);
+  if(current.state!=='OTP_REQUIRED' || current.otpLength!==6 || current.fingerprint!==input.fingerprint || current.form!==d.form || current.submit!==d.submit || current.cancel!==d.cancel || current.digits.some((el,i)=>el!==d.digits[i])) return false;
   current.submit.click(); return true;
  }
  const fields=input.action==='login'?[[d.username,input.username],[d.password,input.password],...(d.captcha?[[d.captcha,input.value]]:[])]:[[input.action==='otp'?d.otp:d.captcha,input.value]];
@@ -230,6 +250,7 @@ type recoveryDOM struct {
 	Fingerprint       string                    `json:"fingerprint"`
 	ActionFingerprint string                    `json:"-"`
 	Captcha           bool                      `json:"captchaRequired"`
+	OTPLength         int                       `json:"otpLength,omitempty"`
 	X                 float64                   `json:"x"`
 	Y                 float64                   `json:"y"`
 	Width             float64                   `json:"width"`
@@ -294,7 +315,7 @@ func (s *server) observeAutomation(ctx context.Context, item *browserSession) (a
 	var dom recoveryDOM
 	var png []byte
 	err := s.withAutomationTab(ctx, item, func(tab context.Context, id target.ID) error {
-		script := automationDOMLibrary + "\n(() => { const d=inspectRecovery(" + fixtureBool(s.fixtureDOM) + "); return {state:d.state,reason:d.reason,fingerprint:d.fingerprint,captchaRequired:!!d.captcha,x:d.rect?.x||0,y:d.rect?.y||0,width:d.rect?.width||0,height:d.rect?.height||0}; })()"
+		script := automationDOMLibrary + "\n(() => { const d=inspectRecovery(" + fixtureBool(s.fixtureDOM) + "); return {state:d.state,reason:d.reason,fingerprint:d.fingerprint,captchaRequired:!!d.captcha,otpLength:d.otpLength||0,x:d.rect?.x||0,y:d.rect?.y||0,width:d.rect?.width||0,height:d.rect?.height||0}; })()"
 		if err := chromedp.Run(tab, chromedp.Evaluate(script, &dom)); err != nil {
 			return err
 		}
@@ -425,7 +446,7 @@ func (s *server) observeAutomation(ctx context.Context, item *browserSession) (a
 		dom.State = authbrowser.Unknown
 		dom.Reason = "ACTION_OUTCOME_UNKNOWN"
 	}
-	return authbrowser.AuthObservation{State: dom.State, Revision: item.revision, CaptchaRequired: dom.Captcha, ReasonCode: dom.Reason, ExpiresAt: item.ExpiresAt}, dom, png, nil
+	return authbrowser.AuthObservation{State: dom.State, Revision: item.revision, CaptchaRequired: dom.Captcha, OTPLength: dom.OTPLength, ReasonCode: dom.Reason, ExpiresAt: item.ExpiresAt}, dom, png, nil
 }
 
 // Only used by the unexported fixture URL injection. No production host/TLS bypass exists.
@@ -437,10 +458,10 @@ func fixtureCookies(cookies []*network.Cookie) []authbrowser.Cookie {
 	return result
 }
 
-// The loginOp/UserName/PassWord/SecurityCode login and detectLoginNewDeviceProc /
-// confirmPage AuthTyp radio with submitForm('ok') were observed on 2026-10-03.
-// The page after that confirmation was not observed; generic OTP selectors remain
-// fixture-derived. No frame access or raw bank error classification is permitted.
+// The loginOp/UserName/PassWord/SecurityCode login, detectLoginNewDeviceProc /
+// confirmPage AuthTyp radio, and otpPage six digit controls/native buttons were
+// observed on 2026-10-03. Other generic OTP selectors remain fixture-derived.
+// No frame access or raw bank error classification is permitted.
 const automationDOMLibrary = `
 function inspectRecovery(fixture) {
  const visible=e=>!!e && !e.disabled && getComputedStyle(e).visibility==='visible' && getComputedStyle(e).display!=='none' && e.getClientRects().length>0 && e.getBoundingClientRect().width>0 && e.getBoundingClientRect().height>0;
@@ -459,6 +480,44 @@ function inspectRecovery(fixture) {
  const n=window.__acbRecoveryNodes; const id=e=>{if(!e)return 0;if(!n.ids.has(e))n.ids.set(e,n.next++);return n.ids.get(e)};
  const all=sel=>[...document.querySelectorAll(sel)];
  const pw=all('input[type="password"]'), users=all('input[name="username" i],input[name="user" i],input[id="username" i],input[id="user" i]'), caps=[...all('input[name*="captcha" i],input[id*="captcha" i]'),...(bankLogin?bankCaptcha:[])], otps=all('input[name*="otp" i],input[id*="otp" i],input[name*="authcode" i],input[id*="authcode" i]');
+ // Hidden EdtOtp/resend-otp are not editable code controls. Admit the complete
+ // observed split-digit contract before generic OTP or SafeKey heuristics.
+ const splitCandidate=all('[id],[name]').some(e=>/^digit-/.test(e.id) || e.id==='EdtOtp' || e.name==='EdtOtp') || all('input[name="dse_processorState"]').some(e=>e.type==='hidden' && e.value==='otpPage');
+ if(splitCandidate){
+  if(document.querySelector('iframe,frame')){result.reason='FRAME_UNSUPPORTED';return result;}
+  const forms=[...document.forms].filter(e=>e.name==='form');
+  if(forms.length!==1){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  const form=forms[0], action=new URL(form.action,location.href);
+  if(action.origin!==location.origin || action.username || action.password){result.reason='WRONG_FORM_ORIGIN';return result;}
+  if(form.method.toLowerCase()!=='post' || action.pathname!=='/acbib/Request' || action.search || action.hash){result.reason='UNRECOGNIZED_PAGE';return result;}
+  const hidden=(name,value)=>{const fields=[...form.elements].filter(e=>e.name===name);return fields.length===1 && fields[0].tagName==='INPUT' && fields[0].type==='hidden' && !fields[0].disabled && fields[0].value===value?fields[0]:null;};
+  const operation=hidden('dse_operationName','detectLoginNewDeviceProc'), processorState=hidden('dse_processorState','otpPage');
+  if(!operation || !processorState){result.reason='UNRECOGNIZED_PAGE';return result;}
+  const digits=[];
+  for(let i=1;i<=6;i++){
+   const nodes=all('[id]').filter(e=>e.id==='digit-'+i);
+   if(nodes.length!==1 || nodes[0].tagName!=='INPUT' || nodes[0].type!=='text' || nodes[0].name!=='' || nodes[0].form!==form || !visible(nodes[0]) || nodes[0].readOnly || nodes[0].maxLength!==1 || nodes[0].pattern!==''){result.reason='AMBIGUOUS_CONTROLS';return result;}
+   digits.push(nodes[0]);
+  }
+  const codes=all('[id],[name]').filter(e=>e.id==='EdtOtp' || e.name==='EdtOtp');
+  if(codes.length!==1 || codes[0].tagName!=='INPUT' || codes[0].type!=='hidden' || codes[0].id!=='EdtOtp' || codes[0].name!=='EdtOtp' || codes[0].form!==form || codes[0].disabled){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  const nativeButton=(key,label,handler)=>{const nodes=all('[id],[name]').filter(e=>e.id===key || e.name===key);return nodes.length===1 && nodes[0].tagName==='INPUT' && nodes[0].type==='button' && nodes[0].id===key && nodes[0].name===key && nodes[0].form===form && visible(nodes[0]) && nodes[0].value===label && nodes[0].getAttribute('onclick')===handler?nodes[0]:null;};
+  const submit=nativeButton('button','Xác nhận',"submitForm('ok');"), cancel=nativeButton('button2','Hủy',"submitForm('close');");
+  if(!submit || !cancel){result.reason='AMBIGUOUS_SUBMIT';return result;}
+  const hiddenNames=new Set(['EdtOtp','dse_sessionId','dse_applicationId','dse_operationName','dse_pageId','dse_processorState','dse_processorId','dse_errorPage','dse_nextEventName','countDownTimeLeft','resend-otp','Certificate','Thumprint']);
+  const rendered=e=>getComputedStyle(e).visibility==='visible' && getComputedStyle(e).display!=='none' && e.getClientRects().length>0 && e.getBoundingClientRect().width>0 && e.getBoundingClientRect().height>0;
+  const ignored=e=>(e.tagName==='INPUT' && e.type==='hidden' && hiddenNames.has(e.name)) || (e.tagName==='TEXTAREA' && ['Signature','PlainText'].includes(e.name) && !rendered(e));
+  const controls=[...new Set([...form.elements].filter(e=>['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.tagName)).concat([...form.querySelectorAll('[role="button"],[onclick]')]))];
+  const unexpectedHandler=[form,...form.querySelectorAll('*'),...form.elements].some(e=>[...e.attributes].some(a=>/^on/i.test(a.name) && !((e===submit || e===cancel) && a.name==='onclick')));
+  if(controls.some(e=>!digits.includes(e) && e!==submit && e!==cancel && !ignored(e)) || controls.some(e=>ignored(e) && [...form.elements].filter(other=>other.name===e.name).length!==1) || unexpectedHandler || form.querySelector('[role="alert"],[aria-invalid="true"]')){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  // Only unrelated navigation/language controls may coexist outside this form.
+  const competing=[...pw,...caps,...otps,...all('input[name*="safekey" i],input[id*="safekey" i],input[name*="securitycode" i],input[id*="securitycode" i],input[id^="digit-"]')];
+  if(competing.some(e=>visible(e) && !digits.includes(e))){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  result.form=form;result.digits=digits;result.submit=submit;result.cancel=cancel;result.otpLength=6;
+  // Structural identities only. Never read code, hidden token, or textarea values.
+  result.fingerprint=JSON.stringify([n.document,location.origin,location.pathname,'OTP_REQUIRED',id(form),form.name,form.method,action.pathname,id(operation),operation.name,operation.type,id(processorState),processorState.name,processorState.type,id(codes[0]),codes[0].name,codes[0].type,digits.map(e=>[id(e),e.id,e.name,e.type,e.maxLength,e.pattern]),[submit,cancel].map(e=>[id(e),e.id,e.name,e.type])]);
+  result.state='OTP_REQUIRED';result.reason='';return result;
+ }
  const safe=all('input[name*="safekey" i],input[id*="safekey" i]');
  // SafeKey on the observed confirmation is a method radio, not an OTP field.
  // Admit only that complete contract before rejecting other SafeKey challenges.

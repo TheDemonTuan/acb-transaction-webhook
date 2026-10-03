@@ -103,7 +103,7 @@ func TestBrowserAutomationInitialCaptchaAndOTP(t *testing.T) {
 	}
 	input := authbrowser.LoginInput{Revision: observation.Revision, Username: "fixture-user", Password: "fixture-password", AccountNumber: "222222222", Captcha: "AB12CD"}
 	observation, err = client.SubmitLogin(ctx, attempt, input)
-	if err != nil || observation.State != authbrowser.OTPRequired {
+	if err != nil || observation.State != authbrowser.OTPRequired || observation.OTPLength != 0 {
 		t.Fatalf("login did not reach OTP: %+v %v", observation, err)
 	}
 	if _, err = client.SubmitLogin(ctx, attempt, input); !authbrowser.IsHTTPStatus(err, 409) {
@@ -231,7 +231,7 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		}
 		return data
 	}
-	initial, confirmation, otp, authenticated := readFixture("bank-login.html"), readFixture("observed-otp-request.html"), readFixture("otp.html"), readFixture("authenticated.html")
+	initial, confirmation, otp, authenticated := readFixture("bank-login.html"), readFixture("observed-otp-request.html"), readFixture("observed-otp-entry.html"), readFixture("authenticated.html")
 	var imageBytes bytes.Buffer
 	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 160, 50))); err != nil {
 		t.Fatal(err)
@@ -259,9 +259,9 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		if r.URL.Query().Get("stage") == "otp" {
+		if r.Form.Get("dse_operationName") == "detectLoginNewDeviceProc" && r.Form.Get("dse_processorState") == "otpPage" {
 			otpCount++
-			if r.Form.Get("otp") != "001234" {
+			if r.Form.Get("EdtOtp") != "001234" || r.Form.Get("dse_nextEventName") != "ok" {
 				w.WriteHeader(400)
 				return
 			}
@@ -271,7 +271,7 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		if r.Form.Get("dse_operationName") == "detectLoginNewDeviceProc" {
 			requestCount++
 			requestOK = r.Form.Get("dse_processorState") == "confirmPage" && r.Form.Get("dse_nextEventName") == "ok" && r.Form.Get("AuthTyp") == "synthetic-selected-method"
-			_, _ = w.Write(otp) // Synthetic next page; not evidence of real ACB OTP selectors.
+			_, _ = w.Write(otp)
 			return
 		}
 		if r.Form.Get("UserName") != "" {
@@ -348,8 +348,8 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		t.Fatal("method radio was treated as an OTP input")
 	}
 	o, err = client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: requestRevision})
-	if err != nil || o.State != authbrowser.OTPRequired {
-		t.Fatalf("observed confirmation did not reach the synthetic numeric OTP fixture: %+v %v", o, err)
+	if err != nil || o.State != authbrowser.OTPRequired || o.OTPLength != 6 {
+		t.Fatalf("observed confirmation did not reach the observed six-digit OTP form: %+v %v", o, err)
 	}
 	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: requestRevision}); !authbrowser.IsHTTPStatus(err, 409) {
 		t.Fatal("confirmation revision was replayed after navigation")
@@ -358,6 +358,20 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		t.Fatal("request action was accepted outside the exact confirmation state")
 	}
 	otpRevision := o.Revision
+	for _, value := range []string{"12345", "1234567", "１２３４５６", "12345x"} {
+		if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: otpRevision, Value: value}); !authbrowser.IsHTTPStatus(err, 400) {
+			t.Fatal("invalid split OTP did not fail before consumption")
+		}
+		if again := observe(); again.State != authbrowser.OTPRequired || again.Revision != otpRevision {
+			t.Fatal("invalid split OTP consumed or changed the live revision")
+		}
+	}
+	mu.Lock()
+	beforeReplyOK := otpCount == 0 && requestCount == 1
+	mu.Unlock()
+	if !beforeReplyOK {
+		t.Fatal("OTP submitted before a valid owner answer")
+	}
 	o, err = client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision, Value: "001234"})
 	if err != nil {
 		t.Fatal(err)
@@ -383,7 +397,7 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 	countsOK := loginCount == 1 && requestCount == 1 && otpCount == 1 && unexpectedPostCount == 0 && credentialsOK && requestOK
 	mu.Unlock()
 	if !countsOK {
-		t.Fatal("observed login/confirmation and synthetic OTP did not preserve exact single submissions")
+		t.Fatal("observed login/confirmation/split OTP did not preserve exact single native submissions and leading zero")
 	}
 	for _, tc := range []struct{ name, html, reason string }{
 		{"authentication frame", strings.Replace(string(initial), "https://acb.com.vn/acbo-tin-tuc-acbonline", "https://example.invalid/challenge", 1), "FRAME_UNSUPPORTED"},
@@ -428,8 +442,134 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		if loginCount != 1 || requestCount != 1 || otpCount != 1 || unexpectedPostCount != 0 {
-			t.Fatal("guarded confirmation produced an extra bank-fixture request")
+			t.Fatal("guarded challenge produced an extra bank-fixture request")
 		}
+	}
+	for _, tc := range []struct{ name, html, reason string }{
+		{"wrong form name", strings.Replace(string(otp), `name="form"`, `name="other"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"wrong operation", strings.Replace(string(otp), `value="detectLoginNewDeviceProc"`, `value="otherProc"`, 1), "UNRECOGNIZED_PAGE"},
+		{"duplicate operation", strings.Replace(string(otp), "</form>", `<input type="hidden" name="dse_operationName" value="detectLoginNewDeviceProc"></form>`, 1), "UNRECOGNIZED_PAGE"},
+		{"wrong state", strings.Replace(string(otp), `value="otpPage"`, `value="confirmPage"`, 1), "UNRECOGNIZED_PAGE"},
+		{"wrong origin", strings.Replace(string(otp), `action="/acbib/Request"`, `action="https://example.invalid/acbib/Request"`, 1), "WRONG_FORM_ORIGIN"},
+		{"wrong method", strings.Replace(string(otp), `method="post"`, `method="get"`, 1), "UNRECOGNIZED_PAGE"},
+		{"wrong path", strings.Replace(string(otp), `action="/acbib/Request"`, `action="/acbib/Other"`, 1), "UNRECOGNIZED_PAGE"},
+		{"request query", strings.Replace(string(otp), `action="/acbib/Request"`, `action="/acbib/Request?other=1"`, 1), "UNRECOGNIZED_PAGE"},
+		{"duplicate form", strings.Replace(string(otp), "</body>", `<form name="form"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"unknown digit", strings.Replace(string(otp), `id="digit-6"`, `id="digit-7"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"duplicate digit", strings.Replace(string(otp), "</form>", `<input type="text" id="digit-1" maxlength="1"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"missing digit", strings.Replace(string(otp), `<input type="text" id="digit-6" maxlength="1">`, "", 1), "AMBIGUOUS_CONTROLS"},
+		{"named digit", strings.Replace(string(otp), `id="digit-1"`, `id="digit-1" name="otp"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"readonly digit", strings.Replace(string(otp), `id="digit-1"`, `id="digit-1" readonly`, 1), "AMBIGUOUS_CONTROLS"},
+		{"disabled digit", strings.Replace(string(otp), `id="digit-1"`, `id="digit-1" disabled`, 1), "AMBIGUOUS_CONTROLS"},
+		{"hidden digit", strings.Replace(string(otp), `id="digit-1"`, `id="digit-1" style="display:none"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"detached digit", strings.Replace(string(otp), `id="digit-1"`, `id="digit-1" form="missing"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"wrong digit type", strings.Replace(string(otp), `type="text" id="digit-1"`, `type="number" id="digit-1"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"wrong digit length", strings.Replace(string(otp), `maxlength="1"`, `maxlength="2"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"duplicate hidden code", strings.Replace(string(otp), "</form>", `<input type="hidden" name="EdtOtp" id="EdtOtp"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"missing hidden code", strings.Replace(string(otp), `<input type="hidden" name="EdtOtp" id="EdtOtp" value="synthetic-unfilled-code">`, "", 1), "AMBIGUOUS_CONTROLS"},
+		{"detached hidden code", strings.Replace(string(otp), `id="EdtOtp"`, `id="EdtOtp" form="missing"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"visible hidden code", strings.Replace(string(otp), `type="hidden" name="EdtOtp"`, `type="text" name="EdtOtp"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"visible signature", strings.Replace(string(otp), `id="Signature" style="display:none"`, `id="Signature"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"visible disabled signature", strings.Replace(string(otp), `id="Signature" style="display:none"`, `id="Signature" disabled`, 1), "AMBIGUOUS_CONTROLS"},
+		{"unknown hidden field", strings.Replace(string(otp), "</form>", `<input type="hidden" name="other"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"extra input", strings.Replace(string(otp), "</form>", `<input name="other"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"extra submit", strings.Replace(string(otp), "</form>", `<button type="submit">Other</button></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"extra handler", strings.Replace(string(otp), "</form>", `<a onclick="submitForm('ok');">Other</a></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"digit handler", strings.Replace(string(otp), `id="digit-1"`, `id="digit-1" onclick="otherSubmit();"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"hidden field handler", strings.Replace(string(otp), `id="resend-otp"`, `id="resend-otp" onchange="otherSubmit();"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"form handler", strings.Replace(string(otp), `<form name="form"`, `<form onsubmit="otherSubmit();" name="form"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"altered confirm handler", strings.Replace(string(otp), "submitForm('ok');", "otherSubmit();", 1), "AMBIGUOUS_SUBMIT"},
+		{"altered cancel handler", strings.Replace(string(otp), "submitForm('close');", "otherSubmit();", 1), "AMBIGUOUS_SUBMIT"},
+		{"detached confirm", strings.Replace(string(otp), `id="button"`, `id="button" form="missing"`, 1), "AMBIGUOUS_SUBMIT"},
+		{"duplicate cancel", strings.Replace(string(otp), "</form>", `<input type="button" id="button2" name="button2" value="Hủy" onclick="submitForm('close');"></form>`, 1), "AMBIGUOUS_SUBMIT"},
+		{"outside code", strings.Replace(string(otp), "</body>", `<form><input name="otp"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"outside password", strings.Replace(string(otp), "</body>", `<form><input type="password"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"associated outside input", strings.Replace(string(otp), `<form name="form"`, `<form id="otp-form" name="form"`, 1) + `<input name="other" form="otp-form">`, "AMBIGUOUS_CONTROLS"},
+		{"hidden frame", strings.Replace(string(otp), "</body>", `<iframe style="display:none" src="about:blank"></iframe></body>`, 1), "FRAME_UNSUPPORTED"},
+	} {
+		t.Run("split OTP/"+tc.name, func(t *testing.T) {
+			navigateConfirmation(tc.html)
+			o := observe()
+			if o.State != authbrowser.Unknown || o.ReasonCode != tc.reason || o.OTPLength != 0 {
+				t.Fatalf("unsafe split OTP admitted: %+v", o)
+			}
+			if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 422) {
+				t.Fatal("unsafe split OTP allowed submission")
+			}
+			assertNoExtraPosts()
+		})
+	}
+	evaluateOTP := func(script string, output any) {
+		t.Helper()
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
+		if err := s.withAutomationTab(ctx, s.session, func(tab context.Context, _ target.ID) error {
+			return chromedp.Run(tab, chromedp.Evaluate(script, output))
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	navigateConfirmation(string(otp))
+	o = observe()
+	if o.State != authbrowser.OTPRequired || o.OTPLength != 6 || observe().Revision != o.Revision {
+		t.Fatal("observed split form with unrelated navigation was not stable")
+	}
+	var splitFingerprint, changedPrivateFingerprint string
+	evaluateOTP(automationDOMLibrary+`;inspectRecovery(false).fingerprint`, &splitFingerprint)
+	for _, value := range []string{"synthetic-private-session", "synthetic-unfilled-code", "synthetic-resend", "synthetic-signature", "Xác nhận", "detectLoginNewDeviceProc", "otpPage"} {
+		if strings.Contains(splitFingerprint, value) {
+			t.Fatal("split OTP fingerprint included field values")
+		}
+	}
+	evaluateOTP(automationDOMLibrary+`;
+document.getElementById('digit-1').value='8';
+document.getElementById('EdtOtp').value='different-hidden-code';
+document.getElementById('resend-otp').value='different-resend-token';
+document.querySelector('[name="dse_sessionId"]').value='different-private-session';
+document.getElementById('Signature').value='different-private-signature';
+inspectRecovery(false).fingerprint`, &changedPrivateFingerprint)
+	if changedPrivateFingerprint != splitFingerprint || observe().Revision != o.Revision {
+		t.Fatal("digit or hidden private values changed structural OTP identity")
+	}
+	// A synthetic no-navigation handler proves that the adapter sets only the six
+	// current digit nodes, emits ordinary events, and clicks confirm exactly once.
+	evaluateOTP(`window.submitForm=event=>{
+ window.fixtureNativeClicks=(window.fixtureNativeClicks||0)+1;
+ window.fixtureSplitFilled=event==='ok' && Array.from({length:6},(_,i)=>document.getElementById('digit-'+(i+1)).value).join('')==='001234';
+ window.fixtureHiddenUntouched=document.getElementById('EdtOtp').value==='different-hidden-code' && document.getElementById('resend-otp').value==='different-resend-token';
+};`, nil)
+	consumedOTPRevision := o.Revision
+	o, err = client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: consumedOTPRevision, Value: "001234"})
+	if err != nil || o.State != authbrowser.Unknown || o.ReasonCode != "ACTION_OUTCOME_UNKNOWN" || o.Revision != consumedOTPRevision {
+		t.Fatalf("unknown split OTP native outcome was not consumed: %+v %v", o, err)
+	}
+	if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: consumedOTPRevision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("unknown split OTP outcome permitted replay")
+	}
+	var splitClickedOnce bool
+	evaluateOTP(`window.fixtureNativeClicks===1 && window.fixtureSplitFilled && window.fixtureHiddenUntouched && !window.fixtureCancelClicks && Object.values(window.fixtureDigitEvents).every(events=>['input','change','keydown','keypress','keyup'].every(type=>events[type]))`, &splitClickedOnce)
+	if !splitClickedOnce {
+		t.Fatal("split OTP did not fill digits through normal events and click only native confirm")
+	}
+	assertNoExtraPosts()
+	for _, mutation := range []struct{ name, script string }{
+		{"confirm handler", `document.getElementById('digit-6').addEventListener('change',()=>document.getElementById('button').setAttribute('onclick','otherSubmit();'));`},
+		{"cancel handler", `document.getElementById('digit-6').addEventListener('change',()=>document.getElementById('button2').setAttribute('onclick','otherSubmit();'));`},
+		{"replacement digit", `document.getElementById('digit-6').addEventListener('change',()=>{const el=document.getElementById('digit-1');el.replaceWith(el.cloneNode());});`},
+		{"detached digit", `document.getElementById('digit-6').addEventListener('change',()=>document.getElementById('digit-1').setAttribute('form','missing'));`},
+	} {
+		t.Run("split OTP pre-click/"+mutation.name, func(t *testing.T) {
+			navigateConfirmation(string(otp))
+			o := observe()
+			evaluateOTP(mutation.script, nil)
+			if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 409) {
+				t.Fatal("changed split OTP contract was clicked")
+			}
+			if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 409) {
+				t.Fatal("changed split OTP contract permitted replay")
+			}
+			assertNoExtraPosts()
+		})
 	}
 	for _, tc := range []struct{ name, html, reason string }{
 		{"wrong form name", strings.Replace(string(confirmation), `name="form"`, `name="other"`, 1), "AMBIGUOUS_CONTROLS"},

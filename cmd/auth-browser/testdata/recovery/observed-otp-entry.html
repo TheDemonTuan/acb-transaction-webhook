@@ -1,0 +1,52 @@
+<!doctype html><!-- Sanitized observed detectLoginNewDeviceProc/otpPage control structure, 2026-10-03. All private hidden values and the entire submitForm/event script below are synthetic, NOT captured bank implementation. -->
+<html><body>
+<form name="form" method="post" action="/acbib/Request">
+<input type="hidden" name="dse_sessionId" value="synthetic-private-session">
+<input type="hidden" name="dse_applicationId" value="synthetic-application">
+<input type="hidden" name="dse_operationName" value="detectLoginNewDeviceProc">
+<input type="hidden" name="dse_pageId" value="5">
+<input type="hidden" name="dse_processorState" value="otpPage">
+<input type="hidden" name="dse_processorId" value="synthetic-processor">
+<input type="hidden" name="dse_errorPage" value="synthetic-error-page">
+<input type="hidden" name="dse_nextEventName" value="">
+<input type="hidden" name="countDownTimeLeft" value="synthetic-countdown">
+<input type="hidden" name="resend-otp" id="resend-otp" value="synthetic-resend">
+<input type="hidden" name="Certificate" value="synthetic-certificate">
+<input type="hidden" name="Thumprint" value="synthetic-thumbprint">
+<textarea name="Signature" id="Signature" style="display:none">synthetic-signature</textarea>
+<textarea name="PlainText" id="PlainText" style="display:none">synthetic-plaintext</textarea>
+<input type="text" id="digit-1" maxlength="1">
+<input type="text" id="digit-2" maxlength="1">
+<input type="text" id="digit-3" maxlength="1">
+<input type="text" id="digit-4" maxlength="1">
+<input type="text" id="digit-5" maxlength="1">
+<input type="text" id="digit-6" maxlength="1">
+<input type="hidden" name="EdtOtp" id="EdtOtp" value="synthetic-unfilled-code">
+<input type="button" name="button" id="button" value="Xác nhận" onclick="submitForm('ok');">
+<input type="button" name="button2" id="button2" value="Hủy" onclick="submitForm('close');">
+</form>
+<!-- Synthetic surrounding navigation/language UI, outside the OTP owning form. -->
+<form name="chooseLan2" method="post" action="/acbib/Request"><input type="hidden" name="dse_operationName" value="displayPageNotLoginOp"><select name="dse_locale"><option value="vi_VN">Tiếng Việt</option></select><input type="button" value="Đổi ngôn ngữ" onclick="void(0)"></form>
+<a href="#" onclick="void(0)">Hướng dẫn</a>
+<script>
+// Synthetic fixture-only implementation: preserve the six-character string,
+// require ordinary input/change/key events, and let only the native confirm
+// handler assemble EdtOtp and submit. No evidence of bank script internals.
+window.fixtureDigitEvents={};
+for(let i=1;i<=6;i++){
+ const digit=document.getElementById('digit-'+i);
+ window.fixtureDigitEvents[digit.id]={};
+ for(const type of ['input','change','keydown','keypress','keyup'])digit.addEventListener(type,()=>{window.fixtureDigitEvents[digit.id][type]=true;});
+}
+function submitForm(event){
+ const form=document.forms.namedItem('form');
+ window.fixtureNativeClicks=(window.fixtureNativeClicks||0)+1;
+ if(event!=='ok'){window.fixtureCancelClicks=(window.fixtureCancelClicks||0)+1;return;}
+ const digits=Array.from({length:6},(_,i)=>document.getElementById('digit-'+(i+1)));
+ if(digits.some(e=>!['input','change','keydown','keypress','keyup'].every(type=>window.fixtureDigitEvents[e.id][type])))return;
+ form.elements.namedItem('EdtOtp').value=digits.map(e=>e.value).join('');
+ form.elements.namedItem('dse_nextEventName').value=event;
+ form.submit();
+}
+</script>
+</body></html>

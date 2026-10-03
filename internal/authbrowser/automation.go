@@ -30,6 +30,7 @@ type AuthObservation struct {
 	State           AuthPageState `json:"state"`
 	Revision        string        `json:"revision"`
 	CaptchaRequired bool          `json:"captchaRequired"`
+	OTPLength       int           `json:"otpLength,omitempty"`
 	ReasonCode      string        `json:"reasonCode,omitempty"`
 	ExpiresAt       time.Time     `json:"expiresAt"`
 }
