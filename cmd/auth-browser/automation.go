@@ -539,18 +539,21 @@ function inspectRecovery(fixture) {
   const nativeButton=(key,label,handler)=>{const nodes=all('[id],[name]').filter(e=>e.id===key || e.name===key);return nodes.length===1 && nodes[0].tagName==='INPUT' && nodes[0].type==='button' && nodes[0].id===key && nodes[0].name===key && nodes[0].form===form && visible(nodes[0]) && nodes[0].value===label && nodes[0].getAttribute('onclick')===handler?nodes[0]:null;};
   const submit=nativeButton('button','Xác nhận',"submitForm('ok');"), cancel=nativeButton('button2','Hủy',"submitForm('close');");
   if(!submit || !cancel){result.reason='AMBIGUOUS_SUBMIT';return result;}
-  const hiddenNames=new Set(['EdtOtp','dse_sessionId','dse_applicationId','dse_operationName','dse_pageId','dse_processorState','dse_processorId','dse_errorPage','dse_nextEventName','countDownTimeLeft','resend-otp','Certificate','Thumprint']);
+  const resends=all('[id="resend-otp"]');
+  if(resends.length!==1 || resends[0].tagName!=='INPUT' || resends[0].type!=='hidden' || resends[0].name!=='' || resends[0].form!==form || resends[0].disabled){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  const resend=resends[0];
+  const hiddenNames=new Set(['EdtOtp','dse_sessionId','dse_applicationId','dse_operationName','dse_pageId','dse_processorState','dse_processorId','dse_errorPage','dse_nextEventName','countDownTimeLeft','Certificate','Thumprint']);
   const rendered=e=>getComputedStyle(e).visibility==='visible' && getComputedStyle(e).display!=='none' && e.getClientRects().length>0 && e.getBoundingClientRect().width>0 && e.getBoundingClientRect().height>0;
-  const ignored=e=>(e.tagName==='INPUT' && e.type==='hidden' && hiddenNames.has(e.name)) || (e.tagName==='TEXTAREA' && ['Signature','PlainText'].includes(e.name) && !rendered(e));
+  const ignored=e=>e===resend || (e.tagName==='INPUT' && e.type==='hidden' && hiddenNames.has(e.name)) || (e.tagName==='TEXTAREA' && ['Signature','PlainText'].includes(e.name) && !rendered(e));
   const controls=[...new Set([...form.elements].filter(e=>['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.tagName)).concat([...form.querySelectorAll('[role="button"],[onclick]')]))];
   const unexpectedHandler=[form,...form.querySelectorAll('*'),...form.elements].some(e=>[...e.attributes].some(a=>/^on/i.test(a.name) && !((e===submit || e===cancel) && a.name==='onclick')));
-  if(controls.some(e=>!digits.includes(e) && e!==submit && e!==cancel && !ignored(e)) || controls.some(e=>ignored(e) && [...form.elements].filter(other=>other.name===e.name).length!==1) || unexpectedHandler || form.querySelector('[role="alert"],[aria-invalid="true"]')){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  if(controls.some(e=>!digits.includes(e) && e!==submit && e!==cancel && !ignored(e)) || controls.some(e=>ignored(e) && e!==resend && [...form.elements].filter(other=>other.name===e.name).length!==1) || unexpectedHandler || form.querySelector('[role="alert"],[aria-invalid="true"]')){result.reason='AMBIGUOUS_CONTROLS';return result;}
   // Only unrelated navigation/language controls may coexist outside this form.
   const competing=[...pw,...caps,...otps,...all('input[name*="safekey" i],input[id*="safekey" i],input[name*="securitycode" i],input[id*="securitycode" i],input[id^="digit-"]')];
   if(competing.some(e=>visible(e) && !digits.includes(e))){result.reason='AMBIGUOUS_CONTROLS';return result;}
   result.form=form;result.digits=digits;result.submit=submit;result.cancel=cancel;result.otpLength=6;
   // Structural identities only. Never read code, hidden token, or textarea values.
-  result.fingerprint=JSON.stringify([n.document,location.origin,location.pathname,'OTP_REQUIRED',id(form),form.name,form.method,action.pathname,id(operation),operation.name,operation.type,id(processorState),processorState.name,processorState.type,id(codes[0]),codes[0].name,codes[0].type,digits.map(e=>[id(e),e.id,e.name,e.type,e.maxLength,e.pattern]),[submit,cancel].map(e=>[id(e),e.id,e.name,e.type])]);
+  result.fingerprint=JSON.stringify([n.document,location.origin,location.pathname,'OTP_REQUIRED',id(form),form.name,form.method,action.pathname,id(operation),operation.name,operation.type,id(processorState),processorState.name,processorState.type,id(codes[0]),codes[0].name,codes[0].type,id(resend),resend.name,resend.id,resend.type,digits.map(e=>[id(e),e.id,e.name,e.type,e.maxLength,e.pattern]),[submit,cancel].map(e=>[id(e),e.id,e.name,e.type])]);
   result.state='OTP_REQUIRED';result.reason='';return result;
  }
  const safe=all('input[name*="safekey" i],input[id*="safekey" i]');

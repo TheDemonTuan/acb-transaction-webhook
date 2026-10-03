@@ -91,7 +91,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 		}
 		if err == nil {
 			h.wakeCoordinator()
-			return h.refreshPanel(ctx, "Đã gửi câu trả lời tới ACB. Chỉ kết quả xác minh bên dưới mới xác nhận đăng nhập thành công; không gửi lại mã.")
+			return h.deliverProgress(ctx)
 		}
 		if errors.Is(err, challenge.ErrOutcomeUnknown) {
 			h.wakeCoordinator()

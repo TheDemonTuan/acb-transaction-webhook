@@ -645,6 +645,16 @@ func TestTelegramStoppedProgressKeepsSafeReasonAndUsableControls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.ReplyBroker = &replyRecorder{}
+	reply := command("AB12CD")
+	reply.Message.ReplyTo = &Message{ID: 77}
+	beforeReplyMessages := len(f.messages)
+	if err := h.HandleUpdate(ctx, reply); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != beforeReplyMessages {
+		t.Fatal("accepted reply created a stale progress copy above the canonical terminal result")
+	}
 	var beforeActions int
 	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM telegram_auth_actions`).Scan(&beforeActions); err != nil {
 		t.Fatal(err)
