@@ -466,11 +466,11 @@ function inspectRecovery(fixture) {
  const confirmationChoice=safe.filter(e=>e.type==='radio');
  if(confirmationChoice.length){
   if(document.querySelector('iframe,frame')){result.reason='FRAME_UNSUPPORTED';return result;}
-  if(document.forms.length!==1 || confirmationForms.length!==1){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  if(confirmationForms.length!==1 || pw.some(visible) || otps.some(visible)){result.reason='AMBIGUOUS_CONTROLS';return result;}
   const form=confirmationForms[0], action=new URL(form.action,location.href);
   if(action.origin!==location.origin || action.username || action.password){result.reason='WRONG_FORM_ORIGIN';return result;}
   if(form.method.toLowerCase()!=='post' || action.pathname!=='/acbib/Request' || action.search || action.hash){result.reason='UNRECOGNIZED_PAGE';return result;}
-  const hidden=(name,value)=>{const fields=all('[name]').filter(e=>e.name===name);return fields.length===1 && fields[0].tagName==='INPUT' && fields[0].type==='hidden' && !fields[0].disabled && fields[0].form===form && fields[0].value===value?fields[0]:null;};
+  const hidden=(name,value)=>{const fields=[...form.elements].filter(e=>e.name===name);return fields.length===1 && fields[0].tagName==='INPUT' && fields[0].type==='hidden' && !fields[0].disabled && fields[0].value===value?fields[0]:null;};
   const operation=hidden('dse_operationName','detectLoginNewDeviceProc'), processorState=hidden('dse_processorState','confirmPage');
   if(!operation || !processorState){result.reason='UNRECOGNIZED_PAGE';return result;}
   const choices=all('input').filter(e=>e.name==='AuthTyp' || e.id==='safekey');
@@ -478,7 +478,8 @@ function inspectRecovery(fixture) {
   const buttons=all('[id],[name]').filter(e=>e.id==='button' || e.name==='button');
   if(buttons.length!==1 || buttons[0].tagName!=='INPUT' || buttons[0].type!=='button' || buttons[0].id!=='button' || buttons[0].name!=='button' || buttons[0].form!==form || !visible(buttons[0]) || buttons[0].value!=='Tiếp tục' || buttons[0].getAttribute('onclick')!=="submitForm('ok');"){result.reason='AMBIGUOUS_SUBMIT';return result;}
   const choice=choices[0], submit=buttons[0];
-  const controls=all('input,select,textarea,button,[role="button"],[onclick]').filter(e=>e.tagName!=='INPUT' || e.type!=='hidden');
+  // Navigation/language controls outside this form cannot submit its challenge.
+  const controls=[...new Set([...form.elements].filter(e=>['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.tagName)).concat([...form.querySelectorAll('[role="button"],[onclick]')]))].filter(e=>e.tagName!=='INPUT' || e.type!=='hidden');
   if(controls.some(e=>e!==choice && e!==submit) || form.querySelector('[role="alert"],[aria-invalid="true"]')){result.reason='AMBIGUOUS_CONTROLS';return result;}
   result.form=form;result.choice=choice;result.submit=submit;
   // Structural identities only: never include hidden-field or radio/button values,

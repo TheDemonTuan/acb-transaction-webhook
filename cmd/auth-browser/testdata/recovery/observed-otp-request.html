@@ -9,5 +9,8 @@
 <label><input type="radio" name="AuthTyp" id="safekey" value="synthetic-selected-method">SafeKey</label>
 <input type="button" name="button" id="button" value="Tiếp tục" onclick="submitForm('ok');">
 </form>
+<!-- Synthetic surrounding language/navigation UI: not authentication controls. -->
+<form name="chooseLan2" method="post" action="/acbib/Request"><input type="hidden" name="dse_operationName" value="displayPageNotLoginOp"><select name="dse_locale"><option value="vi_VN">Tiếng Việt</option></select><input type="button" value="Đổi ngôn ngữ" onclick="void(0)"></form>
+<a href="#" onclick="void(0)">Hướng dẫn</a>
 <script>function submitForm(event){const form=document.forms.namedItem('form');form.elements.namedItem('dse_nextEventName').value=event;form.submit();}</script>
 </body></html>

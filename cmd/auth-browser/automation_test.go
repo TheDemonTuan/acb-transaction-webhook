@@ -458,7 +458,9 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		{"extra submit", strings.Replace(string(confirmation), "</form>", `<button type="submit">Other</button></form>`, 1), "AMBIGUOUS_CONTROLS"},
 		{"extra code field", strings.Replace(string(confirmation), "</form>", `<input name="otp"></form>`, 1), "AMBIGUOUS_CONTROLS"},
 		{"extra handler", strings.Replace(string(confirmation), "</form>", `<a href="#" onclick="submitForm('ok');">Other</a></form>`, 1), "AMBIGUOUS_CONTROLS"},
-		{"extra form", strings.Replace(string(confirmation), "</body>", `<form action="https://example.invalid/" method="post"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"competing confirmation form", strings.Replace(string(confirmation), "</body>", `<form name="form" action="/acbib/Request" method="post"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"outside code field", strings.Replace(string(confirmation), "</body>", `<form><input name="otp"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"outside associated code field", strings.Replace(string(confirmation), `<form name="form"`, `<form id="confirmation" name="form"`, 1) + `<input name="otp" form="confirmation">`, "AMBIGUOUS_CONTROLS"},
 		{"confirmation frame", strings.Replace(string(confirmation), "</body>", `<iframe src="about:blank"></iframe></body>`, 1), "FRAME_UNSUPPORTED"},
 		{"hidden confirmation frame", strings.Replace(string(confirmation), "</body>", `<iframe style="display:none" src="about:blank"></iframe></body>`, 1), "FRAME_UNSUPPORTED"},
 	} {
