@@ -42,6 +42,9 @@ type Response struct {
 	Body             string
 	Kind             PageKind
 	ClassifierReason string
+	// RequestedAccount is the outbound AccountNbr for a direct POST response.
+	// It is not bank-returned identity and must not be logged.
+	RequestedAccount string
 }
 
 func NewClient(base string, transport http.RoundTripper) (*Client, error) {
@@ -206,6 +209,11 @@ func (c *Client) updateFormState(response Response) {
 	if err != nil || form.Fields["dse_sessionId"] == "" || form.Fields["dse_processorState"] == "" {
 		return
 	}
+	if response.Kind == HistoryPage && form.Fields["AccountNbr"] == "" && c.bootstrapFields["AccountNbr"] != "" {
+		// History pages may omit the selection while rotating conversational tokens.
+		// Keep it only in request state; the bank response remains unchanged.
+		form.Fields["AccountNbr"] = c.bootstrapFields["AccountNbr"]
+	}
 	c.bootstrap = action
 	c.bootstrapFields = cloneFields(form.Fields)
 }
@@ -250,12 +258,11 @@ func (c *Client) probeAuthLocked(ctx context.Context) (Response, bool, error) {
 		if extractErr != nil || form.Fields["dse_sessionId"] == "" || form.Fields["dse_processorState"] == "" {
 			return probeResp, false, ErrInconclusiveAuth
 		}
-		action, actErr := c.endpoint(form.Action)
+		_, actErr := c.endpoint(form.Action)
 		if actErr != nil {
 			return probeResp, false, ErrInconclusiveAuth
 		}
-		c.bootstrap = action
-		c.bootstrapFields = cloneFields(form.Fields)
+		// getLocked already installed the validated fresh form via updateFormState.
 		return probeResp, true, nil
 	}
 	return probeResp, false, ErrInconclusiveAuth
@@ -300,7 +307,7 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.do(req)
+	resp, err := c.do(req, fields["AccountNbr"])
 	if err != nil {
 		return Response{}, err
 	}
@@ -379,7 +386,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.do(req)
+	resp, err := c.do(req, hFields["AccountNbr"])
 	if err != nil {
 		return Response{}, err
 	}
@@ -436,7 +443,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 			return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
 		}
 		replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		replayResp, replayErr := c.do(replayReq)
+		replayResp, replayErr := c.do(replayReq, replayFields["AccountNbr"])
 		if replayErr != nil {
 			return Response{}, replayErr
 		}
@@ -483,7 +490,7 @@ func (c *Client) getLocked(ctx context.Context, endpoint string) (Response, erro
 	if err != nil {
 		return Response{}, err
 	}
-	return c.do(req)
+	return c.do(req, "")
 }
 
 func (c *Client) endpoint(endpoint string) (*url.URL, error) {
@@ -502,7 +509,7 @@ func (c *Client) endpoint(endpoint string) (*url.URL, error) {
 	return requestURL, nil
 }
 
-func (c *Client) do(req *http.Request) (Response, error) {
+func (c *Client) do(req *http.Request, requestedAccount string) (Response, error) {
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", DefaultUserAgent)
 	}
@@ -542,6 +549,7 @@ func (c *Client) do(req *http.Request) (Response, error) {
 	if req.Header.Get("Upgrade-Insecure-Requests") == "" {
 		req.Header.Set("Upgrade-Insecure-Requests", "1")
 	}
+	requestURL := req.URL.String()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		c.closeIdleConnectionsLocked()
@@ -559,6 +567,10 @@ func (c *Client) do(req *http.Request) (Response, error) {
 		reason = "AUTH_HTTP_STATUS"
 	}
 	result := Response{URL: resp.Request.URL.String(), StatusCode: resp.StatusCode, Body: string(body), Kind: kind, ClassifierReason: reason}
+	// Redirect requests carry the prior response, even when they return to the original URL.
+	if resp.Request.Response == nil && resp.Request.Method == http.MethodPost && resp.Request.URL.String() == requestURL {
+		result.RequestedAccount = requestedAccount
+	}
 	c.updateFormState(result)
 	return result, nil
 }

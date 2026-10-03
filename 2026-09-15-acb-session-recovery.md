@@ -29,6 +29,20 @@ Final aggregate command `ACB_OTP_WAIT_SMOKE=1 BROWSER_BIN='C:/Users/Administrato
 
 Live acceptance remains **pending owner consent**: only the owner's new Telegram LOGIN action may produce fresh safe verification metadata. A finite account/form/page rejection must remain fail-closed; do not guess a parser fix, pick the first account, suffix-match, force a new login or read production secrets/session material. Only VERIFIED followed by catch-up COMPLETED can establish live success. Release/container readiness is deployment evidence only.
 
+### Missing history account echo repair
+
+The later owner-consented attempt `auth_3d463629c7ee5062f85d591d`, generation 282, failed at 13:50:19 UTC (20:50:19 Vietnam time) with `VERIFICATION_ACCOUNT_MISSING`. Read-only worker metadata showed `HISTORY_PAGE`, HTTP 200, valid form, 131 parsed transactions and an empty `AccountNbr` field. This is different evidence from the earlier silent attempt; its original cause remains unproven.
+
+Verification now accepts a missing/empty bank account echo only on HTTP 200 history with a valid transaction parse after a direct, unredirected POST carrying the candidate's exact `AccountNbr`. Account/summary pages, GETs and redirected responses do not receive this exception. A returned different/masked account still rejects; no first-account choice or suffix matching. `Response.RequestedAccount` describes the actual request, not a fabricated bank-returned identity, and is never logged. Account-presence/match diagnostics stay false when the bank omits it.
+
+The client retains the selected exact account in request/snapshot state while installing fresh bank conversational tokens; response HTML stays unchanged. Catch-up, realtime and history-job paths no longer substitute display-only `AccountMasked` when the returned form has no account. Cookie-only or account-summary handoffs cannot invent an account.
+
+Evidence: omitted/empty history verifier regressions failed before the acceptance change. Isolated local TLS runtime composition then caught masked-account overwrite during catch-up; after removing all five masked fallbacks, omitted and empty responses each reached real scheduled seven-day coverage and `COMPLETED`, persisted/restored a fresh encrypted snapshot and issued subsequent exact-account requests. Different-account and summary cases stopped with zero committed sessions/recovery runs. Each scenario consumed one leading-zero OTP, delivered fresh bound terminal controls after its receipt, and did not replay on tick/restarted handler. Browser API and Telegram were synthetic; this run did not launch Chromium or contact ACB. Permanent real-client consumer regressions cover exact outbound account, token continuity and committed day outcomes for realtime/catch-up/history jobs. Live owner-authorized success remains pending; deployment must not start another attempt.
+
+All nine affected package suites passed without race instrumentation; `go vet` passed for acb/monitor/authrecovery. The obsolete mock test that forwarded `Connection.AccountMasked` was deleted rather than repinned; real-client consumer regressions enforce exact session selection instead. An aggregate native Windows race run hit its explicit 90-second test deadline in monitor/authrecovery/storage; acb/authsession/workerrpc/telegramauth/scheduler/worker passed in that run. The interrupted initial compiler-environment attempt has no retained result. This is not a claim that the full Windows race suite passed.
+
+
+
 ## Telegram usability repair — 2026-10-03
 
 User acceptance: managing ACB in Telegram must be understandable without internal terminology or repeated status polling. A healthy container is not evidence of successful bank login. The reported live attempt stopped before CAPTCHA or credential submission with `UNKNOWN_PAGE`; inspect the VPS and bank's unauthenticated page before changing recognition logic.

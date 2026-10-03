@@ -577,9 +577,6 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
 		}
 
-		if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-			form.Fields["AccountNbr"] = conn.AccountMasked
-		}
 		form.Fields["FromDate"] = t.curDay.Format("02/01/2006")
 		form.Fields["ToDate"] = historyEffectiveToDate(t.curDay, time.Now())
 		form.Fields["_explicitRange"] = "true"
@@ -631,9 +628,6 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 						_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "FORM_INVALID", formErr.Error())
 						t.finish(formErr)
 						return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
-					}
-					if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-						form.Fields["AccountNbr"] = conn.AccountMasked
 					}
 					form.Fields["FromDate"] = t.curDay.Format("02/01/2006")
 					form.Fields["ToDate"] = historyEffectiveToDate(t.curDay, time.Now())

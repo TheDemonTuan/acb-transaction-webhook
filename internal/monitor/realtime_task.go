@@ -381,9 +381,6 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return t.finishPoll(ctx, "PARTIAL", formErr.Error())
 	}
 	historyMarkup := resp.Body
-	if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-		form.Fields["AccountNbr"] = conn.AccountMasked
-	}
 	form.Fields["FromDate"] = t.today
 	form.Fields["ToDate"] = t.today
 	form.Fields["dse_nextEventName"] = "byDate"

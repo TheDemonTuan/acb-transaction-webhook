@@ -34,6 +34,10 @@ func TestSessionVerifierFiniteResultsAndExactAccountGate(t *testing.T) {
 		{name: "masked", account: "***2222", code: "VERIFICATION_ACCOUNT_MISMATCH", phase: "ACCOUNT"},
 		{name: "missing", code: "VERIFICATION_ACCOUNT_MISSING", phase: "ACCOUNT"},
 		{name: "empty", body: `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="AccountNbr" value=""></form>`, code: "VERIFICATION_ACCOUNT_MISSING", phase: "ACCOUNT"},
+		{name: "history_omitted_account", body: `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session"></form><table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td colspan="4">Không có giao dịch</td></tr></table>`, phase: "COMPLETE"},
+		{name: "history_empty_account", body: `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session"><input name="AccountNbr" value=""></form><table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>03/10/2026</td><td>TX1</td><td>0</td><td>100</td></tr></table>`, phase: "COMPLETE"},
+		{name: "history_unbound_get", body: `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session"></form><table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td colspan="4">Không có giao dịch</td></tr></table>`, code: "VERIFICATION_ACCOUNT_MISSING", phase: "ACCOUNT"},
+		{name: "history_invalid_rows", body: `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session"></form><table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr></table>`, code: "VERIFICATION_FORM_INVALID", phase: "ACCOUNT"},
 		{name: "invalid_form", body: `<div>ibkacctDetailProc AccountNbr synthetic-private-body</div>`, code: "VERIFICATION_FORM_INVALID", phase: "ACCOUNT"},
 		{name: "login", body: `<input name="username"><input name="password">`, code: "VERIFICATION_AUTH_REQUIRED", phase: "BOOTSTRAP"},
 		{name: "otp", body: `<input name="otp">`, code: "VERIFICATION_AUTH_REQUIRED", phase: "BOOTSTRAP"},
@@ -91,6 +95,10 @@ func TestSessionVerifierFiniteResultsAndExactAccountGate(t *testing.T) {
 				if tc.upstreamErr != nil {
 					return nil, tc.upstreamErr
 				}
+				if tc.name == "history_unbound_get" {
+					r = r.Clone(r.Context())
+					r.Method = http.MethodGet
+				}
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 			}))
 			if err != nil {
@@ -111,7 +119,7 @@ func TestSessionVerifierFiniteResultsAndExactAccountGate(t *testing.T) {
 			if logCode == "" {
 				logCode = "VERIFIED"
 			}
-			logs.assertResult(t, attempt.Generation, tc.phase, logCode, tc.upstreamErr == nil, tc.code == "" && !tc.cookieOnly || tc.code == "VERIFICATION_ACCOUNT_MISSING" || tc.code == "VERIFICATION_ACCOUNT_MISMATCH", tc.account != "" && tc.phase != "BOOTSTRAP" && !tc.cookieOnly, tc.name == "exact")
+			logs.assertResult(t, attempt.Generation, tc.phase, logCode, tc.upstreamErr == nil, tc.code == "" && !tc.cookieOnly || tc.code == "VERIFICATION_ACCOUNT_MISSING" || tc.code == "VERIFICATION_ACCOUNT_MISMATCH" || tc.name == "history_invalid_rows", tc.account != "" && tc.phase != "BOOTSTRAP" && !tc.cookieOnly, tc.name == "exact")
 			current, err := store.AuthAttemptStatusForOwner(ctx, attempt.ID, "fixture-owner")
 			if err != nil {
 				t.Fatal(err)

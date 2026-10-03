@@ -3,10 +3,14 @@ package acb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -366,6 +370,9 @@ func TestBootstrapResynchronizesWhenStaleFormRejected(t *testing.T) {
 	if resp.Kind != AccountDetailPage {
 		t.Fatalf("expected resynchronization to AccountDetailPage, got %v", resp.Kind)
 	}
+	if resp.RequestedAccount != "" {
+		t.Fatal("GET reprobe incorrectly proved an outbound account")
+	}
 	if len(requests) != 2 {
 		t.Fatalf("expected 2 requests (POST followed by GET fallback), got %d", len(requests))
 	}
@@ -463,6 +470,9 @@ func TestHistoryLoginPageResyncsBeforeAuthRequired(t *testing.T) {
 	}
 	if resp.Kind != HistoryPage {
 		t.Fatalf("expected HistoryPage after resync and replay, got: %s", resp.Kind)
+	}
+	if resp.RequestedAccount != fields["AccountNbr"] {
+		t.Fatal("history replay did not retain its actual outbound account")
 	}
 	if len(requests) != 3 {
 		t.Fatalf("expected exactly 3 requests (POST, GET probe, replay POST), got %d", len(requests))
@@ -654,4 +664,323 @@ func TestClientCloseIdleConnections(t *testing.T) {
 	}
 	// Verify CloseIdleConnections executes cleanly without panic
 	client.CloseIdleConnections()
+}
+
+// Keep the synthetic official origin intact while all traffic goes to local TLS.
+func newAccountContinuityClient(t *testing.T, handler http.HandlerFunc) *Client {
+	t.Helper()
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.TLSClientConfig.ServerName = serverURL.Hostname()
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != OfficialHost+":443" {
+			return nil, fmt.Errorf("unexpected fixture destination %q", address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+	client, err := NewClient("https://"+OfficialHost, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func accountContinuityHandoff(account string) authbrowser.Handoff {
+	return authbrowser.Handoff{
+		Version: 1,
+		Action:  "https://" + OfficialHost + "/acbib/Request",
+		Fields: map[string]string{
+			"dse_operationName":  "ibkacctDetailProc",
+			"dse_processorState": "old-state",
+			"dse_sessionId":      "old-session",
+			"AccountNbr":         account,
+		},
+		Cookies: []authbrowser.Cookie{{Name: "JSESSIONID", Value: "synthetic-session", Domain: OfficialHost, Path: "/", Secure: true}},
+	}
+}
+
+func accountContinuityForm(accountField, token string) string {
+	return `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="` + token + `-state"><input name="dse_sessionId" value="` + token + `-session">` + accountField + `</form>`
+}
+
+const accountContinuityHistoryTable = `<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td colspan="4">Không có giao dịch</td></tr></table>`
+
+func TestClientHistoryAccountOmissionKeepsSelectionAcrossSnapshot(t *testing.T) {
+	for _, field := range []struct {
+		name   string
+		markup string
+	}{
+		{name: "omitted"},
+		{name: "empty", markup: `<input name="AccountNbr" value="">`},
+	} {
+		for _, operation := range []string{"bootstrap", "bootstrap_date", "history", "history_date"} {
+			t.Run(field.name+"/"+operation, func(t *testing.T) {
+				posted := make(chan url.Values, 4)
+				var calls atomic.Int32
+				client := newAccountContinuityClient(t, func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodPost || r.Host != OfficialHost {
+						t.Errorf("unexpected fixture request: %s %s", r.Method, r.Host)
+					}
+					if err := r.ParseForm(); err != nil {
+						t.Error(err)
+					}
+					posted <- r.PostForm
+					call := calls.Add(1)
+					io.WriteString(w, accountContinuityForm(field.markup, fmt.Sprintf("fresh-%d", call))+accountContinuityHistoryTable)
+				})
+				handoff := accountContinuityHandoff("12345678")
+				if err := client.RestoreSession(handoff); err != nil {
+					t.Fatal(err)
+				}
+				selected := handoff.Fields["AccountNbr"]
+				var response Response
+				var err error
+				switch operation {
+				case "bootstrap":
+					response, err = client.Bootstrap(context.Background())
+				case "bootstrap_date":
+					response, err = client.BootstrapForDate(context.Background(), "03/10/2026")
+				case "history", "history_date":
+					fields := cloneFields(handoff.Fields)
+					selected = "87654321" // Caller-selected account must remain authoritative for the request.
+					fields["AccountNbr"] = selected
+					if operation == "history" {
+						response, err = client.History(context.Background(), handoff.Action, fields)
+					} else {
+						response, err = client.HistoryForDate(context.Background(), handoff.Action, fields, "03/10/2026")
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if response.StatusCode != http.StatusOK || response.Kind != HistoryPage || response.RequestedAccount != selected {
+					t.Fatalf("unexpected direct response metadata: status=%d kind=%s requested=%q", response.StatusCode, response.Kind, response.RequestedAccount)
+				}
+				if _, err := ParseHistoryPage(response.Body); err != nil {
+					t.Fatal(err)
+				}
+				form, err := ExtractHistoryForm(response.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if form.Fields["AccountNbr"] != "" {
+					t.Fatal("bank response was overwritten with the selected account")
+				}
+				if first := <-posted; first.Get("AccountNbr") != selected {
+					t.Fatal("first request did not post the selected account")
+				}
+				snapshot, err := client.SnapshotSession()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if snapshot.Fields["AccountNbr"] != selected || client.SessionAccountNumber() != selected || snapshot.Fields["dse_processorState"] != "fresh-1-state" || snapshot.Fields["dse_sessionId"] != "fresh-1-session" {
+					t.Fatal("snapshot lost the selection or kept stale conversational tokens")
+				}
+				form.Fields["_raw"] = "true"
+				form.Fields["dse_nextEventName"] = "nextPage"
+				nextResponse, err := client.HistoryForDate(context.Background(), form.Action, form.Fields, "03/10/2026")
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := <-posted
+				if next.Get("AccountNbr") != selected || next.Get("dse_processorState") != "fresh-1-state" || next.Get("dse_sessionId") != "fresh-1-session" || next.Get("dse_nextEventName") != "nextPage" || nextResponse.RequestedAccount != selected {
+					t.Fatal("continuation lost the selected account, fresh tokens, or navigation event")
+				}
+				snapshot, err = client.SnapshotSession()
+				if err != nil {
+					t.Fatal(err)
+				}
+				restarted, err := NewClient("https://"+OfficialHost, client.http.Transport)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := restarted.RestoreSession(snapshot); err != nil {
+					t.Fatal(err)
+				}
+				response, err = restarted.BootstrapForDate(context.Background(), "04/10/2026")
+				if err != nil {
+					t.Fatal(err)
+				}
+				last := <-posted
+				if response.RequestedAccount != selected || last.Get("AccountNbr") != selected || last.Get("dse_processorState") != "fresh-2-state" || last.Get("dse_sessionId") != "fresh-2-session" || last.Get("FromDate") != "04/10/2026" || last.Get("ToDate") != "04/10/2026" {
+					t.Fatal("restored snapshot lost the exact account, fresh tokens, or query day")
+				}
+			})
+		}
+	}
+}
+
+func TestClientNeverReplacesReturnedAccountOrFallsBackOnAccountDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		field   string
+		account string
+		kind    PageKind
+	}{
+		{name: "history_other", field: `<input name="AccountNbr" value="87654321">`, account: "87654321", kind: HistoryPage},
+		{name: "history_masked", field: `<input name="AccountNbr" value="****5678">`, account: "****5678", kind: HistoryPage},
+		{name: "detail_omitted", kind: AccountDetailPage},
+		{name: "detail_empty", field: `<input name="AccountNbr" value="">`, kind: AccountDetailPage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := accountContinuityForm(tc.field, "fresh")
+			if tc.kind == HistoryPage {
+				body += accountContinuityHistoryTable
+			}
+			client := newAccountContinuityClient(t, func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, body)
+			})
+			if err := client.RestoreSession(accountContinuityHandoff("12345678")); err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.Bootstrap(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Kind != tc.kind || response.RequestedAccount != "12345678" || response.Body != body {
+				t.Fatal("response identity or actual request metadata was changed")
+			}
+			snapshot, err := client.SnapshotSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Fields["AccountNbr"] != tc.account || client.SessionAccountNumber() != tc.account || snapshot.Fields["dse_processorState"] != "fresh-state" {
+				t.Fatal("returned account was replaced or account-detail omission used a fallback")
+			}
+		})
+	}
+}
+
+func TestClientCookieOnlyHistoryDoesNotInventAccount(t *testing.T) {
+	requests := make(chan string, 3)
+	client := newAccountContinuityClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if r.PostForm.Get("AccountNbr") != "" {
+			t.Error("cookie-only history invented an outbound account")
+		}
+		requests <- r.Method
+		io.WriteString(w, accountContinuityForm("", "fresh")+accountContinuityHistoryTable)
+	})
+	if err := client.RestoreCookies(accountContinuityHandoff("").Cookies); err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Kind != HistoryPage || response.RequestedAccount != "" || client.SessionAccountNumber() != "" {
+		t.Fatal("cookie-only session inferred an account")
+	}
+	if first, second := <-requests, <-requests; first != http.MethodGet || second != http.MethodPost {
+		t.Fatalf("cookie-only bootstrap sequence=%s,%s", first, second)
+	}
+	snapshot, err := client.SnapshotSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Fields["AccountNbr"] != "" {
+		t.Fatal("cookie-only snapshot invented an account")
+	}
+}
+
+func TestClientGetAndRedirectResponsesDoNotProveRequestedAccount(t *testing.T) {
+	for _, scenario := range []string{"get", "redirect_get", "redirect_post", "redirect_query", "redirect_back"} {
+		t.Run(scenario, func(t *testing.T) {
+			var calls atomic.Int32
+			client := newAccountContinuityClient(t, func(w http.ResponseWriter, r *http.Request) {
+				call := calls.Add(1)
+				if call == 1 && scenario != "get" {
+					status, location := http.StatusTemporaryRedirect, "/acbib/other"
+					if scenario == "redirect_get" {
+						status = http.StatusFound
+					} else if scenario == "redirect_query" {
+						location = "/acbib/Request?fresh=true"
+					}
+					http.Redirect(w, r, location, status)
+					return
+				}
+				if call == 2 && scenario == "redirect_back" {
+					http.Redirect(w, r, "/acbib/Request", http.StatusTemporaryRedirect)
+					return
+				}
+				io.WriteString(w, accountContinuityForm("", "fresh")+accountContinuityHistoryTable)
+			})
+			if err := client.RestoreSession(accountContinuityHandoff("12345678")); err != nil {
+				t.Fatal(err)
+			}
+			var response Response
+			var err error
+			if scenario == "get" {
+				response, err = client.Get(context.Background(), "/acbib/Request")
+			} else {
+				response, err = client.Bootstrap(context.Background())
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusOK || response.Kind != HistoryPage || response.RequestedAccount != "" {
+				t.Fatal("GET or redirect was treated as direct account-bound POST proof")
+			}
+			expectedCalls := 2
+			if scenario == "get" {
+				expectedCalls = 1
+			} else if scenario == "redirect_back" {
+				expectedCalls = 3
+			}
+			if got := calls.Load(); got != int32(expectedCalls) {
+				t.Fatalf("request count=%d want=%d", got, expectedCalls)
+			}
+		})
+	}
+}
+
+func TestClientHistoryReprobePreservesSelectionWithoutAccountProof(t *testing.T) {
+	requests := make(chan string, 4)
+	var calls atomic.Int32
+	client := newAccountContinuityClient(t, func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		requests <- r.Method
+		if call == 1 {
+			io.WriteString(w, `<input name="username"><input type="password" name="password">`)
+			return
+		}
+		io.WriteString(w, accountContinuityForm("", "resynced")+accountContinuityHistoryTable)
+	})
+	if err := client.RestoreSession(accountContinuityHandoff("12345678")); err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Kind != HistoryPage || response.RequestedAccount != "" {
+		t.Fatal("reprobe response incorrectly proved an account-bound POST")
+	}
+	if first, second := <-requests, <-requests; first != http.MethodPost || second != http.MethodGet {
+		t.Fatalf("reprobe sequence=%s,%s", first, second)
+	}
+	snapshot, err := client.SnapshotSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Fields["AccountNbr"] != "12345678" || snapshot.Fields["dse_processorState"] != "resynced-state" || snapshot.Fields["dse_sessionId"] != "resynced-session" {
+		t.Fatal("history reprobe lost the existing candidate or fresh tokens")
+	}
+	response, err = client.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.RequestedAccount != "12345678" || <-requests != http.MethodPost {
+		t.Fatal("next direct POST failed to reuse the exact candidate")
+	}
 }

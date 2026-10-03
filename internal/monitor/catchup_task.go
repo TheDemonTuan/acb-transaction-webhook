@@ -504,9 +504,6 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			t.finishDone(formErr)
 			return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
 		}
-		if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-			form.Fields["AccountNbr"] = conn.AccountMasked
-		}
 		form.Fields["FromDate"] = t.currentDay.Format("02/01/2006")
 		form.Fields["ToDate"] = historyEffectiveToDate(t.currentDay, t.m.now())
 		form.Fields["dse_nextEventName"] = "byDate"
@@ -556,9 +553,6 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 						_ = t.finishPoll(ctx, "FAILED", formErr.Error())
 						t.finishDone(formErr)
 						return scheduler.TaskStepResult{Done: true, Error: formErr, Outcome: scheduler.OutcomeFatal}, formErr
-					}
-					if form.Fields["AccountNbr"] == "" && conn.AccountMasked != "" {
-						form.Fields["AccountNbr"] = conn.AccountMasked
 					}
 					form.Fields["FromDate"] = t.currentDay.Format("02/01/2006")
 					form.Fields["ToDate"] = historyEffectiveToDate(t.currentDay, t.m.now())

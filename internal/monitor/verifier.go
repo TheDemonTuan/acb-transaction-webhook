@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -144,9 +145,15 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 				result.formValid, result.accountPresent, result.accountMatch = true, account != "", account == expectedAccount
 				result.Unlock()
 				if account == "" {
-					return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISSING"}
-				}
-				if account != expectedAccount {
+					// ACB history can omit the selected account after a direct exact-account
+					// query. Do not apply this to account/summary pages or resync GETs.
+					if response.Kind != acb.HistoryPage || response.StatusCode != http.StatusOK || response.RequestedAccount != expectedAccount {
+						return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISSING"}
+					}
+					if _, err := acb.ParseHistoryPage(response.Body); err != nil {
+						return &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}
+					}
+				} else if account != expectedAccount {
 					return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
 				}
 			}

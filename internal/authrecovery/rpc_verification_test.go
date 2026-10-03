@@ -43,6 +43,7 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 		{"exact", "222222222", "CATCHING_UP", ""},
 		{"other", "111111111", "MANUAL_REQUIRED", "VERIFICATION_ACCOUNT_MISMATCH"},
 		{"missing", "", "MANUAL_REQUIRED", "VERIFICATION_ACCOUNT_MISSING"},
+		{"history_omitted", "", "CATCHING_UP", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCoordinatorFixture(t)
@@ -70,6 +71,9 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 			}
 			bank, err := acb.NewClient("https://online.acb.com.vn", verificationBankTransport(func(r *http.Request) (*http.Response, error) {
 				body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session">` + accountField + `</form>`
+				if tc.name == "history_omitted" {
+					body += `<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td colspan="4">Không có giao dịch</td></tr></table>`
+				}
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 			}))
 			if err != nil {
@@ -97,13 +101,13 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 				t.Fatal(err)
 			}
 			expected := 0
-			if tc.name == "exact" {
+			if tc.state == "CATCHING_UP" {
 				expected = 1
 			}
 			if runs != expected || sessions != expected {
 				t.Fatalf("incorrect commit/recovery gate: sessions=%d runs=%d", sessions, runs)
 			}
-			if tc.name != "exact" {
+			if tc.state != "CATCHING_UP" {
 				old, err := f.store.Session(f.ctx, prior.ID, prior.Generation)
 				if err != nil || string(old.Envelope) != "previous-encrypted-session" {
 					t.Fatalf("rejection replaced original encrypted session: %v", err)

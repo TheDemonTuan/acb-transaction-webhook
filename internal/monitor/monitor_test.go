@@ -152,36 +152,6 @@ func TestNetworkBackoffIncreasesAndSuccessClearsIt(t *testing.T) {
 	}
 }
 
-func TestMonitorUsesConfiguredAccountWhenResponseOmitsAccountNbr(t *testing.T) {
-	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	_, _ = store.ConfigureConnection(ctx, "40478827")
-	_, _ = store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING'`)
-
-	mock := &mockBankClient{
-		getResp: acb.Response{
-			StatusCode: 200,
-			Kind:       acb.AccountDetailPage,
-			Body: `<form action="/acbib/Request">
-				<input name="dse_operationName" value="ibkacctDetailProc">
-				<input name="dse_processorState" value="acctDetailPage">
-				<input name="dse_sessionId" value="session">
-			</form>`,
-		},
-		historyResp: acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: mockHistoryHTML},
-	}
-	if err := New(store, mock, 5*time.Second, 5*time.Second).PollOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if mock.historyFields["AccountNbr"] != "40478827" {
-		t.Fatalf("AccountNbr=%q", mock.historyFields["AccountNbr"])
-	}
-}
-
 func TestMonitorPollNotifierFiresOnCompletion(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
