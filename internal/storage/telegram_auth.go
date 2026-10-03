@@ -405,7 +405,7 @@ func (s *Store) ConsumeTelegramAuthAction(ctx context.Context, actionID string, 
 			if _, err := tx.ExecContext(ctx, `UPDATE telegram_auth_actions SET episode_id=? WHERE id=?`, a.EpisodeID, a.ID); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET consent_action_id=?,consent_expires_at=?,consent_consumed_at=NULL WHERE id=?`, a.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano), a.EpisodeID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE auth_recovery_episodes SET consent_action_id=?,consent_expires_at=?,consent_consumed_at=NULL,status_message_id=NULL WHERE id=?`, a.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano), a.EpisodeID); err != nil {
 				return err
 			}
 		}

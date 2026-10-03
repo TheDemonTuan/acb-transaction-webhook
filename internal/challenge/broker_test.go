@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/png"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -644,5 +645,44 @@ func TestChallengeFormatPreservesCaseAndLeadingZeros(t *testing.T) {
 		if got := ValidResponse(tc.kind, tc.value); got != tc.valid {
 			t.Errorf("kind=%s validity=%t", tc.kind, got)
 		}
+	}
+}
+
+type receiptSender struct {
+	*fixtureSender
+	received chan string
+}
+
+func (s *receiptSender) SendText(_ context.Context, _ int64, text string, _ any) (int64, error) {
+	s.received <- text
+	return 457, nil
+}
+
+func TestAcceptedReplyAcknowledgesBeforeWaitingForBank(t *testing.T) {
+	for _, kind := range []string{"CAPTCHA_TEXT", "OTP"} {
+		t.Run(kind, func(t *testing.T) {
+			b, e, _ := brokerFixture(t, kind)
+			c := promptFixture(t, b, e, kind)
+			sender := &receiptSender{fixtureSender: b.Sender.(*fixtureSender), received: make(chan string, 4)}
+			b.Sender = sender
+			entered, release := make(chan struct{}), make(chan struct{})
+			b.Submitter.(*fixtureSubmitter).after = func() { close(entered); <-release }
+			done := make(chan error, 1)
+			go func() { done <- b.HandleReply(context.Background(), 123, c.PromptMessageID, 1000, "001234") }()
+			defer func() { close(release); <-done }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("bank submission did not start")
+			}
+			select {
+			case text := <-sender.received:
+				if strings.Contains(text, "001234") || challengeStatus(t, b, c.ID) != "CONSUMING" {
+					t.Fatal("receipt exposed the code or preceded durable consumption")
+				}
+			default:
+				t.Fatal("accepted reply was silent while waiting for the bank")
+			}
+		})
 	}
 }

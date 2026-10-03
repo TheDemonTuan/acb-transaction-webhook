@@ -23,6 +23,7 @@ type RecoveryBrowser interface {
 	CaptureCaptcha(context.Context, string, string) ([]byte, error)
 	SubmitLogin(context.Context, string, authbrowser.LoginInput) (authbrowser.AuthObservation, error)
 	SubmitCaptcha(context.Context, string, authbrowser.ChallengeInput) (authbrowser.AuthObservation, error)
+	RequestOTP(context.Context, string, authbrowser.ChallengeInput) (authbrowser.AuthObservation, error)
 	SubmitOTP(context.Context, string, authbrowser.ChallengeInput) (authbrowser.AuthObservation, error)
 	Cancel(context.Context, string) error
 	Complete(context.Context, string) error
@@ -394,7 +395,11 @@ func (c *Coordinator) reconcile(ctx context.Context) error {
 	return c.advance(ctx, e, observation)
 }
 func (c *Coordinator) transition(ctx context.Context, e *storage.AuthRecoveryEpisode, state, reason string) error {
-	if e.State == state {
+	// Keep the one-use OTP request reservation throughout this browser attempt.
+	if reason == "" && e.ReasonCode == "OTP_REQUEST_SENT" {
+		reason = e.ReasonCode
+	}
+	if e.State == state && e.ReasonCode == reason {
 		return nil
 	}
 	if err := c.Store.TransitionAuthRecovery(ctx, e.ID, e.Generation, e.State, state, reason); err != nil {
@@ -457,7 +462,7 @@ func (c *Coordinator) recoverChallenge(ctx context.Context, e storage.AuthRecove
 		if err := c.Store.FinishAuthChallenge(ctx, ch.ID, "INVALIDATED"); err != nil {
 			return true, err
 		}
-		if o.State == authbrowser.Authenticated || ch.Kind == "CAPTCHA_TEXT" && o.State == authbrowser.OTPRequired {
+		if o.State == authbrowser.Authenticated || ch.Kind == "CAPTCHA_TEXT" && (o.State == authbrowser.OTPRequired || o.State == authbrowser.OTPRequestRequired) {
 			return false, nil
 		}
 		return true, c.finish(ctx, e, "WAIT_OPERATOR", "CHALLENGE_OUTCOME_UNKNOWN", time.Time{})
@@ -527,6 +532,8 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		return c.submitLogin(ctx, e, o, "", false, "")
 	case authbrowser.CaptchaRequired:
 		return c.captcha(ctx, e, o)
+	case authbrowser.OTPRequestRequired:
+		return c.requestOTP(ctx, e, o)
 	case authbrowser.OTPRequired:
 		if e.OTPSubmissions >= MaxOTPSubmissions {
 			return c.finish(ctx, e, "WAIT_OPERATOR", "OTP_REJECTED", time.Time{})
@@ -573,6 +580,44 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		}
 		return c.unknown(ctx, e, o.ReasonCode)
 	}
+}
+
+func (c *Coordinator) requestOTP(ctx context.Context, e storage.AuthRecoveryEpisode, o authbrowser.AuthObservation) error {
+	if err := c.current(ctx, e, true); err != nil {
+		return err
+	}
+	if e.ReasonCode == "OTP_REQUEST_SENT" {
+		return c.finish(ctx, e, "WAIT_OPERATOR", "OTP_REQUEST_OUTCOME_UNKNOWN", time.Time{})
+	}
+	recorded, err := c.loginRecorded(ctx, e)
+	if err != nil {
+		return err
+	}
+	if !recorded {
+		return c.finish(ctx, e, "WAIT_OPERATOR", "LOGIN_OUTCOME_UNKNOWN", time.Time{})
+	}
+	if s := c.submissions[e.AttemptID]; o.Revision == "" || s != nil && s.revisions[o.Revision] {
+		return c.finish(ctx, e, "WAIT_OPERATOR", "OTP_REQUEST_OUTCOME_UNKNOWN", time.Time{})
+	}
+	// Commit before external I/O: an error or crash must not resend this request.
+	if err := c.transition(ctx, &e, "LOGIN", "OTP_REQUEST_SENT"); err != nil {
+		return err
+	}
+	if err := c.current(ctx, e, true); err != nil {
+		return err
+	}
+	c.rememberSubmission(e.AttemptID, o.Revision, false)
+	next, err := c.Browser.RequestOTP(ctx, e.AttemptID, authbrowser.ChallengeInput{Revision: o.Revision})
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return c.finish(ctx, e, "WAIT_OPERATOR", "OTP_REQUEST_OUTCOME_UNKNOWN", time.Time{})
+	}
+	if err := c.current(ctx, e, true); err != nil {
+		return err
+	}
+	return c.advance(ctx, e, next)
 }
 func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode, reason string) error {
 	w := c.windows[e.AttemptID]

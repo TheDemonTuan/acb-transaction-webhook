@@ -17,6 +17,7 @@ const (
 	LoginForm            AuthPageState = "LOGIN_FORM"
 	CaptchaRequired      AuthPageState = "CAPTCHA_REQUIRED"
 	OTPRequired          AuthPageState = "OTP_REQUIRED"
+	OTPRequestRequired   AuthPageState = "OTP_REQUEST_REQUIRED"
 	Authenticated        AuthPageState = "AUTHENTICATED"
 	LoginRejected        AuthPageState = "LOGIN_REJECTED"
 	Maintenance          AuthPageState = "MAINTENANCE"
@@ -60,6 +61,10 @@ func (c *Client) SubmitCaptcha(ctx context.Context, attemptID string, input Chal
 
 func (c *Client) SubmitOTP(ctx context.Context, attemptID string, input ChallengeInput) (AuthObservation, error) {
 	return c.automation(ctx, attemptID, "otp", input)
+}
+
+func (c *Client) RequestOTP(ctx context.Context, attemptID string, input ChallengeInput) (AuthObservation, error) {
+	return c.automation(ctx, attemptID, "request-otp", input)
 }
 
 func (c *Client) automation(ctx context.Context, attemptID, action string, input any) (AuthObservation, error) {

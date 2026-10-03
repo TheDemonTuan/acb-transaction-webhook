@@ -67,6 +67,11 @@ type coordinatorFixture struct {
 	observation                                      authbrowser.AuthObservation
 	starts, logins, captchas, otps, cancels, prompts int
 	observes, credentialReads                        int
+	requests                                         int
+	requestFail, requestMalformed                    bool
+	requestInputs                                    []authbrowser.ChallengeInput
+	requestReasons                                   []string
+	requestReplies                                   []authbrowser.AuthObservation
 	startFail, submitFail, aiReject                  bool
 	workerFail                                       bool
 	replyBodies                                      []string
@@ -98,6 +103,15 @@ func newUnconsentedCoordinatorFixture(t *testing.T) *coordinatorFixture {
 	var crop bytes.Buffer
 	if err := png.Encode(&crop, image.NewRGBA(image.Rect(0, 0, 12, 8))); err != nil {
 		t.Fatal(err)
+	}
+	observationExpiry := f.observation.ExpiresAt
+	encodeObservation := func(w http.ResponseWriter) {
+		// Synthetic state-only replies still represent a finite browser session.
+		// Preserve explicit expirations, including deliberately expired fixtures.
+		if f.observation.ExpiresAt.IsZero() {
+			f.observation.ExpiresAt = observationExpiry
+		}
+		json.NewEncoder(w).Encode(f.observation)
 	}
 	browserServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -134,7 +148,7 @@ func newUnconsentedCoordinatorFixture(t *testing.T) *coordinatorFixture {
 			json.NewEncoder(w).Encode(authbrowser.Session{AttemptID: strings.Split(r.URL.Path, "/")[2], Status: "RUNNING"})
 		case strings.HasSuffix(r.URL.Path, "/observation"):
 			f.observes++
-			json.NewEncoder(w).Encode(f.observation)
+			encodeObservation(w)
 		case strings.HasSuffix(r.URL.Path, "/captcha") && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(crop.Bytes())
@@ -147,12 +161,42 @@ func newUnconsentedCoordinatorFixture(t *testing.T) *coordinatorFixture {
 			if len(f.loginReplies) > 0 {
 				f.observation = f.loginReplies[0]
 				f.loginReplies = f.loginReplies[1:]
-				json.NewEncoder(w).Encode(f.observation)
+				encodeObservation(w)
 				return
 			}
 			f.observation.State = authbrowser.OTPRequired
 			f.observation.Revision = "otp-1"
-			json.NewEncoder(w).Encode(f.observation)
+			encodeObservation(w)
+		case strings.HasSuffix(r.URL.Path, "/request-otp"):
+			f.requests++
+			var input authbrowser.ChallengeInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				http.Error(w, "invalid fixture request", 400)
+				return
+			}
+			f.requestInputs = append(f.requestInputs, input)
+			var reason string
+			if err := f.store.DB().QueryRowContext(f.ctx, `SELECT reason_code FROM auth_recovery_episodes WHERE attempt_id=?`, strings.Split(r.URL.Path, "/")[2]).Scan(&reason); err != nil {
+				http.Error(w, "missing durable request reservation", 500)
+				return
+			}
+			f.requestReasons = append(f.requestReasons, reason)
+			if f.requestFail {
+				http.Error(w, "OTP_REQUEST_SECRET_001234", 503)
+				return
+			}
+			if f.requestMalformed {
+				io.WriteString(w, `{`)
+				return
+			}
+			if len(f.requestReplies) > 0 {
+				f.observation = f.requestReplies[0]
+				f.requestReplies = f.requestReplies[1:]
+			} else {
+				f.observation.State = authbrowser.OTPRequired
+				f.observation.Revision = "otp-1"
+			}
+			encodeObservation(w)
 		case strings.HasSuffix(r.URL.Path, "/captcha"):
 			f.captchas++
 			if f.aiReject {
@@ -162,12 +206,12 @@ func newUnconsentedCoordinatorFixture(t *testing.T) *coordinatorFixture {
 				f.observation.State = authbrowser.OTPRequired
 				f.observation.Revision = "otp-1"
 			}
-			json.NewEncoder(w).Encode(f.observation)
+			encodeObservation(w)
 		case strings.HasSuffix(r.URL.Path, "/otp"):
 			f.otps++
 			f.observation.State = authbrowser.Authenticated
 			f.observation.Revision = "authenticated"
-			json.NewEncoder(w).Encode(f.observation)
+			encodeObservation(w)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1335,5 +1379,215 @@ func TestCoordinatorThreeFailedClicksPermitFreshBrowserAttempt(t *testing.T) {
 	e := f.episode()
 	if f.starts != 4 || e.AttemptCount != 4 || e.BudgetStartCount != 3 || e.State != "WAITING_OTP" || f.logins != 1 {
 		t.Fatalf("fourth fresh button stuck: starts=%d logins=%d episode=%+v", f.starts, f.logins, e)
+	}
+}
+
+func TestRecoveryCoordinatorCaptchaThenOTPRequestOnce(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.observation.CaptchaRequired = true
+	f.loginReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-1"}}
+	f.reconcile()
+	ch := f.pending()
+	if ch.Kind != "CAPTCHA_TEXT" || f.requests != 0 || f.logins != 0 {
+		t.Fatalf("OTP request preceded CAPTCHA/login: kind=%s state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", ch.Kind, f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+	if err := f.broker.HandleReply(f.ctx, 22, ch.PromptMessageID, 901, "AB12CD"); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := f.store.DB().QueryRowContext(f.ctx, `SELECT status FROM auth_challenges WHERE id=?`, ch.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	e := f.episode()
+	if status != "CONSUMED" || f.requests != 1 || f.logins != 1 || f.starts != 1 || e.State != "WAITING_OTP" || e.ReasonCode != "OTP_REQUEST_SENT" || e.OTPSubmissions != 0 {
+		t.Fatalf("CAPTCHA/OTP request flow: captcha=%s state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d otpSubmissions=%d", status, e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts, e.OTPSubmissions)
+	}
+	if len(f.requestInputs) != 1 || f.requestInputs[0].Revision != "confirm-1" || f.requestInputs[0].Value != "" || len(f.requestReasons) != 1 || f.requestReasons[0] != "OTP_REQUEST_SENT" {
+		t.Fatalf("OTP request reservation/input: inputs=%+v reasons=%v state=%s reason=%s", f.requestInputs, f.requestReasons, e.State, e.ReasonCode)
+	}
+	otp := f.pending()
+	if otp.Kind != "OTP" || otp.BrowserRevision != "otp-1" {
+		t.Fatalf("OTP prompt: kind=%s revision=%s state=%s reason=%s", otp.Kind, otp.BrowserRevision, f.episode().State, f.episode().ReasonCode)
+	}
+	f.restart(false)
+	f.reconcile()
+	if err := f.broker.HandleReply(f.ctx, 22, otp.PromptMessageID, 902, "001234"); err != nil {
+		t.Fatal(err)
+	}
+	if f.requests != 1 || f.logins != 1 || f.starts != 1 || f.otps != 1 || f.episode().State != "VERIFYING" {
+		t.Fatalf("OTP response flow: state=%s reason=%s requests=%d logins=%d starts=%d otps=%d", f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts, f.otps)
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestAmbiguousOutcomesNeverReplay(t *testing.T) {
+	for _, outcome := range []string{"transport", "response", "same-form", "new-form"} {
+		t.Run(outcome, func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			f.loginReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-1"}}
+			switch outcome {
+			case "transport":
+				f.requestFail = true
+			case "response":
+				f.requestMalformed = true
+			case "same-form":
+				f.requestReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-1"}}
+			case "new-form":
+				f.requestReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-2"}}
+			}
+			f.reconcile()
+			e := f.episode()
+			if e.State != "WAIT_OPERATOR" || e.ReasonCode != "OTP_REQUEST_OUTCOME_UNKNOWN" || f.requests != 1 || len(f.requestReasons) != 1 || f.requestReasons[0] != "OTP_REQUEST_SENT" || f.prompts != 0 {
+				t.Fatalf("ambiguous request: state=%s reason=%s requests=%d reservations=%v logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.requestReasons, f.logins, f.starts, f.prompts)
+			}
+			f.requestFail, f.requestMalformed = false, false
+			f.observation = authbrowser.AuthObservation{State: authbrowser.OTPRequestRequired, Revision: "confirm-after-restart"}
+			f.restart(false)
+			f.reconcile()
+			if f.requests != 1 || f.logins != 1 || f.starts != 1 || f.prompts != 0 {
+				t.Fatalf("request restart: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestUnknownPageWaitsWithoutPrompt(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.loginReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-1"}}
+	f.requestReplies = []authbrowser.AuthObservation{{State: authbrowser.Unknown, Revision: "next-unobserved", ReasonCode: "UNRECOGNIZED_PAGE"}}
+	f.reconcile()
+	if e := f.episode(); e.State != "LOGIN" || e.ReasonCode != "OTP_REQUEST_SENT" || f.prompts != 0 || f.requests != 1 {
+		t.Fatalf("unknown next page: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+	f.restart(false)
+	for range 10 {
+		f.reconcile()
+	}
+	if e := f.episode(); e.State != "MANUAL_REQUIRED" || e.ReasonCode != "UNRECOGNIZED_PAGE" || f.requests != 1 || f.logins != 1 || f.starts != 1 || f.prompts != 0 {
+		t.Fatalf("unknown page bound: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+}
+
+func TestRecoveryCoordinatorRestartOTPRequestReservationNeverReplays(t *testing.T) {
+	for _, next := range []authbrowser.AuthPageState{authbrowser.OTPRequestRequired, authbrowser.OTPRequired} {
+		t.Run(string(next), func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			e := f.episode()
+			a, err := f.store.StartRecoveryAuthAttempt(f.ctx, e.ID, e.Generation, BrowserAttemptTTL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.MarkAuthAttemptInProgress(f.ctx, a.ID); err != nil {
+				t.Fatal(err)
+			}
+			e = f.episode()
+			if err := f.store.TransitionAuthRecovery(f.ctx, e.ID, e.Generation, e.State, "LOGIN", "OTP_REQUEST_SENT"); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.RecordRecoveryLogin(f.ctx, e.ID, e.Generation); err != nil {
+				t.Fatal(err)
+			}
+			f.observation = authbrowser.AuthObservation{State: next, Revision: "restart-form"}
+			if err := f.store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			f.store, err = storage.Open(f.ctx, f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.restart(false)
+			f.reconcile()
+			e = f.episode()
+			if f.requests != 0 || f.logins != 0 || f.starts != 0 {
+				t.Fatalf("reserved request restart: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+			}
+			if next == authbrowser.OTPRequired {
+				if e.State != "WAITING_OTP" || f.pending().Kind != "OTP" || f.prompts != 1 {
+					t.Fatalf("restart OTP adoption: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+				}
+			} else if e.State != "WAIT_OPERATOR" || e.ReasonCode != "OTP_REQUEST_OUTCOME_UNKNOWN" || f.prompts != 0 {
+				t.Fatalf("reserved confirmation: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+			}
+		})
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestAfterOTPPageNeverReplays(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.loginReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "confirm-1"}}
+	f.reconcile()
+	f.observation = authbrowser.AuthObservation{State: authbrowser.OTPRequestRequired, Revision: "confirm-2"}
+	f.restart(false)
+	f.reconcile()
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "OTP_REQUEST_OUTCOME_UNKNOWN" || f.requests != 1 || f.logins != 1 || f.starts != 1 || f.prompts != 1 {
+		t.Fatalf("reservation after OTP page: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestNeedsLoginReservation(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.observation = authbrowser.AuthObservation{State: authbrowser.OTPRequestRequired, Revision: "unexpected-confirm"}
+	f.reconcile()
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "LOGIN_OUTCOME_UNKNOWN" || f.requests != 0 || f.logins != 0 || f.prompts != 0 {
+		t.Fatalf("missing login reservation: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestNeedsCurrentConsent(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.reconcile()
+	e := f.episode()
+	if _, err := f.store.DB().ExecContext(f.ctx, `UPDATE auth_recovery_episodes SET consent_consumed_at=NULL WHERE id=?`, e.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.controller.advance(f.ctx, e, authbrowser.AuthObservation{State: authbrowser.OTPRequestRequired, Revision: "confirm-1"}); err == nil {
+		t.Fatalf("OTP request bypassed consent: state=%s reason=%s requests=%d logins=%d starts=%d", f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts)
+	}
+	if f.requests != 0 || f.logins != 1 || f.starts != 1 {
+		t.Fatalf("invalid consent reached request: state=%s reason=%s requests=%d logins=%d starts=%d", f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts)
+	}
+}
+
+func TestRecoveryCoordinatorConsumingCaptchaCrashAdoptsOTPConfirmation(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.observation.CaptchaRequired = true
+	f.reconcile()
+	ch := f.pending()
+	e := f.episode()
+	if _, err := f.store.ConsumeAuthChallenge(f.ctx, ch.ID, ch.Generation, ch.BrowserRevision, 22, ch.PromptMessageID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.RecordRecoveryLogin(f.ctx, e.ID, e.Generation); err != nil {
+		t.Fatal(err)
+	}
+	f.observation = authbrowser.AuthObservation{State: authbrowser.OTPRequestRequired, Revision: "confirm-after-captcha"}
+	f.restart(false)
+	f.reconcile()
+	if f.requests != 1 || f.logins != 0 || f.starts != 1 || f.pending().Kind != "OTP" {
+		t.Fatalf("consumed CAPTCHA adoption: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+	if err := f.broker.HandleReply(f.ctx, 22, ch.PromptMessageID, 902, "AB12CD"); err == nil {
+		t.Fatalf("consumed CAPTCHA accepted reply: state=%s reason=%s requests=%d logins=%d starts=%d", f.episode().State, f.episode().ReasonCode, f.requests, f.logins, f.starts)
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestRejectsConsumedRevision(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.loginReplies = []authbrowser.AuthObservation{{State: authbrowser.OTPRequestRequired, Revision: "login-1"}}
+	f.reconcile()
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "OTP_REQUEST_OUTCOME_UNKNOWN" || f.requests != 0 || f.logins != 1 || f.prompts != 0 {
+		t.Fatalf("consumed revision: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
+	}
+}
+
+func TestRecoveryCoordinatorOTPRequestRejectsPreviousAttemptLogin(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	e := f.episode()
+	if _, err := f.store.DB().ExecContext(f.ctx, `UPDATE auth_recovery_episodes SET last_login_at=? WHERE id=?`, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano), e.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.observation = authbrowser.AuthObservation{State: authbrowser.OTPRequestRequired, Revision: "unexpected-confirm"}
+	f.reconcile()
+	if e := f.episode(); e.State != "WAIT_OPERATOR" || e.ReasonCode != "LOGIN_OUTCOME_UNKNOWN" || f.requests != 0 || f.logins != 0 || f.prompts != 0 {
+		t.Fatalf("previous attempt login: state=%s reason=%s requests=%d logins=%d starts=%d prompts=%d", e.State, e.ReasonCode, f.requests, f.logins, f.starts, f.prompts)
 	}
 }

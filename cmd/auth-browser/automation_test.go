@@ -231,14 +231,14 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		}
 		return data
 	}
-	initial, otp, authenticated := readFixture("bank-login.html"), readFixture("otp.html"), readFixture("authenticated.html")
+	initial, confirmation, otp, authenticated := readFixture("bank-login.html"), readFixture("observed-otp-request.html"), readFixture("otp.html"), readFixture("authenticated.html")
 	var imageBytes bytes.Buffer
 	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 160, 50))); err != nil {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
-	loginCount, otpCount := 0, 0
-	credentialsOK := false
+	loginCount, requestCount, otpCount, unexpectedPostCount := 0, 0, 0, 0
+	credentialsOK, requestOK := false, false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Render the observed promotional frame without reaching any real bank.
 		w.Header().Set("Content-Security-Policy", "frame-src 'none'")
@@ -268,9 +268,20 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 			_, _ = w.Write(authenticated)
 			return
 		}
-		loginCount++
-		credentialsOK = r.Form.Get("UserName") == "fixture-user" && r.Form.Get("PassWord") == "fixture-password" && r.Form.Get("SecurityCode") == "AB12CD"
-		_, _ = w.Write(otp)
+		if r.Form.Get("dse_operationName") == "detectLoginNewDeviceProc" {
+			requestCount++
+			requestOK = r.Form.Get("dse_processorState") == "confirmPage" && r.Form.Get("dse_nextEventName") == "ok" && r.Form.Get("AuthTyp") == "synthetic-selected-method"
+			_, _ = w.Write(otp) // Synthetic next page; not evidence of real ACB OTP selectors.
+			return
+		}
+		if r.Form.Get("UserName") != "" {
+			loginCount++
+			credentialsOK = r.Form.Get("UserName") == "fixture-user" && r.Form.Get("PassWord") == "fixture-password" && r.Form.Get("SecurityCode") == "AB12CD"
+			_, _ = w.Write(confirmation)
+			return
+		}
+		unexpectedPostCount++
+		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer upstream.Close()
 	s := &server{profiles: t.TempDir(), browserExec: browser, extraFlags: []string{"--headless=new"}, loginURL: upstream.URL + "/acbib/Request", internalToken: "fixture-internal", internalAuthRequired: true}
@@ -320,15 +331,39 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 	}
 	input := authbrowser.LoginInput{Revision: o.Revision, Username: "fixture-user", Password: "fixture-password", AccountNumber: "222222222", Captcha: "AB12CD"}
 	o, err = client.SubmitLogin(ctx, attempt, input)
-	if err != nil || o.State != authbrowser.OTPRequired {
-		t.Fatalf("known bank anchor did not advance to OTP: %+v %v", o, err)
+	if err != nil || o.State != authbrowser.OTPRequestRequired {
+		t.Fatalf("known bank anchor did not advance to observed confirmation: %+v %v", o, err)
 	}
 	if _, err := client.SubmitLogin(ctx, attempt, input); !authbrowser.IsHTTPStatus(err, 409) {
 		t.Fatal("bank anchor allowed replaying credentials")
 	}
+	requestRevision := o.Revision
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: requestRevision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 400) {
+		t.Fatal("request action accepted an answer")
+	}
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: "old-revision"}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("request action accepted an old revision")
+	}
+	if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: requestRevision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 422) {
+		t.Fatal("method radio was treated as an OTP input")
+	}
+	o, err = client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: requestRevision})
+	if err != nil || o.State != authbrowser.OTPRequired {
+		t.Fatalf("observed confirmation did not reach the synthetic numeric OTP fixture: %+v %v", o, err)
+	}
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: requestRevision}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("confirmation revision was replayed after navigation")
+	}
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision}); !authbrowser.IsHTTPStatus(err, 422) {
+		t.Fatal("request action was accepted outside the exact confirmation state")
+	}
+	otpRevision := o.Revision
 	o, err = client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision, Value: "001234"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := client.SubmitOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: otpRevision, Value: "001234"}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("OTP was submitted more than once")
 	}
 	for range 5 {
 		if o.State == authbrowser.Authenticated {
@@ -345,10 +380,10 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 		t.Fatal("bank fixture selected an account other than the requested one")
 	}
 	mu.Lock()
-	countsOK := loginCount == 1 && otpCount == 1 && credentialsOK
+	countsOK := loginCount == 1 && requestCount == 1 && otpCount == 1 && unexpectedPostCount == 0 && credentialsOK && requestOK
 	mu.Unlock()
 	if !countsOK {
-		t.Fatal("observed bank form did not preserve CAPTCHA and single submissions")
+		t.Fatal("observed login/confirmation and synthetic OTP did not preserve exact single submissions")
 	}
 	for _, tc := range []struct{ name, html, reason string }{
 		{"authentication frame", strings.Replace(string(initial), "https://acb.com.vn/acbo-tin-tuc-acbonline", "https://example.invalid/challenge", 1), "FRAME_UNSUPPORTED"},
@@ -378,6 +413,150 @@ func TestBrowserAutomationObservedACBLoginContract(t *testing.T) {
 			}
 		})
 	}
+	navigateConfirmation := func(html string) {
+		t.Helper()
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
+		if err := s.withAutomationTab(ctx, s.session, func(tab context.Context, _ target.ID) error {
+			return chromedp.Run(tab, chromedp.Evaluate("document.open();document.write("+jsString(html)+");document.close();", nil))
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertNoExtraPosts := func() {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		if loginCount != 1 || requestCount != 1 || otpCount != 1 || unexpectedPostCount != 0 {
+			t.Fatal("guarded confirmation produced an extra bank-fixture request")
+		}
+	}
+	for _, tc := range []struct{ name, html, reason string }{
+		{"wrong form name", strings.Replace(string(confirmation), `name="form"`, `name="other"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"wrong method", strings.Replace(string(confirmation), `method="post"`, `method="get"`, 1), "UNRECOGNIZED_PAGE"},
+		{"wrong operation", strings.Replace(string(confirmation), `value="detectLoginNewDeviceProc"`, `value="otherProc"`, 1), "UNRECOGNIZED_PAGE"},
+		{"wrong processor state", strings.Replace(string(confirmation), `value="confirmPage"`, `value="otherPage"`, 1), "UNRECOGNIZED_PAGE"},
+		{"wrong request origin", strings.Replace(string(confirmation), `action="/acbib/Request"`, `action="https://example.invalid/acbib/Request"`, 1), "WRONG_FORM_ORIGIN"},
+		{"wrong request path", strings.Replace(string(confirmation), `action="/acbib/Request"`, `action="/acbib/Other"`, 1), "UNRECOGNIZED_PAGE"},
+		{"unexpected request query", strings.Replace(string(confirmation), `action="/acbib/Request"`, `action="/acbib/Request?other=1"`, 1), "UNRECOGNIZED_PAGE"},
+		{"duplicate operation", strings.Replace(string(confirmation), "</form>", `<input type="hidden" name="dse_operationName" value="detectLoginNewDeviceProc"></form>`, 1), "UNRECOGNIZED_PAGE"},
+		{"duplicate processor state", strings.Replace(string(confirmation), "</form>", `<input type="hidden" name="dse_processorState" value="confirmPage"></form>`, 1), "UNRECOGNIZED_PAGE"},
+		{"visible operation", strings.Replace(string(confirmation), `type="hidden" name="dse_operationName"`, `type="text" name="dse_operationName"`, 1), "UNRECOGNIZED_PAGE"},
+		{"duplicate radio", strings.Replace(string(confirmation), "</form>", `<input type="radio" name="AuthTyp" id="safekey"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"other method radio", strings.Replace(string(confirmation), "</form>", `<input type="radio" name="AuthTyp" id="other"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"disabled method radio", strings.Replace(string(confirmation), `id="safekey"`, `id="safekey" disabled`, 1), "AMBIGUOUS_CONTROLS"},
+		{"hidden method radio", strings.Replace(string(confirmation), `id="safekey"`, `id="safekey" style="display:none"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"wrong method name", strings.Replace(string(confirmation), `name="AuthTyp"`, `name="other"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"detached radio", strings.Replace(string(confirmation), `id="safekey"`, `id="safekey" form="missing"`, 1), "AMBIGUOUS_CONTROLS"},
+		{"detached button", strings.Replace(string(confirmation), `id="button"`, `id="button" form="missing"`, 1), "AMBIGUOUS_SUBMIT"},
+		{"duplicate button", strings.Replace(string(confirmation), "</form>", `<input type="button" id="button" name="button" value="Tiếp tục" onclick="submitForm('ok');"></form>`, 1), "AMBIGUOUS_SUBMIT"},
+		{"disabled button", strings.Replace(string(confirmation), `id="button"`, `id="button" disabled`, 1), "AMBIGUOUS_SUBMIT"},
+		{"hidden button", strings.Replace(string(confirmation), `id="button"`, `id="button" style="display:none"`, 1), "AMBIGUOUS_SUBMIT"},
+		{"wrong button type", strings.Replace(string(confirmation), `type="button"`, `type="submit"`, 1), "AMBIGUOUS_SUBMIT"},
+		{"wrong button handler", strings.Replace(string(confirmation), "submitForm('ok');", "otherSubmit();", 1), "AMBIGUOUS_SUBMIT"},
+		{"wrong button label", strings.Replace(string(confirmation), "Tiếp tục", "Other", 1), "AMBIGUOUS_SUBMIT"},
+		{"extra submit", strings.Replace(string(confirmation), "</form>", `<button type="submit">Other</button></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"extra code field", strings.Replace(string(confirmation), "</form>", `<input name="otp"></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"extra handler", strings.Replace(string(confirmation), "</form>", `<a href="#" onclick="submitForm('ok');">Other</a></form>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"extra form", strings.Replace(string(confirmation), "</body>", `<form action="https://example.invalid/" method="post"></form></body>`, 1), "AMBIGUOUS_CONTROLS"},
+		{"confirmation frame", strings.Replace(string(confirmation), "</body>", `<iframe src="about:blank"></iframe></body>`, 1), "FRAME_UNSUPPORTED"},
+		{"hidden confirmation frame", strings.Replace(string(confirmation), "</body>", `<iframe style="display:none" src="about:blank"></iframe></body>`, 1), "FRAME_UNSUPPORTED"},
+	} {
+		t.Run("confirmation/"+tc.name, func(t *testing.T) {
+			navigateConfirmation(tc.html)
+			o := observe()
+			if o.State != authbrowser.Unknown || o.ReasonCode != tc.reason {
+				t.Fatalf("unsafe confirmation accepted: %+v", o)
+			}
+			if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision}); !authbrowser.IsHTTPStatus(err, 422) {
+				t.Fatal("unsafe confirmation permitted request action")
+			}
+			assertNoExtraPosts()
+		})
+	}
+	navigateConfirmation(strings.Replace(string(confirmation), `type="radio"`, `type="text"`, 1))
+	if o := observe(); o.State != authbrowser.UnsupportedChallenge {
+		t.Fatal("unevidenced SafeKey text input was admitted")
+	}
+	// An unchanged page after the native button click is an unknown outcome, not
+	// permission to replay. This handler deliberately makes no fixture bank request.
+	navigateConfirmation(string(confirmation))
+	o = observe()
+	if o.State != authbrowser.OTPRequestRequired {
+		t.Fatalf("observed SafeKey method radio not admitted: %+v", o)
+	}
+	if again := observe(); again.Revision != o.Revision {
+		t.Fatal("unchanged confirmation advanced its revision")
+	}
+	var fingerprint string
+	s.opMu.Lock()
+	err = s.withAutomationTab(ctx, s.session, func(tab context.Context, _ target.ID) error {
+		return chromedp.Run(tab, chromedp.Evaluate(automationDOMLibrary+`;
+window.submitForm=()=>{window.fixtureRequestClicks=(window.fixtureRequestClicks||0)+1;};
+inspectRecovery(false).fingerprint`, &fingerprint))
+	})
+	s.opMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, privateValue := range []string{"synthetic-private-session", "synthetic-selected-method", "Tiếp tục", "detectLoginNewDeviceProc", "confirmPage"} {
+		if strings.Contains(fingerprint, privateValue) {
+			t.Fatal("confirmation fingerprint contains a field value")
+		}
+	}
+	var afterPrivateChange string
+	s.opMu.Lock()
+	err = s.withAutomationTab(ctx, s.session, func(tab context.Context, _ target.ID) error {
+		return chromedp.Run(tab, chromedp.Evaluate(automationDOMLibrary+`;
+document.querySelector('[name="dse_sessionId"]').value='different-private-session';
+document.getElementById('safekey').value='different-selected-method';
+document.cookie='private_fixture_cookie=private-cookie-value';
+inspectRecovery(false).fingerprint`, &afterPrivateChange))
+	})
+	s.opMu.Unlock()
+	if err != nil || afterPrivateChange != fingerprint {
+		t.Fatal("private field/cookie values influenced the confirmation fingerprint")
+	}
+	if again := observe(); again.Revision != o.Revision {
+		t.Fatal("private field/cookie changes advanced the confirmation revision")
+	}
+	consumedRevision := o.Revision
+	o, err = client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: consumedRevision})
+	if err != nil || o.State != authbrowser.Unknown || o.ReasonCode != "ACTION_OUTCOME_UNKNOWN" || o.Revision != consumedRevision {
+		t.Fatalf("ambiguous native confirmation click was not consumed: %+v %v", o, err)
+	}
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: consumedRevision}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("unknown confirmation result permitted replay")
+	}
+	var clickedOnce bool
+	s.opMu.Lock()
+	err = s.withAutomationTab(ctx, s.session, func(tab context.Context, _ target.ID) error {
+		return chromedp.Run(tab, chromedp.Evaluate(`window.fixtureRequestClicks===1 && document.getElementById('safekey').checked`, &clickedOnce))
+	})
+	s.opMu.Unlock()
+	if err != nil || !clickedOnce {
+		t.Fatal("confirmation did not select the actual DOM radio and click once")
+	}
+	assertNoExtraPosts()
+	// Radio event handlers can change the button. Reinspect after selection and
+	// immediately before clicking; a changed contract must have no POST side effect.
+	navigateConfirmation(string(confirmation))
+	o = observe()
+	s.opMu.Lock()
+	err = s.withAutomationTab(ctx, s.session, func(tab context.Context, _ target.ID) error {
+		return chromedp.Run(tab, chromedp.Evaluate(`document.getElementById('safekey').onchange=()=>document.getElementById('button').setAttribute('onclick','otherSubmit();');`, nil))
+	})
+	s.opMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("changed confirmation handler was clicked after selecting the radio")
+	}
+	if _, err := client.RequestOTP(ctx, attempt, authbrowser.ChallengeInput{Revision: o.Revision}); !authbrowser.IsHTTPStatus(err, 409) {
+		t.Fatal("failed pre-click inspection permitted replay")
+	}
+	assertNoExtraPosts()
 }
 
 func jsString(value string) string { payload, _ := json.Marshal(value); return string(payload) }

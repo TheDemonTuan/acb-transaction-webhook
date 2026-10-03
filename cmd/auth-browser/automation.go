@@ -27,7 +27,7 @@ import (
 func (s *server) registerAutomation(mux *http.ServeMux) {
 	mux.Handle("GET /sessions/{attemptID}/observation", s.requireInternal(http.HandlerFunc(s.automationObservation)))
 	mux.Handle("GET /sessions/{attemptID}/captcha", s.requireInternal(http.HandlerFunc(s.automationCapture)))
-	for _, action := range []string{"login", "captcha", "otp"} {
+	for _, action := range []string{"login", "captcha", "request-otp", "otp"} {
 		mux.Handle("POST /sessions/{attemptID}/"+action, s.requireInternal(http.HandlerFunc(s.automationAction)))
 	}
 }
@@ -136,7 +136,7 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 		automationError(w, 409)
 		return
 	}
-	allowed := (action == "login" && observation.State == authbrowser.LoginForm) || (action == "captcha" && observation.State == authbrowser.CaptchaRequired) || (action == "otp" && observation.State == authbrowser.OTPRequired)
+	allowed := (action == "login" && observation.State == authbrowser.LoginForm) || (action == "captcha" && observation.State == authbrowser.CaptchaRequired) || (action == "request-otp" && observation.State == authbrowser.OTPRequestRequired) || (action == "otp" && observation.State == authbrowser.OTPRequired)
 	if !allowed {
 		automationError(w, 422)
 		return
@@ -145,7 +145,7 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 		automationError(w, 400)
 		return
 	}
-	if (action == "otp" && !validAutomationAnswer(value, 4, 10, true)) || ((action == "captcha" || observation.CaptchaRequired) && !validAutomationAnswer(value, 1, 16, false)) {
+	if (action == "request-otp" && value != "") || (action == "otp" && !validAutomationAnswer(value, 4, 10, true)) || ((action == "captcha" || observation.CaptchaRequired) && !validAutomationAnswer(value, 1, 16, false)) {
 		automationError(w, 400)
 		return
 	}
@@ -159,7 +159,19 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 		item.accountNumber = login.AccountNumber
 	}
 	payload, _ := json.Marshal(map[string]string{"action": action, "username": login.Username, "password": login.Password, "value": value, "fingerprint": dom.ActionFingerprint})
-	script := automationDOMLibrary + "\n(() => { const input=" + string(payload) + "; const d=inspectRecovery(" + fixtureBool(s.fixtureDOM) + "); if(d.fingerprint!==input.fingerprint || !d.form || !d.submit) return false; const fields=input.action==='login'?[[d.username,input.username],[d.password,input.password],...(d.captcha?[[d.captcha,input.value]]:[])]:[[input.action==='otp'?d.otp:d.captcha,input.value]]; for(const [el,val] of fields){if(!el || (el.maxLength>0 && val.length>el.maxLength)) return false; if(el.pattern){try{if(!(new RegExp('^(?:'+el.pattern+')$')).test(val)) return false;}catch(e){return false;}}} for(const [el,val] of fields){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,val); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));} d.submit.click(); return true; })()"
+	script := automationDOMLibrary + "\n(() => { const input=" + string(payload) + "; const d=inspectRecovery(" + fixtureBool(s.fixtureDOM) + `);
+ if(d.fingerprint!==input.fingerprint || !d.form || !d.submit) return false;
+ if(input.action==='request-otp'){
+  if(input.value!=='' || d.state!=='OTP_REQUEST_REQUIRED' || !d.choice) return false;
+  if(!d.choice.checked) d.choice.click();
+  const current=inspectRecovery(` + fixtureBool(s.fixtureDOM) + `);
+  if(current.state!=='OTP_REQUEST_REQUIRED' || current.fingerprint!==input.fingerprint || current.form!==d.form || current.choice!==d.choice || current.submit!==d.submit || !current.choice.checked) return false;
+  current.submit.click(); return true;
+ }
+ const fields=input.action==='login'?[[d.username,input.username],[d.password,input.password],...(d.captcha?[[d.captcha,input.value]]:[])]:[[input.action==='otp'?d.otp:d.captcha,input.value]];
+ for(const [el,val] of fields){if(!el || (el.maxLength>0 && val.length>el.maxLength)) return false; if(el.pattern){try{if(!(new RegExp('^(?:'+el.pattern+')$')).test(val)) return false;}catch(e){return false;}}}
+ for(const [el,val] of fields){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,val); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));}
+ d.submit.click(); return true; })()`
 	var submitted bool
 	err = s.withAutomationTab(r.Context(), item, func(ctx context.Context, _ target.ID) error {
 		return chromedp.Run(ctx, chromedp.Evaluate(script, &submitted))
@@ -425,10 +437,10 @@ func fixtureCookies(cookies []*network.Cookie) []authbrowser.Cookie {
 	return result
 }
 
-// The loginOp/UserName/PassWord/SecurityCode form, login anchor and promotional
-// frame below were observed on ACB's anonymous login page on 2026-10-03.
-// Other challenge selectors remain fixture-derived; no frame access or raw bank
-// error classification is permitted.
+// The loginOp/UserName/PassWord/SecurityCode login and detectLoginNewDeviceProc /
+// confirmPage AuthTyp radio with submitForm('ok') were observed on 2026-10-03.
+// The page after that confirmation was not observed; generic OTP selectors remain
+// fixture-derived. No frame access or raw bank error classification is permitted.
 const automationDOMLibrary = `
 function inspectRecovery(fixture) {
  const visible=e=>!!e && !e.disabled && getComputedStyle(e).visibility==='visible' && getComputedStyle(e).display!=='none' && e.getClientRects().length>0 && e.getBoundingClientRect().width>0 && e.getBoundingClientRect().height>0;
@@ -448,6 +460,32 @@ function inspectRecovery(fixture) {
  const all=sel=>[...document.querySelectorAll(sel)];
  const pw=all('input[type="password"]'), users=all('input[name="username" i],input[name="user" i],input[id="username" i],input[id="user" i]'), caps=[...all('input[name*="captcha" i],input[id*="captcha" i]'),...(bankLogin?bankCaptcha:[])], otps=all('input[name*="otp" i],input[id*="otp" i],input[name*="authcode" i],input[id*="authcode" i]');
  const safe=all('input[name*="safekey" i],input[id*="safekey" i]');
+ // SafeKey on the observed confirmation is a method radio, not an OTP field.
+ // Admit only that complete contract before rejecting other SafeKey challenges.
+ const confirmationForms=[...document.forms].filter(form=>form.name==='form');
+ const confirmationChoice=safe.filter(e=>e.type==='radio');
+ if(confirmationChoice.length){
+  if(document.querySelector('iframe,frame')){result.reason='FRAME_UNSUPPORTED';return result;}
+  if(document.forms.length!==1 || confirmationForms.length!==1){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  const form=confirmationForms[0], action=new URL(form.action,location.href);
+  if(action.origin!==location.origin || action.username || action.password){result.reason='WRONG_FORM_ORIGIN';return result;}
+  if(form.method.toLowerCase()!=='post' || action.pathname!=='/acbib/Request' || action.search || action.hash){result.reason='UNRECOGNIZED_PAGE';return result;}
+  const hidden=(name,value)=>{const fields=all('[name]').filter(e=>e.name===name);return fields.length===1 && fields[0].tagName==='INPUT' && fields[0].type==='hidden' && !fields[0].disabled && fields[0].form===form && fields[0].value===value?fields[0]:null;};
+  const operation=hidden('dse_operationName','detectLoginNewDeviceProc'), processorState=hidden('dse_processorState','confirmPage');
+  if(!operation || !processorState){result.reason='UNRECOGNIZED_PAGE';return result;}
+  const choices=all('input').filter(e=>e.name==='AuthTyp' || e.id==='safekey');
+  if(choices.length!==1 || safe.length!==1 || choices[0].name!=='AuthTyp' || choices[0].id!=='safekey' || choices[0].type!=='radio' || choices[0].form!==form || !visible(choices[0])){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  const buttons=all('[id],[name]').filter(e=>e.id==='button' || e.name==='button');
+  if(buttons.length!==1 || buttons[0].tagName!=='INPUT' || buttons[0].type!=='button' || buttons[0].id!=='button' || buttons[0].name!=='button' || buttons[0].form!==form || !visible(buttons[0]) || buttons[0].value!=='Tiếp tục' || buttons[0].getAttribute('onclick')!=="submitForm('ok');"){result.reason='AMBIGUOUS_SUBMIT';return result;}
+  const choice=choices[0], submit=buttons[0];
+  const controls=all('input,select,textarea,button,[role="button"],[onclick]').filter(e=>e.tagName!=='INPUT' || e.type!=='hidden');
+  if(controls.some(e=>e!==choice && e!==submit) || form.querySelector('[role="alert"],[aria-invalid="true"]')){result.reason='AMBIGUOUS_CONTROLS';return result;}
+  result.form=form;result.choice=choice;result.submit=submit;
+  // Structural identities only: never include hidden-field or radio/button values,
+  // cookie data, session tokens, account data, or validation text.
+  result.fingerprint=JSON.stringify([n.document,location.origin,location.pathname,'OTP_REQUEST_REQUIRED',id(form),form.name,form.method,action.pathname,id(operation),operation.name,operation.type,id(processorState),processorState.name,processorState.type,id(choice),choice.name,choice.id,choice.type,id(submit),submit.name,submit.id,submit.type]);
+  result.state='OTP_REQUEST_REQUIRED';result.reason='';return result;
+ }
  if(safe.length){result.state='UNSUPPORTED_CHALLENGE';result.reason='UNSUPPORTED_CHALLENGE';return result;}
  if(fixture){const code=document.body.dataset.recoveryCode; if(['CREDENTIALS_REJECTED','ACCOUNT_LOCKED','MAINTENANCE','UNSUPPORTED_CHALLENGE'].includes(code)){result.state=code==='MAINTENANCE'?'MAINTENANCE':code==='UNSUPPORTED_CHALLENGE'?'UNSUPPORTED_CHALLENGE':'LOGIN_REJECTED';result.reason=code;result.fingerprint=n.document+':'+code;return result;}}
  let state,controls=[];

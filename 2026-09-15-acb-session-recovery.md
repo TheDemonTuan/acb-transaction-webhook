@@ -31,6 +31,27 @@ Deployment evidence: implementation commit `524a06e3cf188c8f69e0a7337a9a929d32cf
 
 
 
+## Live CAPTCHA → OTP repair — 2026-10-03
+
+The owner reported that replying to the CAPTCHA deleted the old messages and appeared silent before the OTP confirmation/request step. Read-only production metadata establishes one consumed CAPTCHA and one login reservation at 06:39:23 UTC, then `MANUAL_REQUIRED / UNSUPPORTED_CHALLENGE` at 06:39:25; no OTP submission occurred. The terminal result was edited into an old episode progress message rather than a fresh attempt message. This is a failed live acceptance, not a completed login.
+
+The owner's next explicit attempt was observed read-only at 07:04 UTC: same-origin POST form `name=form`, operation `detectLoginNewDeviceProc`, processor state `confirmPage`, visible enabled `AuthTyp` **radio** `id=safekey`, and visible `input type=button id/name=button` labeled “Tiếp tục” with native handler `submitForm('ok');`. This is a login-method confirmation, not an OTP value field or evidence of an unsupported push flow. Only these form/control metadata and finite protocol identifiers were captured; no password, OTP, account, session token, cookies or body text. The next code-entry page still needs direct observation.
+Implemented observed confirmation: `OTP_REQUEST_REQUIRED` admits the exact method-selection form; `/request-otp` selects the actual radio if needed, reinspects the form and clicks its native Continue once. The coordinator first persists `LOGIN / OTP_REQUEST_SENT` inside the existing consent/login fence; timeout, unchanged form, lost response or restart cannot issue a second OTP request. Telegram shows stage 4/6 while requesting and waits to prompt until an actual supported OTP entry form is observed. This is not authority for a fresh login.
+
+Verification: Telegram/challenge/browser-client/coordinator/controller suites passed. Actual Chromium integration and a throwaway actual-browser API executable passed login → observed radio/Continue → **synthetic generic OTP** → exact-account handoff, with exactly one login, request and OTP submission and rejected stale-request replay. Adversarial confirmation forms/mutations and restart/unknown-outcome regressions passed. The throwaway executable source was removed; real next-page OTP compatibility remains pending direct owner-triggered capture.
+
+
+
+- [x] Identify the durable CAPTCHA disposition, login reservation, terminal reason and destination of the terminal progress edit without reading code/password/session values.
+- [x] A fresh LOGIN consent starts a fresh progress message near the current conversation; subsequent stages/terminal result edit that attempt's message, not an earlier attempt's.
+- [x] A durably accepted CAPTCHA/OTP gets an immediate safe receipt before waiting on the bank, with no code echo or replay after deletion/restart.
+- [ ] Inspect the actual post-login OTP DOM and its confirmation/request-code controls. Recognize only the observed numeric login-code flow, request it once, prompt Telegram, then fill/submit the current code once. A `safekey` field name alone is not proof that the flow is a push/QR challenge; unsupported non-numeric/device-binding challenges remain blocked. No guessed selector, invented endpoint, automatic fresh login or bank OTP request merely for diagnosis.
+- [ ] Prove regressions and browser/HTTP smoke, then commit/push/deploy the repair. Real-bank completion stays pending until the owner-operated flow verifies the exact account and full catch-up.
+
+Reply repair evidence: both new behavioral regressions failed before the change and passed after it; Telegram/challenge/coordinator suites passed. A throwaway actual Handler/Broker HTTP smoke exercised two owner consents with distinct message IDs, immediate receipt, one synthetic bank submission per reply and a visible terminal result without echoing the code. The broader storage run separately failed existing logout-notice CAS assertions (`TestACBLogoutLocalAndBankResultsAreIndependentAndNoticeCAS`, stale ack returned nil); no clean storage/full-suite claim is made. OTP DOM diagnosis remains read-only and owner-triggered; no new OTP compatibility claim yet.
+
+
+
 ## Initial setup and migration import
 
 Deploy the new pipeline-built release and apply schema 13 through deployment admission **before** setup. From the VPS:

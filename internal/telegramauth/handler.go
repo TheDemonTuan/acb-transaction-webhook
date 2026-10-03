@@ -638,6 +638,9 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 		} else if e.AIUsed > 0 {
 			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; nếu cần nhập tay, bot sẽ gửi ảnh riêng để trả lời."
 		}
+		if e.ReasonCode == "OTP_REQUEST_SENT" {
+			text = "4/6 · Đang xác nhận phương thức OTP đăng nhập và chờ trang nhập OTP của ACB.\nBạn chưa cần gửi mã; chỉ trả lời khi bot gửi tin yêu cầu OTP riêng."
+		}
 	case "WAITING_CAPTCHA", "WAITING_OTP":
 		if e.State == "WAITING_OTP" {
 			text = "4/6 · Chờ OTP đăng nhập.\nMở app ACB lấy mã cho lần đăng nhập này, rồi trả lời trực tiếp tin yêu cầu OTP riêng (không trả lời tin tiến độ này). Không dùng OTP chuyển tiền."
@@ -776,6 +779,8 @@ func reasonLabel(reason string) string {
 		return "Captcha ACB không tải xong trong thời gian chờ. Kiểm tra kết nối hoặc chờ ACB ổn định rồi bấm Đăng nhập lại."
 	case "LOGIN_OUTCOME_UNKNOWN", "CHALLENGE_OUTCOME_UNKNOWN", "ACTION_OUTCOME_UNKNOWN":
 		return "Chưa xác định được ACB có nhận thao tác vừa gửi hay không. Bot không gửi lại để tránh trùng; kiểm tra app ACB trước khi bấm Đăng nhập cho lần mới."
+	case "OTP_REQUEST_OUTCOME_UNKNOWN":
+		return "Chưa xác định được ACB có nhận yêu cầu OTP đăng nhập hay không. Bot không yêu cầu lại để tránh trùng; kiểm tra app ACB hoặc nhờ người quản lý kiểm tra trước khi bấm Đăng nhập cho lần mới. Không gửi mã cũ vào chat."
 	case "OTP_REJECTED", "INVALID_OTP":
 		return "ACB từ chối OTP đăng nhập. Khi thử lần mới, lấy mã mới từ app ACB và trả lời đúng tin yêu cầu còn hạn."
 	case "CHALLENGE_EXPIRED", "OTP_EXPIRED", "ATTEMPT_EXPIRED", "ATTEMPT_TIMEOUT", "BROWSER_EXPIRED":

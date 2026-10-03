@@ -775,3 +775,111 @@ func TestTelegramConfirmationNavigationRequiresExactPrivateOperator(t *testing.T
 		t.Fatal("navigation performed an operation instead of rendering confirmation")
 	}
 }
+
+func TestFreshLoginConsentStartsNewProgressMessage(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	var previousMessage int64
+	for range 2 {
+		if err := h.menu(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		data, id := menuLogin(t, f)
+		beforeMessages := len(f.messages)
+		if err := h.HandleUpdate(ctx, callback(data, id)); err != nil {
+			t.Fatal(err)
+		}
+		e, err := s.LatestAuthRecoveryEpisode(ctx, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(f.messages) != beforeMessages+1 || e.StatusMessageID <= previousMessage {
+			t.Fatal("fresh consent silently edited a previous attempt instead of sending its own progress")
+		}
+		a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, a.Generation, "FAILED", "MANUAL_REQUIRED", "UNSUPPORTED_CHALLENGE", time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.deliverProgress(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var editedID int64
+		if err := json.Unmarshal(f.edits[len(f.edits)-1]["message_id"], &editedID); err != nil || editedID != e.StatusMessageID {
+			t.Fatal("terminal result updated another attempt's progress", err)
+		}
+		previousMessage = e.StatusMessageID
+	}
+}
+
+func TestTelegramOTPRequestProgressWaitsForActualOTPForm(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.EnsureAuthRecoveryEpisode(ctx, c.ID, c.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='LOGIN',last_login_at=?,consent_consumed_at=? WHERE id=?`, stamp, stamp, e.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	if err := json.Unmarshal(f.messages[len(f.messages)-1]["text"], &text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "3/6") {
+		t.Fatal("initial login progress did not represent the login reservation")
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET reason_code='OTP_REQUEST_SENT' WHERE id=?`, e.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 1 || len(f.edits) != 1 {
+		t.Fatal("same-state OTP request reservation did not edit the current progress")
+	}
+	if err := json.Unmarshal(f.edits[0]["text"], &text); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"4/6", "xác nhận phương thức OTP đăng nhập", "chờ trang nhập OTP", "chưa cần gửi mã"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("OTP request progress missing %q", want)
+		}
+	}
+	for _, unsafe := range []string{"Mở app ACB lấy mã", "Chờ OTP đăng nhập.", "OTP_REQUEST_SENT", e.ID, c.ID} {
+		if strings.Contains(text, unsafe) {
+			t.Fatal("confirmation progress asked for OTP prematurely or exposed internal metadata")
+		}
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='WAIT_OPERATOR',reason_code='OTP_REQUEST_OUTCOME_UNKNOWN' WHERE id=?`, e.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(f.edits[len(f.edits)-1]["text"], &text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, reasonLabel("OTP_REQUEST_OUTCOME_UNKNOWN")) || !strings.Contains(text, "Bot không tự đăng nhập lại") || strings.Contains(text, "OTP_REQUEST_OUTCOME_UNKNOWN") {
+		t.Fatal("stopped OTP request progress lost the safe finite reason")
+	}
+}
+
+func TestTelegramOTPRequestUnknownHasSafeVietnameseNextStep(t *testing.T) {
+	text := reasonLabel("OTP_REQUEST_OUTCOME_UNKNOWN")
+	for _, want := range []string{"yêu cầu OTP đăng nhập", "không yêu cầu lại", "kiểm tra app ACB", "Đăng nhập cho lần mới", "Không gửi mã cũ"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("unknown OTP request next step missing %q", want)
+		}
+	}
+	if strings.Contains(text, "OTP_REQUEST_OUTCOME_UNKNOWN") || strings.Contains(text, "mã chuyển tiền") {
+		t.Fatal("OTP request next step exposed an internal reason or requested a payment code")
+	}
+}

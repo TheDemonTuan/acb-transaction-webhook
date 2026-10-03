@@ -380,6 +380,12 @@ func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID i
 		}
 		return err
 	}
+	receipt := "Đã nhận mã trong ảnh. Đang gửi tới ACB để kiểm tra; chưa xác nhận đăng nhập thành công. Bot sẽ báo bước tiếp theo, bạn không gửi lại mã."
+	if c.Kind == "OTP" {
+		receipt = "Đã nhận mã đăng nhập. Đang gửi tới ACB để xác thực; chưa xác nhận thành công. Bạn không gửi lại mã, hãy chờ kết quả bên dưới."
+	}
+	// Receipt failure must not replay or abandon an already consumed answer.
+	_, _ = b.Sender.SendText(ctx, chatID, receipt, nil)
 	_, submitErr := b.Submitter.SubmitChallenge(ctx, consumed, value)
 	value, text = "", ""
 	// CONSUMING is already durable: even a failed terminal write must ACK the
