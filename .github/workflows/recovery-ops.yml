@@ -1,0 +1,106 @@
+name: Recovery incident operations
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read-only account diagnosis or finish committed recovery startup
+        type: choice
+        options: [diagnose, reconcile]
+        default: diagnose
+        required: true
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: acb-transaction-webhook-production
+  cancel-in-progress: false
+jobs:
+  recovery:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - name: Diagnose or finish the already committed release without rebuild
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/bank-event-gateway' }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ && "$DEPLOY_PATH" != *..* ]] || exit 1
+          [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ && "$VPS_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ && "$VPS_PORT" =~ ^[0-9]{1,5}$ ]] || exit 1
+          [[ "$OPERATION" == diagnose || "$OPERATION" == reconcile ]] || exit 1
+          [[ "$DASHBOARD_OWNER_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || exit 1
+          mkdir -m 700 -p ~/.ssh
+          (umask 077; printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519; printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts)
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          { printf '%s\n' "$GH_TOKEN"; cat <<'REMOTE'
+          set -euo pipefail
+          if [[ "$OPERATION" == diagnose ]]; then
+            python3 - <<'PY'
+          import base64, json, os, re, sqlite3, subprocess
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          root = Path(os.environ['DEPLOY_PATH'])
+          account = (root/'deploy/secrets/acb_account').read_text().strip()
+          key_bytes = (root/'deploy/secrets/app_master_key').read_bytes()
+          key_text = key_bytes.decode('ascii').strip()
+          if re.fullmatch(r'[0-9a-fA-F]{64}', key_text):
+              key = bytes.fromhex(key_text)
+          elif len(key_bytes) == 32:
+              key = key_bytes
+          else:
+              key = base64.b64decode(key_text + '='*((-len(key_text))%4))
+          if len(key) != 32:
+              raise SystemExit('MASTER_KEY_INVALID')
+          query = "import sqlite3,json; db=sqlite3.connect('file:/data/gateway.db?mode=ro',uri=True); c=db.execute('SELECT id,state,generation,account_masked FROM connections ORDER BY created_at LIMIT 1').fetchone(); s=db.execute('SELECT generation,envelope FROM sessions WHERE connection_id=?',(c[0],)).fetchone(); print(json.dumps({'connection':c,'session':[s[0],s[1].decode()] if s else None,'configured':bool(db.execute('SELECT 1 FROM acb_credentials WHERE connection_id=?',(c[0],)).fetchone())})); db.close()"
+          snapshot = json.loads(subprocess.check_output(['docker','run','--rm','--network','none','--user','1000:1000','-v','bank-event-gateway_gateway_data:/data:ro','python:3.13-alpine','python','-c',query],text=True))
+          conn, row = snapshot['connection'], snapshot['session']
+          def masked(value):
+              return '****'+str(value)[-4:] if value else '(empty)'
+          print(json.dumps({'connectionState':conn[1],'generation':conn[2],'configuredAccountMasked':conn[3],'importAccountMasked':masked(account),'credentialsConfigured':snapshot['configured'],'hasStoredSession':bool(row)}))
+          if row:
+              envelope=json.loads(row[1])
+              def decode(value): return base64.b64decode(value+'='*((-len(value))%4))
+              plaintext=None
+              for aad in [f'acb-session:{conn[0]}:{row[0]}',f'acb-session:{conn[0]}']:
+                  try:
+                      plaintext=AESGCM(key).decrypt(decode(envelope['Nonce']),decode(envelope['Ciphertext']),aad.encode())
+                      break
+                  except Exception:
+                      continue
+              if plaintext is None:
+                  raise SystemExit('SESSION_DECRYPT_FAILED')
+              payload=plaintext.decode('utf-8').split('.',1)[0]
+              handoff=json.loads(base64.urlsafe_b64decode(payload+'='*((-len(payload))%4)))
+              fields=handoff.get('fields',{}) if isinstance(handoff,dict) else {}
+              stored=fields.get('AccountNbr','')
+              print(json.dumps({'sessionAccountMasked':masked(stored),'sessionAccountLength':len(stored),'sessionAccountASCIIDigits':bool(re.fullmatch(r'[0-9]+',stored)),'exactImportMatch':stored==account,'storedSessionGeneration':row[0]}))
+          PY
+          else
+            sha="$(python3 - "$DEPLOY_PATH/state.env" <<'PY'
+          import pathlib,re,sys
+          matches=re.findall(r'^RELEASE_SHA=([a-f0-9]{40})$',pathlib.Path(sys.argv[1]).read_text(),re.M)
+          if len(matches)!=1: raise SystemExit('COMMITTED_RELEASE_INVALID')
+          print(matches[0])
+          PY
+            )"
+            target="$DEPLOY_PATH/releases/$sha"
+            (cd "$target" && sha256sum -c SHA256SUMS)
+            auth="$(mktemp -d "$DEPLOY_PATH/.docker-auth.XXXXXXXX")"
+            chmod 700 "$auth"
+            trap 'rm -rf "$auth"' EXIT
+            printf '%s' "$GH_TOKEN" | DOCKER_CONFIG="$auth" docker login ghcr.io -u 'TheDemonTuan' --password-stdin
+            unset GH_TOKEN
+            DOCKER_CONFIG="$auth" bash "$target/deploy.sh" --reconcile "$sha"
+            docker exec acb-recovery-controller /recovery-controller --readiness-check
+          fi
+          REMOTE
+          } | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "read -r GH_TOKEN; export GH_TOKEN; DEPLOY_PATH='$DEPLOY_PATH' OPERATION='$OPERATION' DASHBOARD_OWNER_EMAIL='$DASHBOARD_OWNER_EMAIL' bash -s"
