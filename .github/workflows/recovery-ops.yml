@@ -89,7 +89,7 @@ jobs:
               handoff=json.loads(base64.urlsafe_b64decode(payload+'='*((-len(payload))%4)))
               fields=handoff.get('fields',{}) if isinstance(handoff,dict) else {}
               stored=fields.get('AccountNbr','')
-              print(json.dumps({'sessionAccountMasked':masked(stored),'sessionAccountLength':len(stored),'sessionAccountASCIIDigits':bool(re.fullmatch(r'[0-9]+',stored)),'exactImportMatch':stored==account,'storedSessionGeneration':row[0]}))
+              print(json.dumps({'handoffVersion':handoff.get('version',0) if isinstance(handoff,dict) else 0,'hasAccountField':'AccountNbr' in fields,'fieldNames':sorted(fields),'sessionAccountMasked':masked(stored),'sessionAccountLength':len(stored),'sessionAccountASCIIDigits':bool(re.fullmatch(r'[0-9]+',stored)),'exactImportMatch':stored==account,'storedSessionGeneration':row[0]}))
           PY
           else
             sha="$(python3 - "$DEPLOY_PATH/state.env" <<'PY'
