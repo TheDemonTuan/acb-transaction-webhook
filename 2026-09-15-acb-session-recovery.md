@@ -15,6 +15,9 @@
 
 Deploy the new pipeline-built release and apply schema 13 through deployment admission **before** setup. From the VPS:
 
+Operational workflow: normal changes are pushed directly to `main` without a PR/approval gate. The production workflow runs the reusable CI once on that revision, then ARM64 build, immutable image scan, bundle and admitted VPS deploy. Full lifecycle/fault-matrix rehearsal is not on the ordinary deploy path; request it explicitly with the manual workflow input `rehearse=true`. Failed deploy jobs can be rerun against their existing immutable bundle instead of rebuilding successful jobs. Database backup, exact-account import checks, migration fencing and VPS health/route checks remain mandatory.
+
+
 ```bash
 sudo bash /opt/bank-event-gateway/deploy/setup-recovery.sh
 ```

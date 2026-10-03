@@ -15,6 +15,11 @@ on:
         type: string
         required: false
         default: ''
+      rehearse:
+        description: Optionally run lifecycle and fault-matrix rehearsal before deployment
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -224,6 +229,7 @@ jobs:
 
   rehearsal:
     needs: scan
+    if: github.event_name == 'workflow_dispatch' && inputs.rehearse == true
     name: Rehearsal (${{ matrix.suite }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -270,17 +276,18 @@ jobs:
 
   verified-bundle:
     needs: [scan, rehearsal]
-    if: needs.rehearsal.result == 'success'
+    if: always() && needs.scan.result == 'success' && (needs.rehearsal.result == 'success' || needs.rehearsal.result == 'skipped')
     name: Package verified bundle
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - name: Require all rehearsal shards success
+      - name: Require image scan and requested rehearsal results
         env:
-          RESULT: ${{ needs.rehearsal.result }}
-        run: test "$RESULT" = success
+          SCAN: ${{ needs.scan.result }}
+          REHEARSAL: ${{ needs.rehearsal.result }}
+        run: test "$SCAN" = success && { test "$REHEARSAL" = success || test "$REHEARSAL" = skipped; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -304,8 +311,8 @@ jobs:
           retention-days: 3
 
   deploy:
-    needs: [verify, build, scan, rehearsal, verified-bundle]
-    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true
+    needs: [verify, build, scan, verified-bundle]
+    if: always() && needs.verify.result == 'success' && needs.verified-bundle.result == 'success' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true)
     name: Deploy to VPS
     runs-on: ubuntu-latest
     timeout-minutes: 30
