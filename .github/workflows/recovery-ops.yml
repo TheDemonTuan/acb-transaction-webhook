@@ -5,9 +5,14 @@ on:
       operation:
         description: Read-only account diagnosis or finish committed recovery startup
         type: choice
-        options: [diagnose, reconcile]
+        options: [diagnose, reconcile, import-release]
         default: diagnose
         required: true
+      importer_release:
+        description: Existing scanned release SHA to run its insert-only credential importer
+        type: string
+        default: ''
+        required: false
 permissions:
   contents: read
   packages: read
@@ -32,11 +37,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OPERATION: ${{ inputs.operation }}
           DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
+          IMPORTER_RELEASE: ${{ inputs.importer_release }}
         run: |
           set -euo pipefail
           [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ && "$DEPLOY_PATH" != *..* ]] || exit 1
           [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ && "$VPS_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ && "$VPS_PORT" =~ ^[0-9]{1,5}$ ]] || exit 1
-          [[ "$OPERATION" == diagnose || "$OPERATION" == reconcile ]] || exit 1
+          [[ "$OPERATION" == diagnose || "$OPERATION" == reconcile || "$OPERATION" == import-release ]] || exit 1
+          [[ "$OPERATION" != import-release || "$IMPORTER_RELEASE" =~ ^[a-f0-9]{40}$ ]] || exit 1
           [[ "$DASHBOARD_OWNER_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || exit 1
           mkdir -m 700 -p ~/.ssh
           (umask 077; printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519; printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts)
@@ -99,8 +106,33 @@ jobs:
             trap 'rm -rf "$auth"' EXIT
             printf '%s' "$GH_TOKEN" | DOCKER_CONFIG="$auth" docker login ghcr.io -u 'TheDemonTuan' --password-stdin
             unset GH_TOKEN
+            if [[ "$OPERATION" == import-release ]]; then
+              bundle="$DEPLOY_PATH/releases/$IMPORTER_RELEASE"
+              (cd "$bundle" && sha256sum -c SHA256SUMS)
+              image="$(python3 - "$bundle/images.env" <<'PY'
+          import pathlib,re,sys
+          matches=re.findall(r'^WORKER_IMAGE_REF=(ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64})$',pathlib.Path(sys.argv[1]).read_text(),re.M)
+          if len(matches)!=1: raise SystemExit('IMPORTER_IMAGE_INVALID')
+          print(matches[0])
+          PY
+              )"
+              (
+                exec 8>"$DEPLOY_PATH/.recovery-setup.lock"
+                flock -w 30 8
+                exec 9>"$DEPLOY_PATH/.deploy.lock"
+                flock -w 30 9
+                DOCKER_CONFIG="$auth" docker run --rm --network none --read-only --user 1000:1000 \
+                  -e DATABASE_PATH=/data/gateway.db -e APP_MASTER_KEY_FILE=/run/secrets/app_master_key \
+                  -v bank-event-gateway_gateway_data:/data \
+                  -v "$DEPLOY_PATH/deploy/secrets/app_master_key:/run/secrets/app_master_key:ro" \
+                  -v "$DEPLOY_PATH/deploy/secrets/acb_username:/run/import/acb_username:ro" \
+                  -v "$DEPLOY_PATH/deploy/secrets/acb_password:/run/import/acb_password:ro" \
+                  -v "$DEPLOY_PATH/deploy/secrets/acb_account:/run/import/acb_account:ro" \
+                  --entrypoint /recovery-controller "$image" --import-credentials
+              )
+            fi
             DOCKER_CONFIG="$auth" bash "$target/deploy.sh" --reconcile "$sha"
             docker exec acb-recovery-controller /recovery-controller --readiness-check
           fi
           REMOTE
-          } | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "read -r GH_TOKEN; export GH_TOKEN; DEPLOY_PATH='$DEPLOY_PATH' OPERATION='$OPERATION' DASHBOARD_OWNER_EMAIL='$DASHBOARD_OWNER_EMAIL' bash -s"
+          } | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "read -r GH_TOKEN; export GH_TOKEN; DEPLOY_PATH='$DEPLOY_PATH' OPERATION='$OPERATION' IMPORTER_RELEASE='$IMPORTER_RELEASE' DASHBOARD_OWNER_EMAIL='$DASHBOARD_OWNER_EMAIL' bash -s"
