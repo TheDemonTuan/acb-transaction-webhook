@@ -237,6 +237,19 @@ func (s *Store) checkImportAccountTx(ctx context.Context, tx *sql.Tx, connection
 	if handoff.Version == 0 && handoff.Fields["AccountNbr"] == "" {
 		return nil
 	}
+	if handoff.Fields["AccountNbr"] == "" {
+		var state string
+		var currentGeneration int64
+		if err := tx.QueryRowContext(ctx, `SELECT state,generation FROM connections WHERE id=?`, connectionID).Scan(&state, &currentGeneration); err != nil {
+			return err
+		}
+		// A stale snapshot of an already lost session with no selected account
+		// cannot contradict the owner-approved initial import. No verified claim
+		// is made; consent-gated login verifies the exact account afterward.
+		if state == "AUTH_REQUIRED" && generation < currentGeneration {
+			return nil
+		}
+	}
 	if handoff.Fields["AccountNbr"] != account {
 		return ErrCredentialAccountMismatch
 	}

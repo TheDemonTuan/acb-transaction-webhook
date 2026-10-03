@@ -340,17 +340,17 @@ func TestACBCredentialsReadFailsClosedOnCorruption(t *testing.T) {
 }
 
 func TestACBCredentialsImportChecksExactEncryptedSessionAccount(t *testing.T) {
-	for _, scenario := range []string{"match", "same-last-four", "missing-field", "corrupt", "legacy", "cookie-only"} {
+	for _, scenario := range []string{"match", "same-last-four", "missing-field", "corrupt", "legacy", "cookie-only", "expired-empty", "expired-mismatch"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, ctx, c, _ := credentialStore(t)
 			if _, err := s.DB().Exec(`DELETE FROM acb_credentials`); err != nil {
 				t.Fatal(err)
 			}
 			account := "001234567890"
-			if scenario == "same-last-four" {
+			if scenario == "same-last-four" || scenario == "expired-mismatch" {
 				account = "999999997890"
 			}
-			if scenario == "missing-field" {
+			if scenario == "missing-field" || scenario == "expired-empty" {
 				account = ""
 			}
 			handoff, err := authbrowser.EncodeHandoff(authbrowser.Handoff{Version: 1, Fields: map[string]string{"AccountNbr": account}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic"}}}, []byte("nonce"))
@@ -382,9 +382,14 @@ func TestACBCredentialsImportChecksExactEncryptedSessionAccount(t *testing.T) {
 			if _, err := s.DB().Exec(`INSERT INTO sessions(connection_id,generation,envelope,key_id,updated_at) VALUES(?,?,?,?,?)`, c.ID, c.Generation, encoded, env.KeyID, now()); err != nil {
 				t.Fatal(err)
 			}
+			if scenario == "expired-empty" || scenario == "expired-mismatch" {
+				if _, err := s.DB().Exec(`UPDATE connections SET state='AUTH_REQUIRED',generation=generation+1 WHERE id=?`, c.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
 			imported, err := s.ImportACBCredentials(ctx, ACBCredentials{Username: "user", Password: " password ", AccountNumber: "001234567890"})
 			switch scenario {
-			case "match", "legacy", "cookie-only":
+			case "match", "legacy", "cookie-only", "expired-empty":
 				if err != nil || imported.ID != c.ID {
 					t.Fatalf("import=%+v err=%v", imported, err)
 				}
