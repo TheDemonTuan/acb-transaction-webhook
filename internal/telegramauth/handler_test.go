@@ -583,7 +583,6 @@ func TestTelegramProgressUsesOneMessageAndCoalescesStaleNotices(t *testing.T) {
 		t.Fatal("progress message not persisted")
 	}
 	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='VERIFYING' WHERE id=?`, e.ID)
-	h.lastProgress = time.Time{}
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -591,14 +590,17 @@ func TestTelegramProgressUsesOneMessageAndCoalescesStaleNotices(t *testing.T) {
 		t.Fatal("changed progress was not edited")
 	}
 	var editedID int64
-	var editedText string
+	var editedText, initialText string
 	if err := json.Unmarshal(f.edits[0]["message_id"], &editedID); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(f.edits[0]["text"], &editedText); err != nil {
 		t.Fatal(err)
 	}
-	if editedID != progress.StatusMessageID || editedText != "Đang xác minh phiên" {
+	if err := json.Unmarshal(f.messages[0]["text"], &initialText); err != nil {
+		t.Fatal(err)
+	}
+	if editedID != progress.StatusMessageID || editedText == "" || editedText == initialText {
 		t.Fatal("edited progress did not represent current durable state")
 	}
 	if len(f.messages) != 1 {
@@ -610,6 +612,117 @@ func TestTelegramProgressUsesOneMessageAndCoalescesStaleNotices(t *testing.T) {
 	progress, err = s.AuthRecoveryEpisode(ctx, e.ID)
 	if err != nil || progress.StatusMessageID == 999 {
 		t.Fatal("stale CAS replaced progress message")
+	}
+}
+
+func TestTelegramStoppedProgressKeepsSafeReasonAndUsableControls(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := h.menu(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	data, messageID := menuLogin(t, f)
+	if err := h.HandleUpdate(ctx, callback(data, messageID)); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.LatestAuthRecoveryEpisode(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='LOGIN' WHERE id=?`, e.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beforeActions int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM telegram_auth_actions`).Scan(&beforeActions); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `UPDATE auth_attempts SET created_at=? WHERE id=?`, time.Now().Add(-30*time.Second).UTC().Format(time.RFC3339Nano), a.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var afterActions int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM telegram_auth_actions`).Scan(&afterActions); err != nil || afterActions != beforeActions {
+		t.Fatal("elapsed-time refresh created new actions")
+	}
+	if err := s.FinishRecoveryAuthAttempt(ctx, e.ID, a.Generation, "FAILED", "MANUAL_REQUIRED", "FRAME_UNSUPPORTED", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	beforeMessages := len(f.messages)
+	if err := h.DeliverNotices(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != beforeMessages {
+		t.Fatal("terminal result duplicated progress as a new notice")
+	}
+	edited := f.edits[len(f.edits)-1]
+	var id int64
+	var text string
+	var keyboard inlineKeyboard
+	if err := json.Unmarshal(edited["message_id"], &id); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(edited["text"], &text); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(edited["reply_markup"], &keyboard); err != nil {
+		t.Fatal(err)
+	}
+	if id != progress.StatusMessageID || !strings.Contains(text, reasonLabel("FRAME_UNSUPPORTED")) || strings.Contains(text, e.ID) || strings.Contains(text, c.ID) || strings.Contains(text, a.ID) {
+		t.Fatal("stopped progress lost safe actionable reason or exposed internal IDs")
+	}
+	c, err = s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := ""
+	for _, row := range keyboard.Rows {
+		for _, button := range row {
+			if !strings.HasPrefix(button.Data, "ar:") {
+				continue
+			}
+			var operation string
+			if err := s.DB().QueryRowContext(ctx, `SELECT action FROM telegram_auth_actions WHERE id=? AND message_id=? AND expected_generation=?`, strings.TrimPrefix(button.Data, "ar:"), id, c.Generation).Scan(&operation); err != nil {
+				t.Fatal("progress control was not bound to displayed message/generation", err)
+			}
+			if operation == "LOGIN" {
+				login = button.Data
+			}
+			if operation == "CANCEL" {
+				t.Fatal("stopped attempt retained irrelevant cancellation")
+			}
+		}
+	}
+	if login == "" {
+		t.Fatal("stopped attempt has no usable login next step")
+	}
+	beforeEdits := len(f.edits)
+	if err := h.deliverProgress(ctx); err != nil || len(f.edits) != beforeEdits {
+		t.Fatal("unchanged terminal progress looped edits", err)
+	}
+	u := callback(login, id)
+	u.Callback.Message.EditDate = 1
+	if err := h.HandleUpdate(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.LatestAuthRecoveryEpisode(ctx, c.ID)
+	if err != nil || current.ConsentActionID != strings.TrimPrefix(login, "ar:") {
+		t.Fatal("own edited progress message rejected the next login click", err)
 	}
 }
 
@@ -625,7 +738,7 @@ func TestTelegramConfirmationNavigationRequiresExactPrivateOperator(t *testing.T
 		func(q *CallbackQuery) { q.Message.Chat.ID++ },
 		func(q *CallbackQuery) { q.Message.Chat.Type = "group" },
 		func(q *CallbackQuery) { q.InlineMessageID = "inline" },
-		func(q *CallbackQuery) { q.Message.EditDate = 1 },
+		func(q *CallbackQuery) { q.Message.EditDate = 1; q.Message.From.ID++ },
 		func(q *CallbackQuery) { q.Message.ForwardOrigin = json.RawMessage(`{}`) },
 	} {
 		u := callback("nav:credentials", 100)

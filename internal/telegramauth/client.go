@@ -273,25 +273,19 @@ func localExpiry(value string) string {
 	}
 	return expiry.In(time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60)).Format("15:04:05 02/01/2006")
 }
-func shortID(id string) string {
-	if len(id) > 12 {
-		return id[:12]
-	}
-	return id
-}
 func (c *Client) SendChallenge(ctx context.Context, ch storage.AuthChallenge, image []byte) (int64, error) {
 	force := map[string]any{"force_reply": true, "selective": true, "input_field_placeholder": "Trả lời trực tiếp yêu cầu này"}
-	suffix := fmt.Sprintf(" Mã yêu cầu: %s. Hết hạn: %s.", shortID(ch.ID), localExpiry(ch.ExpiresAt))
+	suffix := fmt.Sprintf(" Hết hạn: %s (giờ Việt Nam). Mã chỉ dùng cho lần này; hết hạn thì không gửi mã cũ.", localExpiry(ch.ExpiresAt))
 	if ch.Kind == "OTP" {
-		return c.SendText(ctx, ch.ChatID, "ACB cần OTP đăng nhập. Chỉ nhập mã do ACB cấp cho lần đăng nhập này, không phải OTP chuyển tiền. Trả lời trực tiếp tin này."+suffix, force)
+		return c.SendText(ctx, ch.ChatID, "4/6 · ACB cần OTP đăng nhập. Mở app ACB lấy mã cho lần đăng nhập này rồi bấm Trả lời vào chính tin này, giữ nguyên số 0 đầu. Không dùng OTP chuyển tiền, không gửi mật khẩu. Sau khi gửi, chờ bot báo xác minh; chưa đăng nhập thành công chỉ vì đã nhập mã."+suffix, force)
 	}
 	if ch.Kind != "CAPTCHA_TEXT" {
 		return 0, errors.New("TELEGRAM_CAPTCHA_INVALID")
 	}
-	return c.sendCaptchaPhoto(ctx, ch.ChatID, image, "ACB cần CAPTCHA. Trả lời trực tiếp ảnh này bằng ký tự trong ảnh."+suffix, force)
+	return c.sendCaptchaPhoto(ctx, ch.ChatID, image, "2/6 · ACB cần captcha. Trả lời trực tiếp ảnh này bằng ký tự trong ảnh; không nhập OTP hay mật khẩu. Bot sẽ gửi thông tin đăng nhập sau khi xử lý captcha và báo bước tiếp theo."+suffix, force)
 }
 func (c *Client) SendCaptchaImage(ctx context.Context, chatID int64, image []byte) (int64, error) {
-	return c.sendCaptchaPhoto(ctx, chatID, image, "Ảnh captcha hiện hành. Ảnh này không tạo yêu cầu trả lời mới.", nil)
+	return c.sendCaptchaPhoto(ctx, chatID, image, "Ảnh captcha hiện tại để xem rõ hơn. Để gửi ký tự, bấm Trả lời vào ảnh yêu cầu captcha gốc còn hạn; không trả lời ảnh xem thêm này.", nil)
 }
 func (c *Client) sendCaptchaPhoto(ctx context.Context, chatID int64, image []byte, caption string, markup any) (int64, error) {
 	if len(image) > 512*1024 || len(image) < 8 || !bytes.Equal(image[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {

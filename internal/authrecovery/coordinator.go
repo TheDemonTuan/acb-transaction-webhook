@@ -561,7 +561,7 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		case "CREDENTIALS_REJECTED":
 			return c.finish(ctx, e, "MANUAL_REQUIRED", "CREDENTIALS_REJECTED", time.Time{})
 		default:
-			return c.unknown(ctx, e)
+			return c.unknown(ctx, e, o.ReasonCode)
 		}
 	case authbrowser.Maintenance:
 		return c.finish(ctx, e, "WAIT_OPERATOR", "BANK_MAINTENANCE", c.Now().Add(15*time.Minute))
@@ -569,12 +569,12 @@ func (c *Coordinator) advance(ctx context.Context, e storage.AuthRecoveryEpisode
 		return c.finish(ctx, e, "MANUAL_REQUIRED", "UNSUPPORTED_CHALLENGE", time.Time{})
 	default:
 		if o.ReasonCode == "ACCOUNT_SELECTION_REQUIRED" || o.ReasonCode == "UNSAFE_CAPTCHA_CROP" || o.ReasonCode == "AMBIGUOUS_CONTROLS" {
-			return c.finish(ctx, e, "MANUAL_REQUIRED", "UNSUPPORTED_PAGE", time.Time{})
+			return c.finish(ctx, e, "MANUAL_REQUIRED", o.ReasonCode, time.Time{})
 		}
-		return c.unknown(ctx, e)
+		return c.unknown(ctx, e, o.ReasonCode)
 	}
 }
-func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode) error {
+func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode, reason string) error {
 	w := c.windows[e.AttemptID]
 	if w.first.IsZero() {
 		w.first = c.Now()
@@ -582,7 +582,14 @@ func (c *Coordinator) unknown(ctx context.Context, e storage.AuthRecoveryEpisode
 	w.count++
 	c.windows[e.AttemptID] = w
 	if w.count >= 10 || c.Now().Sub(w.first) >= 30*time.Second {
-		return c.finish(ctx, e, "MANUAL_REQUIRED", "UNKNOWN_PAGE", time.Time{})
+		// Only adapter-owned codes may leave the runtime. Never expose bank text,
+		// arbitrary DOM data or browser transport errors as an operator reason.
+		switch reason {
+		case "FRAME_UNSUPPORTED", "UNSAFE_CONTROLS", "WRONG_FORM_ORIGIN", "AMBIGUOUS_SUBMIT", "UNRECOGNIZED_PAGE", "UNRECOGNIZED_REJECTION", "CAPTCHA_LOADING", "ACTION_OUTCOME_UNKNOWN", "ACCOUNT_SELECTION_PENDING":
+		default:
+			reason = "UNKNOWN_PAGE"
+		}
+		return c.finish(ctx, e, "MANUAL_REQUIRED", reason, time.Time{})
 	}
 	return nil
 }

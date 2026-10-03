@@ -289,6 +289,52 @@ func (f *coordinatorFixture) pending() storage.AuthChallenge {
 	return ch
 }
 
+func TestRecoveryCoordinatorPreservesSafeBrowserStopReasons(t *testing.T) {
+	for _, tc := range []struct {
+		reason, expected string
+		immediate        bool
+	}{
+		{"ACCOUNT_SELECTION_REQUIRED", "ACCOUNT_SELECTION_REQUIRED", true},
+		{"UNSAFE_CAPTCHA_CROP", "UNSAFE_CAPTCHA_CROP", true},
+		{"AMBIGUOUS_CONTROLS", "AMBIGUOUS_CONTROLS", true},
+		{"FRAME_UNSUPPORTED", "FRAME_UNSUPPORTED", false},
+		{"UNSAFE_CONTROLS", "UNSAFE_CONTROLS", false},
+		{"WRONG_FORM_ORIGIN", "WRONG_FORM_ORIGIN", false},
+		{"AMBIGUOUS_SUBMIT", "AMBIGUOUS_SUBMIT", false},
+		{"UNRECOGNIZED_PAGE", "UNRECOGNIZED_PAGE", false},
+		{"UNRECOGNIZED_REJECTION", "UNRECOGNIZED_REJECTION", false},
+		{"CAPTCHA_LOADING", "CAPTCHA_LOADING", false},
+		{"ACTION_OUTCOME_UNKNOWN", "ACTION_OUTCOME_UNKNOWN", false},
+		{"ACCOUNT_SELECTION_PENDING", "ACCOUNT_SELECTION_PENDING", false},
+		{"BANK_SECRET_password-account", "UNKNOWN_PAGE", false},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			f := newCoordinatorFixture(t)
+			f.observation.State = authbrowser.Unknown
+			f.observation.ReasonCode = tc.reason
+			f.reconcile()
+			if !tc.immediate && f.episode().State == "MANUAL_REQUIRED" {
+				t.Fatal("transient page stopped before the observation window")
+			}
+			for range 20 {
+				f.reconcile()
+			}
+			e := f.episode()
+			if e.State != "MANUAL_REQUIRED" || e.ReasonCode != tc.expected {
+				t.Fatalf("operator reason: state=%s reason=%s", e.State, e.ReasonCode)
+			}
+			if f.starts != 1 || f.logins != 0 || f.captchas != 0 || f.otps != 0 || f.credentialReads != 0 || f.cancels != 1 {
+				t.Fatal("unsupported page submitted credentials/challenges or started another attempt")
+			}
+			f.restart(false)
+			f.reconcile()
+			if f.starts != 1 || f.logins != 0 || f.episode().ReasonCode != tc.expected {
+				t.Fatal("restart resumed a stopped attempt or discarded its safe reason")
+			}
+		})
+	}
+}
+
 func TestRecoveryCoordinatorPendingAccountSelection(t *testing.T) {
 	f := newCoordinatorFixture(t)
 	f.reconcile()

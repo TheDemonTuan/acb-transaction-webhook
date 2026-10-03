@@ -4,12 +4,30 @@
 
 ## Operating contract
 
-- A lost session creates a durable warning, **not a login**. Operational history, startup, polling, restart, text commands and “Mở khóa đăng nhập” cannot authorize a new browser attempt. Only a valid LOGIN/RETRY button gives one attempt; after failure or another session loss, another button is required.
+- A lost session creates a durable warning, **not a login**. Operational history, startup, polling, restart, text commands and “Cho phép đăng nhập” cannot authorize a new browser attempt. Only a valid LOGIN/RETRY button gives one attempt; after failure or another session loss, another button is required.
 - `/start`, `/menu` and `/help` show the Vietnamese control panel. Use “Trạng thái”, “Đăng nhập”, “Đổi thông tin đăng nhập”, “Đăng xuất ACB” and “Trợ giúp”; cancellation and catch-up retry appear when applicable. Read-only menu/status remain available during deployment maintenance.
 - Without an initialized connection/encrypted credential record, the bot reports **“Chưa khởi tạo — chạy setup/import trên VPS”**. Missing credentials permit a degraded menu, not bank login or a grant for an empty connection.
 - After a login button, supported CAPTCHA/login/verification/catch-up steps proceed automatically. Supply only the requested **login OTP from the ACB app** by replying to the current private-chat prompt. Human CAPTCHA is the fallback when AI or a safely recognized challenge cannot complete that step.
 - No dashboard login, bank browser iframe, manual login API or remote-desktop escape hatch remains. Unsupported bank challenges require the ACB app or bank support; the bot must stop rather than guess controls.
 - Dashboard status, tracking configuration, QR, transaction history and data sync remain. Changing stored credentials or logging out preserves the connection ID, exact tracked account, checkpoints and transaction journal.
+
+## Telegram usability repair — 2026-10-03
+
+User acceptance: managing ACB in Telegram must be understandable without internal terminology or repeated status polling. A healthy container is not evidence of successful bank login. The reported live attempt stopped before CAPTCHA or credential submission with `UNKNOWN_PAGE`; inspect the VPS and bank's unauthenticated page before changing recognition logic.
+
+- [x] SSH to VPS and inspect recovery episode, submission counters and service health without exposing credentials, OTP or session material.
+- [x] Replace the generic menu with current ACB state, a clear next step and context-appropriate controls.
+- [x] Show each confirmed operation's acknowledgement, current step and outcome; failed operations must explain the cause and next action in plain Vietnamese.
+- [x] Maintain one changing login progress message through opening ACB, CAPTCHA, login submission, OTP, account verification and missing-transaction recovery, including terminal failures. No connection/episode IDs in user-facing messages, invented percentages, stale progress or automatic retry.
+- [x] Make OTP/CAPTCHA replies, expiry, cancellation, saved-credential changes and bank-vs-local logout outcomes clear. Refresh stale controls safely rather than leaving the user at a dead end.
+- [x] Reproduce and fix the actual bank-page recognition failure; preserve one-click consent, exact-account checks, safe CAPTCHA bounds and no secret-bearing diagnostics.
+- [x] Exercise the changed interaction/recognition path and behavioral regressions; record observed limits separately from successful evidence.
+- [ ] Commit/push `main`, deploy the new immutable release and verify the actual VPS revision, controller readiness and Telegram surface. CodeQL/Codacy do not block this delivery. A live login/OTP result requires the operator's explicit Telegram action, not an assistant-initiated login.
+Acceptance evidence so far: SSH showed the failed live attempt at `UNKNOWN_PAGE` with zero AI/CAPTCHA/OTP submissions. Original production recognition evaluated on the real anonymous ACB page returned `UNKNOWN / FRAME_UNSUPPORTED`; the repaired recognition returned `LOGIN_FORM`, CAPTCHA required, a bounded `100×27` crop and the observed login anchor. No username/password/OTP was entered. Only the observed top-level `loginOp` POST form, its `SecurityCode` image and known submit handler are admitted; the unrelated known promotional frame is ignored, while unknown frames and ambiguous/unsafe controls remain blocked.
+Verification: scoped Go package tests passed. A throwaway HTTP smoke exercised the actual Telegram handler with an isolated synthetic database: consent acknowledgement and all observed progress/terminal panels edited message `102`, with current-state controls and no secret echo. Real Chromium integration passed the observed ACB login form → CAPTCHA crop → one credential submission → OTP → exact-account handoff; replay and unsafe/ambiguous form/frame/crop variants were rejected. This is a synthetic authenticated fixture, not a real-bank login. The crop observer now preserves the recognition stop reason on rejected or still-loading forms instead of overwriting it with a missing-crop error. Throwaway smoke source is removed from the release.
+
+
+
 
 ## Initial setup and migration import
 
@@ -47,7 +65,7 @@ Setup success means configuration, the exercised private reply and local readine
 
 ## Operational username/password changes
 
-1. Open `/menu` → **“Đổi thông tin đăng nhập”** → confirm **“Cấp link đổi thông tin”**. Confirmation is a one-use 60-second action. The new link expires after five minutes and revokes an older pending link.
+1. Open `/menu` → **“Đổi thông tin đăng nhập”** → confirm **“Lưu lại thông tin đăng nhập”**. Confirmation is a one-use 60-second action. The new link expires after five minutes and revokes an older pending link.
 2. Open the HTTPS link in a browser with Cloudflare Access **OWNER** authentication. A Telegram in-app browser without the Access session may need the normal browser. There is no Access bypass.
 3. The page `/admin/acb-credentials#grant=…` removes the fragment from history after reading it into RAM. Do not forward the link; possession is one layer, OWNER authentication is another. The page does not put the grant/password in query parameters, local/session storage, analytics or a query cache.
 4. Enter the complete username, password and identical confirmation; the old secret is not prefilled. Password leading/trailing spaces are significant. The displayed account is masked and **cannot be changed**. This updates only the system's stored credentials, not the bank password.
@@ -69,8 +87,8 @@ The private credential APIs require OWNER, CSRF and exact configured `PUBLIC_ORI
 | `/acb_login` | Render a fresh LOGIN button; typing the command is not consent. |
 | “Đăng nhập” | Consume the authenticated, message-bound, revision-bound 60-second action for **one** browser attempt. A stale button only yields a new button. |
 | `/acb_retry` / retry button | New login consent when recovery needs it; if a verified session only needs catch-up retry, reuse that run/session with no new login or OTP. |
-| `/acb_pause` / “Khóa đăng nhập” | Lock recovery login; does not log out a verified monitoring session or erase history. |
-| `/acb_resume` / “Mở khóa đăng nhập” | Unlock availability, **not login consent**. |
+| `/acb_pause` / “Tạm khóa đăng nhập” | Lock recovery login; does not log out a verified monitoring session or erase history. |
+| `/acb_resume` / “Cho phép đăng nhập” | Unlock availability, **not login consent**. 
 | `/acb_cancel` / “Hủy đăng nhập” | Confirm cancellation of an uncommitted login, not bank logout of a healthy session. |
 
 Fixed bounds: one browser attempt per consumed consent, consent admission within 60 seconds, attempt TTL 15 minutes, login submission cooldown 60 seconds, at most **3 CAPTCHA submissions, 3 AI requests for distinct CAPTCHA revisions, and 1 OTP submission per attempt**. Restart does not replenish counters or replay a consumed revision. Error, maintenance, expiry or uncertain outcome ends authority to start another attempt; a retry time is only when a new button is permitted, never a timer-driven login.
@@ -79,7 +97,7 @@ Only directly reply to the current CAPTCHA/OTP prompt. Exact private chat/user, 
 
 Replies are durably consumed before bank submission. A crash/timeout after `CONSUMING` cannot replay the plaintext answer. A DB failure before durable disposition must not silently delete input and advance its offset. Still-valid pending prompts may be revalidated on restart; stale/undelivered prompts are invalidated. A new captcha image by itself is not proof that login was rejected: credentials may be submitted again only after explicit CAPTCHA rejection and a fresh revision, within the same budget. Unknown login outcome requires operator intervention.
 
-Progress edits one message per episode, coalescing observed states: opening ACB → CAPTCHA → login → waiting OTP → verifying → catch-up → ready. Prompt/final/session-loss notices are separate. No fake percent or bank response-time guarantee. Notices are at least once: a crash can duplicate a notification, **not authorize a duplicate bank action**.
+Progress edits one message per episode, including terminal stops: **1/6 open ACB → 2/6 CAPTCHA → 3/6 submit login → 4/6 login OTP (when required) → 5/6 verify account → 6/6 recover missing transactions**. The main panel shows current state and the next action; cancellation, fresh login consent, catch-up retry, saved-credential changes, login lock/unlock and bank logout are shown only where applicable. Active elapsed time refreshes in 15-second buckets without replacing action nonces on every tick. Terminal failures update the same progress with a translated safe cause and actionable controls; they do not leave an old “logging in” message or append internal connection/episode/challenge IDs. OTP/CAPTCHA prompts remain separate reply targets, show Vietnam-time expiry, and never echo a submitted code. Expired controls yield a fresh panel, never automatic bank action. No fake percent or bank response-time guarantee. A crash may duplicate a delivery, **not authorize a duplicate bank action**.
 
 “Xem ảnh captcha” uses only the current safely bounded crop, at most 512 KiB, with protected content and best-effort deletion. No full-page/password/OTP/account/balance/history screenshot fallback is permitted. If safe crop cannot be established, stop with `UNSAFE_CAPTCHA_CROP`.
 

@@ -38,8 +38,10 @@ type Handler struct {
 	wake                          chan struct{}
 	deliveryMu                    sync.Mutex
 	deliveryRunning               bool
-	lastProgress                  time.Time
+	progressMu                    sync.Mutex
 	progressEpisode, progressText string
+	progressKey                   string
+	progressMarkup                inlineKeyboard
 	deliveryRetryAt               time.Time
 }
 
@@ -84,9 +86,26 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 			return errors.New("TELEGRAM_REPLY_BROKER_UNAVAILABLE")
 		}
 		err := h.ReplyBroker.HandleReply(ctx, m.Chat.ID, m.ReplyTo.ID, m.ID, m.Text)
-		if err == nil || rejectedDisposition(err) || errors.Is(err, challenge.ErrInvalidResponse) || errors.Is(err, challenge.ErrOutcomeUnknown) {
+		if errors.Is(err, challenge.ErrInvalidResponse) {
+			return nil // The broker sends one kind-specific format correction.
+		}
+		if err == nil {
 			h.wakeCoordinator()
-			return nil
+			return h.refreshPanel(ctx, "Đã gửi câu trả lời tới ACB. Chỉ kết quả xác minh bên dưới mới xác nhận đăng nhập thành công; không gửi lại mã.")
+		}
+		if errors.Is(err, challenge.ErrOutcomeUnknown) {
+			h.wakeCoordinator()
+			return h.refreshPanel(ctx, "Chưa xác định được ACB có nhận mã hay không. Bot không gửi lại mã. Chờ kết quả dừng/xác minh; kiểm tra app ACB trước khi bắt đầu lần mới.")
+		}
+		if rejectedDisposition(err) {
+			h.wakeCoordinator()
+			text := "Yêu cầu này không còn dùng được. Không gửi mã cũ; làm theo yêu cầu mới nhất còn hạn hoặc nút bên dưới."
+			if errors.Is(err, storage.ErrChallengeExpired) {
+				text = "Mã đã hết thời gian trả lời nên chưa được gửi tới ACB. Không gửi mã cũ; chờ kết quả dừng và dùng Đăng nhập cho lần mới."
+			} else if errors.Is(err, storage.ErrChallengeConsumed) {
+				text = "Câu trả lời cho yêu cầu này đã được xử lý hoặc đang chờ kết quả. Bot không gửi lại mã; hãy theo dõi tiến độ bên dưới."
+			}
+			return h.refreshPanel(ctx, text)
 		}
 		return err
 	}
@@ -166,11 +185,11 @@ func actionLabel(operation string) string {
 	case "LOGOUT":
 		return "Xác nhận đăng xuất ACB"
 	case "UPDATE_CREDENTIALS":
-		return "Cấp link đổi thông tin"
+		return "Lưu lại thông tin đăng nhập"
 	case "PAUSE":
-		return "Khóa đăng nhập"
+		return "Tạm khóa đăng nhập"
 	case "RESUME":
-		return "Mở khóa đăng nhập"
+		return "Cho phép đăng nhập"
 	default:
 		return "Trạng thái"
 	}
@@ -212,9 +231,12 @@ func (h *Handler) menu(ctx context.Context, help bool) error {
 	if err != nil {
 		return err
 	}
-	text := "Quản lý phiên ACB. Đăng nhập chỉ bắt đầu sau khi bạn bấm nút Đăng nhập."
+	text, err := h.stateText(ctx, c, e, false)
+	if err != nil {
+		return err
+	}
 	if help {
-		text += "\nBot xử lý các bước được ACB hỗ trợ; chỉ trả lời trực tiếp yêu cầu OTP đăng nhập từ app ACB, không nhập OTP chuyển tiền. Telegram không mã hóa đầu cuối; xóa tin chỉ là cố gắng tốt nhất. Đổi thông tin chỉ thay bản lưu hệ thống, không đổi mật khẩu tại ngân hàng."
+		text += "\n\nMỗi lần bấm Đăng nhập chỉ cho phép một lần thử. Dừng hoặc khởi động lại không tự đăng nhập. Chỉ trả lời trực tiếp tin/ảnh yêu cầu OTP đăng nhập hoặc captcha còn hạn; không gửi mật khẩu hay OTP chuyển tiền vào chat. Telegram không mã hóa đầu cuối; xóa tin chỉ là cố gắng tốt nhất. Đổi thông tin chỉ thay bản lưu hệ thống, không đổi mật khẩu tại ngân hàng."
 	}
 	return h.sendPanel(ctx, c, e, text)
 }
@@ -223,118 +245,157 @@ func (h *Handler) sendPanel(ctx context.Context, c storage.Connection, e storage
 	return h.sendNoticePanel(ctx, c, e, text, nil)
 }
 
-func (h *Handler) sendNoticePanel(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, text string, deliveredID *int64) error {
-	keyboard := inlineKeyboard{Rows: [][]inlineButton{{{Text: "Trạng thái", Data: "nav:status"}}}}
-	var actions []storage.TelegramAuthAction
+type panelPlan struct {
+	text       string
+	keyboard   inlineKeyboard
+	operations []string
+	captcha    *storage.AuthChallenge
+}
+
+func (h *Handler) planPanel(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, text string) (panelPlan, error) {
+	p := panelPlan{text: text}
 	locked := false
 	if err := h.Store.CheckMutationAllowed(ctx); err != nil {
 		if !errors.Is(err, storage.ErrMutationGateLocked) {
-			return err
+			return p, err
 		}
 		locked = true
-		text += "\nHệ thống đang bảo trì; thao tác thay đổi tạm khóa. Trạng thái và trợ giúp vẫn hoạt động."
+		p.text += "\nHệ thống đang bảo trì; chỉ xem trạng thái và trợ giúp, chưa thể thay đổi."
 	}
 	configured := false
-	if c.ID != "" && c.State != "UNCONFIGURED" {
+	if c.ID != "" {
 		var err error
 		configured, err = h.Store.HasACBCredentials(ctx, c.ID)
 		if err != nil {
-			return err
+			return p, err
 		}
-	}
-	if !configured {
-		text += "\nChưa khởi tạo — chạy setup/import trên VPS. Chưa đăng nhập ACB."
 	}
 	bot, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
 	if err != nil {
-		return err
+		return p, err
 	}
-	active := false
-	if e.AttemptID != "" {
-		report, err := h.Store.ActiveAuthAttempts(ctx)
-		if err != nil {
-			return err
-		}
-		for _, attempt := range report.Attempts {
-			if attempt.ID == e.AttemptID {
-				active = true
-			}
+	report, err := h.Store.ActiveAuthAttempts(ctx)
+	if err != nil {
+		return p, err
+	}
+	active, otherActive := false, false
+	for _, attempt := range report.Attempts {
+		if attempt.ID == e.AttemptID && attempt.OwnerSubject == storage.RecoveryOwner {
+			active = true
+		} else {
+			otherActive = true
 		}
 	}
-	login := inlineButton{Text: "Đăng nhập", Data: "nav:menu"}
-	operations := []string{}
-	if !locked && configured && !bot.Paused && !active && c.State != "MONITORING" {
-		operations = append(operations, "LOGIN")
+	if !configured {
+		p.text += "\nChưa lưu thông tin đăng nhập. Nhờ người quản lý cấu hình hệ thống trước; không gửi mật khẩu vào chat."
+	}
+	if bot.Paused {
+		p.text += "\nĐăng nhập đang tạm khóa. Cho phép lại không tự đăng nhập."
+	}
+	if otherActive {
+		p.text += "\nNgười quản lý đang đăng nhập ở nơi khác. Bot chờ và không hủy lần đó."
 	}
 	if !locked && c.ID != "" {
-		if bot.Paused {
-			operations = append(operations, "RESUME")
-		} else {
-			operations = append(operations, "PAUSE")
+		if (active && c.State != "MONITORING") || pendingConsent(e) {
+			p.operations = append(p.operations, "CANCEL")
+		} else if !otherActive && !bot.Paused && configured && (c.State == "AUTH_REQUIRED" || c.State == "UNCONFIGURED") && e.RecoveryRunID == "" {
+			readyAt, _ := time.Parse(time.RFC3339Nano, e.NextAttemptAt)
+			loginAt, parseErr := time.Parse(time.RFC3339Nano, e.LastLoginAt)
+			if parseErr == nil && loginAt.Add(time.Minute).After(readyAt) {
+				readyAt = loginAt.Add(time.Minute)
+			}
+			if time.Now().Before(readyAt) {
+				p.text += "\nCó thể thử lại sau " + localExpiry(readyAt.Format(time.RFC3339Nano)) + ". Bấm Làm mới khi đến giờ; bot không tự thử."
+			} else {
+				p.operations = append(p.operations, "LOGIN")
+			}
 		}
-		if active {
-			operations = append(operations, "CANCEL")
-		}
-		if e.RecoveryRunID != "" && c.State == "MONITORING" {
+		if e.RecoveryRunID != "" && c.State == "MONITORING" && e.ReasonCode != "INVALID_CHECKPOINT" {
 			run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
 			if err != nil {
-				return err
+				return p, err
 			}
-			if run.Status == storage.RecoveryRunStatusFailed || run.Status == storage.RecoveryRunStatusCanceled {
-				operations = append(operations, "RETRY")
+			if (run.Status == storage.RecoveryRunStatusFailed || run.Status == storage.RecoveryRunStatusCanceled) && run.ErrorCode != "INVALID_CHECKPOINT" {
+				p.operations = append(p.operations, "RETRY")
 			}
 		}
-	}
-	for _, operation := range operations {
-		buttons, created, err := h.buttons(ctx, c, e, []string{operation})
-		if errors.Is(err, storage.ErrMutationGateLocked) {
-			return h.sendNoticePanel(ctx, c, e, text, deliveredID)
-		}
-		if err != nil {
-			return err
-		}
-		actions = append(actions, created...)
-		button := buttons.Rows[0][0]
-		if operation == "LOGIN" {
-			login = button
-		} else {
-			if operation == "RETRY" {
-				button.Text = "Thử lại đồng bộ"
-			}
-			keyboard.Rows = append(keyboard.Rows, []inlineButton{button})
-		}
-	}
-	if !locked && active && e.AttemptID != "" {
-		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
-		if err == nil && ch.Kind == "CAPTCHA_TEXT" && (ch.Status == "PENDING" || ch.Status == "DELIVERING") {
-			expires, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
-			if parseErr == nil && time.Now().Before(expires) {
-				a, err := h.Store.CreateTelegramAuthAction(ctx, storage.TelegramAuthAction{BotID: h.Client.Readiness().BotID, ChatID: h.ChatID, UserID: h.UserID, EpisodeID: e.ID, ExpectedGeneration: e.Generation, AttemptID: e.AttemptID, BrowserRevision: ch.BrowserRevision, Action: "CAPTCHA_IMAGE"})
-				if err != nil {
-					return err
+		if active && e.AttemptID != "" {
+			ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
+			if err == nil && ch.Kind == "CAPTCHA_TEXT" && (ch.Status == "PENDING" || ch.Status == "DELIVERING") {
+				expires, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
+				if parseErr == nil && time.Now().Before(expires) {
+					p.captcha = &ch
 				}
-				actions = append(actions, a)
-				keyboard.Rows = append(keyboard.Rows, []inlineButton{{Text: "Xem ảnh captcha", Data: "ar:" + a.ID}})
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return p, err
 			}
-		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		}
+		if !active && configured {
+			p.keyboard.Rows = append(p.keyboard.Rows, []inlineButton{{Text: "Thông tin đăng nhập", Data: "nav:credentials"}})
+		}
+		if bot.Paused {
+			p.operations = append(p.operations, "RESUME")
+		} else if !active {
+			p.operations = append(p.operations, "PAUSE")
+		}
+		if c.State == "MONITORING" && !active {
+			p.keyboard.Rows = append(p.keyboard.Rows, []inlineButton{{Text: "Đăng xuất ACB", Data: "nav:logout"}})
+		}
+	}
+	p.keyboard.Rows = append(p.keyboard.Rows, []inlineButton{{Text: "Làm mới", Data: "nav:status"}, {Text: "Hướng dẫn", Data: "nav:help"}})
+	return p, nil
+}
+
+func (h *Handler) renderPanel(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, p panelPlan) (inlineKeyboard, []storage.TelegramAuthAction, error) {
+	keyboard, actions, err := h.buttons(ctx, c, e, p.operations)
+	if err != nil {
+		return keyboard, actions, err
+	}
+	for i, operation := range p.operations {
+		if operation == "RETRY" {
+			keyboard.Rows[i][0].Text = "Thử lại lấy giao dịch thiếu"
+		}
+	}
+	if p.captcha != nil {
+		a, err := h.Store.CreateTelegramAuthAction(ctx, storage.TelegramAuthAction{BotID: h.Client.Readiness().BotID, ChatID: h.ChatID, UserID: h.UserID, EpisodeID: e.ID, ExpectedGeneration: c.Generation, AttemptID: e.AttemptID, BrowserRevision: p.captcha.BrowserRevision, Action: "CAPTCHA_IMAGE"})
+		if err != nil {
+			return keyboard, actions, err
+		}
+		actions = append(actions, a)
+		keyboard.Rows = append(keyboard.Rows, []inlineButton{{Text: "Xem ảnh captcha", Data: "ar:" + a.ID}})
+	}
+	keyboard.Rows = append(keyboard.Rows, p.keyboard.Rows...)
+	return keyboard, actions, nil
+}
+
+func (h *Handler) bindActions(ctx context.Context, actions []storage.TelegramAuthAction, id int64) error {
+	for _, action := range actions {
+		if err := h.Store.DeliverTelegramAuthAction(ctx, action.ID, id); err != nil {
 			return err
 		}
 	}
-	keyboard.Rows = append(keyboard.Rows,
-		[]inlineButton{login},
-		[]inlineButton{{Text: "Đổi thông tin đăng nhập", Data: "nav:credentials"}},
-		[]inlineButton{{Text: "Đăng xuất ACB", Data: "nav:logout"}},
-		[]inlineButton{{Text: "Trợ giúp", Data: "nav:help"}, {Text: "Menu", Data: "nav:menu"}},
-	)
-	id, err := h.Client.SendText(ctx, h.ChatID, text, keyboard)
+	return nil
+}
+
+func (h *Handler) sendNoticePanel(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, text string, deliveredID *int64) error {
+	p, err := h.planPanel(ctx, c, e, text)
 	if err != nil {
 		return err
 	}
-	for _, action := range actions {
-		if err := h.Store.DeliverTelegramAuthAction(ctx, action.ID, id); err != nil {
-			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
-			return err
-		}
+	keyboard, actions, err := h.renderPanel(ctx, c, e, p)
+	if errors.Is(err, storage.ErrMutationGateLocked) {
+		return h.sendNoticePanel(ctx, c, e, text, deliveredID)
+	}
+	if err != nil {
+		return err
+	}
+	id, err := h.Client.SendText(ctx, h.ChatID, p.text, keyboard)
+	if err != nil {
+		return err
+	}
+	if err := h.bindActions(ctx, actions, id); err != nil {
+		_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
+		return err
 	}
 	if deliveredID != nil {
 		*deliveredID = id
@@ -379,12 +440,12 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 			return err
 		}
 		if !blocked {
-			return h.say(ctx, "Phiên đang hoạt động.")
+			return h.status(ctx)
 		}
-		return h.say(ctx, "Phiên đã xác minh, đang chờ bù giao dịch. Dùng /acb_retry nếu bước bù đã thất bại; không đăng nhập lại.")
+		return h.refreshPanel(ctx, "Phiên đã xác minh; đang lấy giao dịch còn thiếu. Chỉ thử lại bước lấy giao dịch nếu đã thất bại; không đăng nhập lại.")
 	}
 	if (operation == "CANCEL") && e.RecoveryRunID != "" && c.State == "MONITORING" {
-		return h.say(ctx, "Không thể hủy bước bù đã bắt đầu; phiên và cổng chặn được giữ nguyên. Dùng /acb_pause để ngăn lần đăng nhập tiếp.")
+		return h.refreshPanel(ctx, "Không thể hủy bước lấy giao dịch đã bắt đầu. Phiên đã xác minh được giữ; tạm khóa đăng nhập chỉ ngăn lần đăng nhập tiếp.")
 	}
 	if operation == "LOGIN" || operation == "RETRY" {
 		report, err := h.Store.ActiveAuthAttempts(ctx)
@@ -393,7 +454,7 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 		}
 		for _, a := range report.Attempts {
 			if a.OwnerSubject != storage.RecoveryOwner {
-				return h.say(ctx, "Đang có phiên đăng nhập manual. Bot chờ, không chiếm hoặc hủy phiên này.")
+				return h.refreshPanel(ctx, "Người quản lý đang đăng nhập ở nơi khác. Bot chờ và không hủy lần đó.")
 			}
 		}
 		if e.AttemptID != "" {
@@ -401,7 +462,7 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 			if err == nil {
 				expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
 				if parseErr == nil && time.Now().Before(expiry) {
-					return h.say(ctx, "Đang chờ yêu cầu CAPTCHA hoặc OTP còn hiệu lực. Hãy trả lời trực tiếp yêu cầu đó.")
+					return h.refreshPanel(ctx, "Đang chờ captcha hoặc OTP còn hạn. Trả lời trực tiếp yêu cầu đó; không tạo thêm lần đăng nhập.")
 				}
 			} else if !errors.Is(err, sql.ErrNoRows) {
 				return err
@@ -426,14 +487,24 @@ func (h *Handler) direct(ctx context.Context, operation string) error {
 	disposition, err := h.Store.ApplyTelegramAuthOperation(ctx, h.Client.Readiness().BotID, e.ID, c.Generation, operation)
 	if err != nil {
 		if rejectedDisposition(err) || errors.Is(err, storage.ErrMutationGateLocked) {
-			return h.say(ctx, operationFailure(err))
+			return h.refreshPanel(ctx, operationFailure(err))
 		}
 		return err
 	}
 	return h.afterOperation(ctx, disposition)
 }
 func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
-	if q.Message == nil || q.InlineMessageID != "" || !h.authorized(q.Message.Chat, &q.From) || unsafeMessage(q.Message) {
+	if q.Message == nil || q.InlineMessageID != "" || !h.authorized(q.Message.Chat, &q.From) {
+		return nil
+	}
+	message := *q.Message
+	// Telegram includes edit_date when a bot's persistent progress is updated.
+	// Only our own bot messages may use that exception; action binding still
+	// fences the displayed message ID, operator and connection generation.
+	if message.From != nil && message.From.IsBot && message.From.ID == h.Client.Readiness().BotID {
+		message.EditDate = 0
+	}
+	if unsafeMessage(&message) {
 		return nil
 	}
 	// Clear the spinner before storage or delivery work, with its own deadline.
@@ -458,15 +529,15 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 	a, disposition, err := h.Store.ConsumeTelegramAuthAction(ctx, strings.TrimPrefix(q.Data, "ar:"), h.Client.Readiness().BotID, h.ChatID, h.UserID, q.Message.ID, time.Now())
 	if err != nil {
 		if errors.Is(err, storage.ErrChallengeExpired) {
-			return h.menu(ctx, false)
+			return h.refreshPanel(ctx, "Nút đã hết hạn. Dùng nút mới bên dưới; chưa bắt đầu thêm lần đăng nhập.")
 		}
 		if rejectedDisposition(err) || errors.Is(err, storage.ErrMutationGateLocked) {
-			return h.say(ctx, operationFailure(err))
+			return h.refreshPanel(ctx, operationFailure(err))
 		}
 		return err
 	}
 	if disposition == "CREDENTIAL_GRANT" {
-		_, err := h.Client.SendText(ctx, h.ChatID, "Link đổi thông tin đăng nhập có hạn 5 phút, yêu cầu đăng nhập chủ tài khoản. Nếu trình duyệt Telegram chưa đăng nhập Cloudflare Access, hãy mở bằng trình duyệt thường. Chỉ thay bản lưu trên VPS; chưa đăng nhập ACB.\n"+h.PublicOrigin+"/admin/acb-credentials#grant="+a.CredentialGrantToken, nil)
+		_, err := h.Client.SendText(ctx, h.ChatID, "Đã cấp link lưu thông tin đăng nhập, có hạn 5 phút.\n1. Mở link và đăng nhập chủ tài khoản để lưu thông tin. Nếu trình duyệt Telegram chưa đăng nhập, mở bằng trình duyệt thường.\n2. Sau khi lưu, bot sẽ báo kết quả; bấm Đăng nhập khi bạn sẵn sàng. Chưa đăng nhập ACB, không đổi mật khẩu ngân hàng.\n"+h.PublicOrigin+"/admin/acb-credentials#grant="+a.CredentialGrantToken, inlineKeyboard{Rows: [][]inlineButton{{{Text: "Quay lại ACB", Data: "nav:menu"}}}})
 		a.CredentialGrantToken = ""
 		return err
 	}
@@ -476,10 +547,13 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 			return errors.New("TELEGRAM_CAPTCHA_BROKER_UNAVAILABLE")
 		}
 		if err := broker.RequestCaptchaImage(ctx, a); err != nil {
+			if rejectedDisposition(err) {
+				return h.refreshPanel(ctx, "Ảnh captcha cũ không còn dùng được. Hãy làm theo yêu cầu mới nhất còn hạn.")
+			}
 			return err
 		}
 		h.Wake()
-		return nil
+		return h.say(ctx, "Đã nhận yêu cầu xem thêm ảnh captcha. Đang lấy ảnh hiện tại; ảnh xem thêm không tạo mã mới. Để gửi ký tự, trả lời ảnh yêu cầu gốc còn hạn.")
 	}
 	return h.afterOperation(ctx, disposition)
 }
@@ -488,80 +562,167 @@ func operationFailure(err error) string {
 	case errors.Is(err, storage.ErrMutationGateLocked):
 		return "Hệ thống đang bảo trì. Bạn vẫn có thể xem Trạng thái và Trợ giúp."
 	case errors.Is(err, storage.ErrRecoveryCommitted):
-		return "Không thể hủy bước bù hoặc thử lại dữ liệu cần sửa thủ công. Phiên và cổng chặn vẫn được giữ nguyên."
+		return "Không thể bỏ qua lỗi dữ liệu giao dịch bằng hủy hoặc đăng nhập lại. Nhờ người quản lý sửa mốc lấy giao dịch; phiên hiện tại vẫn được giữ."
 	case errors.Is(err, storage.ErrRecoveryCooldown):
 		return "Chưa đủ 60 giây từ lần gửi đăng nhập trước. Hãy chờ rồi xác nhận lại."
 	case errors.Is(err, storage.ErrAuthAttemptActive):
-		return "Đang có phiên đăng nhập. Hãy chờ, bot không chiếm phiên manual."
+		return "Đang có lần đăng nhập chưa kết thúc. Hãy chờ tiến độ hoặc trả lời yêu cầu mã còn hạn; bot không tạo thêm lần đăng nhập."
 	default:
-		return "Yêu cầu đã dùng, hết hạn hoặc trạng thái đã thay đổi. Gửi /acb_status rồi lấy nút xác nhận mới."
+		return "Nút đã dùng hoặc trạng thái vừa thay đổi. Dùng nút mới bên dưới; bot chưa tạo thêm lần đăng nhập."
 	}
 }
+func (h *Handler) refreshPanel(ctx context.Context, result string) error {
+	c, e, err := h.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	text, err := h.stateText(ctx, c, e, false)
+	if err != nil {
+		return err
+	}
+	return h.sendPanel(ctx, c, e, result+"\n\n"+text)
+}
+
 func (h *Handler) afterOperation(ctx context.Context, disposition string) error {
 	h.wakeCoordinator()
 	switch disposition {
 	case "LOGOUT_QUEUED":
-		return h.say(ctx, "Đã nhận yêu cầu đăng xuất. Phiên lưu đã bị chặn; bot đang chờ worker xóa trạng thái bộ nhớ và thử thu hồi phía ACB. Kết quả hai phía sẽ được báo riêng.")
-	case "STATUS":
+		return h.refreshPanel(ctx, "Đã nhận yêu cầu đăng xuất.\n1/2 · Đang xóa phiên lưu trên hệ thống.\n2/2 · Sẽ thử thu hồi phiên tại ACB và báo kết quả riêng. Chưa xác nhận đăng xuất ngân hàng hoàn tất; không tự đăng nhập lại.")
+	case "STATUS", "ACTIVE":
 		return h.status(ctx)
-	case "CATCHUP_RETRY":
-		return h.say(ctx, "Đã yêu cầu thử lại bù giao dịch với phiên hiện tại; không đăng nhập hoặc yêu cầu OTP lại.")
-	case "ACTIVE":
-		return h.say(ctx, "Phiên đang hoạt động.")
-	case "REARMED":
-		return h.say(ctx, "Đã nhận yêu cầu đăng nhập một lần. Bot sẽ xử lý và yêu cầu OTP từ app ACB khi cần.")
+	case "CATCHUP_RETRY", "REARMED":
+		return h.deliverProgress(ctx)
 	case "PAUSE":
-		return h.say(ctx, "Đã khóa đăng nhập và hủy yêu cầu đang chờ. Theo dõi với phiên đã xác minh và bù giao dịch vẫn tiếp tục.")
+		return h.refreshPanel(ctx, "Đã tạm khóa đăng nhập và hủy lần đang chờ. Không tự đăng nhập lại. Nếu phiên đã xác minh, theo dõi và lấy giao dịch còn thiếu vẫn tiếp tục theo lịch.")
 	case "RESUMED":
-		return h.say(ctx, "Đã mở khóa đăng nhập. Chưa đăng nhập ACB; hãy bấm Đăng nhập khi cần.")
+		return h.refreshPanel(ctx, "Đã cho phép đăng nhập. Thao tác này không bắt đầu lần mới; bấm Đăng nhập khi cần.")
 	case "CANCEL":
-		return h.say(ctx, "Đã hủy lần này. Bot không tự tạo lại đợt đã hủy; dùng /acb_login hoặc /acb_retry để xác nhận đợt mới.")
+		if err := h.deliverProgress(ctx); err != nil {
+			return err
+		}
+		c, e, err := h.snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		if e.StatusMessageID > 0 {
+			return nil
+		}
+		return h.sendPanel(ctx, c, e, "Đã hủy lần này. Không tự đăng nhập lại; bấm Đăng nhập khi muốn bắt đầu lần mới.")
 	default:
 		return errors.New("TELEGRAM_OPERATION_INVALID")
 	}
 }
 func (h *Handler) status(ctx context.Context) error {
-	c, e, err := h.snapshot(ctx)
-	if err != nil {
-		return err
-	}
-	bot, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
-	if err != nil {
-		return err
-	}
-	text := fmt.Sprintf("Kết nối %s: %s.\nĐợt %s: %s. Số lần thử: %d.\nKhóa đăng nhập: %t.", shortID(c.ID), connectionLabel(c.State), shortID(e.ID), episodeLabel(e.State), e.AttemptCount, bot.Paused)
-	if e.AttemptID != "" {
+	return h.menu(ctx, false)
+}
+
+func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, timed bool) (string, error) {
+	text := "ACB: " + connectionLabel(c.State) + "."
+	switch e.State {
+	case "DETECTED":
+		if pendingConsent(e) {
+			text = "Đã nhận yêu cầu đăng nhập một lần. Đang chờ mở ACB; bạn chưa cần gửi mã."
+		} else if e.ConsentActionID != "" && e.ConsentConsumedAt == "" {
+			text += "\nYêu cầu đăng nhập đã hết hạn trước khi mở ACB. Bấm Đăng nhập nếu muốn xác nhận lần mới; bot không tự thử."
+		} else {
+			text += "\nChưa đăng nhập lại. Bấm Đăng nhập khi bạn sẵn sàng nhận OTP."
+		}
+	case "STARTING":
+		text = "1/6 · Đang mở trang ACB.\nBạn chờ ở đây; bot sẽ cập nhật trong tin này."
+	case "LOGIN":
+		text = "1/6 · Đang chờ trang đăng nhập ACB sẵn sàng.\nBạn chưa cần gửi mã."
+		loginAt, loginErr := time.Parse(time.RFC3339Nano, e.LastLoginAt)
+		consentAt, consentErr := time.Parse(time.RFC3339Nano, e.ConsentConsumedAt)
+		if loginErr == nil && consentErr == nil && !loginAt.Before(consentAt) {
+			text = "3/6 · Đang gửi thông tin đăng nhập và chờ ACB phản hồi.\nChưa xác nhận đăng nhập thành công; không gửi lại mật khẩu hoặc mã."
+		} else if e.AIUsed > 0 {
+			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; nếu cần nhập tay, bot sẽ gửi ảnh riêng để trả lời."
+		}
+	case "WAITING_CAPTCHA", "WAITING_OTP":
+		if e.State == "WAITING_OTP" {
+			text = "4/6 · Chờ OTP đăng nhập.\nMở app ACB lấy mã cho lần đăng nhập này, rồi trả lời trực tiếp tin yêu cầu OTP riêng (không trả lời tin tiến độ này). Không dùng OTP chuyển tiền."
+		} else {
+			text = "2/6 · Chờ bạn nhập captcha.\nTrả lời trực tiếp ảnh yêu cầu captcha bằng ký tự trong ảnh (không trả lời tin tiến độ này)."
+		}
 		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
 		if err == nil {
-			text += "\nĐang chờ " + challengeLabel(ch.Kind) + "; hết hạn " + localExpiry(ch.ExpiresAt) + "."
+			text += "\nHạn trả lời: " + localExpiry(ch.ExpiresAt) + " (giờ Việt Nam)."
+			if expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt); parseErr == nil && !time.Now().Before(expiry) {
+				text += " Mã đã hết hạn; đừng gửi mã cũ. Đang chờ kết quả dừng lần này."
+			} else if ch.Status == "CONSUMING" {
+				text += "\nĐã nhận câu trả lời, đang chờ ACB kiểm tra. Không gửi lại mã."
+			} else if ch.PromptMessageID == 0 {
+				text += "\nĐang gửi yêu cầu riêng; hãy chờ tin/ảnh đó trước khi trả lời."
+			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
+			return "", err
+		} else if e.State == "WAITING_CAPTCHA" && e.AIUsed > e.CaptchaSubmissions {
+			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; chưa cần nhập ký tự. Nếu cần bạn nhập tay, bot sẽ gửi ảnh yêu cầu riêng."
+		} else {
+			text += "\nĐang chờ ACB và chuẩn bị yêu cầu; chưa gửi mã vào chat."
+		}
+	case "VERIFYING":
+		text = "5/6 · Đang xác minh phiên và đúng tài khoản ACB.\nChưa xác nhận thành công; bạn chờ, không cần gửi thêm mã."
+	case "CATCHING_UP":
+		text = "6/6 · Phiên đã xác minh, đang lấy giao dịch còn thiếu.\nChưa tiếp tục theo dõi cho đến khi lấy đủ giao dịch."
+		if e.RecoveryRunID != "" {
+			run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
+			if err != nil {
+				return "", err
+			}
+			text += "\nKhoảng " + run.RangeFrom + " đến " + run.RangeTo + "; ngày đang xử lý: " + run.NextDay + "."
+		}
+	case "COMPLETED":
+		text = "Hoàn tất 6/6 · Đã xác minh ACB và lấy đủ giao dịch còn thiếu."
+	case "CANCELLED", "CANCELED":
+		text = "Đã hủy lần đăng nhập này. Bot không tự thử lại; bấm Đăng nhập nếu muốn bắt đầu lần mới."
+	case "WAIT_OPERATOR", "MANUAL_REQUIRED", "FAILED", "RETRY_WAIT", "MAINTENANCE_WAIT":
+		text = "Đã dừng lần đăng nhập này.\n" + reasonLabel(e.ReasonCode) + "\nBot không tự đăng nhập lại."
+		if c.State == "MONITORING" {
+			text = "Phiên đã xác minh nhưng chưa lấy đủ giao dịch.\n" + reasonLabel(e.ReasonCode) + "\nChưa tiếp tục theo dõi; không cần đăng nhập hoặc lấy OTP lại."
 		}
 	}
-	if e.RecoveryRunID != "" {
-		run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
-		if err != nil {
-			return err
+	if timed && progressKind(e.State) && e.AttemptID != "" && e.State != "CATCHING_UP" {
+		attempt, err := h.Store.AuthAttemptStatusForOwner(ctx, e.AttemptID, storage.RecoveryOwner)
+		if err == nil {
+			if started, parseErr := time.Parse(time.RFC3339Nano, attempt.CreatedAt); parseErr == nil {
+				seconds := int(time.Since(started).Seconds()) / 15 * 15
+				if seconds < 0 {
+					seconds = 0
+				}
+				text += fmt.Sprintf("\nĐã chờ khoảng %d giây · giới hạn lần này: %s (giờ Việt Nam).", seconds, localExpiry(attempt.ExpiresAt))
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
 		}
-		text += fmt.Sprintf("\nBù giao dịch: %s; khoảng %s đến %s; ngày tiếp theo %s.", episodeLabel(string(run.Status)), run.RangeFrom, run.RangeTo, run.NextDay)
+	}
+	if timed && e.State == "CATCHING_UP" {
+		if started, parseErr := time.Parse(time.RFC3339Nano, e.UpdatedAt); parseErr == nil {
+			seconds := int(time.Since(started).Seconds()) / 15 * 15
+			if seconds < 0 {
+				seconds = 0
+			}
+			text += fmt.Sprintf("\nĐã chờ bước này khoảng %d giây. Tin này tự cập nhật; bạn không cần bấm làm mới.", seconds)
+		}
 	}
 	settings, err := h.Store.GetMonitorSettings(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !settings.Enabled {
-		text += "\nLịch theo dõi hiện đang tạm dừng."
-	}
-	ready := h.Client.Readiness()
-	if !ready.Ready {
-		text += "\nTelegram: kết nối suy giảm."
-	} else {
-		text += "\nTelegram: sẵn sàng."
+	if !settings.Enabled || storage.ResolveSchedule(time.Now(), &settings).Mode == storage.ModePaused {
+		text += "\nLịch theo dõi giao dịch đang tạm dừng."
+	} else if e.State == "COMPLETED" {
+		text += "\nĐã tiếp tục theo dõi giao dịch."
 	}
 	if h.AIDegraded != nil && h.AIDegraded() != "" {
-		text += "\nAI CAPTCHA: suy giảm; dùng phản hồi người vận hành."
+		text += "\nĐọc captcha tự động đang không sẵn sàng. Khi được yêu cầu, trả lời trực tiếp ảnh captcha để tiếp tục."
 	}
-	return h.sendPanel(ctx, c, e, text)
+	return text, nil
+}
+
+func pendingConsent(e storage.AuthRecoveryEpisode) bool {
+	expires, err := time.Parse(time.RFC3339Nano, e.ConsentExpiresAt)
+	return e.ConsentActionID != "" && e.ConsentConsumedAt == "" && err == nil && time.Now().Before(expires)
 }
 func connectionLabel(state string) string {
 	switch state {
@@ -577,64 +738,62 @@ func connectionLabel(state string) string {
 		return "chưa sẵn sàng"
 	}
 }
-func challengeLabel(kind string) string {
-	if kind == "OTP" {
-		return "OTP đăng nhập"
-	}
-	return "CAPTCHA"
-}
-func episodeLabel(state string) string {
-	switch state {
-	case "DETECTED":
-		return "đã phát hiện mất phiên"
-	case "STARTING", "LOGIN":
-		return "đang đăng nhập"
-	case "WAITING_CAPTCHA":
-		return "chờ CAPTCHA"
-	case "WAITING_OTP":
-		return "chờ OTP đăng nhập"
-	case "VERIFYING":
-		return "đang xác minh"
-	case "CATCHING_UP", "RUNNING", "PENDING":
-		return "đang bù giao dịch"
-	case "RETRY_WAIT":
-		return "chờ thử lại"
-	case "WAIT_OPERATOR":
-		return "chờ xác nhận người vận hành"
-	case "MAINTENANCE_WAIT":
-		return "chờ ngân hàng bảo trì"
-	case "MANUAL_REQUIRED", "FAILED":
-		return "cần xử lý thủ công"
-	case "COMPLETED":
-		return "hoàn tất"
-	case "CANCELLED", "CANCELED":
-		return "đã hủy"
-	case "SUPERSEDED":
-		return "đã được thay thế"
-	default:
-		return "không có đợt hiện tại"
-	}
-}
 func reasonLabel(reason string) string {
 	switch reason {
 	case "CREDENTIALS_REJECTED":
-		return "Thông tin đăng nhập bị từ chối"
+		return "ACB từ chối tên đăng nhập hoặc mật khẩu. Kiểm tra trong app ACB, rồi dùng Thông tin đăng nhập để lưu lại trước khi thử."
+	case "CREDENTIALS_NOT_CONFIGURED", "CREDENTIALS_UNAVAILABLE":
+		return "Chưa đọc được thông tin đăng nhập đã lưu. Dùng Thông tin đăng nhập để lưu lại hoặc nhờ người quản lý kiểm tra."
+	case "CREDENTIALS_DECRYPT_FAILED":
+		return "Không mở được thông tin đăng nhập đã mã hóa. Nhờ người quản lý kiểm tra khóa mã hóa, hoặc lưu lại qua Thông tin đăng nhập."
+	case "CREDENTIALS_REVISION_CONFLICT":
+		return "Thông tin đăng nhập vừa thay đổi. Kiểm tra thông tin mới rồi bấm Đăng nhập cho lần mới."
 	case "ACCOUNT_LOCKED":
-		return "Tài khoản bị khóa"
+		return "ACB báo tài khoản bị khóa. Mở app ACB hoặc liên hệ ngân hàng để mở khóa trước khi thử lại."
 	case "CATCHUP_FAILED", "HISTORY_RANGE_UNAVAILABLE":
-		return "Chưa bù đủ giao dịch; cổng theo dõi vẫn bị chặn"
-	case "INVALID_CHECKPOINT":
-		return "Mốc lịch sử không hợp lệ, cần sửa có kiểm soát"
+		return "Lấy giao dịch còn thiếu thất bại. Bấm Thử lại lấy giao dịch thiếu nếu có; phiên hiện tại được giữ, không yêu cầu OTP mới."
+	case "INVALID_CHECKPOINT", "CATCHUP_PROGRESS_MISSING":
+		return "Mốc lấy giao dịch còn thiếu hoặc tiến độ đã lưu không hợp lệ. Nhờ người quản lý kiểm tra dữ liệu; không đăng nhập lại để bỏ qua lỗi."
 	case "SESSION_DECRYPT_FAILED":
-		return "Không giải mã được phiên, cần kiểm tra khóa mã hóa"
-	case "ACCOUNT_SELECTION_REQUIRED":
-		return "Không chọn được đúng tài khoản"
+		return "Không mở được phiên ACB đã mã hóa. Nhờ người quản lý kiểm tra khóa mã hóa trước khi thử lại."
+	case "ACCOUNT_SELECTION_REQUIRED", "ACCOUNT_SELECTION_PENDING":
+		return "Chưa chọn và xác minh được đúng tài khoản ACB. Kiểm tra số tài khoản đã lưu; nhờ người quản lý kiểm tra trang chọn tài khoản nếu vẫn lỗi."
 	case "UNSUPPORTED_CHALLENGE":
-		return "Ngân hàng yêu cầu phương thức không hỗ trợ; xử lý trong ứng dụng ACB hoặc liên hệ ngân hàng"
+		return "ACB yêu cầu cách xác minh bot chưa hỗ trợ. Kiểm tra trong app ACB hoặc liên hệ ngân hàng; không gửi mã chuyển tiền vào chat."
+	case "UNSAFE_CAPTCHA_CROP", "CAPTCHA_CAPTURE_UNAVAILABLE":
+		return "Không lấy được ảnh captcha an toàn để gửi cho bạn. Nhờ người quản lý kiểm tra vùng captcha trên trang ACB; bot không gửi ảnh toàn trang chứa dữ liệu riêng."
+	case "AMBIGUOUS_CONTROLS", "AMBIGUOUS_SUBMIT", "UNSAFE_CONTROLS":
+		return "Không xác định chắc chắn ô nhập hoặc nút đăng nhập ACB. Bot dừng để tránh nhập sai; nhờ người quản lý kiểm tra giao diện ACB."
+	case "FRAME_UNSUPPORTED":
+		return "Trang đăng nhập ACB nằm trong khung bot chưa hỗ trợ. Nhờ người quản lý kiểm tra giao diện đăng nhập."
+	case "WRONG_FORM_ORIGIN":
+		return "Địa chỉ nhận thông tin đăng nhập không đúng trang ACB được cho phép. Bot đã dừng để bảo vệ tài khoản; nhờ người quản lý kiểm tra."
+	case "UNKNOWN_PAGE", "UNRECOGNIZED_PAGE", "UNSUPPORTED_PAGE":
+		return "Trang ACB không hiện bước đăng nhập mà bot nhận diện được trong thời gian chờ. Nhờ người quản lý kiểm tra trang ACB hoặc kết nối; chỉ thử lại sau khi đã kiểm tra."
+	case "UNRECOGNIZED_REJECTION":
+		return "ACB trả về thông báo từ chối bot chưa nhận diện được. Kiểm tra trong app ACB hoặc nhờ người quản lý kiểm tra; chưa xác nhận đăng nhập thành công."
+	case "CAPTCHA_LOADING":
+		return "Captcha ACB không tải xong trong thời gian chờ. Kiểm tra kết nối hoặc chờ ACB ổn định rồi bấm Đăng nhập lại."
+	case "LOGIN_OUTCOME_UNKNOWN", "CHALLENGE_OUTCOME_UNKNOWN", "ACTION_OUTCOME_UNKNOWN":
+		return "Chưa xác định được ACB có nhận thao tác vừa gửi hay không. Bot không gửi lại để tránh trùng; kiểm tra app ACB trước khi bấm Đăng nhập cho lần mới."
+	case "OTP_REJECTED", "INVALID_OTP":
+		return "ACB từ chối OTP đăng nhập. Khi thử lần mới, lấy mã mới từ app ACB và trả lời đúng tin yêu cầu còn hạn."
+	case "CHALLENGE_EXPIRED", "OTP_EXPIRED", "ATTEMPT_EXPIRED", "ATTEMPT_TIMEOUT", "BROWSER_EXPIRED":
+		return "Lần đăng nhập hoặc yêu cầu mã đã hết thời gian chờ. Không gửi mã cũ; bấm Đăng nhập để bắt đầu lần mới."
+	case "CAPTCHA_BUDGET_EXHAUSTED", "CAPTCHA_REJECTED", "INVALID_CAPTCHA":
+		return "Chưa vượt qua captcha ACB. Bấm Đăng nhập cho lần mới; nếu bot gửi ảnh, trả lời trực tiếp ảnh bằng ký tự hiện trên đó."
+	case "ATTEMPT_BUDGET_EXHAUSTED":
+		return "Các lần thử được cho phép đều chưa hoàn tất. Kiểm tra thông tin đăng nhập và app ACB trước khi tự chọn bắt đầu lần mới."
+	case "BANK_MAINTENANCE", "MAINTENANCE":
+		return "ACB đang bảo trì. Chờ ngân hàng hoạt động lại rồi bấm Đăng nhập; bot không tự thử."
+	case "BROWSER_UNAVAILABLE":
+		return "Không kết nối được trình duyệt đăng nhập ACB của hệ thống. Nhờ người quản lý kiểm tra dịch vụ và kết nối, rồi bấm Đăng nhập để thử lần mới."
 	case "MANUAL_ACTIVE":
-		return "Đang có phiên manual"
+		return "Người quản lý đang đăng nhập ở nơi khác. Chờ lần đó kết thúc; bot không chiếm hoặc hủy lần đó."
+	case "OPERATOR_CANCELLED":
+		return "Bạn đã hủy lần này. Bấm Đăng nhập khi muốn bắt đầu lần mới."
 	default:
-		return "Cần kiểm tra trạng thái và xác nhận bước tiếp theo"
+		return "Chưa xác minh được phiên ACB. Nhờ người quản lý kiểm tra nguyên nhân trước khi chọn Đăng nhập cho lần mới; không gửi mật khẩu hay mã vào chat."
 	}
 }
 
@@ -745,7 +904,18 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 		// Actionable notices use the same fence-aware operator menu. No nonce
 		// is created while maintenance locks mutations.
 		beforeID := int64(0)
-		err = h.sendNoticePanel(ctx, c, e, text, &beforeID)
+		if n.Kind != "CREDENTIALS_UPDATED" && (e.StatusMessageID > 0 || e.AttemptCount > 0) {
+			err = h.deliverProgress(ctx)
+			if err == nil {
+				updated, readErr := h.Store.AuthRecoveryEpisode(ctx, e.ID)
+				if readErr != nil {
+					return readErr
+				}
+				beforeID = updated.StatusMessageID
+			}
+		} else {
+			err = h.sendNoticePanel(ctx, c, e, text, &beforeID)
+		}
 		if err != nil {
 			if persistErr := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, 0, time.Now().Add(deliveryDelay(err))); persistErr != nil {
 				return persistErr
@@ -760,108 +930,84 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 }
 
 func (h *Handler) deliverProgress(ctx context.Context) error {
-	if time.Since(h.lastProgress) < time.Second {
-		return nil
-	}
+	h.progressMu.Lock()
+	defer h.progressMu.Unlock()
 	c, e, err := h.snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	if e.ID == "" {
+	if e.ID == "" || !progressKind(e.State) && e.StatusMessageID == 0 && e.AttemptCount == 0 && e.ConsentActionID == "" {
 		return nil
 	}
-	text := ""
-	switch e.State {
-	case "STARTING":
-		text = "Đang mở ACB"
-	case "LOGIN":
-		text = "Đang xử lý bước đăng nhập ACB"
-		loginAt, loginErr := time.Parse(time.RFC3339Nano, e.LastLoginAt)
-		consentAt, consentErr := time.Parse(time.RFC3339Nano, e.ConsentConsumedAt)
-		if loginErr == nil && consentErr == nil && !loginAt.Before(consentAt) {
-			text = "Đang gửi thông tin đăng nhập"
-		} else if e.AIUsed > 0 {
-			text = "Đang đọc captcha bằng AI"
-		}
-	case "WAITING_CAPTCHA":
-		text = "Chờ CAPTCHA"
-	case "WAITING_OTP":
-		text = "Chờ OTP đăng nhập từ app ACB"
-		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
-		if err == nil {
-			text += " (hạn " + localExpiry(ch.ExpiresAt) + ")"
-		} else if !errors.Is(err, sql.ErrNoRows) {
+	text, err := h.stateText(ctx, c, e, true)
+	if err != nil {
+		return err
+	}
+	p, err := h.planPanel(ctx, c, e, text)
+	if err != nil {
+		return err
+	}
+	// Only a control/state transition creates nonces. Elapsed-time edits reuse
+	// the same message-bound controls; an expired click refreshes the panel.
+	captchaRevision := ""
+	if p.captcha != nil {
+		captchaRevision = p.captcha.BrowserRevision
+	}
+	key := fmt.Sprintf("%s:%d:%d:%s:%s:%s:%v:%v", e.ID, c.Generation, e.ConfigRevision, e.AttemptID, e.State, captchaRevision, p.operations, p.keyboard.Rows)
+	if h.progressEpisode == e.ID && h.progressText == p.text && h.progressKey == key {
+		return nil
+	}
+	markup := h.progressMarkup
+	var actions []storage.TelegramAuthAction
+	if h.progressKey != key {
+		markup, actions, err = h.renderPanel(ctx, c, e, p)
+		if err != nil {
 			return err
 		}
-	case "VERIFYING":
-		text = "Đang xác minh phiên"
-	case "CATCHING_UP":
-		text = "Đang bù giao dịch từ " + e.RequiredFrom + " đến " + e.RequiredTo
-	case "COMPLETED":
-		text = "Đã sẵn sàng"
-	default:
-		return nil
 	}
-	if h.progressEpisode == e.ID && h.progressText == text {
-		return nil
-	}
-	markup := inlineKeyboard{Rows: [][]inlineButton{{{Text: "Trạng thái", Data: "nav:status"}, {Text: "Menu", Data: "nav:menu"}}}}
-	h.lastProgress = time.Now()
-	if e.StatusMessageID > 0 {
-		err = h.Client.EditText(ctx, h.ChatID, e.StatusMessageID, text, markup)
+	id := e.StatusMessageID
+	if id > 0 {
+		err = h.Client.EditText(ctx, h.ChatID, id, p.text, markup)
 		if err != nil {
 			var transport *TransportError
 			if !errors.As(err, &transport) || transport.Code != "TELEGRAM_MESSAGE_UNEDITABLE" {
 				return err
 			}
-		} else {
-			h.progressEpisode, h.progressText = e.ID, text
-			return nil
+			id = 0
+			// A replacement message needs fresh message-bound controls.
+			if len(actions) == 0 {
+				markup, actions, err = h.renderPanel(ctx, c, e, p)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
-	id, err := h.Client.SendText(ctx, h.ChatID, text, markup)
-	if err != nil {
+	if id == 0 {
+		id, err = h.Client.SendText(ctx, h.ChatID, p.text, markup)
+		if err != nil {
+			return err
+		}
+		if err := h.Store.SetAuthRecoveryStatusMessage(ctx, e.ID, c.Generation, id); err != nil {
+			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
+			return err
+		}
+	}
+	if err := h.bindActions(ctx, actions, id); err != nil {
 		return err
 	}
-	if err := h.Store.SetAuthRecoveryStatusMessage(ctx, e.ID, c.Generation, id); err != nil {
-		_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
-		return err
-	}
-	h.progressEpisode, h.progressText = e.ID, text
+	h.progressEpisode, h.progressText, h.progressKey, h.progressMarkup = e.ID, p.text, key, markup
 	return nil
 }
 func (h *Handler) noticeText(ctx context.Context, n storage.AuthRecoveryNotice, e storage.AuthRecoveryEpisode) (string, error) {
-	var text string
-	switch n.Kind {
-	case "DETECTED":
-		text = "ACB mất phiên. Hệ thống chưa đăng nhập lại. Bấm Đăng nhập để bot tự xử lý; bạn chỉ cần lấy OTP trong app ACB khi được yêu cầu."
-	case "CREDENTIALS_UPDATED":
-		text = "Đã lưu thông tin đăng nhập. Chưa đăng nhập ACB. Bấm Đăng nhập khi bạn sẵn sàng."
-	case "AI_READING":
-		text = "Đang đọc CAPTCHA tự động."
-	case "CATCHING_UP", "VERIFYING":
-		text = "Đăng nhập đã được xác minh. Đang bù giao dịch; chưa khôi phục theo dõi realtime."
-		if n.Kind == "VERIFYING" {
-			text = "Đang xác minh phiên đăng nhập; chưa khôi phục theo dõi realtime."
-		}
-	case "COMPLETED":
-		state, err := h.Store.ReadTelegramAuthState(ctx, h.Client.Readiness().BotID)
-		if err != nil {
-			return "", err
-		}
-		settings, err := h.Store.GetMonitorSettings(ctx)
-		if err != nil {
-			return "", err
-		}
-		if state.Paused || !settings.Enabled || storage.ResolveSchedule(time.Now(), &settings).Mode == storage.ModePaused {
-			text = "Phiên đã sẵn sàng; lịch theo dõi hiện đang tạm dừng."
-		} else {
-			text = "Đã khôi phục ACB. Đã bù giao dịch và tiếp tục theo dõi."
-		}
-	default:
-		text = episodeLabel(n.Kind) + ". " + reasonLabel(e.ReasonCode) + "."
+	if n.Kind == "CREDENTIALS_UPDATED" {
+		return "Đã lưu thông tin đăng nhập mới. Chưa đăng nhập ACB; bấm Đăng nhập khi sẵn sàng nhận OTP. Thao tác này không đổi mật khẩu tại ngân hàng.", nil
 	}
-	return fmt.Sprintf("%s\nKết nối %s; đợt %s; số lần thử %d.", text, shortID(e.ConnectionID), shortID(e.ID), e.AttemptCount), nil
+	c, _, err := h.snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	return h.stateText(ctx, c, e, false)
 }
 func (h *Handler) deliverLogoutNotices(ctx context.Context) error {
 	jobs, err := h.Store.PendingACBLogoutNotices(ctx)
@@ -869,9 +1015,9 @@ func (h *Handler) deliverLogoutNotices(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
-		local := "Đang chờ worker xóa trạng thái bộ nhớ; chưa xác nhận xóa phiên local hoàn tất."
+		local := "1/2 · Đang chờ xóa phiên khỏi hệ thống; chưa xác nhận hoàn tất."
 		if job.LocalClearedAt != "" {
-			local = "Đã xóa phiên lưu và trạng thái bộ nhớ của hệ thống trên VPS."
+			local = "1/2 · Đã xóa phiên lưu và trạng thái bộ nhớ của hệ thống."
 		}
 		bank := "Chưa có kết quả thu hồi phiên phía ACB."
 		switch job.BankStatus {
@@ -884,9 +1030,13 @@ func (h *Handler) deliverLogoutNotices(ctx context.Context) error {
 		case "IN_FLIGHT":
 			bank = "Đang thử thu hồi phiên phía ACB; chưa xác nhận thành công."
 		}
-		text := local + "\n" + bank + "\nHệ thống chưa đăng nhập lại. Mở khóa đăng nhập không tạo phiên mới."
-		messageID, err := h.Client.SendText(ctx, h.ChatID, text, inlineKeyboard{Rows: [][]inlineButton{{{Text: "Trạng thái", Data: "nav:status"}, {Text: "Menu", Data: "nav:menu"}}}})
+		text := local + "\n2/2 · " + bank + "\nHệ thống chưa đăng nhập lại. Cho phép đăng nhập không tạo lần mới."
+		c, e, err := h.snapshot(ctx)
 		if err != nil {
+			return err
+		}
+		messageID := int64(0)
+		if err := h.sendNoticePanel(ctx, c, e, text, &messageID); err != nil {
 			return err
 		}
 		if err := h.Store.FinishACBLogoutNotice(ctx, job.ID, messageID, job.UpdatedAt); err != nil {

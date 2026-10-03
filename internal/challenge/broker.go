@@ -343,7 +343,11 @@ func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID i
 		b.reminded[c.ID] = true
 		b.mu.Unlock()
 		if first {
-			_, _ = b.Sender.SendText(ctx, chatID, "Định dạng chưa hợp lệ. Hãy trả lời đúng tin yêu cầu bằng mã trong ảnh hoặc OTP đăng nhập.", nil)
+			message := "Mã trong ảnh chỉ gồm 1–16 chữ cái hoặc chữ số. Bấm Trả lời vào tin có ảnh mã xác thực rồi nhập lại; mã này chưa được gửi tới ACB."
+			if c.Kind == "OTP" {
+				message = "Mã đăng nhập phải gồm 4–10 chữ số. Bấm Trả lời vào yêu cầu mã đăng nhập hiện tại rồi nhập mã từ ứng dụng ACB, giữ nguyên số 0 đầu. Không nhập mã chuyển tiền; mã này chưa được gửi tới ACB."
+			}
+			_, _ = b.Sender.SendText(ctx, chatID, message, nil)
 		}
 		return ErrInvalidResponse
 	}

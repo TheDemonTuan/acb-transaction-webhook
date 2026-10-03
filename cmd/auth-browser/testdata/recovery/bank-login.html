@@ -1,0 +1,11 @@
+<!doctype html><!-- Sanitized field/control structure observed on the anonymous ACB login page, 2026-10-03. No bank tokens or credentials. -->
+<html><body>
+<form name="loginOp" method="post" action="Request">
+<input name="UserName" id="user-name" type="text">
+<input name="PassWord" id="password" type="password">
+<img alt="Mã xác thực" src="Captcha.jpg" class="captcha" width="160" height="50"><input name="SecurityCode" id="security-code" type="text" required>
+<a class="button-blue acbone-submit-button" href="#" onclick="submitFormLogin();sendInsider('ins_login_start');">Đăng nhập</a>
+</form>
+<iframe id="iframe-banner" src="https://acb.com.vn/acbo-tin-tuc-acbonline"></iframe>
+<script>function submitFormLogin(){document.forms.loginOp.submit();}function sendInsider(event){}</script>
+</body></html>

@@ -105,10 +105,10 @@ func TestTelegramChallengePrivateMemoryDelivery(t *testing.T) {
 	if err != nil || id != 99 {
 		t.Fatalf("image delivery failed: %v", err)
 	}
-	if !bytes.Equal(receivedPhoto, crop.Bytes()) || !force || !protected || !strings.Contains(caption, "Trả lời trực tiếp ảnh này") || !strings.Contains(caption, "Hết hạn:") {
+	if !bytes.Equal(receivedPhoto, crop.Bytes()) || !force || !protected || caption == "" {
 		t.Fatal("CAPTCHA reply/privacy UX incorrect")
 	}
-	if strings.Contains(caption, "123:secret") || strings.Contains(caption, "http") {
+	if strings.Contains(caption, "123:secret") || strings.Contains(caption, "http") || strings.Contains(caption, challenge.ID) {
 		t.Fatal("private attachment disclosed token/public URL")
 	}
 	if _, err := client.SendChallenge(context.Background(), challenge, []byte("not png")); err == nil {

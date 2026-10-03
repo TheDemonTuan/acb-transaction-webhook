@@ -287,6 +287,12 @@ func (s *server) observeAutomation(ctx context.Context, item *browserSession) (a
 			return err
 		}
 		dom.ActionFingerprint = dom.Fingerprint
+		// A CAPTCHA control is not an admitted crop on a rejected/unfinished form.
+		// Keep the recognition failure instead of replacing it with crop validation.
+		if dom.Captcha && dom.State == authbrowser.Unknown {
+			dom.Captcha = false
+			return nil
+		}
 		if dom.Captcha {
 			if dom.Width <= 0 || dom.Height <= 0 || dom.Width > 1024 || dom.Height > 512 {
 				dom.State = authbrowser.Unknown
@@ -419,18 +425,28 @@ func fixtureCookies(cookies []*network.Cookie) []authbrowser.Cookie {
 	return result
 }
 
-// Selector provenance: main.go's DOM signals and main_test.go's login/OTP fixtures.
-// These are structural fixture evidence, NOT a verified live ACB login contract.
-// No SafeKey push/QR, arbitrary selector, frame access or raw bank error classification.
+// The loginOp/UserName/PassWord/SecurityCode form, login anchor and promotional
+// frame below were observed on ACB's anonymous login page on 2026-10-03.
+// Other challenge selectors remain fixture-derived; no frame access or raw bank
+// error classification is permitted.
 const automationDOMLibrary = `
 function inspectRecovery(fixture) {
  const visible=e=>!!e && !e.disabled && getComputedStyle(e).visibility==='visible' && getComputedStyle(e).display!=='none' && e.getClientRects().length>0 && e.getBoundingClientRect().width>0 && e.getBoundingClientRect().height>0;
  const result={state:'UNKNOWN',reason:'UNRECOGNIZED_PAGE',fingerprint:''};
- if(window.top!==window || [...document.querySelectorAll('iframe,frame')].some(visible)){result.reason='FRAME_UNSUPPORTED';return result;}
+ if(window.top!==window){result.reason='FRAME_UNSUPPORTED';return result;}
+ const bankForms=[...document.forms].filter(form=>{const action=new URL(form.action,location.href);return form.name==='loginOp' && form.method.toLowerCase()==='post' && action.origin===location.origin && action.pathname==='/acbib/Request';});
+ const bankForm=bankForms.length===1?bankForms[0]:null;
+ const bankField=(name,id,type)=>bankForm && [...bankForm.elements].filter(e=>e.tagName==='INPUT' && e.name===name && e.id===id && e.type===type);
+ const bankUser=bankField('UserName','user-name','text'), bankPassword=bankField('PassWord','password','password'), bankCaptcha=bankField('SecurityCode','security-code','text');
+ const bankLogin=bankUser?.length===1 && bankPassword?.length===1 && bankCaptcha?.length===1;
+ // ACB embeds a promotional frame outside the login form. Never inspect it or
+ // treat any other frame as a supported authentication surface.
+ const promotionalFrame=e=>{if(!bankLogin || e.tagName!=='IFRAME' || e.id!=='iframe-banner' || bankForm.contains(e))return false;const u=new URL(e.src,location.href);return u.origin==='https://acb.com.vn' && u.pathname==='/acbo-tin-tuc-acbonline';};
+ if([...document.querySelectorAll('iframe,frame')].some(e=>visible(e) && !promotionalFrame(e))){result.reason='FRAME_UNSUPPORTED';return result;}
  if(!window.__acbRecoveryNodes){window.__acbRecoveryNodes={ids:new WeakMap(),next:1,document:crypto.randomUUID()};}
  const n=window.__acbRecoveryNodes; const id=e=>{if(!e)return 0;if(!n.ids.has(e))n.ids.set(e,n.next++);return n.ids.get(e)};
  const all=sel=>[...document.querySelectorAll(sel)];
- const pw=all('input[type="password"]'), users=all('input[name="username" i],input[name="user" i],input[id="username" i],input[id="user" i]'), caps=all('input[name*="captcha" i],input[id*="captcha" i]'), otps=all('input[name*="otp" i],input[id*="otp" i],input[name*="authcode" i],input[id*="authcode" i]');
+ const pw=all('input[type="password"]'), users=all('input[name="username" i],input[name="user" i],input[id="username" i],input[id="user" i]'), caps=[...all('input[name*="captcha" i],input[id*="captcha" i]'),...(bankLogin?bankCaptcha:[])], otps=all('input[name*="otp" i],input[id*="otp" i],input[name*="authcode" i],input[id*="authcode" i]');
  const safe=all('input[name*="safekey" i],input[id*="safekey" i]');
  if(safe.length){result.state='UNSUPPORTED_CHALLENGE';result.reason='UNSUPPORTED_CHALLENGE';return result;}
  if(fixture){const code=document.body.dataset.recoveryCode; if(['CREDENTIALS_REJECTED','ACCOUNT_LOCKED','MAINTENANCE','UNSUPPORTED_CHALLENGE'].includes(code)){result.state=code==='MAINTENANCE'?'MAINTENANCE':code==='UNSUPPORTED_CHALLENGE'?'UNSUPPORTED_CHALLENGE':'LOGIN_REJECTED';result.reason=code;result.fingerprint=n.document+':'+code;return result;}}
@@ -442,7 +458,8 @@ function inspectRecovery(fixture) {
  const form=controls[0].form;
  if(!form || controls.some(e=>e.form!==form || !visible(e) || e.readOnly)){result.reason='UNSAFE_CONTROLS';return result;}
  if(new URL(form.action,location.href).origin!==location.origin){result.reason='WRONG_FORM_ORIGIN';return result;}
- const submits=[...form.querySelectorAll('button:not([type]),button[type="submit"],input[type="submit"]')];
+ const bankSubmit=bankLogin && form===bankForm?[...form.querySelectorAll('a.button-blue.acbone-submit-button[href="#"]')].filter(e=>/^\s*submitFormLogin\(\);\s*sendInsider\('ins_login_start'\);?\s*$/.test(e.getAttribute('onclick')||'')):[];
+ const submits=[...form.querySelectorAll('button:not([type]),button[type="submit"],input[type="submit"]'),...bankSubmit];
  if(submits.length!==1 || !visible(submits[0])){result.reason='AMBIGUOUS_SUBMIT';return result;}
  result.form=form;result.submit=submits[0];
  let image=null;
