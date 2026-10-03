@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
@@ -72,6 +74,7 @@ func (s *server) automationObservation(w http.ResponseWriter, r *http.Request) {
 	}
 	observation, _, _, err := s.observeAutomation(r.Context(), item)
 	if err != nil {
+		slog.Warn("ACB automation observation failed", "failure", automationFailureClass(err))
 		automationError(w, 503)
 		return
 	}
@@ -129,15 +132,18 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 	}
 	observation, dom, _, err := s.observeAutomation(r.Context(), item)
 	if err != nil {
+		logAutomationActionFailure(action, "before_action_observation", 503, err)
 		automationError(w, 503)
 		return
 	}
 	if revision == "" || revision != observation.Revision || item.consumed {
+		logAutomationActionFailure(action, "revision_validation", 409, nil)
 		automationError(w, 409)
 		return
 	}
 	allowed := (action == "login" && observation.State == authbrowser.LoginForm) || (action == "captcha" && observation.State == authbrowser.CaptchaRequired) || (action == "request-otp" && observation.State == authbrowser.OTPRequestRequired) || (action == "otp" && observation.State == authbrowser.OTPRequired)
 	if !allowed {
+		logAutomationActionFailure(action, "state_validation", 422, nil)
 		automationError(w, 422)
 		return
 	}
@@ -203,6 +209,11 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 	payload = nil
 	script = ""
 	if err != nil || !submitted {
+		phase := "action_guard"
+		if err != nil {
+			phase = "action_evaluation"
+		}
+		logAutomationActionFailure(action, phase, 409, err)
 		automationError(w, 409)
 		return
 	}
@@ -215,11 +226,35 @@ func (s *server) automationAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if time.Now().After(deadline) || r.Context().Err() != nil {
+			logAutomationActionFailure(action, "after_action_observation", 503, observeErr)
 			automationError(w, 503)
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// Never log CDP/JavaScript text, URLs, revisions, form values or submitted input.
+// A navigation exception may contain the evaluated script and its credentials.
+func automationFailureClass(err error) string {
+	if err == nil {
+		return "GUARD_REJECTED"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "CONTEXT_CANCELLED"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "DEADLINE_EXCEEDED"
+	}
+	var exception *runtime.ExceptionDetails
+	if errors.As(err, &exception) {
+		return "JAVASCRIPT_EXCEPTION"
+	}
+	return "BROWSER_PROTOCOL_FAILURE"
+}
+
+func logAutomationActionFailure(action, phase string, status int, err error) {
+	slog.Warn("ACB automation action failed", "action", action, "phase", phase, "status", status, "failure", automationFailureClass(err))
 }
 
 func validAutomationAnswer(value string, min, max int, digits bool) bool {
