@@ -19,17 +19,18 @@ import (
 )
 
 type botFixture struct {
-	mu           sync.Mutex
-	requests     []string
-	messages     []map[string]json.RawMessage
-	edits        []map[string]json.RawMessage
-	updates      []Update
-	messageID    int64
-	webhook      string
-	failCode     int
-	retryAfter   int
-	failEditCode int
-	afterSend    func()
+	mu              sync.Mutex
+	requests        []string
+	messages        []map[string]json.RawMessage
+	edits           []map[string]json.RawMessage
+	callbackAnswers []map[string]json.RawMessage
+	updates         []Update
+	messageID       int64
+	webhook         string
+	failCode        int
+	retryAfter      int
+	failEditCode    int
+	afterSend       func()
 }
 
 func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +73,13 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if f.afterSend != nil {
 			f.afterSend()
 		}
+	case "answerCallbackQuery":
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		f.callbackAnswers = append(f.callbackAnswers, body)
 	case "getUpdates":
 		result = f.updates
 	}
@@ -625,6 +633,92 @@ func TestTelegramProgressUsesOneMessageAndCoalescesStaleNotices(t *testing.T) {
 	if err != nil || progress.StatusMessageID == 999 {
 		t.Fatal("stale CAS replaced progress message")
 	}
+}
+
+func TestTelegramStaleClickAndNavigationKeepOneLiveProgress(t *testing.T) {
+	ctx, s, h, f, _ := testTelegram(t)
+	c, err := s.Connection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, s, `INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES(?,1,X'00','fixture',?)`, c.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err := h.menu(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	login, menuID := menuLogin(t, f)
+	if err := h.HandleUpdate(ctx, callback(login, menuID)); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.LatestAuthRecoveryEpisode(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartRecoveryAuthAttempt(ctx, e.ID, e.Generation, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.messages)
+	if err := h.HandleUpdate(ctx, callback(login, menuID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != before {
+		t.Fatal("stale click sent a second startup panel that cannot follow the attempt")
+	}
+	var feedback string
+	if err := json.Unmarshal(f.callbackAnswers[len(f.callbackAnswers)-1]["text"], &feedback); err != nil || feedback == "" {
+		t.Fatal("stale click omitted callback feedback", err)
+	}
+	mustExec(t, s, `UPDATE auth_recovery_episodes SET state='WAITING_CAPTCHA',ai_used=1 WHERE id=?`, e.ID)
+	if err := h.deliverProgress(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []Update{command("/menu"), command("/acb_status"), callback("nav:menu", e.StatusMessageID), callback("nav:status", e.StatusMessageID)} {
+		if err := h.HandleUpdate(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.messages) != before {
+			t.Fatal("active navigation copied the current stage into an untracked message")
+		}
+	}
+	// Expired controls need fresh nonces even when the displayed state is unchanged.
+	var expiredKeyboard inlineKeyboard
+	if err := json.Unmarshal(f.edits[len(f.edits)-1]["reply_markup"], &expiredKeyboard); err != nil {
+		t.Fatal(err)
+	}
+	expired := expiredKeyboard.Rows[0][0].Data
+	mustExec(t, s, `UPDATE telegram_auth_actions SET expires_at=? WHERE id=?`, time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano), strings.TrimPrefix(expired, "ar:"))
+	if err := h.HandleUpdate(ctx, callback(expired, e.StatusMessageID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != before {
+		t.Fatal("expired control sent an untracked progress copy")
+	}
+	latest, err := s.AuthRecoveryEpisode(ctx, e.ID)
+	if err != nil || latest.StatusMessageID != e.StatusMessageID || latest.AttemptCount != 1 {
+		t.Fatal("navigation changed the progress owner or admitted another attempt", err)
+	}
+	var id int64
+	var keyboard inlineKeyboard
+	edit := f.edits[len(f.edits)-1]
+	if err := json.Unmarshal(edit["message_id"], &id); err != nil || id != e.StatusMessageID {
+		t.Fatal("latest progress was not edited on its canonical message", err)
+	}
+	if err := json.Unmarshal(edit["reply_markup"], &keyboard); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range keyboard.Rows {
+		for _, button := range row {
+			if strings.HasPrefix(button.Data, "ar:") {
+				if _, disposition, err := s.ConsumeTelegramAuthAction(ctx, strings.TrimPrefix(button.Data, "ar:"), 42, h.ChatID, h.UserID, id, time.Now()); err != nil || disposition != "CANCEL" {
+					t.Fatal("refreshed canonical control was not usable on its own message", err)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("canonical progress omitted a usable cancel control")
 }
 
 func TestTelegramStoppedProgressKeepsSafeReasonAndUsableControls(t *testing.T) {

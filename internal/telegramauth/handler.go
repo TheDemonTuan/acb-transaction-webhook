@@ -240,16 +240,27 @@ func (h *Handler) menu(ctx context.Context, help bool) error {
 	if err != nil {
 		return err
 	}
+	active := progressKind(e.State) || pendingConsent(e)
+	if active && !help {
+		return h.updateProgress(ctx, true)
+	}
 	text, err := h.stateText(ctx, c, e, false)
 	if err != nil {
 		return err
 	}
 	if help {
+		if active {
+			text = ""
+		}
 		text += "\n\n📖 HƯỚNG DẪN SỬ DỤNG:\n" +
 			"• Đăng nhập: Mỗi lần bấm chỉ thực hiện một lượt thử an toàn. Hệ thống không bao giờ tự ý đăng nhập ngầm.\n" +
 			"• Nhập OTP & Captcha: Chỉ trả lời (Reply) trực tiếp vào tin nhắn yêu cầu riêng còn thời hạn. Tuyệt đối không gửi OTP chuyển tiền hay mật khẩu vào khung chat.\n" +
 			"• Cập nhật thông tin: Dùng liên kết bảo mật để cập nhật tài khoản/mật khẩu lưu trên máy chủ, không làm thay đổi mật khẩu tại ngân hàng.\n" +
 			"• An toàn: Dữ liệu được mã hóa đa tầng và xóa khỏi bộ nhớ ngay sau khi xác thực."
+	}
+	if active {
+		// Help is static guidance, not another snapshot of the live attempt.
+		return h.say(ctx, text)
 	}
 	return h.sendPanel(ctx, c, e, text)
 }
@@ -571,9 +582,21 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 	if unsafeMessage(&message) {
 		return nil
 	}
-	// Clear the spinner before storage or delivery work, with its own deadline.
+	var a storage.TelegramAuthAction
+	var disposition string
+	var actionErr error
+	callbackText := ""
+	if strings.HasPrefix(q.Data, "ar:") && len(q.Data) == 25 {
+		a, disposition, actionErr = h.Store.ConsumeTelegramAuthAction(ctx, strings.TrimPrefix(q.Data, "ar:"), h.Client.Readiness().BotID, h.ChatID, h.UserID, q.Message.ID, time.Now())
+		if errors.Is(actionErr, storage.ErrChallengeExpired) {
+			callbackText = "Nút đã hết hạn. Đang cập nhật nút mới trên tin tiến độ."
+		} else if rejectedDisposition(actionErr) || errors.Is(actionErr, storage.ErrMutationGateLocked) {
+			callbackText = operationFailure(actionErr)
+		}
+	}
+	// Clear the spinner with finite feedback before any Telegram delivery work.
 	ackCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	_ = h.Client.AnswerCallbackQuery(ackCtx, q.ID)
+	_ = h.Client.AnswerCallbackQuery(ackCtx, q.ID, callbackText)
 	cancel()
 	switch q.Data {
 	case "nav:menu":
@@ -590,7 +613,7 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 	if !strings.HasPrefix(q.Data, "ar:") || len(q.Data) != 25 {
 		return h.menu(ctx, false)
 	}
-	a, disposition, err := h.Store.ConsumeTelegramAuthAction(ctx, strings.TrimPrefix(q.Data, "ar:"), h.Client.Readiness().BotID, h.ChatID, h.UserID, q.Message.ID, time.Now())
+	err := actionErr
 	if err != nil {
 		if errors.Is(err, storage.ErrChallengeExpired) {
 			return h.refreshPanel(ctx, "⏱️ Nút bấm đã hết hạn. Vui lòng dùng nút bấm mới bên dưới.")
@@ -640,6 +663,10 @@ func (h *Handler) refreshPanel(ctx context.Context, result string) error {
 	c, e, err := h.snapshot(ctx)
 	if err != nil {
 		return err
+	}
+	if progressKind(e.State) || pendingConsent(e) {
+		// Stale controls must not leave a frozen copy of an earlier stage in chat.
+		return h.updateProgress(ctx, true)
 	}
 	text, err := h.stateText(ctx, c, e, false)
 	if err != nil {
@@ -1113,6 +1140,10 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 }
 
 func (h *Handler) deliverProgress(ctx context.Context) error {
+	return h.updateProgress(ctx, false)
+}
+
+func (h *Handler) updateProgress(ctx context.Context, refreshControls bool) error {
 	h.progressMu.Lock()
 	defer h.progressMu.Unlock()
 	c, e, err := h.snapshot(ctx)
@@ -1137,8 +1168,11 @@ func (h *Handler) deliverProgress(ctx context.Context) error {
 		captchaRevision = p.captcha.BrowserRevision
 	}
 	key := fmt.Sprintf("%s:%d:%d:%s:%s:%s:%v:%v", e.ID, c.Generation, e.ConfigRevision, e.AttemptID, e.State, captchaRevision, p.operations, p.keyboard.Rows)
-	if h.progressEpisode == e.ID && h.progressText == p.text && h.progressKey == key {
+	if !refreshControls && h.progressEpisode == e.ID && h.progressText == p.text && h.progressKey == key {
 		return nil
+	}
+	if refreshControls {
+		h.progressKey = ""
 	}
 	markup := h.progressMarkup
 	var actions []storage.TelegramAuthAction

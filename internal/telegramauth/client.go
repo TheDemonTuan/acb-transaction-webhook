@@ -264,8 +264,8 @@ func (c *Client) SendText(ctx context.Context, chatID int64, text string, markup
 func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
 	return c.call(ctx, "deleteMessage", map[string]int64{"chat_id": chatID, "message_id": messageID}, nil)
 }
-func (c *Client) AnswerCallbackQuery(ctx context.Context, id string) error {
-	return c.call(ctx, "answerCallbackQuery", map[string]string{"callback_query_id": id}, nil)
+func (c *Client) AnswerCallbackQuery(ctx context.Context, id, text string) error {
+	return c.call(ctx, "answerCallbackQuery", map[string]string{"callback_query_id": id, "text": text}, nil)
 }
 func localExpiry(value string) string {
 	expiry, err := time.Parse(time.RFC3339Nano, value)

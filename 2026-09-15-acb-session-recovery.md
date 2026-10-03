@@ -50,6 +50,16 @@ Rebuilt all Telegram bot interactions with a modern fintech card layout, intuiti
 - **Confirmation Dialogs**: Structured cards with clear descriptions and a `[ Quay lại ]` escape button for login, logout, credential update, and retry.
 - **Clean Challenge Cards & Receipts**: Clear, numbered OTP and Captcha instructions with input placeholders, deadline indicators, and immediate non-replaying receipts.
 - **Zero Technical Jargon**: All error codes (`reasonLabel`) mapped to plain, professional Vietnamese explanations with dedicated next-action advice (`reasonAction`); no internal terminology (`generation`, `fence`, `episode`, `mutation`, `reconcile`).
+### Duplicate Active Progress Panel Repair — 2026-10-03
+
+The owner reported and provided screenshot evidence of a stale `[1/5] Khởi động trình duyệt bảo mật...` progress panel being sent below the active `[2/5] Đang nhận diện Captcha tự động...` panel, with the explanatory text `Nút bấm đã được sử dụng hoặc trạng thái vừa thay đổi. Vui lòng dùng nút bấm mới bên dưới.`
+
+Production metadata and regression confirmed that clicking an already-consumed or expired login button routed through `refreshPanel`, which rendered a full new panel using `stateText` instead of editing the canonical `StatusMessageID`. Because the new panel had no assigned `StatusMessageID`, it was frozen at stage 1/5 while the true attempt continued. In addition, `/menu` or navigation while an attempt was active created a second snapshot panel.
+
+Implemented fixes:
+- Stale/consumed action callbacks send finite toast feedback via `answerCallbackQuery` and refresh controls on the canonical progress message directly; they never append a duplicate snapshot panel.
+- While an attempt is active, `/menu` and `/acb_status` edit the canonical progress card in place (`updateProgress(..., true)`). `/help` sends pure static text without a stage panel copy.
+- Behavioral regression `TestTelegramStaleClickAndNavigationKeepOneLiveProgress` enforces zero message growth on stale button replays and navigation commands while verifying that refreshed controls remain bound and usable.
 ## Telegram usability repair — 2026-10-03
 
 User acceptance: managing ACB in Telegram must be understandable without internal terminology or repeated status polling. A healthy container is not evidence of successful bank login. The reported live attempt stopped before CAPTCHA or credential submission with `UNKNOWN_PAGE`; inspect the VPS and bank's unauthenticated page before changing recognition logic.
