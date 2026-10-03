@@ -310,13 +310,13 @@ func (b *Broker) remindFormat(ctx context.Context, c storage.AuthChallenge, otpL
 	if !first {
 		return
 	}
-	message := "Mã trong ảnh chỉ gồm 1–16 chữ cái hoặc chữ số. Bấm Trả lời vào tin có ảnh mã xác thực rồi nhập lại; mã này chưa được gửi tới ACB."
+	message := "⚠️ ĐỊNH DẠNG CAPTCHA CHƯA ĐÚNG\n────────────────────────\nMã trong ảnh chỉ gồm các ký tự chữ và số. Vui lòng bấm 'Trả lời' vào ảnh captcha và nhập lại."
 	if c.Kind == "OTP" {
-		length := "4–10"
+		length := "các"
 		if otpLength > 0 && otpLength <= 10 {
 			length = strconv.Itoa(otpLength)
 		}
-		message = "Mã đăng nhập cho yêu cầu hiện tại phải gồm " + length + " chữ số. Bấm Trả lời vào yêu cầu mã đăng nhập hiện tại rồi nhập mã từ ứng dụng ACB, giữ nguyên số 0 đầu. Không nhập mã chuyển tiền; mã này chưa được gửi tới ACB."
+		message = "⚠️ ĐỊNH DẠNG OTP CHƯA ĐÚNG\n────────────────────────\nMã OTP đăng nhập ACB phải gồm " + length + " chữ số.\nVui lòng mở app ACB lấy mã mới, bấm 'Trả lời' tin yêu cầu OTP và gửi lại (giữ nguyên số 0 ở đầu nếu có)."
 	}
 	_, _ = b.Sender.SendText(ctx, c.ChatID, message, nil)
 }
@@ -397,9 +397,9 @@ func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID i
 		}
 		return err
 	}
-	receipt := "Đã nhận mã trong ảnh. Đang gửi tới ACB để kiểm tra; chưa xác nhận đăng nhập thành công. Bot sẽ báo bước tiếp theo, bạn không gửi lại mã."
+	receipt := "🧩 ĐÃ NHẬN MÃ CAPTCHA\n────────────────────────\nĐang gửi mã tới ACB để kiểm tra...\n⏳ Vui lòng theo dõi kết quả ở tin tiến độ bên dưới. (Không gửi lại mã)"
 	if c.Kind == "OTP" {
-		receipt = "Đã nhận mã đăng nhập. Đang gửi tới ACB để xác thực; chưa xác nhận thành công. Bạn không gửi lại mã, hãy chờ kết quả bên dưới."
+		receipt = "📩 ĐÃ NHẬN MÃ OTP\n────────────────────────\nĐang gửi mã tới ACB để xác thực phiên...\n⏳ Vui lòng theo dõi kết quả ở tin tiến độ bên dưới. (Không gửi lại mã)"
 	}
 	// Receipt failure must not replay or abandon an already consumed answer.
 	_, _ = b.Sender.SendText(ctx, chatID, receipt, nil)

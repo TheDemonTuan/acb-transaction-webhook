@@ -95,15 +95,15 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) error {
 		}
 		if errors.Is(err, challenge.ErrOutcomeUnknown) {
 			h.wakeCoordinator()
-			return h.replyExplanation(ctx, "Chưa xác định được ACB có nhận mã hay không. Bot không gửi lại mã. Chờ kết quả dừng/xác minh; kiểm tra app ACB trước khi bắt đầu lần mới.")
+			return h.replyExplanation(ctx, "⚠️ Chưa xác định được ACB có nhận mã hay không. Bot không gửi lại mã để tránh trùng.\n⏳ Vui lòng theo dõi kết quả ở tin tiến độ bên dưới.")
 		}
 		if rejectedDisposition(err) {
 			h.wakeCoordinator()
-			text := "Yêu cầu này không còn dùng được. Không gửi mã cũ; làm theo yêu cầu mới nhất còn hạn hoặc nút bên dưới."
+			text := "⚠️ Yêu cầu nhập mã này không còn hiệu lực. Vui lòng làm theo thông báo mới nhất bên dưới."
 			if errors.Is(err, storage.ErrChallengeExpired) {
-				text = "Mã đã hết thời gian trả lời nên chưa được gửi tới ACB. Không gửi mã cũ; chờ kết quả dừng và dùng Đăng nhập cho lần mới."
+				text = "⏱️ Mã đã hết thời gian chờ trả lời nên chưa được gửi tới ACB.\n💡 Vui lòng bấm 'Đăng nhập' để tạo lượt mới khi sẵn sàng."
 			} else if errors.Is(err, storage.ErrChallengeConsumed) {
-				text = "Câu trả lời cho yêu cầu này đã được xử lý hoặc đang chờ kết quả. Bot không gửi lại mã; hãy theo dõi tiến độ bên dưới."
+				text = "✅ Mã xác thực đã được tiếp nhận và đang xử lý.\n⏳ Vui lòng theo dõi kết quả ở tin tiến độ bên dưới."
 			}
 			return h.replyExplanation(ctx, text)
 		}
@@ -245,7 +245,11 @@ func (h *Handler) menu(ctx context.Context, help bool) error {
 		return err
 	}
 	if help {
-		text += "\n\nMỗi lần bấm Đăng nhập chỉ cho phép một lần thử. Dừng hoặc khởi động lại không tự đăng nhập. Chỉ trả lời trực tiếp tin/ảnh yêu cầu OTP đăng nhập hoặc captcha còn hạn; không gửi mật khẩu hay OTP chuyển tiền vào chat. Telegram không mã hóa đầu cuối; xóa tin chỉ là cố gắng tốt nhất. Đổi thông tin chỉ thay bản lưu hệ thống, không đổi mật khẩu tại ngân hàng."
+		text += "\n\n📖 HƯỚNG DẪN SỬ DỤNG:\n" +
+			"• Đăng nhập: Mỗi lần bấm chỉ thực hiện một lượt thử an toàn. Hệ thống không bao giờ tự ý đăng nhập ngầm.\n" +
+			"• Nhập OTP & Captcha: Chỉ trả lời (Reply) trực tiếp vào tin nhắn yêu cầu riêng còn thời hạn. Tuyệt đối không gửi OTP chuyển tiền hay mật khẩu vào khung chat.\n" +
+			"• Cập nhật thông tin: Dùng liên kết bảo mật để cập nhật tài khoản/mật khẩu lưu trên máy chủ, không làm thay đổi mật khẩu tại ngân hàng.\n" +
+			"• An toàn: Dữ liệu được mã hóa đa tầng và xóa khỏi bộ nhớ ngay sau khi xác thực."
 	}
 	return h.sendPanel(ctx, c, e, text)
 }
@@ -269,7 +273,7 @@ func (h *Handler) planPanel(ctx context.Context, c storage.Connection, e storage
 			return p, err
 		}
 		locked = true
-		p.text += "\nHệ thống đang bảo trì; chỉ xem trạng thái và trợ giúp, chưa thể thay đổi."
+		p.text += "\n\n⚠️ Hệ thống đang bảo trì; chỉ xem trạng thái và trợ giúp, chưa thể thực hiện thay đổi."
 	}
 	configured := false
 	if c.ID != "" {
@@ -296,13 +300,13 @@ func (h *Handler) planPanel(ctx context.Context, c storage.Connection, e storage
 		}
 	}
 	if !configured {
-		p.text += "\nChưa lưu thông tin đăng nhập. Nhờ người quản lý cấu hình hệ thống trước; không gửi mật khẩu vào chat."
+		p.text += "\n\n⚠️ Chưa lưu thông tin đăng nhập. Vui lòng bấm 'Thông tin đăng nhập' để cấu hình trước; không gửi mật khẩu vào chat."
 	}
 	if bot.Paused {
-		p.text += "\nĐăng nhập đang tạm khóa. Cho phép lại không tự đăng nhập."
+		p.text += "\n\n⏸️ Đăng nhập tự động đang tạm khóa. Bấm 'Cho phép đăng nhập' để mở lại."
 	}
 	if otherActive {
-		p.text += "\nNgười quản lý đang đăng nhập ở nơi khác. Bot chờ và không hủy lần đó."
+		p.text += "\n\n🔄 Đang có một lượt đăng nhập được thực hiện ở nơi khác. Bot đang chờ và không can thiệp vào phiên đó."
 	}
 	if !locked && c.ID != "" {
 		if (active && c.State != "MONITORING") || pendingConsent(e) {
@@ -314,7 +318,7 @@ func (h *Handler) planPanel(ctx context.Context, c storage.Connection, e storage
 				readyAt = loginAt.Add(time.Minute)
 			}
 			if time.Now().Before(readyAt) {
-				p.text += "\nCó thể thử lại sau " + localExpiry(readyAt.Format(time.RFC3339Nano)) + ". Bấm Làm mới khi đến giờ; bot không tự thử."
+				p.text += "\n\n⏳ Có thể thử lại sau " + localExpiry(readyAt.Format(time.RFC3339Nano)) + " (giờ VN). Bấm 'Làm mới' khi đến giờ."
 			} else {
 				p.operations = append(p.operations, "LOGIN")
 			}
@@ -373,7 +377,30 @@ func (h *Handler) renderPanel(ctx context.Context, c storage.Connection, e stora
 		actions = append(actions, a)
 		keyboard.Rows = append(keyboard.Rows, []inlineButton{{Text: "Xem ảnh captcha", Data: "ar:" + a.ID}})
 	}
-	keyboard.Rows = append(keyboard.Rows, p.keyboard.Rows...)
+	var primaryRows [][]inlineButton
+	var secondaryButtons []inlineButton
+	for _, row := range keyboard.Rows {
+		for _, btn := range row {
+			if btn.Text == "Đăng nhập" || strings.Contains(btn.Text, "Thử lại") || strings.Contains(btn.Text, "Hủy") || strings.Contains(btn.Text, "Xem ảnh") {
+				primaryRows = append(primaryRows, []inlineButton{btn})
+			} else {
+				secondaryButtons = append(secondaryButtons, btn)
+			}
+		}
+	}
+	for _, row := range p.keyboard.Rows {
+		secondaryButtons = append(secondaryButtons, row...)
+	}
+	var finalRows [][]inlineButton
+	finalRows = append(finalRows, primaryRows...)
+	for i := 0; i < len(secondaryButtons); i += 2 {
+		if i+1 < len(secondaryButtons) {
+			finalRows = append(finalRows, []inlineButton{secondaryButtons[i], secondaryButtons[i+1]})
+		} else {
+			finalRows = append(finalRows, []inlineButton{secondaryButtons[i]})
+		}
+	}
+	keyboard.Rows = finalRows
 	return keyboard, actions, nil
 }
 
@@ -451,10 +478,10 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 		if !blocked {
 			return h.status(ctx)
 		}
-		return h.refreshPanel(ctx, "Phiên đã xác minh; đang lấy giao dịch còn thiếu. Chỉ thử lại bước lấy giao dịch nếu đã thất bại; không đăng nhập lại.")
+		return h.refreshPanel(ctx, "ℹ️ Phiên đã xác minh; hệ thống đang lấy các giao dịch còn thiếu.\nChỉ thử lại bước lấy giao dịch nếu đã thất bại; không cần đăng nhập lại.")
 	}
 	if (operation == "CANCEL") && e.RecoveryRunID != "" && c.State == "MONITORING" {
-		return h.refreshPanel(ctx, "Không thể hủy bước lấy giao dịch đã bắt đầu. Phiên đã xác minh được giữ; tạm khóa đăng nhập chỉ ngăn lần đăng nhập tiếp.")
+		return h.refreshPanel(ctx, "⚠️ Không thể hủy bước lấy giao dịch đã bắt đầu.\nPhiên đã xác minh được giữ an toàn.")
 	}
 	if operation == "LOGIN" || operation == "RETRY" {
 		report, err := h.Store.ActiveAuthAttempts(ctx)
@@ -463,7 +490,7 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 		}
 		for _, a := range report.Attempts {
 			if a.OwnerSubject != storage.RecoveryOwner {
-				return h.refreshPanel(ctx, "Người quản lý đang đăng nhập ở nơi khác. Bot chờ và không hủy lần đó.")
+				return h.refreshPanel(ctx, "🔄 Đang có phiên đăng nhập ở nơi khác. Bot đang chờ và không can thiệp vào phiên đó.")
 			}
 		}
 		if e.State == "VERIFYING" || progressKind(e.State) && e.OTPSubmissions > 0 {
@@ -477,22 +504,44 @@ func (h *Handler) confirm(ctx context.Context, operation string) error {
 				}
 				expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
 				if parseErr == nil && time.Now().Before(expiry) {
-					return h.refreshPanel(ctx, "Đang chờ captcha hoặc OTP còn hạn. Trả lời trực tiếp yêu cầu đó; không tạo thêm lần đăng nhập.")
+					return h.refreshPanel(ctx, "📲 Đang chờ mã xác thực còn thời hạn.\nVui lòng trả lời tin nhắn yêu cầu mã; không tạo thêm lần đăng nhập mới.")
 				}
 			} else if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
 		}
 	}
-	text := fmt.Sprintf("%s? Nút dùng một lần, hết hạn sau 60 giây.", actionLabel(operation))
-	if operation == "UPDATE_CREDENTIALS" {
-		text += " Link HTTPS có hạn 5 phút và yêu cầu đăng nhập chủ tài khoản. Chỉ thay thông tin lưu trên VPS, không đổi mật khẩu ngân hàng và không tự đăng nhập."
+	var text string
+	switch operation {
+	case "LOGIN":
+		text = "🔐 XÁC NHẬN BẮT ĐẦU ĐĂNG NHẬP ACB\n────────────────────────\nHệ thống sẽ mở trình duyệt để đăng nhập và xử lý captcha tự động.\n\n📲 Vui lòng chuẩn bị sẵn ứng dụng ACB ONE trên điện thoại để lấy mã OTP khi có yêu cầu.\n\n⏱️ Nút xác nhận có hiệu lực trong 60 giây:"
+	case "LOGOUT":
+		text = "🚪 XÁC NHẬN ĐĂNG XUẤT ACB\n────────────────────────\n⚠️ Thao tác này sẽ:\n• Xóa phiên đăng nhập đang lưu trên VPS.\n• Gửi yêu cầu thu hồi phiên an toàn tới máy chủ ACB.\n• Tạm dừng tự động đồng bộ giao dịch cho đến lần đăng nhập mới.\n\n⏱️ Nút xác nhận có hiệu lực trong 60 giây:"
+	case "UPDATE_CREDENTIALS":
+		text = "⚙️ CẬP NHẬT THÔNG TIN ĐĂNG NHẬP\n────────────────────────\nHệ thống sẽ tạo liên kết bảo mật (hạn 5 phút) để bạn cập nhật tài khoản và mật khẩu ngân hàng.\n• Yêu cầu đăng nhập tài khoản quản trị.\n• Chỉ lưu trữ trên VPS, không đổi mật khẩu tại ngân hàng.\n\n⏱️ Bấm xác nhận bên dưới để nhận liên kết:"
+	case "CANCEL":
+		text = "🛑 XÁC NHẬN HỦY LẦN ĐĂNG NHẬP\n────────────────────────\nBạn có chắc chắn muốn hủy lượt đăng nhập đang diễn ra không?\n\n⏱️ Nút xác nhận có hiệu lực trong 60 giây:"
+	case "RETRY":
+		text = "🔄 XÁC NHẬN THỬ LẠI LẤY GIAO DỊCH\n────────────────────────\nHệ thống sẽ kết nối lại phiên ACB hiện tại để tải các giao dịch còn thiếu.\n\n⏱️ Nút xác nhận có hiệu lực trong 60 giây:"
+	default:
+		text = fmt.Sprintf("⚠️ XÁC NHẬN THAO TÁC\n────────────────────────\nBạn có muốn thực hiện %s không?\n\n⏱️ Nút bấm có hiệu lực một lần trong 60 giây:", actionLabel(operation))
 	}
-	if operation == "LOGOUT" {
-		text += " Hệ thống sẽ xóa phiên trên VPS và thử thu hồi phiên tại ACB. Nếu ngân hàng không xác nhận, bot sẽ báo rõ; thông tin đăng nhập và giao dịch vẫn được giữ."
+	keyboard, actions, err := h.buttons(ctx, c, e, []string{operation})
+	if err != nil {
+		return err
 	}
-	_, err = h.sendButtons(ctx, c, e, text, []string{operation})
-	return err
+	keyboard.Rows = append(keyboard.Rows, []inlineButton{{Text: "Quay lại", Data: "nav:menu"}})
+	id, err := h.Client.SendText(ctx, h.ChatID, text, keyboard)
+	if err != nil {
+		return err
+	}
+	for _, a := range actions {
+		if err := h.Store.DeliverTelegramAuthAction(ctx, a.ID, id); err != nil {
+			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
+			return err
+		}
+	}
+	return nil
 }
 func (h *Handler) direct(ctx context.Context, operation string) error {
 	c, e, err := h.snapshot(ctx)
@@ -544,7 +593,7 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 	a, disposition, err := h.Store.ConsumeTelegramAuthAction(ctx, strings.TrimPrefix(q.Data, "ar:"), h.Client.Readiness().BotID, h.ChatID, h.UserID, q.Message.ID, time.Now())
 	if err != nil {
 		if errors.Is(err, storage.ErrChallengeExpired) {
-			return h.refreshPanel(ctx, "Nút đã hết hạn. Dùng nút mới bên dưới; chưa bắt đầu thêm lần đăng nhập.")
+			return h.refreshPanel(ctx, "⏱️ Nút bấm đã hết hạn. Vui lòng dùng nút bấm mới bên dưới.")
 		}
 		if rejectedDisposition(err) || errors.Is(err, storage.ErrMutationGateLocked) {
 			return h.refreshPanel(ctx, operationFailure(err))
@@ -552,7 +601,8 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 		return err
 	}
 	if disposition == "CREDENTIAL_GRANT" {
-		_, err := h.Client.SendText(ctx, h.ChatID, "Đã cấp link lưu thông tin đăng nhập, có hạn 5 phút.\n1. Mở link và đăng nhập chủ tài khoản để lưu thông tin. Nếu trình duyệt Telegram chưa đăng nhập, mở bằng trình duyệt thường.\n2. Sau khi lưu, bot sẽ báo kết quả; bấm Đăng nhập khi bạn sẵn sàng. Chưa đăng nhập ACB, không đổi mật khẩu ngân hàng.\n"+h.PublicOrigin+"/admin/acb-credentials#grant="+a.CredentialGrantToken, inlineKeyboard{Rows: [][]inlineButton{{{Text: "Quay lại ACB", Data: "nav:menu"}}}})
+		msgText := "⚙️ LIÊN KẾT CẬP NHẬT THÔNG TIN\n────────────────────────\nLiên kết bảo mật đã sẵn sàng (có hạn trong 5 phút):\n👉 " + h.PublicOrigin + "/admin/acb-credentials#grant=" + a.CredentialGrantToken + "\n\n📝 Hướng dẫn thực hiện:\n1. Bấm mở liên kết trên trình duyệt web của bạn.\n2. Đăng nhập tài khoản quản trị để lưu tên đăng nhập & mật khẩu mới.\n3. Sau khi lưu xong, quay lại đây bấm 'Đăng nhập' để kiểm tra kết nối.\n\n🛡️ Thao tác chỉ lưu thông tin bảo mật trên VPS, không đổi mật khẩu tại ngân hàng."
+		_, err := h.Client.SendText(ctx, h.ChatID, msgText, inlineKeyboard{Rows: [][]inlineButton{{{Text: "Quay lại ACB", Data: "nav:menu"}}}})
 		a.CredentialGrantToken = ""
 		return err
 	}
@@ -575,15 +625,15 @@ func (h *Handler) handleCallback(ctx context.Context, q *CallbackQuery) error {
 func operationFailure(err error) string {
 	switch {
 	case errors.Is(err, storage.ErrMutationGateLocked):
-		return "Hệ thống đang bảo trì. Bạn vẫn có thể xem Trạng thái và Trợ giúp."
+		return "⚠️ Hệ thống đang bảo trì. Bạn vẫn có thể xem Trạng thái và Hướng dẫn."
 	case errors.Is(err, storage.ErrRecoveryCommitted):
-		return "Không thể bỏ qua lỗi dữ liệu giao dịch bằng hủy hoặc đăng nhập lại. Nhờ người quản lý sửa mốc lấy giao dịch; phiên hiện tại vẫn được giữ."
+		return "⚠️ Không thể hủy khi đang trong tiến trình đồng bộ dữ liệu. Phiên đăng nhập hiện tại vẫn được bảo vệ an toàn."
 	case errors.Is(err, storage.ErrRecoveryCooldown):
-		return "Chưa đủ 60 giây từ lần gửi đăng nhập trước. Hãy chờ rồi xác nhận lại."
+		return "⏳ Chưa đủ 60 giây từ lần gửi đăng nhập trước. Vui lòng chờ ít giây rồi xác nhận lại."
 	case errors.Is(err, storage.ErrAuthAttemptActive):
-		return "Đang có lần đăng nhập chưa kết thúc. Hãy chờ tiến độ hoặc trả lời yêu cầu mã còn hạn; bot không tạo thêm lần đăng nhập."
+		return "🔄 Đang có một lượt đăng nhập đang xử lý. Vui lòng theo dõi tiến độ hoặc trả lời tin nhắn yêu cầu mã OTP/Captcha."
 	default:
-		return "Nút đã dùng hoặc trạng thái vừa thay đổi. Dùng nút mới bên dưới; bot chưa tạo thêm lần đăng nhập."
+		return "ℹ️ Nút bấm đã được sử dụng hoặc trạng thái vừa thay đổi. Vui lòng dùng nút bấm mới bên dưới."
 	}
 }
 func (h *Handler) refreshPanel(ctx context.Context, result string) error {
@@ -602,15 +652,15 @@ func (h *Handler) afterOperation(ctx context.Context, disposition string) error 
 	h.wakeCoordinator()
 	switch disposition {
 	case "LOGOUT_QUEUED":
-		return h.refreshPanel(ctx, "Đã nhận yêu cầu đăng xuất.\n1/2 · Đang xóa phiên lưu trên hệ thống.\n2/2 · Sẽ thử thu hồi phiên tại ACB và báo kết quả riêng. Chưa xác nhận đăng xuất ngân hàng hoàn tất; không tự đăng nhập lại.")
+		return h.refreshPanel(ctx, "🚪 ĐÃ NHẬN YÊU CẦU ĐĂNG XUẤT\n────────────────────────\n• Bước 1: Đang xóa phiên lưu trữ trên hệ thống.\n• Bước 2: Đang gửi lệnh thu hồi phiên an toàn tới ACB.\n\n💡 Kết quả thu hồi sẽ được thông báo ngay khi hoàn tất. Hệ thống không tự động đăng nhập lại.")
 	case "STATUS", "ACTIVE":
 		return h.status(ctx)
 	case "CATCHUP_RETRY", "REARMED":
 		return h.deliverProgress(ctx)
 	case "PAUSE":
-		return h.refreshPanel(ctx, "Đã tạm khóa đăng nhập và hủy lần đang chờ. Không tự đăng nhập lại. Nếu phiên đã xác minh, theo dõi và lấy giao dịch còn thiếu vẫn tiếp tục theo lịch.")
+		return h.refreshPanel(ctx, "⏸️ ĐÃ TẠM KHÓA ĐĂNG NHẬP\n────────────────────────\nĐã hủy các phiên đăng nhập đang chờ và tạm dừng đăng nhập tự động.\n💡 Nếu phiên ngân hàng đang hoạt động, hệ thống vẫn tiếp tục theo dõi giao dịch theo lịch.")
 	case "RESUMED":
-		return h.refreshPanel(ctx, "Đã cho phép đăng nhập. Thao tác này không bắt đầu lần mới; bấm Đăng nhập khi cần.")
+		return h.refreshPanel(ctx, "▶️ ĐÃ MỞ KHÓA ĐĂNG NHẬP\n────────────────────────\nHệ thống đã sẵn sàng cho phép đăng nhập mới.\n💡 Thao tác này không tự động đăng nhập. Bấm 'Đăng nhập' khi bạn muốn bắt đầu.")
 	case "CANCEL":
 		if err := h.deliverProgress(ctx); err != nil {
 			return err
@@ -622,7 +672,7 @@ func (h *Handler) afterOperation(ctx context.Context, disposition string) error 
 		if e.StatusMessageID > 0 {
 			return nil
 		}
-		return h.sendPanel(ctx, c, e, "Đã hủy lần này. Không tự đăng nhập lại; bấm Đăng nhập khi muốn bắt đầu lần mới.")
+		return h.sendPanel(ctx, c, e, "🛑 ĐÃ HỦY LẦN ĐĂNG NHẬP\n────────────────────────\nĐã hủy phiên làm việc hiện tại an toàn.\n💡 Hệ thống không tự động thử lại. Bấm 'Đăng nhập' khi bạn muốn bắt đầu lượt mới.")
 	default:
 		return errors.New("TELEGRAM_OPERATION_INVALID")
 	}
@@ -632,65 +682,79 @@ func (h *Handler) status(ctx context.Context) error {
 }
 
 func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage.AuthRecoveryEpisode, timed bool) (string, error) {
-	text := "ACB: " + connectionLabel(c.State) + "."
+	accountDisplay := c.AccountMasked
+	if accountDisplay == "" {
+		accountDisplay = "Chưa thiết lập"
+	}
+	monitorStatus := "🟢 Tự động đồng bộ"
+	settings, err := h.Store.GetMonitorSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !settings.Enabled || storage.ResolveSchedule(time.Now(), &settings).Mode == storage.ModePaused {
+		monitorStatus = "⏸️ Tạm dừng theo lịch"
+	}
+
+	var text string
 	switch e.State {
 	case "DETECTED":
 		if pendingConsent(e) {
-			text = "Đã nhận yêu cầu đăng nhập một lần. Đang chờ mở ACB; bạn chưa cần gửi mã."
+			text = "🔄 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đã tiếp nhận yêu cầu đăng nhập\n💡 Đang chờ khởi động phiên ACB. Bạn chưa cần gửi mã, vui lòng chờ trong giây lát."
 		} else if e.ConsentActionID != "" && e.ConsentConsumedAt == "" {
-			text += "\nYêu cầu đăng nhập đã hết hạn trước khi mở ACB. Bấm Đăng nhập nếu muốn xác nhận lần mới; bot không tự thử."
+			text = fmt.Sprintf("🏦 QUẢN LÝ PHIÊN ACB\n────────────────────────\n📌 Trạng thái: %s\n👤 Số tài khoản: %s\n📡 Giám sát: %s\n\n⚠️ Yêu cầu đăng nhập trước đã hết hạn.\n👉 Bấm 'Đăng nhập' bên dưới để tạo lượt đăng nhập mới.", connectionLabel(c.State), accountDisplay, monitorStatus)
 		} else {
-			text += "\nChưa đăng nhập lại. Bấm Đăng nhập khi bạn sẵn sàng nhận OTP."
+			guidance := "💡 Phiên ngân hàng chưa kết nối. Bấm 'Đăng nhập' bên dưới khi bạn sẵn sàng mở app ACB lấy mã OTP."
+			if c.State == "MONITORING" {
+				guidance = "✨ Hệ thống đang kết nối ngân hàng ổn định và theo dõi biến động số dư theo thời gian thực."
+			}
+			text = fmt.Sprintf("🏦 QUẢN LÝ PHIÊN ACB\n────────────────────────\n📌 Trạng thái: %s\n👤 Số tài khoản: %s\n📡 Giám sát: %s\n\n%s", connectionLabel(c.State), accountDisplay, monitorStatus, guidance)
 		}
 	case "STARTING":
-		text = "1/6 · Đang mở trang ACB.\nBạn chờ ở đây; bot sẽ cập nhật trong tin này."
+		text = "🔄 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang khởi động trình duyệt bảo mật...\n\n  🔄 [1/5] Khởi động phiên bảo mật ACB\n  ⬜ [2/5] Xử lý mã Captcha\n  ⬜ [3/5] Gửi thông tin đăng nhập\n  ⬜ [4/5] Xác thực mã OTP\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Hệ thống đang mở trang ACB an toàn; tiến độ sẽ tự cập nhật trong tin nhắn này."
 	case "LOGIN":
-		text = "1/6 · Đang chờ trang đăng nhập ACB sẵn sàng.\nBạn chưa cần gửi mã."
 		loginAt, loginErr := time.Parse(time.RFC3339Nano, e.LastLoginAt)
 		consentAt, consentErr := time.Parse(time.RFC3339Nano, e.ConsentConsumedAt)
-		if loginErr == nil && consentErr == nil && !loginAt.Before(consentAt) {
-			text = "3/6 · Đang gửi thông tin đăng nhập và chờ ACB phản hồi.\nChưa xác nhận đăng nhập thành công; không gửi lại mật khẩu hoặc mã."
-		} else if e.AIUsed > 0 {
-			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; nếu cần nhập tay, bot sẽ gửi ảnh riêng để trả lời."
-		}
-		if e.ReasonCode == "OTP_REQUEST_SENT" {
-			text = "4/6 · Đang xác nhận phương thức OTP đăng nhập và chờ trang nhập OTP của ACB.\nBạn chưa cần gửi mã; chỉ trả lời khi bot gửi tin yêu cầu OTP riêng."
+		switch {
+		case e.ReasonCode == "OTP_REQUEST_SENT":
+			text = "📲 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang xác nhận phương thức OTP...\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  ✅ [2/5] Xử lý Captcha thành công\n  ✅ [3/5] Đã gửi thông tin đăng nhập\n  🔄 [4/5] Đang yêu cầu ACB gửi mã OTP...\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Ngân hàng đang tạo mã OTP đăng nhập. Bạn chưa cần gửi mã; hãy chờ tin nhắn yêu cầu riêng từ bot."
+		case loginErr == nil && consentErr == nil && !loginAt.Before(consentAt):
+			text = "🔐 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang xác thực thông tin tài khoản...\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  ✅ [2/5] Xử lý Captcha thành công\n  🔄 [3/5] Đang gửi thông tin đăng nhập và chờ ACB phản hồi...\n  ⬜ [4/5] Xác thực mã OTP\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Đang xác thực thông tin an toàn với ACB; vui lòng không gửi lại mật khẩu."
+		case e.AIUsed > 0:
+			text = "🧩 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang nhận diện mã Captcha...\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  🔄 [2/5] Đang nhận diện Captcha tự động...\n  ⬜ [3/5] Gửi thông tin đăng nhập\n  ⬜ [4/5] Xác thực mã OTP\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Hệ thống đang tự động đọc captcha. Nếu cần nhập tay, bot sẽ gửi ảnh riêng để bạn trả lời."
+		default:
+			text = "🌐 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang kết nối tới cổng đăng nhập ACB...\n\n  🔄 [1/5] Đang chờ trang đăng nhập ACB sẵn sàng...\n  ⬜ [2/5] Xử lý mã Captcha\n  ⬜ [3/5] Gửi thông tin đăng nhập\n  ⬜ [4/5] Xác thực mã OTP\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Đang tải giao diện đăng nhập ngân hàng; bạn chưa cần gửi mã."
 		}
 	case "WAITING_CAPTCHA", "WAITING_OTP":
-		text = "Đang chờ ACB và chuẩn bị yêu cầu riêng; bạn chưa cần gửi mã vào chat."
 		ch, err := h.Store.ActiveAuthChallenge(ctx, e.AttemptID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return "", err
 		}
-		// The OTP reservation survives CONSUMED and prompt deletion. A lagging
-		// episode must not turn an already accepted answer into another request.
 		if e.State == "WAITING_OTP" && e.OTPSubmissions > 0 || err == nil && ch.Status == "CONSUMING" {
-			text = "Đang chờ ACB kiểm tra câu trả lời và xác minh phiên.\nChưa xác nhận thành công; bạn chờ, không gửi lại mã."
+			text = "⏳ TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang kiểm tra mã xác thực với ngân hàng...\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  ✅ [2/5] Xử lý Captcha thành công\n  ✅ [3/5] Thông tin đăng nhập hợp lệ\n  🔄 [4/5] Đã nhận mã, ACB đang xác thực...\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Đang chờ ACB kiểm tra mã xác thực; vui lòng không gửi lại mã."
 		} else if err == nil {
 			expiry, parseErr := time.Parse(time.RFC3339Nano, ch.ExpiresAt)
 			if parseErr != nil || !time.Now().Before(expiry) {
-				text = "Yêu cầu mã đã hết thời gian trả lời. Không gửi mã cũ; đang chờ kết quả dừng lần này."
+				text = "⏱️ Yêu cầu mã đã hết thời gian chờ.\nKhông gửi mã cũ; hệ thống đang dừng lượt này để bảo vệ tài khoản."
 			} else if ch.PromptMessageID == 0 {
-				text = "Đang gửi yêu cầu riêng; hãy chờ tin/ảnh đó trước khi trả lời."
+				text = "📲 Đang chuẩn bị yêu cầu mã xác thực riêng; vui lòng chờ trong giây lát..."
+			} else if e.State == "WAITING_OTP" {
+				text = "📲 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: CHỜ NHẬP MÃ OTP ĐĂNG NHẬP\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  ✅ [2/5] Xử lý Captcha thành công\n  ✅ [3/5] Thông tin đăng nhập hợp lệ\n  🔔 [4/5] Đang chờ mã OTP từ bạn...\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n👉 Hướng dẫn nhập OTP:\n1. Mở app ACB ONE trên điện thoại lấy mã OTP đăng nhập.\n2. Bấm 'Trả lời' (Reply) vào tin nhắn yêu cầu OTP riêng bên dưới.\n⚠️ Giữ nguyên chữ số 0 ở đầu (nếu có). Không dùng OTP chuyển tiền!\n⏱️ Hạn trả lời: " + localExpiry(ch.ExpiresAt) + " (giờ VN)"
 			} else {
-				if e.State == "WAITING_OTP" {
-					text = "4/6 · Chờ OTP đăng nhập.\nMở app ACB lấy mã cho lần đăng nhập này, rồi trả lời trực tiếp tin yêu cầu OTP riêng (không trả lời tin tiến độ này). Không dùng OTP chuyển tiền."
-				} else {
-					text = "2/6 · Chờ bạn nhập captcha.\nTrả lời trực tiếp ảnh yêu cầu captcha bằng ký tự trong ảnh (không trả lời tin tiến độ này)."
-				}
-				text += "\nHạn trả lời: " + localExpiry(ch.ExpiresAt) + " (giờ Việt Nam)."
+				text = "🧩 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: CHỜ BẠN NHẬP MÃ CAPTCHA\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  🔔 [2/5] Đang chờ bạn nhập mã Captcha...\n  ⬜ [3/5] Gửi thông tin đăng nhập\n  ⬜ [4/5] Xác thực mã OTP\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n👉 Hướng dẫn nhập:\nXem ảnh captcha gửi riêng bên dưới, bấm 'Trả lời' (Reply) ảnh đó bằng các ký tự nhìn thấy.\n⏱️ Hạn trả lời: " + localExpiry(ch.ExpiresAt) + " (giờ VN)"
 			}
 		} else if e.State == "WAITING_CAPTCHA" && e.AIUsed > e.CaptchaSubmissions {
-			text = "2/6 · Đang đọc captcha tự động.\nBạn chờ; chưa cần nhập ký tự. Nếu cần bạn nhập tay, bot sẽ gửi ảnh yêu cầu riêng."
+			text = "🧩 TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang nhận diện mã Captcha...\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  🔄 [2/5] Đang nhận diện Captcha tự động...\n  ⬜ [3/5] Gửi thông tin đăng nhập\n  ⬜ [4/5] Xác thực mã OTP\n  ⬜ [5/5] Hoàn tất & Kiểm tra phiên\n\n💡 Hệ thống đang tự động đọc captcha. Nếu cần bạn nhập tay, bot sẽ gửi ảnh yêu cầu riêng."
+		} else {
+			text = "⏳ Đang chuẩn bị yêu cầu xác thực từ ACB; bạn chưa cần gửi mã vào chat."
 		}
 	case "VERIFYING":
-		text = "5/6 · Đang xác minh phiên và đúng tài khoản ACB.\nChưa xác nhận thành công; không gửi thêm mã."
+		verifyDeadlineText := ""
 		started, err := h.Store.RecoveryVerificationStartedAt(ctx, e.ID, e.Generation)
 		if errors.Is(err, storage.ErrRecoverySuperseded) {
 			return "", err
 		}
 		if err != nil {
-			text += "\n" + reasonLabel("VERIFICATION_STATE_INVALID")
+			verifyDeadlineText = "\n⚠️ " + reasonLabel("VERIFICATION_STATE_INVALID")
 		} else {
 			deadline := started.Add(60 * time.Second)
 			attempt, err := h.Store.AuthAttemptStatusForOwner(ctx, e.AttemptID, storage.RecoveryOwner)
@@ -699,16 +763,16 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 			}
 			expiry, err := time.Parse(time.RFC3339Nano, attempt.ExpiresAt)
 			if err != nil {
-				text += "\n" + reasonLabel("VERIFICATION_STATE_INVALID")
+				verifyDeadlineText = "\n⚠️ " + reasonLabel("VERIFICATION_STATE_INVALID")
 			} else {
 				if expiry.Before(deadline) {
 					deadline = expiry
 				}
-				text += "\nHạn xác minh: " + localExpiry(deadline.UTC().Format(time.RFC3339Nano)) + " (giờ Việt Nam)."
+				verifyDeadlineText = "\n⏱️ Hạn xác minh: " + localExpiry(deadline.UTC().Format(time.RFC3339Nano)) + " (giờ VN)"
 			}
 		}
+		text = "🛡️ TIẾN TRÌNH ĐĂNG NHẬP ACB\n────────────────────────\n⏳ Trạng thái: Đang xác minh phiên và kiểm tra tài khoản..." + verifyDeadlineText + "\n\n  ✅ [1/5] Khởi động phiên bảo mật\n  ✅ [2/5] Xử lý Captcha thành công\n  ✅ [3/5] Thông tin đăng nhập hợp lệ\n  ✅ [4/5] Đã nhận mã OTP thành công\n  🔄 [5/5] Đối soát tài khoản & Thiết lập phiên kết nối...\n\n💡 Đang kiểm tra đúng tài khoản ngân hàng và khởi tạo phiên an toàn; không gửi thêm mã."
 	case "CATCHING_UP":
-		text = "6/6 · Phiên đã xác minh, đang lấy giao dịch còn thiếu.\nChưa tiếp tục theo dõi cho đến khi lấy đủ giao dịch."
 		if e.RecoveryRunID != "" {
 			run, err := h.Store.GetRecoveryRun(ctx, e.RecoveryRunID)
 			if err != nil {
@@ -719,20 +783,29 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 				if run.ErrorCode == "INVALID_CHECKPOINT" {
 					reason = "INVALID_CHECKPOINT"
 				}
-				text = "Phiên đã xác minh nhưng chưa lấy đủ giao dịch.\n" + reasonLabel(reason) + "\nChưa tiếp tục theo dõi; không cần đăng nhập hoặc lấy OTP lại."
+				text = "⚠️ ĐỒNG BỘ GIAO DỊCH GẶP GIÁN ĐOẠN\n────────────────────────\nPhiên đã xác minh nhưng bước lấy giao dịch chưa hoàn tất.\n\n📌 Chi tiết:\n" + reasonLabel(reason) + "\n\n🛠️ Hướng xử lý:\n• " + reasonAction(reason) + "\n\n💡 Phiên đăng nhập vẫn an toàn; không cần đăng nhập hoặc lấy OTP lại."
+			} else {
+				text = fmt.Sprintf("📊 ĐỒNG BỘ DỮ LIỆU GIAO DỊCH\n────────────────────────\n🎉 Phiên ACB đã xác thực thành công!\n🔄 Đang tải các giao dịch còn thiếu:\n  • Khoảng thời gian: %s ➔ %s\n  • Ngày đang xử lý: %s\n\n⏳ Tiến trình đang chạy tự động trong nền; tin nhắn sẽ tự cập nhật khi hoàn tất.", run.RangeFrom, run.RangeTo, run.NextDay)
 			}
-			text += "\nKhoảng " + run.RangeFrom + " đến " + run.RangeTo + "; ngày đang xử lý: " + run.NextDay + "."
+		} else {
+			text = "📊 ĐỒNG BỘ DỮ LIỆU GIAO DỊCH\n────────────────────────\n🎉 Phiên ACB đã xác thực thành công!\n🔄 Đang tải các giao dịch còn thiếu trong thời gian gián đoạn...\n⏳ Quá trình diễn ra tự động trong nền."
 		}
 	case "COMPLETED":
-		text = "Hoàn tất 6/6 · Đã xác minh ACB và lấy đủ giao dịch còn thiếu."
+		text = fmt.Sprintf("🎉 ĐĂNG NHẬP & KẾT NỐI ACB THÀNH CÔNG!\n────────────────────────\n✅ Phiên ngân hàng đã được xác thực an toàn.\n✅ Đã kiểm tra đúng tài khoản: %s.\n✅ Dữ liệu giao dịch đã được đồng bộ đầy đủ.\n📡 Hệ thống đang tự động theo dõi biến động số dư theo thời gian thực.", accountDisplay)
 	case "CANCELLED", "CANCELED":
-		text = "Đã hủy lần đăng nhập này. Bot không tự thử lại; bấm Đăng nhập nếu muốn bắt đầu lần mới."
+		text = "🛑 ĐÃ HỦY LẦN ĐĂNG NHẬP\n────────────────────────\nPhiên đăng nhập này đã được hủy an toàn.\n💡 Hệ thống không tự động thử lại. Bấm 'Đăng nhập' bên dưới khi bạn muốn bắt đầu lượt mới."
 	case "WAIT_OPERATOR", "MANUAL_REQUIRED", "FAILED", "RETRY_WAIT", "MAINTENANCE_WAIT":
-		text = "Đã dừng lần đăng nhập này.\n" + reasonLabel(e.ReasonCode) + "\nBot không tự đăng nhập lại."
+		reason := e.ReasonCode
+		if reason == "" {
+			reason = "UNKNOWN"
+		}
 		if c.State == "MONITORING" {
-			text = "Phiên đã xác minh nhưng chưa lấy đủ giao dịch.\n" + reasonLabel(e.ReasonCode) + "\nChưa tiếp tục theo dõi; không cần đăng nhập hoặc lấy OTP lại."
+			text = "⚠️ ĐỒNG BỘ GIAO DỊCH GẶP GIÁN ĐOẠN\n────────────────────────\nPhiên đã xác minh nhưng bước lấy giao dịch chưa hoàn tất.\n\n📌 Chi tiết:\n" + reasonLabel(reason) + "\n\n🛠️ Hướng xử lý:\n• " + reasonAction(reason) + "\n\n💡 Phiên đăng nhập vẫn an toàn; không cần đăng nhập hoặc lấy OTP lại."
+		} else {
+			text = "❌ ĐĂNG NHẬP CHƯA THÀNH CÔNG\n────────────────────────\n📌 Nguyên nhân:\n" + reasonLabel(reason) + "\n\n🛠️ Hướng xử lý:\n• " + reasonAction(reason) + "\n\n💡 Hệ thống đã dừng phiên an toàn để bảo vệ tài khoản của bạn. Bấm 'Đăng nhập' bên dưới để thử lại."
 		}
 	}
+
 	if timed && progressKind(e.State) && e.AttemptID != "" && e.State != "CATCHING_UP" && e.State != "VERIFYING" {
 		attempt, err := h.Store.AuthAttemptStatusForOwner(ctx, e.AttemptID, storage.RecoveryOwner)
 		if err == nil {
@@ -741,7 +814,7 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 				if seconds < 0 {
 					seconds = 0
 				}
-				text += fmt.Sprintf("\nĐã chờ khoảng %d giây · giới hạn lần này: %s (giờ Việt Nam).", seconds, localExpiry(attempt.ExpiresAt))
+				text += fmt.Sprintf("\n\n⏱️ Đã xử lý khoảng %d giây · Hạn chót: %s (giờ VN).", seconds, localExpiry(attempt.ExpiresAt))
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return "", err
@@ -753,20 +826,11 @@ func (h *Handler) stateText(ctx context.Context, c storage.Connection, e storage
 			if seconds < 0 {
 				seconds = 0
 			}
-			text += fmt.Sprintf("\nĐã chờ bước này khoảng %d giây. Tin này tự cập nhật; bạn không cần bấm làm mới.", seconds)
+			text += fmt.Sprintf("\n\n⏱️ Đang đồng bộ khoảng %d giây. Tin nhắn này tự động cập nhật.", seconds)
 		}
 	}
-	settings, err := h.Store.GetMonitorSettings(ctx)
-	if err != nil {
-		return "", err
-	}
-	if !settings.Enabled || storage.ResolveSchedule(time.Now(), &settings).Mode == storage.ModePaused {
-		text += "\nLịch theo dõi giao dịch đang tạm dừng."
-	} else if e.State == "COMPLETED" {
-		text += "\nĐã tiếp tục theo dõi giao dịch."
-	}
 	if h.AIDegraded != nil && h.AIDegraded() != "" {
-		text += "\nĐọc captcha tự động đang không sẵn sàng. Khi được yêu cầu, trả lời trực tiếp ảnh captcha để tiếp tục."
+		text += "\n\n⚠️ Đọc captcha tự động hiện không sẵn sàng. Nếu cần thiết, bot sẽ gửi ảnh captcha để bạn nhập tay."
 	}
 	return text, nil
 }
@@ -778,95 +842,125 @@ func pendingConsent(e storage.AuthRecoveryEpisode) bool {
 func connectionLabel(state string) string {
 	switch state {
 	case "MONITORING":
-		return "phiên đã xác minh"
+		return "🟢 Đang hoạt động (Đã xác minh)"
 	case "AUTH_REQUIRED":
-		return "cần đăng nhập"
+		return "🟡 Cần đăng nhập lại"
 	case "AUTH_STARTING":
-		return "đang đăng nhập"
+		return "🔵 Đang xử lý đăng nhập"
 	case "UNCONFIGURED":
-		return "chưa cấu hình"
+		return "⚪ Chưa cấu hình tài khoản"
 	default:
-		return "chưa sẵn sàng"
+		return "⚪ Chưa sẵn sàng"
 	}
 }
+
+func reasonAction(reason string) string {
+	switch reason {
+	case "VERIFICATION_TIMEOUT":
+		return "Mở app ACB ONE kiểm tra thông báo phiên, sau đó bấm Đăng nhập để lấy mã OTP mới."
+	case "VERIFICATION_ACCOUNT_MISMATCH":
+		return "Kiểm tra lại số tài khoản ngân hàng trong mục Thông tin đăng nhập."
+	case "VERIFICATION_ACCOUNT_MISSING", "VERIFICATION_PAGE_UNSUPPORTED", "FRAME_UNSUPPORTED", "AMBIGUOUS_CONTROLS", "AMBIGUOUS_SUBMIT", "UNKNOWN_PAGE", "UNRECOGNIZED_PAGE", "UNSUPPORTED_PAGE":
+		return "Bấm Đăng nhập để thử lại. Nếu vẫn gặp lỗi này, nhờ quản trị viên kiểm tra lại kết nối giao diện ACB."
+	case "VERIFICATION_AUTH_REQUIRED", "OTP_REJECTED", "INVALID_OTP":
+		return "Bấm Đăng nhập, mở app ACB ONE lấy mã OTP mới và trả lời ngay khi bot gửi yêu cầu."
+	case "CREDENTIALS_REJECTED":
+		return "Mở mục Thông tin đăng nhập để cập nhật lại tên đăng nhập hoặc mật khẩu ACB ONE."
+	case "ACCOUNT_LOCKED":
+		return "Mở app ACB ONE hoặc liên hệ tổng đài ACB (1900 54 54 86) để mở khóa tài khoản trước."
+	case "BANK_MAINTENANCE", "MAINTENANCE", "VERIFICATION_MAINTENANCE":
+		return "Vui lòng chờ ngân hàng hoàn tất bảo trì rồi bấm Đăng nhập lại."
+	case "CHALLENGE_EXPIRED", "OTP_EXPIRED", "ATTEMPT_EXPIRED", "ATTEMPT_TIMEOUT", "BROWSER_EXPIRED":
+		return "Bấm Đăng nhập khi bạn đã sẵn sàng cầm điện thoại để nhận mã."
+	case "CAPTCHA_BUDGET_EXHAUSTED", "CAPTCHA_REJECTED", "INVALID_CAPTCHA":
+		return "Bấm Đăng nhập lại. Nếu bot gửi ảnh captcha, hãy nhập đúng các ký tự trong ảnh."
+	case "CATCHUP_FAILED", "HISTORY_RANGE_UNAVAILABLE":
+		return "Phiên làm việc vẫn an toàn. Bấm 'Thử lại lấy giao dịch thiếu' để hệ thống đồng bộ lại."
+	case "OPERATOR_CANCELLED":
+		return "Bấm Đăng nhập khi bạn muốn bắt đầu lượt mới."
+	default:
+		return "Bấm Đăng nhập để thử lại lượt mới."
+	}
+}
+
 func reasonLabel(reason string) string {
 	switch reason {
 	case "VERIFICATION_ACCOUNT_MISMATCH":
-		return "ACB trả về tài khoản khác số tài khoản đã lưu. Bot đã dừng, chưa lưu phiên; kiểm tra số tài khoản và nhờ người quản lý kiểm tra. Không gửi lại mã."
+		return "Số tài khoản từ ACB không khớp với số tài khoản đã lưu trên hệ thống."
 	case "VERIFICATION_ACCOUNT_MISSING":
-		return "Trang ACB không cung cấp số tài khoản để đối chiếu. Bot chưa lưu phiên; nhờ người quản lý kiểm tra. Không gửi lại mã."
+		return "Trang lịch sử ACB không phản hồi số tài khoản để đối soát."
 	case "VERIFICATION_FORM_INVALID":
-		return "Không đọc được biểu mẫu giao dịch ACB để xác minh phiên. Bot đã dừng an toàn; nhờ người quản lý kiểm tra giao diện ACB. Không gửi lại mã."
+		return "Không đọc được cấu trúc biểu mẫu ACB để xác minh phiên."
 	case "VERIFICATION_AUTH_REQUIRED":
-		return "ACB chưa giữ phiên đăng nhập và yêu cầu xác thực lại. Chưa xác nhận thành công; kiểm tra app ACB trước khi chọn lần đăng nhập mới. Không gửi lại mã đã dùng."
+		return "ACB yêu cầu xác thực lại hoặc chưa lưu phiên đăng nhập."
 	case "VERIFICATION_PAGE_UNSUPPORTED":
-		return "ACB trả về trang bot chưa nhận diện được để xác minh phiên. Bot đã dừng; nhờ người quản lý kiểm tra giao diện ACB. Không gửi lại mã."
+		return "ACB phản hồi trang chưa được nhận diện để xác minh phiên."
 	case "VERIFICATION_MAINTENANCE":
-		return "ACB đang bảo trì nên chưa xác minh được phiên. Chờ ngân hàng hoạt động lại; không gửi thêm mã."
+		return "Ngân hàng ACB đang trong thời gian bảo trì hệ thống."
 	case "VERIFICATION_UNAVAILABLE":
-		return "Dịch vụ chưa xác minh được phiên ACB do kết nối hoặc xử lý chưa sẵn sàng. Chưa xác nhận thành công; không gửi thêm mã."
+		return "Dịch vụ chưa thể kết nối xác minh phiên với máy chủ ACB."
 	case "VERIFICATION_SUPERSEDED":
-		return "Lần xác minh này đã được thay thế bởi thay đổi phiên mới hơn. Xem trạng thái hiện tại; không gửi lại mã cũ."
+		return "Phiên làm việc này đã được thay thế bởi thao tác mới hơn."
 	case "VERIFICATION_TIMEOUT":
-		return "Hệ thống chưa xác minh được phiên ACB trong thời gian cho phép. Không kết luận OTP sai hoặc hết hạn. Nhờ người quản lý kiểm tra trước khi chọn lần đăng nhập mới; không gửi lại mã đã dùng."
+		return "Quá thời gian chờ phản hồi xác minh từ ACB (60 giây). Hệ thống không kết luận mã OTP sai."
 	case "VERIFICATION_STATE_INVALID":
-		return "Mốc thời gian xác minh đã lưu bị thiếu hoặc không hợp lệ. Bot dừng an toàn; nhờ người quản lý kiểm tra dữ liệu. Không gửi lại mã."
+		return "Mốc thời gian xác minh lưu trữ không hợp lệ hoặc bị thiếu."
 	case "CREDENTIALS_REJECTED":
-		return "ACB từ chối tên đăng nhập hoặc mật khẩu. Kiểm tra trong app ACB, rồi dùng Thông tin đăng nhập để lưu lại trước khi thử."
+		return "ACB từ chối tên đăng nhập hoặc mật khẩu đã cung cấp."
 	case "CREDENTIALS_NOT_CONFIGURED", "CREDENTIALS_UNAVAILABLE":
-		return "Chưa đọc được thông tin đăng nhập đã lưu. Dùng Thông tin đăng nhập để lưu lại hoặc nhờ người quản lý kiểm tra."
+		return "Chưa cấu hình thông tin đăng nhập tài khoản ACB trên hệ thống."
 	case "CREDENTIALS_DECRYPT_FAILED":
-		return "Không mở được thông tin đăng nhập đã mã hóa. Nhờ người quản lý kiểm tra khóa mã hóa, hoặc lưu lại qua Thông tin đăng nhập."
+		return "Không thể giải mã thông tin đăng nhập tài khoản ACB."
 	case "CREDENTIALS_REVISION_CONFLICT":
-		return "Thông tin đăng nhập vừa thay đổi. Kiểm tra thông tin mới rồi bấm Đăng nhập cho lần mới."
+		return "Thông tin đăng nhập ACB vừa được cập nhật phiên bản mới."
 	case "ACCOUNT_LOCKED":
-		return "ACB báo tài khoản bị khóa. Mở app ACB hoặc liên hệ ngân hàng để mở khóa trước khi thử lại."
+		return "ACB thông báo tài khoản đang bị tạm khóa bảo vệ."
 	case "CATCHUP_FAILED", "HISTORY_RANGE_UNAVAILABLE":
-		return "Lấy giao dịch còn thiếu thất bại. Bấm Thử lại lấy giao dịch thiếu nếu có; phiên hiện tại được giữ, không yêu cầu OTP mới."
+		return "Quá trình tải dữ liệu giao dịch còn thiếu gặp gián đoạn."
 	case "INVALID_CHECKPOINT", "CATCHUP_PROGRESS_MISSING":
-		return "Mốc lấy giao dịch còn thiếu hoặc tiến độ đã lưu không hợp lệ. Nhờ người quản lý kiểm tra dữ liệu; không đăng nhập lại để bỏ qua lỗi."
+		return "Mốc đồng bộ dữ liệu giao dịch đã lưu không hợp lệ."
 	case "SESSION_DECRYPT_FAILED":
-		return "Không mở được phiên ACB đã mã hóa. Nhờ người quản lý kiểm tra khóa mã hóa trước khi thử lại."
+		return "Không thể mở khóa phiên đăng nhập ACB đã lưu trữ."
 	case "ACCOUNT_SELECTION_REQUIRED", "ACCOUNT_SELECTION_PENDING":
-		return "Chưa chọn và xác minh được đúng tài khoản ACB. Kiểm tra số tài khoản đã lưu; nhờ người quản lý kiểm tra trang chọn tài khoản nếu vẫn lỗi."
+		return "Chưa chọn được đúng tài khoản ACB mục tiêu."
 	case "UNSUPPORTED_CHALLENGE":
-		return "ACB yêu cầu cách xác minh bot chưa hỗ trợ. Kiểm tra trong app ACB hoặc liên hệ ngân hàng; không gửi mã chuyển tiền vào chat."
+		return "ACB yêu cầu phương thức xác thực chưa được hỗ trợ."
 	case "UNSAFE_CAPTCHA_CROP", "CAPTCHA_CAPTURE_UNAVAILABLE":
-		return "Không lấy được ảnh captcha an toàn để gửi cho bạn. Nhờ người quản lý kiểm tra vùng captcha trên trang ACB; bot không gửi ảnh toàn trang chứa dữ liệu riêng."
+		return "Không thể trích xuất ảnh Captcha bảo mật từ trang ACB."
 	case "AMBIGUOUS_CONTROLS", "AMBIGUOUS_SUBMIT", "UNSAFE_CONTROLS":
-		return "Không xác định chắc chắn ô nhập hoặc nút đăng nhập ACB. Bot dừng để tránh nhập sai; nhờ người quản lý kiểm tra giao diện ACB."
+		return "Không thể xác định nút bấm đăng nhập an toàn trên giao diện ACB."
 	case "FRAME_UNSUPPORTED":
-		return "Trang đăng nhập ACB nằm trong khung bot chưa hỗ trợ. Nhờ người quản lý kiểm tra giao diện đăng nhập."
+		return "Khung giao diện đăng nhập ACB chưa được hỗ trợ."
 	case "WRONG_FORM_ORIGIN":
-		return "Địa chỉ nhận thông tin đăng nhập không đúng trang ACB được cho phép. Bot đã dừng để bảo vệ tài khoản; nhờ người quản lý kiểm tra."
+		return "Địa chỉ gửi thông tin đăng nhập không khớp với tên miền ACB."
 	case "UNKNOWN_PAGE", "UNRECOGNIZED_PAGE", "UNSUPPORTED_PAGE":
-		return "Trang ACB không hiện bước đăng nhập mà bot nhận diện được trong thời gian chờ. Nhờ người quản lý kiểm tra trang ACB hoặc kết nối; chỉ thử lại sau khi đã kiểm tra."
+		return "Giao diện ACB không hiển thị bước đăng nhập hợp lệ trong thời gian chờ."
 	case "UNRECOGNIZED_REJECTION":
-		return "ACB trả về thông báo từ chối bot chưa nhận diện được. Kiểm tra trong app ACB hoặc nhờ người quản lý kiểm tra; chưa xác nhận đăng nhập thành công."
+		return "ACB từ chối đăng nhập với thông báo chưa được hỗ trợ."
 	case "CAPTCHA_LOADING":
-		return "Captcha ACB không tải xong trong thời gian chờ. Kiểm tra kết nối hoặc chờ ACB ổn định rồi bấm Đăng nhập lại."
+		return "Mã Captcha ACB không tải xong trong thời gian cho phép."
 	case "LOGIN_OUTCOME_UNKNOWN", "CHALLENGE_OUTCOME_UNKNOWN", "ACTION_OUTCOME_UNKNOWN":
-		return "Chưa xác định được ACB có nhận thao tác vừa gửi hay không. Bot không gửi lại để tránh trùng; kiểm tra app ACB trước khi bấm Đăng nhập cho lần mới."
+		return "Chưa xác định được kết quả gửi thao tác tới ACB."
 	case "OTP_REQUEST_OUTCOME_UNKNOWN":
-		return "Chưa xác định được ACB có nhận yêu cầu OTP đăng nhập hay không. Bot không yêu cầu lại để tránh trùng; kiểm tra app ACB hoặc nhờ người quản lý kiểm tra trước khi bấm Đăng nhập cho lần mới. Không gửi mã cũ vào chat."
+		return "Chưa xác định được ACB đã tiếp nhận yêu cầu gửi OTP hay chưa."
 	case "OTP_REJECTED", "INVALID_OTP":
-		return "ACB từ chối OTP đăng nhập. Khi thử lần mới, lấy mã mới từ app ACB và trả lời đúng tin yêu cầu còn hạn."
+		return "Mã OTP không chính xác hoặc đã bị ngân hàng từ chối."
 	case "CHALLENGE_EXPIRED", "OTP_EXPIRED", "ATTEMPT_EXPIRED", "ATTEMPT_TIMEOUT", "BROWSER_EXPIRED":
-		return "Lần đăng nhập hoặc yêu cầu mã đã hết thời gian chờ. Không gửi mã cũ; bấm Đăng nhập để bắt đầu lần mới."
+		return "Quá thời hạn chờ thao tác hoặc phiên đăng nhập đã hết hạn."
 	case "CAPTCHA_BUDGET_EXHAUSTED", "CAPTCHA_REJECTED", "INVALID_CAPTCHA":
-		return "Chưa vượt qua captcha ACB. Bấm Đăng nhập cho lần mới; nếu bot gửi ảnh, trả lời trực tiếp ảnh bằng ký tự hiện trên đó."
+		return "Chưa vượt qua được bước xác thực mã Captcha của ACB."
 	case "ATTEMPT_BUDGET_EXHAUSTED":
-		return "Các lần thử được cho phép đều chưa hoàn tất. Kiểm tra thông tin đăng nhập và app ACB trước khi tự chọn bắt đầu lần mới."
+		return "Đã hết số lượt thử đăng nhập được phép trong phiên này."
 	case "BANK_MAINTENANCE", "MAINTENANCE":
-		return "ACB đang bảo trì. Chờ ngân hàng hoạt động lại rồi bấm Đăng nhập; bot không tự thử."
+		return "Ngân hàng ACB đang trong thời gian bảo trì định kỳ."
 	case "BROWSER_UNAVAILABLE":
-		return "Không kết nối được trình duyệt đăng nhập ACB của hệ thống. Nhờ người quản lý kiểm tra dịch vụ và kết nối, rồi bấm Đăng nhập để thử lần mới."
+		return "Không thể khởi động trình duyệt bảo mật trên máy chủ."
 	case "MANUAL_ACTIVE":
-		return "Người quản lý đang đăng nhập ở nơi khác. Chờ lần đó kết thúc; bot không chiếm hoặc hủy lần đó."
+		return "Đang có phiên đăng nhập thủ công khác đang diễn ra."
 	case "OPERATOR_CANCELLED":
-		return "Bạn đã hủy lần này. Bấm Đăng nhập khi muốn bắt đầu lần mới."
+		return "Bạn đã chủ động hủy lượt đăng nhập này."
 	default:
-		return "Chưa xác minh được phiên ACB. Nhờ người quản lý kiểm tra nguyên nhân trước khi chọn Đăng nhập cho lần mới; không gửi mật khẩu hay mã vào chat."
+		return "Chưa thể thiết lập phiên kết nối ACB an toàn."
 	}
 }
 
@@ -1090,7 +1184,7 @@ func (h *Handler) deliverProgress(ctx context.Context) error {
 }
 func (h *Handler) noticeText(ctx context.Context, n storage.AuthRecoveryNotice, e storage.AuthRecoveryEpisode) (string, error) {
 	if n.Kind == "CREDENTIALS_UPDATED" {
-		return "Đã lưu thông tin đăng nhập mới. Chưa đăng nhập ACB; bấm Đăng nhập khi sẵn sàng nhận OTP. Thao tác này không đổi mật khẩu tại ngân hàng.", nil
+		return "⚙️ THÔNG TIN ĐĂNG NHẬP ĐÃ LƯU\n────────────────────────\n✅ Đã lưu thông tin tài khoản ACB mới vào hệ thống.\n💡 Chưa đăng nhập ACB; bấm 'Đăng nhập' khi bạn sẵn sàng nhận OTP.\n🛡️ Thao tác này không làm thay đổi mật khẩu tại ngân hàng.", nil
 	}
 	c, _, err := h.snapshot(ctx)
 	if err != nil {
@@ -1104,22 +1198,22 @@ func (h *Handler) deliverLogoutNotices(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
-		local := "1/2 · Đang chờ xóa phiên khỏi hệ thống; chưa xác nhận hoàn tất."
+		local := "• Hệ thống: Đang chờ xóa phiên..."
 		if job.LocalClearedAt != "" {
-			local = "1/2 · Đã xóa phiên lưu và trạng thái bộ nhớ của hệ thống."
+			local = "• Hệ thống: ✅ Đã xóa phiên lưu trữ trên máy chủ."
 		}
-		bank := "Chưa có kết quả thu hồi phiên phía ACB."
+		bank := "• Ngân hàng: Đang xử lý thu hồi phiên..."
 		switch job.BankStatus {
 		case "CONFIRMED":
-			bank = "ACB đã xác nhận phiên trước bị thu hồi."
+			bank = "• Ngân hàng: ✅ ACB đã xác nhận thu hồi phiên an toàn."
 		case "ALREADY_EXPIRED":
-			bank = "Phiên trước đã hết hạn tại ACB trước thao tác đăng xuất."
+			bank = "• Ngân hàng: ℹ️ Phiên làm việc đã hết hạn tại ACB từ trước."
 		case "UNCONFIRMED":
-			bank = "Chưa xác nhận ACB thu hồi phiên. Nếu cần, kiểm tra hoặc đăng xuất trong app ACB."
+			bank = "• Ngân hàng: ⚠️ Chưa nhận được xác nhận từ ACB. Bạn có thể kiểm tra thêm trên app ACB ONE."
 		case "IN_FLIGHT":
-			bank = "Đang thử thu hồi phiên phía ACB; chưa xác nhận thành công."
+			bank = "• Ngân hàng: 🔄 Đang gửi lệnh thu hồi phiên tới ACB..."
 		}
-		text := local + "\n2/2 · " + bank + "\nHệ thống chưa đăng nhập lại. Cho phép đăng nhập không tạo lần mới."
+		text := "🚪 KẾT QUẢ ĐĂNG XUẤT ACB\n────────────────────────\n" + local + "\n" + bank + "\n\n💡 Hệ thống đã đưa về trạng thái chờ. Bấm 'Đăng nhập' khi muốn tạo phiên mới."
 		c, e, err := h.snapshot(ctx)
 		if err != nil {
 			return err

@@ -228,9 +228,10 @@ func (c *Client) SetCommands(ctx context.Context, chatID int64) error {
 	return c.call(ctx, "setMyCommands", map[string]any{
 		"scope": map[string]any{"type": "chat", "chat_id": chatID},
 		"commands": []map[string]string{
-			{"command": "menu", "description": "Bảng điều khiển ACB"},
-			{"command": "acb_status", "description": "Trạng thái phiên ACB"},
-			{"command": "help", "description": "Hướng dẫn sử dụng"},
+			{"command": "menu", "description": "🏠 Bảng điều khiển ACB"},
+			{"command": "acb_status", "description": "📊 Trạng thái kết nối"},
+			{"command": "acb_login", "description": "🔑 Bắt đầu đăng nhập"},
+			{"command": "help", "description": "❓ Hướng dẫn sử dụng"},
 		},
 	}, nil)
 }
@@ -274,18 +275,19 @@ func localExpiry(value string) string {
 	return expiry.In(time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60)).Format("15:04:05 02/01/2006")
 }
 func (c *Client) SendChallenge(ctx context.Context, ch storage.AuthChallenge, image []byte) (int64, error) {
-	force := map[string]any{"force_reply": true, "selective": true, "input_field_placeholder": "Trả lời trực tiếp yêu cầu này"}
-	suffix := fmt.Sprintf(" Hết hạn: %s (giờ Việt Nam). Mã chỉ dùng cho lần này; hết hạn thì không gửi mã cũ.", localExpiry(ch.ExpiresAt))
+	suffix := fmt.Sprintf("\n⏱️ Hạn chót gửi mã: %s (giờ VN).", localExpiry(ch.ExpiresAt))
 	if ch.Kind == "OTP" {
-		return c.SendText(ctx, ch.ChatID, "4/6 · ACB cần OTP đăng nhập. Mở app ACB lấy mã cho lần đăng nhập này rồi bấm Trả lời vào chính tin này, giữ nguyên số 0 đầu. Không dùng OTP chuyển tiền, không gửi mật khẩu. Sau khi gửi, chờ bot báo xác minh; chưa đăng nhập thành công chỉ vì đã nhập mã."+suffix, force)
+		force := map[string]any{"force_reply": true, "selective": true, "input_field_placeholder": "Nhập mã OTP tại đây..."}
+		return c.SendText(ctx, ch.ChatID, "📲 YÊU CẦU NHẬP MÃ OTP ĐĂNG NHẬP\n────────────────────────\nNgân hàng ACB vừa gửi mã OTP xác thực:\n\n1️⃣ Mở app ACB ONE trên điện thoại\n2️⃣ Lấy mã OTP đăng nhập (Smart OTP hoặc SMS)\n3️⃣ Bấm nút 'Trả lời' (Reply) tin nhắn này và gửi mã\n\n⚠️ Lưu ý quan trọng:\n• Giữ nguyên chữ số 0 ở đầu (nếu có).\n• KHÔNG dùng mã OTP chuyển tiền.\n• Mã chỉ dùng cho lần này; hết hạn vui lòng không gửi lại."+suffix, force)
 	}
 	if ch.Kind != "CAPTCHA_TEXT" {
 		return 0, errors.New("TELEGRAM_CAPTCHA_INVALID")
 	}
-	return c.sendCaptchaPhoto(ctx, ch.ChatID, image, "2/6 · ACB cần captcha. Trả lời trực tiếp ảnh này bằng ký tự trong ảnh; không nhập OTP hay mật khẩu. Bot sẽ gửi thông tin đăng nhập sau khi xử lý captcha và báo bước tiếp theo."+suffix, force)
+	forceCaptcha := map[string]any{"force_reply": true, "selective": true, "input_field_placeholder": "Nhập ký tự captcha tại đây..."}
+	return c.sendCaptchaPhoto(ctx, ch.ChatID, image, "🧩 YÊU CẦU NHẬP MÃ CAPTCHA\n────────────────────────\nHệ thống cần bạn trợ giúp đọc mã bảo vệ từ ACB:\n\n👉 Hãy xem ảnh đính kèm, bấm 'Trả lời' (Reply) và nhập đúng các ký tự nhìn thấy trong ảnh."+suffix, forceCaptcha)
 }
 func (c *Client) SendCaptchaImage(ctx context.Context, chatID int64, image []byte) (int64, error) {
-	return c.sendCaptchaPhoto(ctx, chatID, image, "Ảnh captcha hiện tại để xem rõ hơn. Để gửi ký tự, bấm Trả lời vào ảnh yêu cầu captcha gốc còn hạn; không trả lời ảnh xem thêm này.", nil)
+	return c.sendCaptchaPhoto(ctx, chatID, image, "🧩 ẢNH CAPTCHA PHÓNG TO\n────────────────────────\nẢnh chụp trực tiếp từ trang ACB để xem rõ hơn.\n👉 Để gửi ký tự, vui lòng bấm Trả lời (Reply) vào ảnh yêu cầu captcha gốc còn hạn.", nil)
 }
 func (c *Client) sendCaptchaPhoto(ctx context.Context, chatID int64, image []byte, caption string, markup any) (int64, error) {
 	if len(image) > 512*1024 || len(image) < 8 || !bytes.Equal(image[:8], []byte{137, 80, 78, 71, 13, 10, 26, 10}) {
