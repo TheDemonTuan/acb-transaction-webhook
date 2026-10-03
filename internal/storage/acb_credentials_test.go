@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -339,7 +340,7 @@ func TestACBCredentialsReadFailsClosedOnCorruption(t *testing.T) {
 }
 
 func TestACBCredentialsImportChecksExactEncryptedSessionAccount(t *testing.T) {
-	for _, scenario := range []string{"match", "same-last-four", "missing-field", "corrupt", "legacy"} {
+	for _, scenario := range []string{"match", "same-last-four", "missing-field", "corrupt", "legacy", "cookie-only"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, ctx, c, _ := credentialStore(t)
 			if _, err := s.DB().Exec(`DELETE FROM acb_credentials`); err != nil {
@@ -355,6 +356,13 @@ func TestACBCredentialsImportChecksExactEncryptedSessionAccount(t *testing.T) {
 			handoff, err := authbrowser.EncodeHandoff(authbrowser.Handoff{Version: 1, Fields: map[string]string{"AccountNbr": account}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic"}}}, []byte("nonce"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if scenario == "cookie-only" {
+				payload, err := json.Marshal([]authbrowser.Cookie{{Name: "session", Value: "synthetic"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				handoff = base64.RawURLEncoding.EncodeToString(payload) + ".synthetic"
 			}
 			aad := security.SessionAAD(c.ID, c.Generation)
 			if scenario == "legacy" {
@@ -376,7 +384,7 @@ func TestACBCredentialsImportChecksExactEncryptedSessionAccount(t *testing.T) {
 			}
 			imported, err := s.ImportACBCredentials(ctx, ACBCredentials{Username: "user", Password: " password ", AccountNumber: "001234567890"})
 			switch scenario {
-			case "match", "legacy":
+			case "match", "legacy", "cookie-only":
 				if err != nil || imported.ID != c.ID {
 					t.Fatalf("import=%+v err=%v", imported, err)
 				}

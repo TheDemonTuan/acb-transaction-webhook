@@ -231,6 +231,12 @@ func (s *Store) checkImportAccountTx(ctx context.Context, tx *sql.Tx, connection
 	if err != nil {
 		return ErrCredentialsDecryptFailed
 	}
+	// Cookie-only legacy sessions contain no account-selection evidence. Import
+	// the operator's initial account without claiming it has been verified;
+	// a later consent-gated login must still select that exact account.
+	if handoff.Version == 0 && handoff.Fields["AccountNbr"] == "" {
+		return nil
+	}
 	if handoff.Fields["AccountNbr"] != account {
 		return ErrCredentialAccountMismatch
 	}
