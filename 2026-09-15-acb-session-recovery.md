@@ -395,3 +395,12 @@ For live acceptance, use an owner-selected window or naturally expired session; 
 
 
 The historical harness demonstrated an earlier implementation, including a retry policy that is now removed. Its counts and output are not current end-to-end proof. Keep fixture/UI/race evidence, latest aggregate timing failures, Linux Docker acceptance, live Telegram, live provider and live ACB results separate.
+
+## 2026-10-04 release and central deployment evidence
+
+- History/session-state hotfix PR #112 merged as `8a192a44d270c4f0c313ee1eae62c02c7a44ead5`. Branch rehearsal run `37211038832` passed lifecycle and fault-matrix; main run `37211573396` passed CI, immutable image gates and actual VPS deployment. SSH observed that SHA with gateway/frontend `green` and worker `READY`.
+- The first live startup catch-up did not prove successful history retrieval: at `2026-10-04T22:33:46+07:00`, bootstrap classified HTTP 200 `/acbib/Request` as `LOGIN_FORM` and recorded session expiry. No assistant login or OTP replay was performed.
+- Source frontend-only run `37214130421` passed full reusable CI and actual local Wrangler HTTP verification, then produced immutable `frontend-dist-5525dd39e7871852a01db70411456da0fd1eddde`. Backend build/scan/bundle/SSH jobs were skipped. The central controller downloaded the real ZIP and verified GitHub digest, exhaustive checksums, source identity and fixed static-only configuration.
+- `TheDemonTuan/vps-deploy` owns `cloudflare-deploy.yml` and trusted ACB publication/rollback adapters. Reused uptimeflare credentials were transferred as GitHub sealed-box ciphertext, never plaintext. No source ACB Cloudflare key was added.
+- Central live survey run `37214520206` could read account Workers and resolve the zone, but `GET /zones/d01c38f57ee75add58e9f54e68611ab5/workers/routes` returned HTTP 403. Required Workers Routes permission is not established. ACB automatic publication remains disabled; no Cloudflare route switch, frontend stop or VPS metadata cutover occurred. Authenticated owner-browser acceptance remains separate and required.
+
