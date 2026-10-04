@@ -59,46 +59,12 @@ http:
         - security-headers
       service: acb-service
 
-    acb-credentials-router:
-      rule: "Host(`bank.tuannguyenviet.site`) && Path(`/admin/acb-credentials`)"
-      entryPoints: [web]
-      priority: 250
-      middlewares: [tunnel-only, acb-credentials-security]
-      service: acb-frontend-service
-
-    # Public frontend router on transactions hostname
-    acb-public-frontend-router:
-      rule: "Host(`transactions.tuannguyenviet.site`)"
-      entryPoints:
-        - web
-      priority: 100
-      middlewares:
-        - tunnel-only
-        - security-headers
-      service: acb-frontend-service
-
-    # Frontend router on bank hostname
-    acb-frontend-router:
-      rule: "Host(`bank.tuannguyenviet.site`)"
-      entryPoints:
-        - web
-      priority: 100
-      middlewares:
-        - tunnel-only
-        - security-headers
-      service: acb-frontend-service
+    acb-deploy-gateway:
+      rule: "Host(`gateway-deploy.acb.internal.invalid`) && Path(`/readyz`)"
+      entryPoints: [slot-probe]
+      service: acb-service
 
   services:
-    acb-frontend-service:
-      loadBalancer:
-        passHostHeader: true
-        servers:
-          - url: "http://acb-frontend:8080"
-        healthCheck:
-          path: "/readyz"
-          interval: "5s"
-          timeout: "2s"
-
     acb-service:
       loadBalancer:
         passHostHeader: true

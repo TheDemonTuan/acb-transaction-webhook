@@ -34,10 +34,17 @@ jobs:
             exit 1
           fi
           shellcheck --severity=error "${scripts[@]}"
-      - name: Validate baseline importer syntax
-        run: python3 -m py_compile deploy/import-baseline.py
-      - name: Test recovery setup safety
-        run: python3 -m unittest discover -s deploy/tests -p 'test_setup_recovery.py' -v
+      - name: Validate static hosting and recovery tooling syntax
+        run: python3 -m py_compile deploy/migrate-static-hosting.py deploy/cloudflare-routes.py deploy/verify-frontend.py deploy/release-frontend.py deploy/classify-changes.py deploy/acb-route-publish.py
+      - name: Test deployment safety and static hosting contracts
+        run: |
+          python3 -m pip install PyYAML
+          python3 -m unittest discover -s deploy/tests -p 'test_*.py' -v
+      - name: Test root-owned ACB route publisher in isolated directories
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y python3-yaml
+          sudo /usr/bin/python3 -m unittest discover -s deploy/tests -p 'test_route_publisher.py' -v
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2

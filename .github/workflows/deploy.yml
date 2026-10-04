@@ -5,6 +5,22 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      target:
+        description: Components to release (auto compares with the last successful main push)
+        type: choice
+        required: true
+        default: all
+        options: [auto, all, frontend, backend]
+      frontend_version_id:
+        description: Exact existing Worker version UUID to roll back (target frontend and deploy true only)
+        type: string
+        required: false
+        default: ''
+      bootstrap_frontend:
+        description: Initialize the static Worker without routing production traffic (target frontend only)
+        type: boolean
+        required: false
+        default: false
       deploy:
         description: Deploy to production (manual confirmation required)
         type: boolean
@@ -29,6 +45,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  changes:
+    name: Select release components
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      frontend: ${{ steps.select.outputs.frontend }}
+      backend: ${{ steps.select.outputs.backend }}
+      frontend_mode: ${{ steps.select.outputs.frontend_mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Classify changes and validate dispatch
+        id: select
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 deploy/classify-changes.py
+
   verify:
     uses: ./.github/workflows/ci.yml
   verify-contract:
@@ -43,7 +81,8 @@ jobs:
         run: test "$RESULT" = success
 
   build:
-    needs: [verify, verify-contract]
+    needs: [changes, verify, verify-contract]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.verify.result == 'success' && needs.verify-contract.result == 'success'
     name: Build ${{ matrix.component }} (ARM64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
@@ -56,7 +95,6 @@ jobs:
         include:
           - {component: gateway, context: '.', dockerfile: Dockerfile, target: gateway, suffix: '', key: GATEWAY_IMAGE_REF}
           - {component: worker, context: '.', dockerfile: Dockerfile, target: worker, suffix: '-worker', key: WORKER_IMAGE_REF}
-          - {component: frontend, context: '.', dockerfile: Dockerfile, target: frontend, suffix: '-frontend', key: FRONTEND_IMAGE_REF}
           - {component: dbtool, context: '.', dockerfile: Dockerfile, target: dbtool, suffix: '-dbtool', key: DBTOOL_IMAGE_REF}
           - {component: auth-browser, context: '.', dockerfile: Dockerfile.auth-browser, target: '', suffix: '-auth-browser', key: BROWSER_IMAGE_REF}
           - {component: tts-gateway, context: tts-gateway, dockerfile: tts-gateway/Dockerfile, target: '', suffix: '-tts-gateway', key: TTS_IMAGE_REF}
@@ -134,7 +172,8 @@ jobs:
           retention-days: 3
 
   scan:
-    needs: build
+    needs: [changes, build]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.build.result == 'success'
     name: Scan immutable images
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -156,7 +195,7 @@ jobs:
           python3 - "$GITHUB_SHA" "$BARK_IMAGE_REF" <<'PY'
           import pathlib,re,sys
           sha,bark=sys.argv[1:]
-          names={'gateway':'GATEWAY_IMAGE_REF','frontend':'FRONTEND_IMAGE_REF','worker':'WORKER_IMAGE_REF','dbtool':'DBTOOL_IMAGE_REF','auth-browser':'BROWSER_IMAGE_REF','tts-gateway':'TTS_IMAGE_REF'}
+          names={'gateway':'GATEWAY_IMAGE_REF','worker':'WORKER_IMAGE_REF','dbtool':'DBTOOL_IMAGE_REF','auth-browser':'BROWSER_IMAGE_REF','tts-gateway':'TTS_IMAGE_REF'}
           digest=re.compile(r'ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}\Z')
           if not re.fullmatch(r'[a-f0-9]{40}',sha) or not digest.fullmatch(bark): raise SystemExit('Invalid release SHA or Bark digest')
           lines=[f'RELEASE_SHA={sha}']
@@ -191,10 +230,9 @@ jobs:
           set -euo pipefail
           mkdir -p security-reports sbom-artifacts
           bash deploy/verify-third-party-policy.sh --image "$(sed -n 's/^BARK_IMAGE_REF=//p' images.env)" --allowlist deploy/third-party-allowlist.json
-          for component in gateway frontend worker dbtool auth-browser tts-gateway bark; do
+          for component in gateway worker dbtool auth-browser tts-gateway bark; do
             case "$component" in
               gateway) key=GATEWAY_IMAGE_REF ;;
-              frontend) key=FRONTEND_IMAGE_REF ;;
               worker) key=WORKER_IMAGE_REF ;;
               dbtool) key=DBTOOL_IMAGE_REF ;;
               auth-browser) key=BROWSER_IMAGE_REF ;;
@@ -228,8 +266,8 @@ jobs:
           retention-days: 3
 
   rehearsal:
-    needs: scan
-    if: github.event_name == 'workflow_dispatch' && inputs.rehearse == true
+    needs: [changes, scan]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.scan.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.rehearse == true
     name: Rehearsal (${{ matrix.suite }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -256,13 +294,13 @@ jobs:
       - name: Rehearse real deploy and rollback on isolated runner (${{ matrix.suite }})
         run: |
           set -euo pipefail
-          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
+          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh migrate-static-hosting.py acb-route-publish.py install-route-publisher.sh setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
           for file in "${files[@]}"; do
             [[ "$file" == images.env ]] || cp "deploy/$file" "bundle/$file"
           done
           # Harness switches to app UID 1000; keep .git credentials private.
           chmod a+r bundle/* deploy/tests/test_simple_deploy.sh platform/edge/dynamic/acb.yml
-          chmod a+x bundle/{deploy.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,bark-entrypoint.sh}
+          chmod a+x bundle/{deploy.sh,healthcheck.sh,render-route.sh,backup-db.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py,bark-entrypoint.sh}
           chmod 644 bundle/{compose.prod.yaml,compose.auth-recovery-ai.yaml}
           (cd bundle && sha256sum "${files[@]}" > SHA256SUMS)
           chmod a+r bundle/SHA256SUMS
@@ -275,8 +313,8 @@ jobs:
           bash deploy/tests/test_simple_deploy.sh --images-env "$PWD/bundle/images.env" --bundle "$PWD/bundle" --suite "${{ matrix.suite }}"
 
   verified-bundle:
-    needs: [scan, rehearsal]
-    if: always() && needs.scan.result == 'success' && (needs.rehearsal.result == 'success' || needs.rehearsal.result == 'skipped')
+    needs: [changes, scan, rehearsal]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.scan.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.rehearse == true && needs.rehearsal.result == 'success') || (!(github.event_name == 'workflow_dispatch' && inputs.rehearse == true) && needs.rehearsal.result == 'skipped'))
     name: Package verified bundle
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -287,7 +325,7 @@ jobs:
         env:
           SCAN: ${{ needs.scan.result }}
           REHEARSAL: ${{ needs.rehearsal.result }}
-        run: test "$SCAN" = success && { test "$REHEARSAL" = success || test "$REHEARSAL" = skipped; }
+        run: test "$SCAN" = success && { if [[ '${{ github.event_name }}' == workflow_dispatch && '${{ inputs.rehearse }}' == true ]]; then test "$REHEARSAL" = success; else test "$REHEARSAL" = skipped; fi; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -296,11 +334,11 @@ jobs:
       - name: Assemble verified bundle
         run: |
           set -euo pipefail
-          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
+          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh migrate-static-hosting.py acb-route-publish.py install-route-publisher.sh setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
           for file in "${files[@]}"; do
             [[ "$file" == images.env ]] || cp "deploy/$file" "bundle/$file"
           done
-          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py}
+          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py}
           chmod 644 bundle/{bark-entrypoint.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,images.env}
           (cd bundle && sha256sum "${files[@]}" > SHA256SUMS)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -311,8 +349,8 @@ jobs:
           retention-days: 3
 
   deploy:
-    needs: [verify, build, scan, verified-bundle]
-    if: always() && needs.verify.result == 'success' && needs.verified-bundle.result == 'success' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true)
+    needs: [changes, verify, verify-contract, build, scan, verified-bundle]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.verify.result == 'success' && needs.verify-contract.result == 'success' && needs.build.result == 'success' && needs.scan.result == 'success' && needs.verified-bundle.result == 'success' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true)
     name: Deploy to VPS
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -341,9 +379,9 @@ jobs:
           mkdir -m 700 -p ~/.ssh
           (umask 077; printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519; printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts)
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
-          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh import-baseline.py setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
+          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh migrate-static-hosting.py acb-route-publish.py install-route-publisher.sh setup-recovery.sh setup-recovery.py compose.prod.yaml compose.auth-recovery-ai.yaml seccomp-auth-browser.json bark-entrypoint.sh images.env)
           for file in "${files[@]}"; do [[ -s "bundle/$file" ]] || { echo "Missing $file" >&2; exit 1; }; done
-          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,bark-entrypoint.sh}
+          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py,bark-entrypoint.sh}
           (cd bundle && sha256sum -c SHA256SUMS)
       - name: Stage and deploy one immutable bundle
         env:
@@ -365,13 +403,13 @@ jobs:
           stage="$DEPLOY_PATH/releases/.stage-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ssh "${ssh_opts[@]}" "$remote" "umask 077; mkdir -p '$DEPLOY_PATH/releases' '$stage'"
           trap 'ssh "${ssh_opts[@]}" "$remote" "rm -rf '\''$stage'\''" || true' EXIT
-          scp -i "$HOME/.ssh/id_ed25519" -P "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,images.env,SHA256SUMS} "$remote:$stage/"
+          scp -i "$HOME/.ssh/id_ed25519" -P "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,images.env,SHA256SUMS} "$remote:$stage/"
           [[ "$DASHBOARD_OWNER_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { echo "Invalid dashboard owner email" >&2; exit 1; }
           { printf '%s\n%s\n' "$GH_TOKEN" "$RECOVERY_IMPORT_ACCOUNT"; cat <<'REMOTE'
           set -euo pipefail
           target="$DEPLOY_PATH/releases/$SHA"
           (cd "$STAGE" && sha256sum -c SHA256SUMS)
-          chmod 700 "$STAGE"/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,import-baseline.py,setup-recovery.sh,setup-recovery.py}
+          chmod 700 "$STAGE"/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py}
           chmod 644 "$STAGE"/{bark-entrypoint.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,images.env,SHA256SUMS}
           if [[ -e "$target" ]]; then
             (cd "$target" && sha256sum -c "$STAGE/SHA256SUMS")
@@ -432,9 +470,8 @@ jobs:
           flock -w 30 9 || { echo 'Setup publication lock unavailable' >&2; exit 1; }
           committed="$(sed -n 's/^RELEASE_SHA=//p' "$DEPLOY_PATH/state.env")"
           gateway="$(sed -n 's/^GATEWAY_SLOT=//p' "$DEPLOY_PATH/state.env")"
-          frontend="$(sed -n 's/^FRONTEND_SLOT=//p' "$DEPLOY_PATH/state.env")"
-          [[ "$committed" == "$SHA" && "$gateway" =~ ^(blue|green)$ && "$frontend" =~ ^(blue|green)$ ]] || { echo 'Commit postcondition failed' >&2; exit 1; }
-          DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" bash "$target/healthcheck.sh" route "$gateway" "$SHA" "$SHA"
+          [[ "$committed" == "$SHA" && "$gateway" =~ ^(blue|green)$ ]] || { echo 'Commit postcondition failed' >&2; exit 1; }
+          DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" bash "$target/healthcheck.sh" route "$gateway" "$SHA"
           python3 - "$DEPLOY_PATH" "$target/setup-recovery.sh" <<'PY'
           import os,secrets,sys
           root,target=sys.argv[1:]
@@ -450,9 +487,9 @@ jobs:
               if os.path.lexists(temporary): os.unlink(temporary)
           PY
           printf 'DEPLOY_SUMMARY: Recovery setup: sudo bash %s/deploy/setup-recovery.sh\n' "$DEPLOY_PATH"
-          printf 'DEPLOY_SUMMARY: Requested SHA: %s\nDEPLOY_SUMMARY: Committed SHA: %s\nDEPLOY_SUMMARY: Gateway slot: %s\nDEPLOY_SUMMARY: Frontend slot: %s\n' "$SHA" "$committed" "$gateway" "$frontend"
+          printf 'DEPLOY_SUMMARY: Requested SHA: %s\nDEPLOY_SUMMARY: Committed SHA: %s\nDEPLOY_SUMMARY: Gateway slot: %s\n' "$SHA" "$committed" "$gateway"
           while IFS= read -r line; do
-            [[ "$line" =~ ^(GATEWAY|FRONTEND|WORKER|DBTOOL|BROWSER|TTS|BARK)_IMAGE_REF=ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || continue
+            [[ "$line" =~ ^(GATEWAY|WORKER|DBTOOL|BROWSER|TTS|BARK)_IMAGE_REF=ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || continue
             printf 'DEPLOY_SUMMARY: %s\n' "$line"
           done < "$target/images.env"
           if [[ -s "$target/backup-receipt-path" ]]; then
@@ -477,4 +514,164 @@ jobs:
             echo 'Rollback: failed; pending evidence preserved' >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'Rollback: inspect remote deploy log' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  frontend-build:
+    name: Build verified static assets
+    needs: [changes, verify, verify-contract]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.frontend == 'true' && needs.changes.outputs.frontend_mode != 'rollback' && needs.verify.result == 'success' && needs.verify-contract.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Install exact frontend toolchain
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Build release artifact once
+        working-directory: web
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: bun run build:cloudflare
+      - name: Smoke actual local Wrangler HTTP surface
+        run: |
+          set -euo pipefail
+          (cd web && node node_modules/wrangler/bin/wrangler.js deploy --dry-run)
+          (cd web && exec node node_modules/wrangler/bin/wrangler.js dev --local --ip 127.0.0.1 --port 8787) > "$RUNNER_TEMP/wrangler-local.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          python3 - "$pid" "$GITHUB_SHA" <<'PY'
+          import os,sys,time,urllib.error,urllib.request
+          pid,sha=int(sys.argv[1]),sys.argv[2]
+          for _ in range(60):
+              os.kill(pid,0)
+              try:
+                  with urllib.request.urlopen('http://127.0.0.1:8787/__release',timeout=1) as response:
+                      if response.read() == (sha+'\n').encode(): break
+              except (OSError,urllib.error.URLError): pass
+              time.sleep(1)
+          else: raise SystemExit('Local Wrangler release did not become ready')
+          PY
+          python3 deploy/verify-frontend.py --origin http://127.0.0.1:8787 --sha "$GITHUB_SHA" --mode static --surface local --artifact web/dist
+      - name: Package immutable frontend artifact
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,os,pathlib,shutil
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'frontend-artifact'
+          root.mkdir()
+          source=pathlib.Path('web/dist')
+          if any(path.is_symlink() for path in source.rglob('*')): raise SystemExit('Symlinks are not permitted in static assets')
+          shutil.copytree(source,root/'dist')
+          shutil.copyfile('web/wrangler.jsonc',root/'wrangler.jsonc')
+          (root/'release-sha').write_text(os.environ['GITHUB_SHA']+'\n',encoding='ascii')
+          files=sorted(path for path in root.rglob('*') if path.is_file())
+          (root/'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}\n' for path in files),encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: ${{ runner.temp }}/frontend-artifact/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  frontend-deploy:
+    name: Release frontend Worker
+    needs: [changes, verify, verify-contract, frontend-build, build, scan, rehearsal, verified-bundle, deploy]
+    if: >-
+      always() && needs.changes.result == 'success' && needs.changes.outputs.frontend == 'true' &&
+      needs.verify.result == 'success' && needs.verify-contract.result == 'success' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.deploy == true) &&
+      ((needs.changes.outputs.frontend_mode == 'rollback' && needs.frontend-build.result == 'skipped') ||
+       (needs.changes.outputs.frontend_mode != 'rollback' && needs.frontend-build.result == 'success')) &&
+      ((needs.changes.outputs.backend == 'false' && needs.build.result == 'skipped' && needs.scan.result == 'skipped' &&
+        needs.rehearsal.result == 'skipped' && needs.verified-bundle.result == 'skipped' && needs.deploy.result == 'skipped') ||
+       (needs.changes.outputs.backend == 'true' && needs.build.result == 'success' && needs.scan.result == 'success' &&
+        needs.verified-bundle.result == 'success' && needs.deploy.result == 'success' &&
+        ((github.event_name == 'workflow_dispatch' && inputs.rehearse == true && needs.rehearsal.result == 'success') ||
+         (!(github.event_name == 'workflow_dispatch' && inputs.rehearse == true) && needs.rehearsal.result == 'skipped'))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Install exact release toolchain (no rebuild)
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.changes.outputs.frontend_mode != 'rollback'
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: ${{ runner.temp }}/frontend-artifact
+      - name: Verify artifact identity, exact file set and checksums
+        if: needs.changes.outputs.frontend_mode != 'rollback'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,os,pathlib,re,shutil
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'frontend-artifact'
+          sha=os.environ['GITHUB_SHA']
+          if (root/'release-sha').read_bytes() != (sha+'\n').encode(): raise SystemExit('Artifact SHA mismatch')
+          if (root/'wrangler.jsonc').read_bytes() != pathlib.Path('web/wrangler.jsonc').read_bytes(): raise SystemExit('Artifact config differs from exact checkout')
+          expected=set()
+          for line in (root/'SHA256SUMS').read_text(encoding='utf-8').splitlines():
+              match=re.fullmatch(r'([a-f0-9]{64})  (.+)',line)
+              if not match: raise SystemExit('Invalid checksum entry')
+              digest,name=match.groups()
+              relative=pathlib.PurePosixPath(name)
+              if relative.is_absolute() or '..' in relative.parts or relative.as_posix()!=name or '\\' in name: raise SystemExit('Unsafe checksum path')
+              if name not in ('wrangler.jsonc','release-sha') and not name.startswith('dist/'): raise SystemExit('Unexpected artifact file')
+              if name in expected: raise SystemExit('Duplicate checksum entry')
+              path=root/name
+              if not path.is_file() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest()!=digest: raise SystemExit('Artifact checksum mismatch')
+              expected.add(name)
+          paths=list(root.rglob('*'))
+          if any(path.is_symlink() for path in paths): raise SystemExit('Artifact contains symlink')
+          actual={path.relative_to(root).as_posix() for path in paths if path.is_file()}
+          if actual!=expected|{'SHA256SUMS'} or not {'dist/index.html','dist/__release','wrangler.jsonc','release-sha'}<=expected: raise SystemExit('Incomplete artifact manifest')
+          if (root/'dist/__release').read_bytes() != (sha+'\n').encode(): raise SystemExit('Static release identity mismatch')
+          shutil.copytree(root/'dist','web/dist')
+          for name in ('wrangler.jsonc','release-sha','SHA256SUMS'): shutil.copyfile(root/name,pathlib.Path('web')/name)
+          PY
+      - name: Publish, bootstrap or roll back exact Worker version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FRONTEND_MODE: ${{ needs.changes.outputs.frontend_mode }}
+          FRONTEND_VERSION_ID: ${{ inputs.frontend_version_id }}
+        run: |
+          set -euo pipefail
+          args=(--sha "$GITHUB_SHA" --mode "$FRONTEND_MODE" --summary "$RUNNER_TEMP/frontend-release-summary.json")
+          if [[ "$FRONTEND_MODE" == rollback ]]; then args+=(--version-id "$FRONTEND_VERSION_ID"); fi
+          python3 deploy/release-frontend.py "${args[@]}"
+      - name: Record frontend release evidence
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/frontend-release-summary.json" ]]; then
+            printf '\nFrontend release evidence (backend identity is independent):\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat "$RUNNER_TEMP/frontend-release-summary.json" >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Frontend release did not produce lifecycle evidence; no success is asserted.' >> "$GITHUB_STEP_SUMMARY"
           fi
