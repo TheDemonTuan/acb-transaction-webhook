@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,8 +11,10 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
@@ -69,7 +72,7 @@ func (t *verifyTask) Step(ctx context.Context) (scheduler.TaskStepResult, error)
 	return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, nil
 }
 
-func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string, generation int64, encrypted []byte) (resultErr error) {
+func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string, generation int64, encrypted []byte) (verified []byte, resultErr error) {
 	// The scheduler may still finish a canceled task after this call returns.
 	// Guard the finite diagnostic fields, and emit only at the caller boundary.
 	var result struct {
@@ -81,6 +84,7 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 		formValid      bool
 		accountPresent bool
 		accountMatch   bool
+		envelope       []byte
 	}
 	result.phase = "RESTORE"
 	defer func() {
@@ -99,8 +103,8 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 			slog.Info("ACB session verification result", "generation", generation, "phase", result.phase, "code", code)
 		}
 	}()
-	if v == nil || v.sessions == nil || v.client == nil {
-		return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+	if v == nil || v.sessions == nil || v.client == nil || v.sessions.store == nil || v.sessions.keyring == nil || v.sessions.restorer == nil {
+		return nil, &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
 	}
 
 	execFn := func(stepCtx context.Context) error {
@@ -111,16 +115,75 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 		stop := context.AfterFunc(ctx, cancel)
 		defer stop()
 		defer cancel()
-		if err := v.sessions.RestoreEnvelope(stepCtx, connectionID, generation, encrypted); err != nil {
-			return verificationFailure(err)
-		}
-		result.Lock()
-		result.phase = "BOOTSTRAP"
-		result.Unlock()
-		var expectedAccount string
+		var refreshed []byte
 		response, err := sessionOperation(stepCtx, v.sessions.store, v.sessions, nil, connectionID, generation, true, func() (acb.Response, error) {
-			expectedAccount = v.client.SessionAccountNumber()
-			return v.client.Bootstrap(stepCtx)
+			// Restore, bank navigation, and snapshot are one operation. Another
+			// candidate must not replace the state whose account we just verified.
+			v.sessions.mu.Lock()
+			restoreErr := v.sessions.restoreLocked(connectionID, generation, encrypted)
+			v.sessions.mu.Unlock()
+			if restoreErr != nil {
+				return acb.Response{}, verificationFailure(restoreErr)
+			}
+			result.Lock()
+			result.phase = "BOOTSTRAP"
+			result.Unlock()
+			expectedAccount := v.client.SessionAccountNumber()
+			response, err := v.client.Bootstrap(stepCtx)
+			if err != nil {
+				return response, verificationFailure(err)
+			}
+			if err := checkSessionFence(stepCtx, v.sessions.store, connectionID, generation, true); err != nil {
+				return acb.Response{}, verificationFailure(err)
+			}
+			switch response.Kind {
+			case acb.AccountDetailPage, acb.HistoryPage:
+				if expectedAccount != "" {
+					result.Lock()
+					result.phase = "ACCOUNT"
+					result.Unlock()
+					form, err := acb.ExtractHistoryForm(response.Body)
+					if err != nil {
+						return response, &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}
+					}
+					account := form.Fields["AccountNbr"]
+					result.Lock()
+					result.formValid, result.accountPresent, result.accountMatch = true, account != "", account == expectedAccount
+					result.Unlock()
+					if account == "" {
+						// Only parsed history from a direct exact-account POST proves
+						// selection without an account echo. GET/detail pages do not.
+						if response.Kind != acb.HistoryPage || response.StatusCode != http.StatusOK || response.RequestedAccount != expectedAccount {
+							return response, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISSING"}
+						}
+						if _, err := acb.ParseHistoryPage(response.Body); err != nil {
+							return response, &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}
+						}
+					} else if account != expectedAccount {
+						return response, &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+					}
+				}
+			case acb.LoginPage, acb.OTPChallenge, acb.CaptchaPage:
+				return response, &authsession.VerificationError{Code: "VERIFICATION_AUTH_REQUIRED"}
+			case acb.MaintenancePage:
+				return response, &authsession.VerificationError{Code: "VERIFICATION_MAINTENANCE"}
+			default:
+				return response, &authsession.VerificationError{Code: "VERIFICATION_PAGE_UNSUPPORTED"}
+			}
+			handoff, err := v.client.SnapshotSession()
+			if err != nil {
+				return response, verificationFailure(err)
+			}
+			plaintext, err := authbrowser.EncodeHandoff(handoff, []byte("verified"))
+			if err != nil {
+				return response, verificationFailure(err)
+			}
+			envelope, err := v.sessions.keyring.Encrypt([]byte(plaintext), security.SessionAAD(connectionID, generation))
+			if err != nil {
+				return response, verificationFailure(err)
+			}
+			refreshed, err = json.Marshal(envelope)
+			return response, err
 		})
 		if response.StatusCode != 0 {
 			result.Lock()
@@ -128,50 +191,36 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 			result.Unlock()
 		}
 		if err != nil {
+			clear(refreshed)
+			if authsession.VerificationCode(err) != "" {
+				return err
+			}
 			return verificationFailure(err)
 		}
-		switch response.Kind {
-		case acb.AccountDetailPage, acb.HistoryPage:
-			if expectedAccount != "" {
-				result.Lock()
-				result.phase = "ACCOUNT"
-				result.Unlock()
-				form, err := acb.ExtractHistoryForm(response.Body)
-				if err != nil {
-					return &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}
-				}
-				account := form.Fields["AccountNbr"]
-				result.Lock()
-				result.formValid, result.accountPresent, result.accountMatch = true, account != "", account == expectedAccount
-				result.Unlock()
-				if account == "" {
-					// ACB history can omit the selected account after a direct exact-account
-					// query. Do not apply this to account/summary pages or resync GETs.
-					if response.Kind != acb.HistoryPage || response.StatusCode != http.StatusOK || response.RequestedAccount != expectedAccount {
-						return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISSING"}
-					}
-					if _, err := acb.ParseHistoryPage(response.Body); err != nil {
-						return &authsession.VerificationError{Code: "VERIFICATION_FORM_INVALID"}
-					}
-				} else if account != expectedAccount {
-					return &authsession.VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
-				}
-			}
-			result.Lock()
-			result.phase = "COMPLETE"
-			result.Unlock()
-			return nil
-		case acb.LoginPage, acb.OTPChallenge, acb.CaptchaPage:
-			return &authsession.VerificationError{Code: "VERIFICATION_AUTH_REQUIRED"}
-		case acb.MaintenancePage:
-			return &authsession.VerificationError{Code: "VERIFICATION_MAINTENANCE"}
-		default:
-			return &authsession.VerificationError{Code: "VERIFICATION_PAGE_UNSUPPORTED"}
+		result.Lock()
+		defer result.Unlock()
+		if err := ctx.Err(); err != nil {
+			clear(refreshed)
+			return verificationFailure(err)
 		}
+		result.phase, result.envelope = "COMPLETE", refreshed
+		return nil
+	}
+	finish := func(err error) ([]byte, error) {
+		result.Lock()
+		defer result.Unlock()
+		if err != nil {
+			clear(result.envelope)
+			result.envelope = nil
+			return nil, err
+		}
+		envelope := result.envelope
+		result.envelope = nil
+		return envelope, nil
 	}
 
 	if v.scheduler == nil || !v.scheduler.IsRunning() {
-		return execFn(ctx)
+		return finish(execFn(ctx))
 	}
 
 	task := &verifyTask{
@@ -182,15 +231,15 @@ func (v *SessionVerifier) VerifySession(ctx context.Context, connectionID string
 	}
 
 	if err := v.scheduler.Enqueue(task); err != nil {
-		return verificationFailure(err)
+		return nil, verificationFailure(err)
 	}
 
 	select {
 	case <-ctx.Done():
 		v.scheduler.CancelTask(task.ID())
-		return verificationFailure(ctx.Err())
+		return finish(verificationFailure(ctx.Err()))
 	case err := <-task.done:
-		return err
+		return finish(err)
 	}
 }
 

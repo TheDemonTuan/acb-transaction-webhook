@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
@@ -29,16 +31,19 @@ func (b *browserFixture) Handoff(context.Context, string) (string, error) {
 	if b.afterHandoff != nil {
 		b.afterHandoff()
 	}
-	return "cookie=synthetic-secret; OTP=001234", b.handoffError
+	if b.handoffError != nil {
+		return "", b.handoffError
+	}
+	return authbrowser.EncodeHandoff(authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic-secret", Domain: "online.acb.com.vn", Path: "/", Secure: true}}}, []byte("synthetic-nonce"))
 }
 func (b *browserFixture) Complete(context.Context, string) error {
 	b.completions++
 	return b.completeError
 }
 
-type verifierFunc func(context.Context, string, int64, []byte) error
+type verifierFunc func(context.Context, string, int64, []byte) ([]byte, error)
 
-func (v verifierFunc) VerifySession(ctx context.Context, id string, generation int64, encrypted []byte) error {
+func (v verifierFunc) VerifySession(ctx context.Context, id string, generation int64, encrypted []byte) ([]byte, error) {
 	return v(ctx, id, generation, encrypted)
 }
 
@@ -107,20 +112,25 @@ func TestRecoveryFinalizeCrashBoundaries(t *testing.T) {
 	scheduler := &recoveryScheduler{store: s}
 	verifications := 0
 	reject := true
-	verify := verifierFunc(func(_ context.Context, id string, generation int64, encrypted []byte) error {
+	verify := verifierFunc(func(_ context.Context, id string, generation int64, encrypted []byte) ([]byte, error) {
 		verifications++
 		var envelope security.Envelope
 		if err := json.Unmarshal(encrypted, &envelope); err != nil {
 			t.Fatal(err)
 		}
 		plain, err := keyring.Decrypt(envelope, security.SessionAAD(id, generation))
-		if err != nil || string(plain) != "cookie=synthetic-secret; OTP=001234" {
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clear(plain)
+		handoff, err := authbrowser.DecodeHandoff(string(plain))
+		if err != nil || len(handoff.Cookies) != 1 || handoff.Cookies[0].Value != "synthetic-secret" {
 			t.Fatalf("incorrect encrypted handoff: %v", err)
 		}
 		if reject {
-			return &VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+			return nil, &VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
 		}
-		return nil
+		return encrypted, nil
 	})
 	f := NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify, Scheduler: scheduler})
 	if _, err := f.Complete(ctx, a); VerificationCode(err) != "VERIFICATION_ACCOUNT_MISMATCH" {
@@ -200,7 +210,7 @@ func TestFinalizerFencesChangesDuringHandoffAndVerification(t *testing.T) {
 			if phase == "handoff" {
 				browser.afterHandoff = change
 			}
-			verify := verifierFunc(func(context.Context, string, int64, []byte) error {
+			verify := verifierFunc(func(_ context.Context, _ string, _ int64, encrypted []byte) ([]byte, error) {
 				calls++
 				if phase == "verification" {
 					change()
@@ -210,7 +220,7 @@ func TestFinalizerFencesChangesDuringHandoffAndVerification(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				return nil
+				return encrypted, nil
 			})
 			f := NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify})
 			_, err := f.Complete(ctx, a)
@@ -242,7 +252,7 @@ func TestFinalizerSanitizesTransportErrors(t *testing.T) {
 			s, keyring, a := finalizerStore(t)
 			secret := "bot-token/password/001234/cookie/encrypted-envelope"
 			browser := &browserFixture{}
-			verify := verifierFunc(func(context.Context, string, int64, []byte) error { return errors.New(secret) })
+			verify := verifierFunc(func(context.Context, string, int64, []byte) ([]byte, error) { return nil, errors.New(secret) })
 			want := ErrVerificationPending
 			if phase == "handoff" {
 				browser.handoffError = errors.New(secret)
@@ -256,22 +266,33 @@ func TestFinalizerSanitizesTransportErrors(t *testing.T) {
 	}
 }
 
-func TestFinalizerConcurrentVerifiedWinsRejection(t *testing.T) {
-	ctx := context.Background()
-	s, keyring, a := finalizerStore(t)
-	browser := &browserFixture{}
-	verify := verifierFunc(func(ctx context.Context, _ string, _ int64, encrypted []byte) error {
-		if _, err := s.CompleteAuthSession(ctx, a.ID, encrypted); err != nil {
-			t.Fatal(err)
-		}
-		return &VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
-	})
-	conn, err := NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify}).Complete(ctx, a)
-	if err != nil || conn.State != "MONITORING" {
-		t.Fatalf("concurrent verified commit lost to rejection: %v", err)
-	}
-	if _, err := s.GetRecoveryRunByEvent(ctx, a.ConnectionID, a.Generation, a.ID); err != nil {
-		t.Fatalf("verified commit lost its recovery intent: %v", err)
+func TestFinalizerConcurrentVerifiedWinsInvalidResults(t *testing.T) {
+	for _, result := range []string{"rejection", "empty", "malformed"} {
+		t.Run(result, func(t *testing.T) {
+			ctx := context.Background()
+			s, keyring, a := finalizerStore(t)
+			browser := &browserFixture{}
+			verify := verifierFunc(func(ctx context.Context, _ string, _ int64, encrypted []byte) ([]byte, error) {
+				if _, err := s.CompleteAuthSession(ctx, a.ID, encrypted); err != nil {
+					t.Fatal(err)
+				}
+				switch result {
+				case "rejection":
+					return nil, &VerificationError{Code: "VERIFICATION_ACCOUNT_MISMATCH"}
+				case "malformed":
+					return []byte("invalid-envelope"), nil
+				default:
+					return nil, nil
+				}
+			})
+			conn, err := NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify}).Complete(ctx, a)
+			if err != nil || conn.State != "MONITORING" {
+				t.Fatalf("concurrent verified commit lost to invalid result: %v", err)
+			}
+			if _, err := s.GetRecoveryRunByEvent(ctx, a.ConnectionID, a.Generation, a.ID); err != nil {
+				t.Fatalf("verified commit lost its recovery intent: %v", err)
+			}
+		})
 	}
 }
 
@@ -290,7 +311,10 @@ func TestFinalizerAdoptsCommitBeforeBrowserCleanup(t *testing.T) {
 	s, keyring, a := finalizerStore(t)
 	browser := &browserFixture{}
 	verifications := 0
-	verify := verifierFunc(func(context.Context, string, int64, []byte) error { verifications++; return nil })
+	verify := verifierFunc(func(_ context.Context, _ string, _ int64, encrypted []byte) ([]byte, error) {
+		verifications++
+		return encrypted, nil
+	})
 	f := NewFinalizer(Options{Store: crashAfterCommitStore{s}, Browser: browser, Keyring: keyring, Verifier: verify})
 	crashed := false
 	func() {
@@ -354,9 +378,9 @@ func TestFinalizerRejectsInvalidAdmissionWithoutBankEffects(t *testing.T) {
 			}
 			browser := &browserFixture{}
 			verifications := 0
-			options := Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verifierFunc(func(context.Context, string, int64, []byte) error {
+			options := Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verifierFunc(func(_ context.Context, _ string, _ int64, encrypted []byte) ([]byte, error) {
 				verifications++
-				return nil
+				return encrypted, nil
 			})}
 			if state == "missing-keyring" {
 				options.Keyring = nil
@@ -390,8 +414,8 @@ func TestFinalizerFiniteVerificationFailures(t *testing.T) {
 		t.Run(code, func(t *testing.T) {
 			ctx := context.Background()
 			s, keyring, a := finalizerStore(t)
-			verify := verifierFunc(func(context.Context, string, int64, []byte) error {
-				return &VerificationError{Code: code}
+			verify := verifierFunc(func(context.Context, string, int64, []byte) ([]byte, error) {
+				return nil, &VerificationError{Code: code}
 			})
 			_, err := NewFinalizer(Options{Store: s, Browser: &browserFixture{}, Keyring: keyring, Verifier: verify}).Complete(ctx, a)
 			switch code {
@@ -411,6 +435,120 @@ func TestFinalizerFiniteVerificationFailures(t *testing.T) {
 			var sessions, runs int
 			if err := s.DB().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM recovery_runs)`).Scan(&sessions, &runs); err != nil || sessions != 0 || runs != 0 {
 				t.Fatalf("rejection committed session/recovery: %d/%d %v", sessions, runs, err)
+			}
+		})
+	}
+}
+
+func TestFinalizerRejectsInvalidVerifiedEnvelopeWithoutReplacingPriorSession(t *testing.T) {
+	for _, result := range []string{"nil", "empty", "malformed-json", "null", "empty-envelope", "rejected-envelope", "wrong-version", "wrong-key", "unknown-key", "wrong-connection", "wrong-generation", "invalid-nonce", "short-nonce", "invalid-ciphertext", "invalid-handoff"} {
+		t.Run(result, func(t *testing.T) {
+			ctx := context.Background()
+			s, keyring, previous := finalizerStore(t)
+			if _, err := s.CompleteAuthSession(ctx, previous.ID, []byte("previous-encrypted-session")); err != nil {
+				t.Fatal(err)
+			}
+			priorRun, err := s.GetRecoveryRunByEvent(ctx, previous.ConnectionID, previous.Generation, previous.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := s.StartAuthAttempt(ctx, "operator", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := s.Connection(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			browser := &browserFixture{}
+			scheduler := &recoveryScheduler{store: s, available: true}
+			verify := verifierFunc(func(_ context.Context, id string, generation int64, encrypted []byte) ([]byte, error) {
+				switch result {
+				case "nil":
+					return nil, nil
+				case "empty":
+					return []byte{}, nil
+				case "malformed-json":
+					return []byte("cookie-secret-invalid-json"), nil
+				case "null":
+					return []byte("null"), nil
+				case "empty-envelope":
+					return []byte("{}"), nil
+				case "rejected-envelope":
+					return encrypted, &VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+				}
+				var envelope security.Envelope
+				if err := json.Unmarshal(encrypted, &envelope); err != nil {
+					t.Fatal(err)
+				}
+				switch result {
+				case "wrong-version":
+					envelope.Version = "unsupported"
+				case "unknown-key":
+					envelope.KeyID = "missing"
+				case "invalid-nonce":
+					envelope.Nonce = "!"
+				case "short-nonce":
+					envelope.Nonce = base64.RawStdEncoding.EncodeToString([]byte{1})
+				case "invalid-ciphertext":
+					envelope.Ciphertext = "!"
+				default:
+					plaintext, err := keyring.Decrypt(envelope, security.SessionAAD(id, generation))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer clear(plaintext)
+					encryptor := keyring
+					switch result {
+					case "wrong-key":
+						encryptor, err = security.NewKeyring(bytes.Repeat([]byte{8}, 32))
+					case "wrong-connection":
+						id += "-other"
+					case "wrong-generation":
+						generation++
+					case "invalid-handoff":
+						clear(plaintext)
+						plaintext = []byte("cookie-secret-invalid-handoff")
+						defer clear(plaintext)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					envelope, err = encryptor.Encrypt(plaintext, security.SessionAAD(id, generation))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				encoded, err := json.Marshal(envelope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return encoded, nil
+			})
+			_, err = NewFinalizer(Options{Store: s, Browser: browser, Keyring: keyring, Verifier: verify, Scheduler: scheduler}).Complete(ctx, a)
+			if VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || errors.Unwrap(err) != nil || strings.Contains(err.Error(), "cookie-secret") {
+				t.Fatalf("invalid verifier result escaped safe failure: %v", err)
+			}
+			after, err := s.Connection(ctx)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("invalid result changed connection: %v", err)
+			}
+			old, err := s.Session(ctx, previous.ConnectionID, previous.Generation)
+			if err != nil || string(old.Envelope) != "previous-encrypted-session" {
+				t.Fatalf("invalid result replaced prior durable session: %v", err)
+			}
+			if _, err := s.Session(ctx, a.ConnectionID, a.Generation); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid result committed a session: %v", err)
+			}
+			if _, err := s.GetRecoveryRunByEvent(ctx, a.ConnectionID, a.Generation, a.ID); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid result created recovery intent: %v", err)
+			}
+			var priorStatus string
+			if err := s.DB().QueryRowContext(ctx, `SELECT status FROM recovery_runs WHERE id=?`, priorRun.ID).Scan(&priorStatus); err != nil || priorStatus != string(priorRun.Status) {
+				t.Fatalf("invalid result changed prior recovery intent: %v", err)
+			}
+			if browser.completions != 0 || len(scheduler.runIDs) != 0 {
+				t.Fatal("invalid result cleaned up browser or scheduled recovery")
 			}
 		})
 	}

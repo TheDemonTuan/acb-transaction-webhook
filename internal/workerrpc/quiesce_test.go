@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
@@ -29,8 +30,8 @@ func (q *quiesceMockHandler) WakeDispatcher(ctx context.Context) error          
 func (q *quiesceMockHandler) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
 	return nil
 }
-func (q *quiesceMockHandler) VerifySession(ctx context.Context, acc string, gen int64, pw []byte) error {
-	return nil
+func (q *quiesceMockHandler) VerifySession(ctx context.Context, acc string, gen int64, pw []byte) ([]byte, error) {
+	return nil, nil
 }
 func (q *quiesceMockHandler) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
 	return nil
@@ -114,9 +115,9 @@ func TestWorkerRPC_QuiesceAndResume(t *testing.T) {
 		t.Fatalf("expected CreateHistoryJob to fail while quiesced")
 	}
 
-	err = client.VerifySession(ctx, "acc1", 42, []byte("pass"))
-	if err == nil {
-		t.Fatalf("expected VerifySession to fail while quiesced")
+	envelope, err := client.VerifySession(ctx, "acc1", 42, []byte("pass"))
+	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || envelope != nil {
+		t.Fatalf("expected verification unavailable without envelope while quiesced, got: %v", err)
 	}
 
 	// 4. Healthcheck continues to return 200 OK (worker process is healthy and alive)

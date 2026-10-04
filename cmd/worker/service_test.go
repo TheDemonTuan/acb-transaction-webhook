@@ -66,7 +66,10 @@ func TestWorkerService_VerifySession_GenerationGuard(t *testing.T) {
 		{"synthetic-private-account", 5, "VERIFICATION_SUPERSEDED"},
 	} {
 		output.Reset()
-		err := ws.VerifySession(ctx, tc.account, tc.generation, []byte("synthetic-private-password"))
+		verified, err := ws.VerifySession(ctx, tc.account, tc.generation, []byte("synthetic-private-password"))
+		if len(verified) != 0 {
+			t.Fatal("rejected request returned a session")
+		}
 		if authsession.VerificationCode(err) != tc.code || err.Error() != tc.code {
 			t.Fatalf("generation=%d code=%q error=%v", tc.generation, tc.code, err)
 		}
@@ -188,7 +191,7 @@ func TestWorkerService_VerifySession_FailsClosedOnStoreError(t *testing.T) {
 	// Close store to simulate database failure
 	store.Close()
 
-	err = ws.VerifySession(ctx, conn.ID, 1, []byte("pw"))
+	_, err = ws.VerifySession(ctx, conn.ID, 1, []byte("pw"))
 	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
 		t.Fatalf("expected safe unavailable store failure, got %v", err)
 	}

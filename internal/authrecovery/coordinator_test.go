@@ -52,9 +52,9 @@ func (f *coordinatorSolver) Solve(context.Context, []byte) (string, error) {
 	return "Ab12CD", nil
 }
 
-type coordinatorVerifier func(context.Context, string, int64, []byte) error
+type coordinatorVerifier func(context.Context, string, int64, []byte) ([]byte, error)
 
-func (v coordinatorVerifier) VerifySession(ctx context.Context, connectionID string, generation int64, envelope []byte) error {
+func (v coordinatorVerifier) VerifySession(ctx context.Context, connectionID string, generation int64, envelope []byte) ([]byte, error) {
 	return v(ctx, connectionID, generation, envelope)
 }
 
@@ -155,7 +155,11 @@ func newUnconsentedCoordinatorFixture(t *testing.T) *coordinatorFixture {
 				http.Error(w, "not authenticated", 409)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]string{"session": "synthetic-authenticated-session"})
+			handoff, err := authbrowser.EncodeHandoff(authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic-cookie", Domain: "online.acb.com.vn", Path: "/", Secure: true}}}, []byte("synthetic-nonce"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			json.NewEncoder(w).Encode(map[string]string{"session": handoff})
 		case strings.HasSuffix(r.URL.Path, "/status"):
 			json.NewEncoder(w).Encode(authbrowser.Session{AttemptID: strings.Split(r.URL.Path, "/")[2], Status: "RUNNING"})
 		case strings.HasSuffix(r.URL.Path, "/observation"):
@@ -1292,21 +1296,22 @@ func TestRecoveryCoordinatorOneConsentAICaptchaAndOTP(t *testing.T) {
 	}
 	f.store.WithKeyring(keyring)
 	verified := 0
-	verifier := coordinatorVerifier(func(ctx context.Context, connectionID string, generation int64, encrypted []byte) error {
+	verifier := coordinatorVerifier(func(ctx context.Context, connectionID string, generation int64, encrypted []byte) ([]byte, error) {
 		var envelope security.Envelope
 		if err := json.Unmarshal(encrypted, &envelope); err != nil {
-			return err
+			return nil, err
 		}
 		plaintext, err := keyring.Decrypt(envelope, security.SessionAAD(connectionID, generation))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer clear(plaintext)
-		if string(plaintext) != "synthetic-authenticated-session" {
-			return errors.New("unexpected fixture session")
+		handoff, err := authbrowser.DecodeHandoff(string(plaintext))
+		if err != nil || len(handoff.Cookies) != 1 || handoff.Cookies[0].Value != "synthetic-cookie" {
+			return nil, errors.New("unexpected fixture session")
 		}
 		verified++
-		return nil
+		return encrypted, nil
 	})
 	f.controller.Finalizer = authsession.NewFinalizer(authsession.Options{Store: f.store, Browser: f.browser, Keyring: keyring, Verifier: verifier})
 	f.reconcile()
@@ -1702,9 +1707,9 @@ func TestRecoveryCoordinatorHumanWaitsEndUnknownStreaks(t *testing.T) {
 	}
 	f.store.WithKeyring(keyring)
 	verified := 0
-	f.controller.Finalizer = authsession.NewFinalizer(authsession.Options{Store: f.store, Browser: f.browser, Keyring: keyring, Verifier: coordinatorVerifier(func(context.Context, string, int64, []byte) error {
+	f.controller.Finalizer = authsession.NewFinalizer(authsession.Options{Store: f.store, Browser: f.browser, Keyring: keyring, Verifier: coordinatorVerifier(func(_ context.Context, _ string, _ int64, encrypted []byte) ([]byte, error) {
 		verified++
-		return nil
+		return encrypted, nil
 	})})
 	f.observation = authbrowser.AuthObservation{State: authbrowser.Authenticated, Revision: "authenticated"}
 	f.reconcile()
@@ -2132,7 +2137,7 @@ func TestRecoveryCoordinatorVerificationConcurrentCommitWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.store.WithKeyring(keyring)
-	committer := authsession.NewFinalizer(authsession.Options{Store: f.store, Browser: f.browser, Keyring: keyring, Verifier: coordinatorVerifier(func(context.Context, string, int64, []byte) error { return nil })})
+	committer := authsession.NewFinalizer(authsession.Options{Store: f.store, Browser: f.browser, Keyring: keyring, Verifier: coordinatorVerifier(func(_ context.Context, _ string, _ int64, encrypted []byte) ([]byte, error) { return encrypted, nil })})
 	f.finalizer.complete = func(ctx context.Context, a storage.AuthAttempt) (storage.Connection, error) {
 		conn, err := committer.Complete(ctx, a)
 		if err != nil {
