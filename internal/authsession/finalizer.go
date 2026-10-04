@@ -3,10 +3,12 @@ package authsession
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/authbrowser"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
@@ -63,8 +65,10 @@ type Browser interface {
 	Complete(context.Context, string) error
 }
 
+// Verifier returns the encrypted, generation-bound session after bank verification.
+// A failed verification must not return a session.
 type Verifier interface {
-	VerifySession(context.Context, string, int64, []byte) error
+	VerifySession(context.Context, string, int64, []byte) ([]byte, error)
 }
 
 type Scheduler interface {
@@ -124,7 +128,9 @@ func (f *Finalizer) Complete(ctx context.Context, attempt storage.AuthAttempt) (
 	if current.Status == "VERIFIED" {
 		return f.resume(ctx, current, conn)
 	}
-	if err := f.options.Verifier.VerifySession(ctx, current.ConnectionID, current.Generation, encrypted); err != nil {
+	verified, verificationErr := f.options.Verifier.VerifySession(ctx, current.ConnectionID, current.Generation, encrypted)
+	defer clear(verified)
+	if verificationErr != nil {
 		latest, latestConn, lookupErr := f.current(ctx, attempt)
 		if lookupErr != nil {
 			return storage.Connection{}, lookupErr
@@ -133,7 +139,7 @@ func (f *Finalizer) Complete(ctx context.Context, attempt storage.AuthAttempt) (
 			return f.resume(ctx, latest, latestConn)
 		}
 		// Never wrap the verifier's error: RPC errors may contain envelope or bank data.
-		if code := VerificationCode(err); code != "" {
+		if code := VerificationCode(verificationErr); code != "" {
 			if code == "VERIFICATION_SUPERSEDED" {
 				return storage.Connection{}, ErrConflict
 			}
@@ -148,7 +154,10 @@ func (f *Finalizer) Complete(ctx context.Context, attempt storage.AuthAttempt) (
 	if current.Status == "VERIFIED" {
 		return f.resume(ctx, current, conn)
 	}
-	conn, err = f.options.Store.CompleteAuthSession(ctx, current.ID, encrypted)
+	if !f.validVerifiedSession(current.ConnectionID, current.Generation, verified) {
+		return storage.Connection{}, &VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+	}
+	conn, err = f.options.Store.CompleteAuthSession(ctx, current.ID, verified)
 	if err != nil {
 		if errors.Is(err, storage.ErrGenerationFenceMismatch) || errors.Is(err, storage.ErrRecoverySuperseded) {
 			return storage.Connection{}, ErrConflict
@@ -169,6 +178,27 @@ func (f *Finalizer) Complete(ctx context.Context, attempt storage.AuthAttempt) (
 		return storage.Connection{}, err
 	}
 	return f.resume(ctx, current, conn)
+}
+
+func (f *Finalizer) validVerifiedSession(connectionID string, generation int64, encoded []byte) bool {
+	var envelope security.Envelope
+	if len(encoded) == 0 || json.Unmarshal(encoded, &envelope) != nil {
+		return false
+	}
+	// Match the session loader's structural checks before AES-GCM decryption,
+	// including nonce length: malformed RPC replies must not cause a panic.
+	nonce, nonceErr := base64.RawStdEncoding.DecodeString(envelope.Nonce)
+	ciphertext, ciphertextErr := base64.RawStdEncoding.DecodeString(envelope.Ciphertext)
+	if envelope.Version != security.EnvelopeVersion || envelope.KeyID == "" || nonceErr != nil || len(nonce) != 12 || ciphertextErr != nil || len(ciphertext) < 16 {
+		return false
+	}
+	plaintext, err := f.options.Keyring.Decrypt(envelope, security.SessionAAD(connectionID, generation))
+	if err != nil {
+		return false
+	}
+	defer clear(plaintext)
+	_, err = authbrowser.DecodeHandoff(string(plaintext))
+	return err == nil
 }
 
 func (f *Finalizer) current(ctx context.Context, expected storage.AuthAttempt) (storage.AuthAttempt, storage.Connection, error) {

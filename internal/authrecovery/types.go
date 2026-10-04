@@ -17,10 +17,10 @@ const (
 	LoginCooldown         = 60 * time.Second
 )
 
-// SessionVerifier verifies an encrypted session envelope in the worker; it does
-// not receive the account's login password.
+// SessionVerifier returns the encrypted, generation-bound session refreshed by
+// worker verification; it does not receive the account's login password.
 type SessionVerifier interface {
-	VerifySession(ctx context.Context, connectionID string, generation int64, encrypted []byte) error
+	VerifySession(ctx context.Context, connectionID string, generation int64, encrypted []byte) ([]byte, error)
 }
 
 // RecoveryScheduler records worker-owned catch-up scheduling intent.

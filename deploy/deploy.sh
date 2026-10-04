@@ -118,6 +118,18 @@ write_runtime() {
 }
 route_replace() {
   local src="$1"
+  if [[ "$ROUTE" == /opt/platform/edge/dynamic/acb.yml ]]; then
+    python3 - "$src" "$ROUTE" <<'PY' | sudo -n /usr/local/libexec/acb-route-publish
+import base64,hashlib,json,sys
+from pathlib import Path
+src,dst=map(Path,sys.argv[1:])
+data=src.read_bytes()
+if not data or len(data)>131072: raise SystemExit('route publication size limit exceeded')
+print(json.dumps({'expected_sha256':hashlib.sha256(dst.read_bytes()).hexdigest(),
+                  'route_base64':base64.b64encode(data).decode('ascii')}))
+PY
+    return
+  fi
   python3 - "$src" "$ROUTE" <<'PY'
 import os,sys,tempfile
 src,dst=sys.argv[1:]

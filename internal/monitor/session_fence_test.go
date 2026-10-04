@@ -212,7 +212,7 @@ func TestSessionVerifierTimeoutThenLogoutBeforeQueuedDispatch(t *testing.T) {
 	verifier := NewSessionVerifier(loader, client, sched)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := verifier.VerifySession(ctx, conn.ID, conn.Generation, encoded); authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
+	if _, err := verifier.VerifySession(ctx, conn.ID, conn.Generation, encoded); authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
 		t.Fatalf("timeout=%v", err)
 	}
 	logs.assertResult(t, conn.Generation, "RESTORE", "VERIFICATION_UNAVAILABLE", false, false, false, false)
@@ -224,7 +224,10 @@ func TestSessionVerifierTimeoutThenLogoutBeforeQueuedDispatch(t *testing.T) {
 	// Also exercise a queued request whose RPC context has not expired: the fence,
 	// not just scheduler cancellation, must prevent resurrection on dispatch.
 	queuedDone := make(chan error, 1)
-	go func() { queuedDone <- verifier.VerifySession(context.Background(), conn.ID, conn.Generation, encoded) }()
+	go func() {
+		_, err := verifier.VerifySession(context.Background(), conn.ID, conn.Generation, encoded)
+		queuedDone <- err
+	}()
 	close(release)
 	select {
 	case err := <-queuedDone:

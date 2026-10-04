@@ -105,7 +105,11 @@ func TestSessionVerifierFiniteResultsAndExactAccountGate(t *testing.T) {
 				t.Fatal(err)
 			}
 			verifier := NewSessionVerifier(NewSessionLoader(store, keyring, client), client)
-			err = verifier.VerifySession(ctx, conn.ID, attempt.Generation, encoded)
+			verified, verifyErr := verifier.VerifySession(ctx, conn.ID, attempt.Generation, encoded)
+			err = verifyErr
+			if err != nil && len(verified) != 0 {
+				t.Fatal("rejected candidate returned a committable session")
+			}
 			if got := authsession.VerificationCode(err); got != tc.code {
 				t.Fatalf("verification code=%q, want %q", got, tc.code)
 			}

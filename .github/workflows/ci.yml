@@ -38,6 +38,11 @@ jobs:
         run: python3 -m py_compile deploy/import-baseline.py
       - name: Test recovery setup safety
         run: python3 -m unittest discover -s deploy/tests -p 'test_setup_recovery.py' -v
+      - name: Test fixed-target route publication safety
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y python3-yaml
+          sudo /usr/bin/python3 -m unittest discover -s deploy/tests -p 'test_route_publisher.py' -v
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2

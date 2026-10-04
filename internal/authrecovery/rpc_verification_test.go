@@ -3,10 +3,12 @@ package authrecovery
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,7 +25,7 @@ type verificationRPCHandler struct {
 	verifier *monitor.SessionVerifier
 }
 
-func (h verificationRPCHandler) VerifySession(ctx context.Context, id string, generation int64, envelope []byte) error {
+func (h verificationRPCHandler) VerifySession(ctx context.Context, id string, generation int64, envelope []byte) ([]byte, error) {
 	return h.verifier.VerifySession(ctx, id, generation, envelope)
 }
 
@@ -60,7 +62,7 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 			if _, err := f.store.DB().ExecContext(f.ctx, `INSERT INTO sessions(connection_id,generation,envelope,key_id,verified_at,updated_at) VALUES(?,?,?,'fixture',?,?)`, prior.ID, prior.Generation, []byte("previous-encrypted-session"), stamp, stamp); err != nil {
 				t.Fatal(err)
 			}
-			candidate := authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Action: "https://online.acb.com.vn/acbib/Request", Fields: map[string]string{"dse_sessionId": "synthetic-session", "dse_processorState": "acctDetailPage", "dse_operationName": "ibkacctDetailProc", "AccountNbr": "222222222"}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic-cookie", Domain: acb.OfficialHost, Path: "/", Secure: true}}}
+			candidate := authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Action: "https://online.acb.com.vn/acbib/Request", Fields: map[string]string{"dse_sessionId": "synthetic-session", "dse_processorState": "stale-state", "dse_operationName": "ibkacctDetailProc", "AccountNbr": "222222222"}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic-cookie", Domain: acb.OfficialHost, Path: "/", Secure: true}}}
 			handoff, err := authbrowser.EncodeHandoff(candidate, []byte("synthetic-nonce"))
 			if err != nil {
 				t.Fatal(err)
@@ -69,16 +71,39 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 			if tc.account != "" {
 				accountField = `<input name="AccountNbr" value="` + tc.account + `">`
 			}
-			bank, err := acb.NewClient("https://online.acb.com.vn", verificationBankTransport(func(r *http.Request) (*http.Response, error) {
-				body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="acctDetailPage"><input name="dse_sessionId" value="fresh-session">` + accountField + `</form>`
+			var bankCalls atomic.Int32
+			transport := verificationBankTransport(func(r *http.Request) (*http.Response, error) {
+				call := bankCalls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Hostname() != acb.OfficialHost || r.URL.Path != "/acbib/Request" {
+					t.Error("verification or restored query attempted a bank login or unexpected endpoint")
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				wantSession, wantState, wantCookie := "synthetic-session", "stale-state", "synthetic-cookie"
+				if call > 1 {
+					wantSession, wantState, wantCookie = "fresh-session", "fresh-state", "fresh-cookie"
+					if r.PostForm.Get("FromDate") != "04/10/2026" || r.PostForm.Get("ToDate") != "04/10/2026" {
+						t.Error("restored query lost its requested date")
+					}
+				}
+				cookie, cookieErr := r.Cookie("session")
+				if r.PostForm.Get("dse_sessionId") != wantSession || r.PostForm.Get("dse_processorState") != wantState || r.PostForm.Get("AccountNbr") != "222222222" || cookieErr != nil || cookie.Value != wantCookie {
+					t.Error("bank request did not use the expected conversation tokens, cookie and exact account")
+				}
+				body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh-state"><input name="dse_sessionId" value="fresh-session">` + accountField + `</form>`
 				if tc.name == "history_omitted" {
 					body += `<table><tr><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td colspan="4">Không có giao dịch</td></tr></table>`
 				}
-				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-			}))
+				header := make(http.Header)
+				header.Add("Set-Cookie", "session=fresh-cookie; Path=/; Secure; HttpOnly")
+				return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})
+			bank, err := acb.NewClient("https://online.acb.com.vn", transport)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer bank.CloseIdleConnections()
 			verifier := monitor.NewSessionVerifier(monitor.NewSessionLoader(f.store, keyring, bank), bank)
 			rpc, err := workerrpc.NewServer(verificationRPCHandler{verifier: verifier}, "synthetic-rpc-token")
 			if err != nil {
@@ -106,6 +131,55 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 			}
 			if runs != expected || sessions != expected {
 				t.Fatalf("incorrect commit/recovery gate: sessions=%d runs=%d", sessions, runs)
+			}
+			if tc.state == "CATCHING_UP" {
+				stored, err := f.store.Session(f.ctx, e.ConnectionID, e.Generation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var envelope security.Envelope
+				if err := json.Unmarshal(stored.Envelope, &envelope); err != nil {
+					t.Fatal(err)
+				}
+				plaintext, err := keyring.Decrypt(envelope, security.SessionAAD(e.ConnectionID, e.Generation))
+				defer clear(plaintext)
+				if err != nil {
+					t.Fatal(err)
+				}
+				committed, err := authbrowser.DecodeHandoff(string(plaintext))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if committed.Fields["dse_sessionId"] != "fresh-session" || committed.Fields["dse_processorState"] != "fresh-state" || committed.Fields["AccountNbr"] != "222222222" {
+					t.Fatal("finalization committed pre-verification conversation state instead of the verified account and fresh bank token")
+				}
+				freshCookie := false
+				for _, cookie := range committed.Cookies {
+					if cookie.Name == "session" && cookie.Value == "fresh-cookie" {
+						freshCookie = true
+					}
+				}
+				if !freshCookie {
+					t.Fatal("finalization committed the pre-verification cookie")
+				}
+				// Restore from durable storage into a new client, not the verifier's
+				// already refreshed in-memory bank client.
+				restarted, err := acb.NewClient("https://online.acb.com.vn", transport)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer restarted.CloseIdleConnections()
+				loader := monitor.NewSessionLoader(f.store, keyring, restarted)
+				if err := loader.Restore(f.ctx, e.ConnectionID, e.Generation); err != nil {
+					t.Fatal(err)
+				}
+				response, err := restarted.BootstrapForDate(f.ctx, "04/10/2026")
+				if err != nil || response.RequestedAccount != "222222222" {
+					t.Fatalf("committed session could not query its exact account: %v", err)
+				}
+				if bankCalls.Load() != 2 {
+					t.Fatal("verification or restored query made unexpected bank requests")
+				}
 			}
 			if tc.state != "CATCHING_UP" {
 				old, err := f.store.Session(f.ctx, prior.ID, prior.Generation)

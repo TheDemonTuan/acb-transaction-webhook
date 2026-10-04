@@ -1,6 +1,7 @@
 package workerrpc_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
@@ -30,16 +32,16 @@ type mockWorkerHandler struct {
 	recoveryConnectionID  string
 	recoveryGeneration    int64
 	recoveryEventKey      string
-	verifiedAccount       string
 
-	verifyErr    error
-	createJobErr error
-	cancelJobErr error
-	settingsErr  error
-	wakeErr      error
-	syncBlock    chan struct{}
-	jobs         map[string]storage.HistorySyncJob
-	mu           sync.Mutex
+	verifyErr      error
+	verifyEnvelope []byte
+	createJobErr   error
+	cancelJobErr   error
+	settingsErr    error
+	wakeErr        error
+	syncBlock      chan struct{}
+	jobs           map[string]storage.HistorySyncJob
+	mu             sync.Mutex
 }
 
 func (m *mockWorkerHandler) RequestSync(ctx context.Context) error {
@@ -112,15 +114,14 @@ func (m *mockWorkerHandler) ScheduleRecovery(ctx context.Context, connectionID s
 	return nil
 }
 
-func (m *mockWorkerHandler) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
+func (m *mockWorkerHandler) VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error) {
 	if m.verifyErr != nil {
-		return m.verifyErr
+		return m.verifyEnvelope, m.verifyErr
 	}
 	if string(password) == "wrong" {
-		return errors.New("invalid password")
+		return nil, errors.New("invalid password")
 	}
-	m.verifiedAccount = account
-	return nil
+	return m.verifyEnvelope, nil
 }
 func (m *mockWorkerHandler) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
 	return nil
@@ -259,19 +260,6 @@ func TestWorkerRPC_Roundtrip(t *testing.T) {
 	}
 	if mock.recoveryConnectionID != "conn_recovery" || mock.recoveryGeneration != 7 || mock.recoveryEventKey != "auth.verified" {
 		t.Fatalf("unexpected recovery request: %q/%d/%q", mock.recoveryConnectionID, mock.recoveryGeneration, mock.recoveryEventKey)
-	}
-
-	// 8. VerifySession success
-	if err := client.VerifySession(ctx, "12345678", 1, []byte("correct")); err != nil {
-		t.Fatalf("VerifySession failed: %v", err)
-	}
-	if mock.verifiedAccount != "12345678" {
-		t.Errorf("expected account to match")
-	}
-
-	// 9. VerifySession failure
-	if err := client.VerifySession(ctx, "12345678", 1, []byte("wrong")); err == nil {
-		t.Fatalf("expected VerifySession with wrong password to fail")
 	}
 
 	// 10. Unauthorized client
@@ -643,8 +631,8 @@ func TestWorkerRPC_DrainingRejectsUpstreamCommands(t *testing.T) {
 	if _, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02"); err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("expected CreateHistoryJob to be rejected with 503 during drain, got: %v", err)
 	}
-	if err := client.VerifySession(ctx, "12345", 1, []byte("pw")); authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
-		t.Fatalf("expected verification unavailable during drain, got: %v", err)
+	if envelope, err := client.VerifySession(ctx, "12345", 1, []byte("pw")); authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || envelope != nil {
+		t.Fatalf("expected verification unavailable without envelope during drain, got: %v", err)
 	}
 
 	// 4. Non-upstream calls (wake-dispatcher, notify-settings) still succeed
@@ -924,7 +912,7 @@ func TestWorkerRPC_VerificationErrorRoundtrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server, err := workerrpc.NewServer(&mockWorkerHandler{verifyErr: tt.err}, "synthetic-token")
+			server, err := workerrpc.NewServer(&mockWorkerHandler{verifyErr: tt.err, verifyEnvelope: []byte(secret)}, "synthetic-token")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -956,9 +944,9 @@ func TestWorkerRPC_VerificationErrorRoundtrip(t *testing.T) {
 				t.Fatal("handler secret leaked to HTTP response")
 			}
 			client := workerrpc.NewClient(ts.URL, "synthetic-token")
-			err = client.VerifySession(context.Background(), "synthetic-account", 1, []byte("pw"))
+			envelope, err := client.VerifySession(context.Background(), "synthetic-account", 1, []byte("pw"))
 			var verificationErr *authsession.VerificationError
-			if !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != tt.code || err.Error() != tt.code {
+			if envelope != nil || !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != tt.code || err.Error() != tt.code {
 				t.Fatalf("unexpected verification error: %v", err)
 			}
 		})
@@ -997,9 +985,9 @@ func TestWorkerRPC_VerificationErrorBodySanitization(t *testing.T) {
 			}))
 			defer ts.Close()
 			client := workerrpc.NewClient(ts.URL, "synthetic-token")
-			err := client.VerifySession(context.Background(), "synthetic-account", 1, []byte("pw"))
+			envelope, err := client.VerifySession(context.Background(), "synthetic-account", 1, []byte("pw"))
 			var verificationErr *authsession.VerificationError
-			if !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != tt.code || err.Error() != tt.code {
+			if envelope != nil || !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != tt.code || err.Error() != tt.code {
 				t.Fatalf("unexpected verification error: %v", err)
 			}
 			if strings.Contains(err.Error(), secret) {
@@ -1030,9 +1018,9 @@ func TestWorkerRPC_VerificationTransportSanitization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := workerrpc.NewClient(tt.url, "synthetic-token")
-			err := client.VerifySession(tt.ctx, "synthetic-account", 1, []byte("pw"))
+			envelope, err := client.VerifySession(tt.ctx, "synthetic-account", 1, []byte("pw"))
 			var verificationErr *authsession.VerificationError
-			if !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
+			if envelope != nil || !errors.As(err, &verificationErr) || authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
 				t.Fatalf("unexpected transport error: %v", err)
 			}
 		})
@@ -1071,8 +1059,8 @@ func TestWorkerRPC_VerificationRequestValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			resp.Body.Close()
-			if resp.StatusCode != tt.status || mock.verifiedAccount != "" {
-				t.Fatalf("status=%d verified=%t, want status=%d without verification", resp.StatusCode, mock.verifiedAccount != "", tt.status)
+			if resp.StatusCode != tt.status {
+				t.Fatalf("status=%d, want status=%d", resp.StatusCode, tt.status)
 			}
 		})
 	}
@@ -1087,5 +1075,135 @@ func TestWorkerRPC_NonVerificationErrorBehaviorUnchanged(t *testing.T) {
 	err := workerrpc.NewClient(ts.URL, "synthetic-token").RequestSync(context.Background())
 	if err == nil || authsession.VerificationCode(err) != "" || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "existing-endpoint-error") {
 		t.Fatalf("non-verification error behavior changed: %v", err)
+	}
+}
+
+func TestWorkerRPC_VerificationEnvelopeRoundtrip(t *testing.T) {
+	keyring, err := security.NewKeyring(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const account = "synthetic-account"
+	const generation = int64(9)
+	plaintext := []byte(`{"session":"fresh-session","token":"fresh-form-token"}`)
+	encrypted, err := keyring.Encrypt(plaintext, security.SessionAAD(account, generation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedEnvelope, err := json.Marshal(encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := workerrpc.NewServer(&mockWorkerHandler{verifyEnvelope: verifiedEnvelope}, "synthetic-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+	client := workerrpc.NewClient(ts.URL, "synthetic-token")
+	envelope, err := client.VerifySession(context.Background(), account, generation, []byte("candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(envelope, verifiedEnvelope) {
+		t.Fatal("RPC did not return the latest verified encrypted envelope")
+	}
+	var received security.Envelope
+	if err := json.Unmarshal(envelope, &received); err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := keyring.Decrypt(received, security.SessionAAD(account, generation))
+	if err != nil || !bytes.Equal(decrypted, plaintext) {
+		t.Fatalf("verified handoff could not be decrypted for its generation: %v", err)
+	}
+	if _, err := keyring.Decrypt(received, security.SessionAAD(account, generation+1)); err == nil {
+		t.Fatal("verified envelope was not bound to its generation")
+	}
+}
+
+func TestWorkerRPC_VerificationSuccessRequiresBoundedEnvelope(t *testing.T) {
+	const secret = "synthetic-response-secret"
+	const limit = 128 << 10
+	validEnvelope := []byte(`{"Version":"v1","KeyID":"k1","Nonce":"synthetic-nonce","Ciphertext":"synthetic-ciphertext"}`)
+	encode := func(envelope []byte) string {
+		t.Helper()
+		body, err := json.Marshal(struct {
+			Envelope []byte `json:"envelope"`
+		}{Envelope: envelope})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	valid := encode(validEnvelope)
+	tests := []struct {
+		name string
+		body string
+		want []byte
+	}{
+		{"valid", valid, validEnvelope},
+		{"limit", valid + strings.Repeat(" ", limit-len(valid)), validEnvelope},
+		{"oversized", valid + strings.Repeat(" ", limit+1-len(valid)), nil},
+		{"legacy", `{"ok":true}`, nil},
+		{"empty_body", "", nil},
+		{"null_envelope", `{"envelope":null}`, nil},
+		{"empty_envelope", encode([]byte{}), nil},
+		{"malformed_response", `{"envelope":"` + secret, nil},
+		{"malformed_envelope", encode([]byte("{" + secret)), nil},
+		{"plaintext_handoff", encode([]byte(`{"cookies":"` + secret + `"}`)), nil},
+		{"missing_envelope_field", encode([]byte(`{"Version":"v1","KeyID":"k1","Nonce":"nonce"}`)), nil},
+		{"unsupported_envelope", encode([]byte(`{"Version":"v2","KeyID":"k1","Nonce":"nonce","Ciphertext":"ciphertext"}`)), nil},
+		{"envelope_with_plaintext", encode([]byte(`{"Version":"v1","KeyID":"k1","Nonce":"nonce","Ciphertext":"ciphertext","cookies":"` + secret + `"}`)), nil},
+		{"trailing_json", valid + `{}`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer ts.Close()
+			envelope, err := workerrpc.NewClient(ts.URL, "synthetic-token").VerifySession(context.Background(), "synthetic-account", 1, []byte("candidate"))
+			if tt.want != nil {
+				if err != nil || !bytes.Equal(envelope, tt.want) {
+					t.Fatalf("valid encrypted envelope was not returned: %v", err)
+				}
+				return
+			}
+			if envelope != nil || authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
+				t.Fatalf("invalid success must return only a safe error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerRPC_VerificationHandlerRejectsInvalidEnvelope(t *testing.T) {
+	const secret = "synthetic-cookie-secret"
+	envelopes := [][]byte{
+		nil,
+		{},
+		[]byte(`{"cookies":"` + secret + `"}`),
+		[]byte(`{"Version":"v1","KeyID":"k1","Nonce":"nonce","Ciphertext":"ciphertext","cookies":"` + secret + `"}`),
+		[]byte(`{"Version":"v1","KeyID":"k1","Nonce":"nonce","Ciphertext":"` + strings.Repeat("x", 128<<10) + `"}`),
+	}
+	for _, envelope := range envelopes {
+		server, err := workerrpc.NewServer(&mockWorkerHandler{verifyEnvelope: envelope}, "synthetic-token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/rpc/verify-session", strings.NewReader(`{"account":"synthetic-account","generation":1,"password":"cHc="}`))
+		req.Header.Set(workerrpc.HeaderInternalToken, "synthetic-token")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, req)
+		var failure workerrpc.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusServiceUnavailable || failure.Code != "VERIFICATION_UNAVAILABLE" || failure.Error != "VERIFICATION_UNAVAILABLE" {
+			t.Fatalf("invalid handler success must produce safe unavailable response, got status=%d error=%s", response.Code, failure.Code)
+		}
+		if strings.Contains(response.Body.String(), secret) || strings.Contains(response.Body.String(), "envelope") {
+			t.Fatal("invalid handler success leaked envelope or plaintext")
+		}
 	}
 }
