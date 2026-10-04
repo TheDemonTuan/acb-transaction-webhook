@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
@@ -26,6 +27,8 @@ const (
 	HeaderRequestID     = "X-Request-Id"
 	HeaderIdempotency   = "Idempotency-Key"
 )
+
+const maxVerificationResponseBytes = 128 << 10
 
 type ctxKey string
 
@@ -83,6 +86,21 @@ type VerifySessionRequest struct {
 	Account    string `json:"account"`
 	Generation int64  `json:"generation"`
 	Password   []byte `json:"password"`
+}
+
+type verifySessionResponse struct {
+	Envelope []byte `json:"envelope"`
+}
+
+func validVerificationEnvelope(data []byte) bool {
+	var envelope security.Envelope
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return false
+	}
+	return envelope.Version == security.EnvelopeVersion && envelope.KeyID != "" &&
+		envelope.Nonce != "" && envelope.Ciphertext != ""
 }
 
 type ScheduleRecoveryRequest struct {
@@ -171,7 +189,7 @@ type WorkerHandler interface {
 	NotifySettingsChanged(ctx context.Context) error
 	WakeDispatcher(ctx context.Context) error
 	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
-	VerifySession(ctx context.Context, account string, generation int64, password []byte) error
+	VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error)
 	InvalidateSession(ctx context.Context, connectionID string, generation int64) error
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
@@ -927,7 +945,8 @@ func (s *Server) routes() {
 			writeError(w, http.StatusBadRequest, "invalid session verification parameters", reqID)
 			return
 		}
-		if err := s.handler.VerifySession(r.Context(), req.Account, req.Generation, req.Password); err != nil {
+		envelope, err := s.handler.VerifySession(r.Context(), req.Account, req.Generation, req.Password)
+		if err != nil {
 			code := authsession.VerificationCode(err)
 			status := http.StatusUnprocessableEntity
 			switch code {
@@ -942,7 +961,18 @@ func (s *Server) routes() {
 			writeJSON(w, status, ErrorResponse{Error: code, Code: code, RequestID: reqID})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
+		if !validVerificationEnvelope(envelope) {
+			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "VERIFICATION_UNAVAILABLE", Code: "VERIFICATION_UNAVAILABLE", RequestID: reqID})
+			return
+		}
+		response, err := json.Marshal(verifySessionResponse{Envelope: envelope})
+		if err != nil || len(response) > maxVerificationResponseBytes {
+			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "VERIFICATION_UNAVAILABLE", Code: "VERIFICATION_UNAVAILABLE", RequestID: reqID})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(response)
 	}))
 
 	s.mux.HandleFunc("/rpc/notification-channels/test", s.auth(func(w http.ResponseWriter, r *http.Request) {
@@ -1086,6 +1116,13 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 		}
 		return fmt.Errorf("worker rpc %s returned %d: %s", path, resp.StatusCode, string(errBytes))
 	}
+	if path == "/rpc/verify-session" {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxVerificationResponseBytes+1))
+		if err != nil || len(data) > maxVerificationResponseBytes || json.Unmarshal(data, out) != nil {
+			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+		}
+		return nil
+	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
@@ -1190,17 +1227,24 @@ func (c *Client) InvalidateSession(ctx context.Context, connectionID string, gen
 	return c.post(callCtx, "/rpc/session/invalidate", InvalidateSessionRequest{ConnectionID: connectionID, Generation: generation}, nil)
 }
 
-func (c *Client) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
+func (c *Client) VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error) {
 	if len(password) == 0 {
-		return errors.New("empty password")
+		return nil, &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
 	}
 	callCtx, cancel := c.withTimeout(ctx, 20*time.Second)
 	defer cancel()
-	return c.post(callCtx, "/rpc/verify-session", VerifySessionRequest{
+	var response verifySessionResponse
+	if err := c.post(callCtx, "/rpc/verify-session", VerifySessionRequest{
 		Account:    account,
 		Generation: generation,
 		Password:   password,
-	}, nil)
+	}, &response); err != nil {
+		return nil, err
+	}
+	if !validVerificationEnvelope(response.Envelope) {
+		return nil, &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
+	}
+	return response.Envelope, nil
 }
 
 func (c *Client) TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error) {

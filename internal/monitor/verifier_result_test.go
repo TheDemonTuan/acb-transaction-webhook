@@ -168,7 +168,7 @@ func TestSessionVerifierFenceBeforeAndAfterBootstrap(t *testing.T) {
 				installLogoutFence(t, store, conn)
 			}
 			verifier := NewSessionVerifier(NewSessionLoader(store, keyring, client), client)
-			err = verifier.VerifySession(context.Background(), conn.ID, conn.Generation, encoded)
+			_, err = verifier.VerifySession(context.Background(), conn.ID, conn.Generation, encoded)
 			if authsession.VerificationCode(err) != "VERIFICATION_SUPERSEDED" {
 				t.Fatalf("stale result was accepted: %v", err)
 			}
@@ -191,7 +191,7 @@ func TestSessionVerifierFenceBeforeAndAfterBootstrap(t *testing.T) {
 func TestSessionVerifierUnavailableEmitsSafeResult(t *testing.T) {
 	logs := captureVerificationLogs(t)
 	var verifier *SessionVerifier
-	err := verifier.VerifySession(context.Background(), "synthetic-private-account", 1, []byte("synthetic-secret-error"))
+	_, err := verifier.VerifySession(context.Background(), "synthetic-private-account", 1, []byte("synthetic-secret-error"))
 	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
 		t.Fatalf("unavailable verifier error=%v", err)
 	}
@@ -213,7 +213,7 @@ func TestSessionVerifierPausedQueueEmitsSafeResult(t *testing.T) {
 	defer sched.Stop()
 	sched.Pause()
 	verifier := NewSessionVerifier(NewSessionLoader(store, keyring, client), client, sched)
-	err = verifier.VerifySession(context.Background(), conn.ID, conn.Generation, encoded)
+	_, err = verifier.VerifySession(context.Background(), conn.ID, conn.Generation, encoded)
 	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
 		t.Fatalf("queue admission error=%v", err)
 	}

@@ -216,7 +216,7 @@ func TestSessionVerifier_GATE04_StoreErrorProducesZeroACBCalls(t *testing.T) {
 	store.Close()
 
 	// Attempt verification
-	err = verifier.VerifySession(ctx, conn.ID, 1, []byte("some-encrypted-envelope"))
+	_, err = verifier.VerifySession(ctx, conn.ID, 1, []byte("some-encrypted-envelope"))
 	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" {
 		t.Fatalf("expected safe unavailable error from failed store, got %v", err)
 	}

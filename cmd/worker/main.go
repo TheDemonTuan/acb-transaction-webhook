@@ -197,25 +197,25 @@ func (w *workerService) WakeDispatcher(ctx context.Context) error {
 	return nil
 }
 
-func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) error {
+func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error) {
 	reject := func(code string) error {
 		slog.Info("ACB session verification result", "generation", generation, "phase", "RESTORE", "code", code)
 		return &authsession.VerificationError{Code: code}
 	}
 	if generation <= 0 {
-		return reject("VERIFICATION_UNAVAILABLE")
+		return nil, reject("VERIFICATION_UNAVAILABLE")
 	}
 	if w.store != nil {
 		conn, err := w.store.Connection(ctx)
 		if err != nil {
-			return reject("VERIFICATION_UNAVAILABLE")
+			return nil, reject("VERIFICATION_UNAVAILABLE")
 		}
 		if conn.ID != account || conn.Generation != generation {
-			return reject("VERIFICATION_SUPERSEDED")
+			return nil, reject("VERIFICATION_SUPERSEDED")
 		}
 	}
 	if w.verifierSessionLoader == nil || w.verifierClient == nil {
-		return reject("VERIFICATION_UNAVAILABLE")
+		return nil, reject("VERIFICATION_UNAVAILABLE")
 	}
 	var verifier *monitor.SessionVerifier
 	if w.bankMonitor != nil {

@@ -115,6 +115,7 @@ write_runtime() {
     printf 'WORKER_RELEASE_COMMIT=%s\nENV_FILE=%s\nSECRETS_DIR=%s\nBARK_SECRET_GROUP=1000\n' "$sha" "$DEPLOY_PATH/deploy/.env.production" "$DEPLOY_PATH/deploy/secrets"
   } | atomic_write_file "$dest/runtime.env" 600
 }
+
 start_recovery_controller() {
   local bundle="$1"
   load_recovery_flags "$bundle" || return 1
