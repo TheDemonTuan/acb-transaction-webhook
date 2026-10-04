@@ -75,6 +75,16 @@ class PublisherTests(unittest.TestCase):
                     self.publish(data)
                 self.assertEqual(self.destination.read_bytes(), self.blue)
 
+    def test_obsolete_frontend_topology_refused_even_in_root_policy(self):
+        topology = self.publisher.yaml.safe_load(self.green)
+        topology['http']['services']['acb-frontend-service'] = {
+            'loadBalancer': {'servers': [{'url': 'http://acb-frontend-green:8080'}]}}
+        legacy = self.publisher.yaml.safe_dump(topology).encode()
+        (self.templates / 'legacy.yml').write_bytes(legacy)
+        with self.assertRaises(self.publisher.PublishError):
+            self.publish(legacy)
+        self.assertEqual(self.destination.read_bytes(), self.blue)
+
     def test_compare_before_write_refuses_stale_release(self):
         expected = hashlib.sha256(self.blue).hexdigest()
         self.publish(self.green)
