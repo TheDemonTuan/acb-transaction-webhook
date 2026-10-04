@@ -36,6 +36,8 @@ jobs:
           shellcheck --severity=error "${scripts[@]}"
       - name: Validate static hosting and recovery tooling syntax
         run: python3 -m py_compile deploy/migrate-static-hosting.py deploy/cloudflare-routes.py deploy/verify-frontend.py deploy/classify-changes.py deploy/acb-route-publish.py
+      - name: Validate baseline importer syntax
+        run: python3 -m py_compile deploy/import-baseline.py
       - name: Test deployment safety and static hosting contracts
         run: |
           python3 -m pip install PyYAML
