@@ -1,0 +1,35 @@
+[general]
+host = "::"
+port = 8080
+root = "/public"
+log-level = "warn"
+cache-control-headers = true
+compression = true
+compression-static = true
+page-fallback = "/public/index.html"
+health = false
+
+[advanced]
+[[advanced.headers]]
+source = "/__release"
+headers = { Cache-Control = "no-store", Content-Type = "text/plain; charset=utf-8" }
+
+[[advanced.headers]]
+source = "/readyz"
+headers = { Cache-Control = "no-store", Content-Type = "text/plain; charset=utf-8" }
+
+[[advanced.headers]]
+source = "/healthz"
+headers = { Cache-Control = "no-store", Content-Type = "text/plain; charset=utf-8" }
+
+[[advanced.headers]]
+source = "/admin/acb-credentials"
+headers = { Cache-Control = "no-store", Referrer-Policy = "no-referrer", X-Frame-Options = "DENY" }
+
+[[advanced.headers]]
+source = "/assets/**"
+headers = { Cache-Control = "public, max-age=31536000, immutable" }
+
+[[advanced.headers]]
+source = "/**/index.html"
+headers = { Cache-Control = "no-cache, no-store, must-revalidate" }

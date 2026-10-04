@@ -905,7 +905,7 @@ run_suite_fault_matrix() {
     if [[ "$mode" == wrong-frontend ]]; then
       printf '%s\n' "$base_sha" > "$root/wrong-release"
       chmod 644 "$root/wrong-release"
-      printf 'services:\n  frontend-green:\n    volumes:\n      - %s:/usr/share/nginx/html/__release:ro\n' "$root/wrong-release" > "$root/wrong-frontend.yaml"
+      printf 'services:\n  frontend-green:\n    volumes:\n      - %s:/public/__release:ro\n' "$root/wrong-release" > "$root/wrong-frontend.yaml"
     fi
     if [[ "$mode" == wrong-gateway ]]; then
       printf 'services:\n  gateway-green:\n    environment:\n      RELEASE_COMMIT: %s\n' "$base_sha" > "$root/wrong-gateway.yaml"

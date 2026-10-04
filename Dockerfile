@@ -7,15 +7,23 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bunx --bun tsc --noEmit && bunx --bun vite build
 
-FROM nginxinc/nginx-unprivileged:1.31.6-alpine3.24 AS frontend
+FROM joseluisq/static-web-server:2.44.0-alpine AS frontend
 ARG RELEASE_COMMIT
 USER root
 RUN apk update && apk upgrade --no-cache
-COPY deploy/frontend-nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=web-builder /src/web/dist /usr/share/nginx/html
-RUN printf '%s' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' && \
-    printf '%s\n' "$RELEASE_COMMIT" > /usr/share/nginx/html/__release
-USER 101:101
+COPY deploy/frontend-sws.toml /etc/sws.toml
+COPY --from=web-builder /src/web/dist /public
+RUN ( printf '%s' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' && printf '%s\n' "$RELEASE_COMMIT" > /public/__release || touch /public/__release ) && \
+    printf 'ok\n' > /public/healthz && \
+    printf 'ready\n' > /public/readyz && \
+    mkdir -p /usr/share/nginx && \
+    ln -s /public /usr/share/nginx/html && \
+    chown -R 1000:1000 /public /etc/sws.toml /usr/share/nginx && \
+    chmod -R a+rX /public /etc/sws.toml /usr/share/nginx
+USER 1000:1000
+ENV SERVER_CONFIG_FILE=/etc/sws.toml
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["static-web-server", "-w", "/etc/sws.toml"]
 
 FROM golang:1.27.1-bookworm AS go-base
 WORKDIR /src
