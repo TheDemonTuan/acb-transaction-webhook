@@ -292,6 +292,8 @@ def local_entries(body, page_url, origin):
         except ValueError:
             raise VerificationError("invalid HTML asset reference") from None
         if not same_origin:
+            if parsed.hostname == "static.cloudflareinsights.com":
+                continue
             require(not module, "module entry must be same-origin")
             continue  # Existing global CSP permits the external analytics script.
         require(parsed.username is None and parsed.password is None and not parsed.fragment,
