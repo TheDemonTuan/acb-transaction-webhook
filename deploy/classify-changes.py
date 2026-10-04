@@ -18,7 +18,6 @@ FRONTEND_PATHS = {
     'deploy/tests/test_cloudflare_routes.py',
 }
 SHA = re.compile(r'[0-9a-f]{40}\Z')
-UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z')
 
 
 def classify_paths(paths):
@@ -106,26 +105,14 @@ def select(event_name, inputs, auto):
         raise ValueError('Invalid component target')
     deploy = inputs.get('deploy', False)
     rehearse = inputs.get('rehearse', False)
-    bootstrap = inputs.get('bootstrap_frontend', False)
-    for name, value in [('deploy', deploy), ('rehearse', rehearse), ('bootstrap_frontend', bootstrap)]:
+    for name, value in [('deploy', deploy), ('rehearse', rehearse)]:
         if type(value) is not bool:
             raise ValueError(f'{name} must be a boolean')
-    version = inputs.get('frontend_version_id', '')
     account = inputs.get('import_account', '')
-    if not isinstance(version, str) or not isinstance(account, str):
+    if not isinstance(account, str):
         raise ValueError('Invalid dispatch string input')
-    if version and not UUID.fullmatch(version):
-        raise ValueError('frontend_version_id must be an exact UUID')
     if account and not re.fullmatch(r'[0-9]{1,32}', account):
         raise ValueError('INVALID_IMPORT_ACCOUNT')
-    if version or bootstrap:
-        if event_name != 'workflow_dispatch' or target != 'frontend' or not deploy:
-            raise ValueError('Frontend rollback/bootstrap requires target=frontend and deploy=true')
-        if version and bootstrap:
-            raise ValueError('Frontend rollback and bootstrap are mutually exclusive')
-        if account or rehearse:
-            raise ValueError('Frontend rollback/bootstrap cannot request backend import or rehearsal')
-    mode = 'rollback' if version else 'bootstrap' if bootstrap else 'publish'
     if target == 'auto':
         frontend, backend, reason, base = auto()
     else:
@@ -135,7 +122,7 @@ def select(event_name, inputs, auto):
         backend = True
         reason += '; backend forced by import_account or rehearse'
     return {'frontend': str(frontend).lower(), 'backend': str(backend).lower(),
-            'frontend_mode': mode, 'reason': reason, 'base_sha': base}
+            'reason': reason, 'base_sha': base}
 
 
 def main():
@@ -149,7 +136,7 @@ def main():
     inputs = event.get('inputs') or {}
     # workflow_dispatch webhook inputs are strings, unlike the Actions inputs context.
     inputs = dict(inputs)
-    for name in ('deploy', 'rehearse', 'bootstrap_frontend'):
+    for name in ('deploy', 'rehearse'):
         value = inputs.get(name, False)
         if isinstance(value, str):
             if value not in {'true', 'false'}:
@@ -169,11 +156,11 @@ def main():
 
     result = select(event_name, inputs, auto)
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-        for name in ('frontend', 'backend', 'frontend_mode'):
+        for name in ('frontend', 'backend'):
             output.write(f'{name}={result[name]}\n')
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
         summary.write('### Release component selection\n')
-        summary.write(f"Frontend: {result['frontend']} ({result['frontend_mode']}); backend: {result['backend']}\n\n")
+        summary.write(f"Frontend artifact: {result['frontend']}; backend: {result['backend']}\n\n")
         summary.write(result['reason'] + '\n')
         if result['base_sha']:
             summary.write(f"Successful main push base: `{result['base_sha']}`\n")

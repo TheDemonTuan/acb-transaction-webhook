@@ -10,7 +10,6 @@ classifier = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(classifier)
 SHA_A = 'a' * 40
 SHA_B = 'b' * 40
-VERSION = '12345678-1234-1234-1234-123456789abc'
 
 
 class ClassifyChangesTests(unittest.TestCase):
@@ -35,21 +34,19 @@ class ClassifyChangesTests(unittest.TestCase):
         result = classifier.select('workflow_dispatch', {'target': 'backend', 'deploy': False}, lambda: None)
         self.assertEqual((result['frontend'], result['backend']), ('false', 'true'))
 
-    def test_rollback_and_bootstrap_are_frontend_only(self):
-        for special, mode in [({'frontend_version_id': VERSION}, 'rollback'),
-                              ({'bootstrap_frontend': True}, 'bootstrap')]:
-            inputs = {'target': 'frontend', 'deploy': True, **special}
-            result = classifier.select('workflow_dispatch', inputs, lambda: self.fail('Unexpected auto'))
-            self.assertEqual(result['frontend_mode'], mode)
-            self.assertEqual(result['backend'], 'false')
-            for change in [{'target': 'all'}, {'deploy': False}, {'rehearse': True}, {'import_account': '123'}]:
-                with self.subTest(change=change, mode=mode), self.assertRaises(ValueError):
-                    classifier.select('workflow_dispatch', {**inputs, **change}, lambda: None)
-        with self.assertRaises(ValueError):
-            classifier.select('workflow_dispatch', {'target': 'frontend', 'deploy': True,
-                              'frontend_version_id': VERSION, 'bootstrap_frontend': True}, lambda: None)
-        with self.assertRaises(ValueError):
-            classifier.select('workflow_dispatch', {'frontend_version_id': 'latest'}, lambda: None)
+    def test_frontend_dispatch_only_produces_artifact(self):
+        for deploy in [False, True]:
+            with self.subTest(deploy=deploy):
+                result = classifier.select('workflow_dispatch', {'target': 'frontend', 'deploy': deploy},
+                                           lambda: self.fail('Unexpected auto'))
+                self.assertEqual((result['frontend'], result['backend']), ('true', 'false'))
+                self.assertEqual(set(result), {'frontend', 'backend', 'reason', 'base_sha'})
+
+    def test_dispatch_input_validation(self):
+        for inputs in [{'target': 'unknown'}, {'deploy': 'true'}, {'rehearse': 'false'},
+                       {'import_account': 123}, {'import_account': 'not-an-account'}]:
+            with self.subTest(inputs=inputs), self.assertRaises(ValueError):
+                classifier.select('workflow_dispatch', inputs, lambda: self.fail('Unexpected auto'))
 
     def test_auto_selected_on_push_and_dispatch(self):
         auto = lambda: (True, False, 'auto', SHA_A)

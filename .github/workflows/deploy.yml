@@ -6,23 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Components to release (auto compares with the last successful main push)
+        description: Components to build (auto compares with the last successful main push)
         type: choice
         required: true
         default: all
         options: [auto, all, frontend, backend]
-      frontend_version_id:
-        description: Exact existing Worker version UUID to roll back (target frontend and deploy true only)
-        type: string
-        required: false
-        default: ''
-      bootstrap_frontend:
-        description: Initialize the static Worker without routing production traffic (target frontend only)
-        type: boolean
-        required: false
-        default: false
       deploy:
-        description: Deploy to production (manual confirmation required)
+        description: Deploy selected backend to production (frontend artifacts publish centrally)
         type: boolean
         required: true
         default: false
@@ -55,7 +45,6 @@ jobs:
     outputs:
       frontend: ${{ steps.select.outputs.frontend }}
       backend: ${{ steps.select.outputs.backend }}
-      frontend_mode: ${{ steps.select.outputs.frontend_mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -519,7 +508,7 @@ jobs:
   frontend-build:
     name: Build verified static assets
     needs: [changes, verify, verify-contract]
-    if: always() && needs.changes.result == 'success' && needs.changes.outputs.frontend == 'true' && needs.changes.outputs.frontend_mode != 'rollback' && needs.verify.result == 'success' && needs.verify-contract.result == 'success'
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.frontend == 'true' && needs.verify.result == 'success' && needs.verify-contract.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -564,7 +553,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib,os,pathlib,shutil
+          import hashlib,json,os,pathlib,shutil
           root=pathlib.Path(os.environ['RUNNER_TEMP'])/'frontend-artifact'
           root.mkdir()
           source=pathlib.Path('web/dist')
@@ -572,6 +561,8 @@ jobs:
           shutil.copytree(source,root/'dist')
           shutil.copyfile('web/wrangler.jsonc',root/'wrangler.jsonc')
           (root/'release-sha').write_text(os.environ['GITHUB_SHA']+'\n',encoding='ascii')
+          manifest={'app':'acb','source_repository':os.environ['GITHUB_REPOSITORY'],'source_sha':os.environ['GITHUB_SHA']}
+          (root/'manifest.json').write_text(json.dumps(manifest,sort_keys=True)+'\n',encoding='utf-8')
           files=sorted(path for path in root.rglob('*') if path.is_file())
           (root/'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}\n' for path in files),encoding='utf-8')
           PY
@@ -582,96 +573,20 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
-
-  frontend-deploy:
-    name: Release frontend Worker
-    needs: [changes, verify, verify-contract, frontend-build, build, scan, rehearsal, verified-bundle, deploy]
-    if: >-
-      always() && needs.changes.result == 'success' && needs.changes.outputs.frontend == 'true' &&
-      needs.verify.result == 'success' && needs.verify-contract.result == 'success' &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.deploy == true) &&
-      ((needs.changes.outputs.frontend_mode == 'rollback' && needs.frontend-build.result == 'skipped') ||
-       (needs.changes.outputs.frontend_mode != 'rollback' && needs.frontend-build.result == 'success')) &&
-      ((needs.changes.outputs.backend == 'false' && needs.build.result == 'skipped' && needs.scan.result == 'skipped' &&
-        needs.rehearsal.result == 'skipped' && needs.verified-bundle.result == 'skipped' && needs.deploy.result == 'skipped') ||
-       (needs.changes.outputs.backend == 'true' && needs.build.result == 'success' && needs.scan.result == 'success' &&
-        needs.verified-bundle.result == 'success' && needs.deploy.result == 'success' &&
-        ((github.event_name == 'workflow_dispatch' && inputs.rehearse == true && needs.rehearsal.result == 'success') ||
-         (!(github.event_name == 'workflow_dispatch' && inputs.rehearse == true) && needs.rehearsal.result == 'skipped'))))
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: production
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24'
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.2
-      - name: Install exact release toolchain (no rebuild)
-        working-directory: web
-        run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.changes.outputs.frontend_mode != 'rollback'
-        with:
-          name: frontend-dist-${{ github.sha }}
-          path: ${{ runner.temp }}/frontend-artifact
-      - name: Verify artifact identity, exact file set and checksums
-        if: needs.changes.outputs.frontend_mode != 'rollback'
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import hashlib,os,pathlib,re,shutil
-          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'frontend-artifact'
-          sha=os.environ['GITHUB_SHA']
-          if (root/'release-sha').read_bytes() != (sha+'\n').encode(): raise SystemExit('Artifact SHA mismatch')
-          if (root/'wrangler.jsonc').read_bytes() != pathlib.Path('web/wrangler.jsonc').read_bytes(): raise SystemExit('Artifact config differs from exact checkout')
-          expected=set()
-          for line in (root/'SHA256SUMS').read_text(encoding='utf-8').splitlines():
-              match=re.fullmatch(r'([a-f0-9]{64})  (.+)',line)
-              if not match: raise SystemExit('Invalid checksum entry')
-              digest,name=match.groups()
-              relative=pathlib.PurePosixPath(name)
-              if relative.is_absolute() or '..' in relative.parts or relative.as_posix()!=name or '\\' in name: raise SystemExit('Unsafe checksum path')
-              if name not in ('wrangler.jsonc','release-sha') and not name.startswith('dist/'): raise SystemExit('Unexpected artifact file')
-              if name in expected: raise SystemExit('Duplicate checksum entry')
-              path=root/name
-              if not path.is_file() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest()!=digest: raise SystemExit('Artifact checksum mismatch')
-              expected.add(name)
-          paths=list(root.rglob('*'))
-          if any(path.is_symlink() for path in paths): raise SystemExit('Artifact contains symlink')
-          actual={path.relative_to(root).as_posix() for path in paths if path.is_file()}
-          if actual!=expected|{'SHA256SUMS'} or not {'dist/index.html','dist/__release','wrangler.jsonc','release-sha'}<=expected: raise SystemExit('Incomplete artifact manifest')
-          if (root/'dist/__release').read_bytes() != (sha+'\n').encode(): raise SystemExit('Static release identity mismatch')
-          shutil.copytree(root/'dist','web/dist')
-          for name in ('wrangler.jsonc','release-sha','SHA256SUMS'): shutil.copyfile(root/name,pathlib.Path('web')/name)
-          PY
-      - name: Publish, bootstrap or roll back exact Worker version
+      - name: Report artifact handoff (not a production deployment)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FRONTEND_MODE: ${{ needs.changes.outputs.frontend_mode }}
-          FRONTEND_VERSION_ID: ${{ inputs.frontend_version_id }}
+          SOURCE_EVENT: ${{ github.event_name }}
         run: |
-          set -euo pipefail
-          args=(--sha "$GITHUB_SHA" --mode "$FRONTEND_MODE" --summary "$RUNNER_TEMP/frontend-release-summary.json")
-          if [[ "$FRONTEND_MODE" == rollback ]]; then args+=(--version-id "$FRONTEND_VERSION_ID"); fi
-          python3 deploy/release-frontend.py "${args[@]}"
-      - name: Record frontend release evidence
-        if: always()
-        run: |
-          if [[ -f "$RUNNER_TEMP/frontend-release-summary.json" ]]; then
-            printf '\nFrontend release evidence (backend identity is independent):\n```json\n' >> "$GITHUB_STEP_SUMMARY"
-            cat "$RUNNER_TEMP/frontend-release-summary.json" >> "$GITHUB_STEP_SUMMARY"
-            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Frontend release did not produce lifecycle evidence; no success is asserted.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            printf '### Frontend artifact built, not deployed\n\n'
+            printf 'Artifact: `frontend-dist-%s` (30-day retention). Source run: `%s`.\n\n' "$GITHUB_SHA" "$GITHUB_RUN_ID"
+            printf 'Cloudflare credentials and production publishing belong only to `TheDemonTuan/vps-deploy`, environment `production`.\n\n'
+            if [[ "$SOURCE_EVENT" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+              printf 'Central scheduled publishing considers this artifact only after the **whole source run succeeds**, including the selected backend gates/deployment. This job does not assert it is live.\n\n'
+            else
+              printf 'Manual source runs do not publish automatically, even with `deploy=true`. After the whole source run succeeds, dispatch centrally:\n\n'
+              printf '```sh\ngh workflow run cloudflare-deploy.yml --repo TheDemonTuan/vps-deploy -f app=acb -f mode=publish -f source_run_id=%s\n```\n\n' "$GITHUB_RUN_ID"
+            fi
+            printf 'Bootstrap and exact-version rollback are central-only operations; frontend-only source runs do not SSH to or mutate the VPS unless `rehearse` or `import_account` selects the backend.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
