@@ -121,9 +121,16 @@ class PublisherTests(unittest.TestCase):
 
     def test_deploy_user_publish_and_restore_through_fixed_root_helper(self):
         import pwd
-        users = [user for user in pwd.getpwall() if user.pw_uid in (1000, 1001)]
-        self.assertTrue(users, 'isolated runner must have a deploy UID')
-        username = users[0].pw_name
+        runuser = shutil.which('runuser', path='/usr/sbin:/usr/bin:/sbin:/bin')
+        self.assertIsNotNone(runuser, 'runuser is required for the root publisher integration test')
+        prerequisite = 'run this test via sudo from a non-root passwordless-sudo test account'
+        username = os.environ.get('SUDO_USER')
+        self.assertTrue(username, prerequisite)
+        try:
+            user = pwd.getpwnam(username)
+        except KeyError:
+            self.fail(prerequisite)
+        self.assertNotEqual(user.pw_uid, 0, prerequisite)
         source = (Path(__file__).parents[1] / 'acb-route-publish.py').read_text()
         # A root-owned throwaway installation changes only the fixed constants;
         # no production helper, policy, directory or sudoers file is touched.
@@ -133,17 +140,17 @@ class PublisherTests(unittest.TestCase):
         helper = self.root / 'acb-route-publish'
         helper.write_text(source)
         helper.chmod(0o755)
-        direct = subprocess.run(['/usr/bin/runuser', '-u', username, '--', '/usr/bin/python3', '-c',  # nosec B603 B607
+        direct = subprocess.run([runuser, '-u', username, '--', '/usr/bin/python3', '-c',  # nosec B603 B607
                                  'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("bad")',
                                  str(self.destination)], capture_output=True, text=True, check=False)
         self.assertNotEqual(direct.returncode, 0)
         for data in (self.green, self.blue):
-            result = subprocess.run(['/usr/bin/runuser', '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
+            result = subprocess.run([runuser, '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
                                     input=json.dumps(self.envelope(data)), capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.destination.read_bytes(), data)
             self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o644)
-        rejected = subprocess.run(['/usr/bin/runuser', '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
+        rejected = subprocess.run([runuser, '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
                                   input=json.dumps(self.envelope(self.green.replace(b'acb-service', b'9router-service'))),
                                   capture_output=True, text=True, check=False)
         self.assertNotEqual(rejected.returncode, 0)
