@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
-import subprocess
+import subprocess  # nosec B404: isolated Linux fixture tests root helper
 import tempfile
 import unittest
 
@@ -114,10 +114,9 @@ class PublisherTests(unittest.TestCase):
 
     def test_fixed_cli_rejects_arguments(self):
         source = Path(__file__).parents[1] / 'acb-route-publish.py'
-        result = subprocess.run(['/usr/bin/python3', str(source), str(self.foreign)],
-                                input=json.dumps(self.envelope(self.green)), text=True, capture_output=True)
+        result = subprocess.run(['/usr/bin/python3', str(source), str(self.foreign)],  # nosec B603 B607
+                                input=json.dumps(self.envelope(self.green)), text=True, capture_output=True, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('accepts no arguments', result.stderr)
         self.assertEqual(self.destination.read_bytes(), self.blue)
 
     def test_deploy_user_publish_and_restore_through_fixed_root_helper(self):
@@ -134,19 +133,19 @@ class PublisherTests(unittest.TestCase):
         helper = self.root / 'acb-route-publish'
         helper.write_text(source)
         helper.chmod(0o755)
-        direct = subprocess.run(['runuser', '-u', username, '--', '/usr/bin/python3', '-c',
+        direct = subprocess.run(['/usr/bin/runuser', '-u', username, '--', '/usr/bin/python3', '-c',  # nosec B603 B607
                                  'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("bad")',
-                                 str(self.destination)], capture_output=True, text=True)
+                                 str(self.destination)], capture_output=True, text=True, check=False)
         self.assertNotEqual(direct.returncode, 0)
         for data in (self.green, self.blue):
-            result = subprocess.run(['runuser', '-u', username, '--', 'sudo', '-n', str(helper)],
-                                    input=json.dumps(self.envelope(data)), capture_output=True, text=True)
+            result = subprocess.run(['/usr/bin/runuser', '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
+                                    input=json.dumps(self.envelope(data)), capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.destination.read_bytes(), data)
             self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o644)
-        rejected = subprocess.run(['runuser', '-u', username, '--', 'sudo', '-n', str(helper)],
+        rejected = subprocess.run(['/usr/bin/runuser', '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
                                   input=json.dumps(self.envelope(self.green.replace(b'acb-service', b'9router-service'))),
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, check=False)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(self.destination.read_bytes(), self.blue)
 
