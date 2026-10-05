@@ -76,7 +76,7 @@ def scope(config):
 
 def validate(route, templates):
     try:
-        candidate = yaml.load(route, Loader=UniqueLoader)
+        candidate = yaml.load(route, Loader=UniqueLoader)  # nosec B506: UniqueLoader subclasses yaml.SafeLoader
         scope(candidate)
         trusted(templates, directory=True)
         matches = False
@@ -88,7 +88,7 @@ def validate(route, templates):
             data = template.read_bytes()
             if len(data) > LIMIT:
                 raise PublishError('Publisher template too large')
-            authorized = yaml.load(data, Loader=UniqueLoader)
+            authorized = yaml.load(data, Loader=UniqueLoader)  # nosec B506: UniqueLoader subclasses yaml.SafeLoader
             scope(authorized)
             matches = matches or candidate == authorized
             count += 1
