@@ -321,6 +321,16 @@ Source `frontend-build` produces immutable `frontend-dist-<sha>` with `dist/`, `
 
 Manual source runs, including `target=frontend deploy=true` and migration-branch builds, only produce artifacts and never trigger automatic publishing. Once the whole source run succeeds, explicitly run `gh workflow run cloudflare-deploy.yml --repo TheDemonTuan/vps-deploy -f app=acb -f mode=publish -f source_run_id=<run-id>`. Bootstrap is central `mode=bootstrap` with that verified source run; it must prove no conflicting route/domain ownership and cannot claim public verification before route/browser acceptance. Exact-version rollback is central `mode=rollback -f version_id=<UUID>` and does not depend on a new source build. Source dispatch has no bootstrap/rollback inputs or publisher mode. Do not merge this migration to main until both hosts pass browser/route acceptance and backend metadata migration completes; the production VPS retains its original hosting until then.
 
+
+### Intentional frontend rollback and publishing pause runbook
+Automatic publishing cadence is controlled by `cloudflare/registry/acb.json.automatic` on `TheDemonTuan/vps-deploy` main. To prevent scheduled republishing of a rolled-back release, operators MUST follow this sequence:
+1. **Pause**: Set `automatic: false` in `cloudflare/registry/acb.json` on central `main` and push.
+2. **Drain**: Wait for any queued or running central publication workflows for ACB to complete.
+3. **Rollback**: Dispatch exact rollback with the desired version UUID and SHA from the verified receipt:
+   `gh workflow run cloudflare-deploy.yml --repo TheDemonTuan/vps-deploy --ref main -f app=acb -f mode=rollback -f version_id=<UUID> -f sha=<SHA>`
+4. **Verify**: Probe public endpoints and review the generated rollback receipt.
+5. **Resume**: Keep `automatic: false` while preparing the source fix. After the fix passes full CI and is manually published and accepted, re-enable `automatic: true`.
+Candidate failure auto-restore operates in-flight during publishing without requiring registry changes; subsequent scheduled runs record candidate status accurately in deployment receipts.
 The former source `deploy/release-frontend.py` and its publisher tests moved to the central platform repository and are removed here; they are not a second operator publishing path. Source reusable CI still runs the route/verifier/classifier/migration safety tests and the full application suite. Cloudflare secrets are not needed by source builds or backend releases.
 
 After both hosts pass route/owner-browser acceptance, use `python3 deploy/migrate-static-hosting.py --root /opt/bank-event-gateway --bundle <absolute-verified-bundle> --snapshot <new-absolute-private-directory> --check`; `--apply` additionally requires `--proof <0600-two-host-receipt>`. Apply locks recovery setup before deployment, transforms only current/rollback-referenced metadata, preserves independently updated backend image references and backend Compose definitions, and publishes canonical state last. `.static-hosting-pending` blocks normal deployment until ACK/checksums complete or `--restore` reinstates original metadata. Snapshots/provenance distinguish transformed baselines from their original CI source; historical releases, DB, secrets and bank sessions are not migrated.
