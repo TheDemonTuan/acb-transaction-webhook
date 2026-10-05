@@ -16,6 +16,7 @@ FRONTEND_PATHS = {
     'deploy/cloudflare-routes.py',
     'deploy/verify-frontend.py',
     'deploy/tests/test_cloudflare_routes.py',
+    'deploy/tests/test_verify_frontend.py',
 }
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 

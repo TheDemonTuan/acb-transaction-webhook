@@ -9,8 +9,9 @@ import sys
 import tempfile
 import threading
 import unittest
+import time
 import urllib.parse
-
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("verify_frontend", Path(__file__).parents[1] / "verify-frontend.py")
 verify = importlib.util.module_from_spec(spec)
@@ -71,6 +72,12 @@ class FrontendTests(unittest.TestCase):
                                     "Cache-Control": "public, max-age=31536000, immutable", "ETag": '"fixture"'})
                     if self.headers.get("If-None-Match") and not owner.conditional_200:
                         status, body = 304, b""
+                elif path == "/api/public/v1/transactions":
+                    body = b'{"items":[],"summary":{}}'
+                    headers.update({"Content-Type": "application/json", "Cache-Control": "no-store"})
+                elif path == "/api/public/v1/events":
+                    body = b'event: initial_state\ndata: {"epoch":"ep1","watermark":0}\n\nevent: stream.heartbeat\ndata: {"slot":"green"}\n\n'
+                    headers.update({"Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform"})
                 else:
                     body = HTML
                     headers["Content-Type"] = "text/html; charset=utf-8"
@@ -83,7 +90,10 @@ class FrontendTests(unittest.TestCase):
                         self.send_header(key, item)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def log_message(self, *args):
                 pass
@@ -102,10 +112,10 @@ class FrontendTests(unittest.TestCase):
     def run_static(self, surface="local"):
         return verify.Verifier(self.origin, SHA, surface, verify.Artifact(self.artifact)).run()
 
-    def fail_mutation(self, mutation, diagnostic):
+    def fail_mutation(self, mutation, diagnostic, surface="local"):
         self.mutate = mutation
         with self.assertRaisesRegex(verify.VerificationError, diagnostic):
-            self.run_static()
+            self.run_static(surface)
 
     def test_static_local_checks_all_entries_and_credentials_without_cookies(self):
         self.assertIn("checksums verified", self.run_static())
@@ -299,7 +309,7 @@ class FrontendTests(unittest.TestCase):
             return 302, headers, b"synthetic sensitive body"
         self.mutate = mutation
         self.assertIn("SHA NOT verified", verify.verify_access(self.origin))
-        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.requests), 2)
 
     def test_access_rejects_challenge_wrong_status_or_destination(self):
         for status, location in [(200, "https://thedemontuan.cloudflareaccess.com/cdn-cgi/access/login/fixture"),
@@ -354,6 +364,94 @@ class FrontendTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaisesRegex(verify.VerificationError, "unsafe artifact"):
                 artifact.bytes_for(path)
 
+    def test_viewer_probes_api_and_sse_heartbeat(self):
+        summary = self.run_static("viewer")
+        self.assertIn("API JSON and SSE heartbeat verified", summary)
+        paths = [urllib.parse.urlsplit(path).path for path, _ in self.requests]
+        self.assertIn("/api/public/v1/transactions", paths)
+        self.assertIn("/api/public/v1/events", paths)
 
+    def test_local_never_probes_backend(self):
+        self.run_static("local")
+        paths = [urllib.parse.urlsplit(path).path for path, _ in self.requests]
+        self.assertFalse(any(p.startswith("/api/") for p in paths))
+
+    def test_api_swallowed_by_spa_fails(self):
+        def mutation(path, status, headers, body):
+            if urllib.parse.urlsplit(path).path == "/api/public/v1/transactions":
+                headers = {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=0, must-revalidate"}
+                return 200, headers, HTML
+            return status, headers, body
+        self.fail_mutation(mutation, "MIME mismatch", surface="viewer")
+
+    def test_api_malformed_json_or_wrong_shape_fails(self):
+        for bad_body, err in [(b"not-json", "invalid JSON"), (b'{"items":"not-list"}', "items list"), (b'[]', "JSON object")]:
+            with self.subTest(bad_body=bad_body):
+                def mutation(path, status, headers, body):
+                    if urllib.parse.urlsplit(path).path == "/api/public/v1/transactions":
+                        headers["Content-Type"] = "application/json"
+                        headers["Cache-Control"] = "no-store"
+                        return 200, headers, bad_body
+                    return status, headers, body
+                self.fail_mutation(mutation, err, surface="viewer")
+
+    def test_api_empty_items_is_valid(self):
+        def mutation(path, status, headers, body):
+            if urllib.parse.urlsplit(path).path == "/api/public/v1/transactions":
+                headers["Content-Type"] = "application/json"
+                headers["Cache-Control"] = "no-store"
+                return 200, headers, b'{"items":[],"summary":{}}'
+            return status, headers, body
+        self.mutate = mutation
+        self.assertIn("API JSON and SSE heartbeat verified", self.run_static("viewer"))
+
+    def test_sse_wrong_mime_fails(self):
+        def mutation(path, status, headers, body):
+            if urllib.parse.urlsplit(path).path == "/api/public/v1/events":
+                headers = {"Content-Type": "text/plain", "Cache-Control": "no-cache, no-transform"}
+                return 200, headers, b"data: test\n\n"
+            return status, headers, body
+        self.fail_mutation(mutation, "event stream MIME mismatch", surface="viewer")
+
+    def test_sse_missing_heartbeat_or_eof_fails(self):
+        def mutation(path, status, headers, body):
+            if urllib.parse.urlsplit(path).path == "/api/public/v1/events":
+                headers = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform"}
+                return 200, headers, b'event: initial_state\ndata: {"epoch":"ep1","watermark":0}\n\n'
+            return status, headers, body
+        self.fail_mutation(mutation, "stream closed prematurely", surface="viewer")
+
+    def test_sse_malformed_target_frame_fails(self):
+        def mutation(path, status, headers, body):
+            if urllib.parse.urlsplit(path).path == "/api/public/v1/events":
+                headers = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform"}
+                return 200, headers, b'event: initial_state\ndata: {"epoch":"ep1"}\n\nevent: stream.heartbeat\ndata: not-json\n\n'
+            return status, headers, body
+        self.fail_mutation(mutation, "malformed stream.heartbeat payload", surface="viewer")
+
+    def test_sse_deadline_bounded(self):
+        def delayed(path, status, headers, body):
+            if urllib.parse.urlsplit(path).path == "/api/public/v1/events":
+                time.sleep(0.1)
+                return status, headers, body
+            return status, headers, body
+        self.mutate = delayed
+        client = verify.Client(self.origin)
+        with patch.object(verify, "TIMEOUT", 0.03):
+            with self.assertRaisesRegex(verify.VerificationError, "exceeded"):
+                client.stream_events("/api/public/v1/events")
+
+    def test_access_rejects_when_api_status_fails(self):
+        def mutation(path, status, headers, body):
+            p = urllib.parse.urlsplit(path).path
+            if p == "/":
+                headers["Location"] = "https://thedemontuan.cloudflareaccess.com/cdn-cgi/access/login/fixture?opaque=value"
+                return 302, headers, b""
+            elif p == "/api/v1/status":
+                return 200, {"Content-Type": "application/json"}, b"{}"
+            return status, headers, body
+        self.mutate = mutation
+        with self.assertRaisesRegex(verify.VerificationError, "302"):
+            verify.verify_access(self.origin)
 if __name__ == "__main__":
     unittest.main()

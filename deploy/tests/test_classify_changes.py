@@ -15,7 +15,8 @@ SHA_B = 'b' * 40
 class ClassifyChangesTests(unittest.TestCase):
     def test_path_contract(self):
         for path in ['web/src/app.tsx', 'deploy/cloudflare-routes.py',
-                     'deploy/verify-frontend.py', 'deploy/tests/test_cloudflare_routes.py']:
+                     'deploy/verify-frontend.py', 'deploy/tests/test_cloudflare_routes.py',
+                     'deploy/tests/test_verify_frontend.py']:
             with self.subTest(path=path):
                 self.assertEqual(classifier.classify_paths([path]), (True, False))
         for path in ['.github/workflows/deploy.yml', '.github/workflows/ci.yml', 'scripts/verify.sh']:
