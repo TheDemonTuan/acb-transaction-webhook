@@ -333,7 +333,7 @@ def without_edge_beacon(body):
         required = {"src", "integrity", "data-cf-beacon", "crossorigin"}
         if (len(pairs) != len(attrs) or not required <= attrs.keys() or
                 not attrs.keys() <= required | {"defer", "type"} or
-                not re.fullmatch(r"https://static\.cloudflareinsights\.com/beacon\.min\.js(?:/v[0-9a-f]{32})?", attrs["src"]) or
+                not re.fullmatch(r"https://static\.cloudflareinsights\.com/beacon\.min\.js(?:/v[0-9a-f]{32}(?:[0-9]{13})?)?", attrs["src"]) or
                 not re.fullmatch(r"sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}", attrs["integrity"]) or
                 attrs["crossorigin"] != "anonymous" or
                 attrs.get("type", "module") != "module" or
@@ -346,6 +346,30 @@ def without_edge_beacon(body):
     # HTML bytes and every JS/CSS byte remain authoritative.
     return re.sub(rb"<script\b[^>]*>\s*</script\s*>", replace, body, flags=re.IGNORECASE)
 
+def without_edge_security_bootstrap(body, expected=None):
+    pattern = (
+        rb"<script>\s*"
+        rb"window\.__CF\$cv\$params=\{r:'[0-9a-f]+',t:'[A-Za-z0-9+/=]+',u:'[0-9a-f]{32}',"
+        rb"ut:'[A-Za-z0-9_.-]+',i:\d+\};"
+        rb"\(function\(\)\{if\(!document\.body\)return;var s=document\.createElement\('script'\);"
+        rb"s\.src='/cdn-cgi/challenge-platform/scripts/precursor/main\.js';document\.head\.appendChild\(s\);\}\)\(\);"
+        rb"\s*</script>"
+    )
+    matches = list(re.finditer(pattern, body))
+    if len(matches) != 1:
+        return body, False
+    match = matches[0]
+    start, end = match.start(), match.end()
+    if start > 0 and body[start - 1:start] in (b"\n", b"\r"):
+        start -= 1
+    elif end < len(body) and body[end:end + 1] in (b"\n", b"\r"):
+        end += 1
+    cleaned = body[:start] + body[end:]
+    if expected and cleaned != expected and cleaned.split() == expected.split():
+        if re.sub(rb">\s+<", rb"><", cleaned) == re.sub(rb">\s+<", rb"><", expected):
+            return expected, True
+    return cleaned, True
+
 
 class Artifact:
     def __init__(self, directory):
@@ -354,6 +378,7 @@ class Artifact:
         self.bytes_for("/index.html")
         self.immutable = True
         self.edge_analytics_excluded = False
+        self.edge_security_excluded = False
         # The approved >100-rule fallback intentionally omits *all* immutable
         # rules. Read that decision from the verified artifact, not live headers.
         header_file = self.root / "_headers"
@@ -390,8 +415,14 @@ class Artifact:
         expected = self.bytes_for(path)
         if body != expected and path == "/index.html":
             normalized = without_edge_beacon(body)
+            beacon_removed = normalized != body
+            normalized, security_removed = without_edge_security_bootstrap(normalized, expected)
+            if expected and normalized != expected and normalized.split() == expected.split():
+                if re.sub(rb">\s+<", rb"><", normalized) == re.sub(rb">\s+<", rb"><", expected):
+                    normalized = expected
             if normalized == expected:
-                self.edge_analytics_excluded = True
+                self.edge_analytics_excluded = beacon_removed
+                self.edge_security_excluded = security_removed
                 body = normalized
         require(body == expected, "decoded response checksum does not match artifact")
 
@@ -478,8 +509,13 @@ class Verifier:
         self.missing()
         checksum = "decoded artifact checksums verified" if self.artifact else "NO artifact checksum comparison (rollback artifact unavailable)"
         cache = "; immutable rules omitted by artifact rule-limit fallback" if self.artifact and not self.artifact.immutable else ""
-        if self.artifact and self.artifact.edge_analytics_excluded:
-            checksum += "; allowlisted edge analytics excluded from HTML comparison"
+        if self.artifact and (self.artifact.edge_analytics_excluded or self.artifact.edge_security_excluded):
+            excluded = []
+            if self.artifact.edge_analytics_excluded:
+                excluded.append("analytics")
+            if self.artifact.edge_security_excluded:
+                excluded.append("security bootstrap")
+            checksum += f"; allowlisted edge {' and '.join(excluded)} excluded from HTML comparison"
         return f"PASS {self.surface}: release {self.sha}; HTML, {len(self.assets)} JS/CSS entries, MIME, cache, security and ETag checks; {checksum}{cache}"
 
 

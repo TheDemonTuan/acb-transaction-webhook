@@ -541,15 +541,17 @@ class Migration:
         opener = urllib.request.build_opener(NoRedirect())
         sha = proof["hosts"][0]["release_sha"]
         try:
+            headers = {"Accept": "text/plain", "User-Agent": "acb-verifier/1"}
             request = urllib.request.Request("https://transactions.tuannguyenviet.site/__release?smoke=" + sha,
-                                             headers={"Accept": "text/plain"})
+                                             headers=headers)
             with opener.open(request, timeout=15) as response:
                 if (response.status != 200 or response.headers.get_content_type() != "text/plain"
                         or response.read(128) != (sha + "\n").encode()
                         or "no-store" not in response.headers.get("Cache-Control", "").lower()):
                     raise MigrationError("public viewer release is not verified Worker identity")
             try:
-                with opener.open("https://bank.tuannguyenviet.site/", timeout=15):
+                bank_req = urllib.request.Request("https://bank.tuannguyenviet.site/", headers={"User-Agent": "acb-verifier/1"})
+                with opener.open(bank_req, timeout=15):
                     raise MigrationError("bank Access redirect missing")
             except urllib.error.HTTPError as response:
                 location = urllib.parse.urlsplit(response.headers.get("Location", ""))
