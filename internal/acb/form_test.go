@@ -182,3 +182,38 @@ func TestExtractHistoryFormMultipleFormsAndSelect(t *testing.T) {
 		t.Fatalf("expected q to be isolated, but got %q", form.Fields["q"])
 	}
 }
+
+func TestExtractHistoryFormSuccessfulControls(t *testing.T) {
+	form, err := ExtractHistoryForm(`<form action="/acbib/Request">
+	<input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="fresh">
+	<input name="dse_nextEventName" value="byMonth">
+	<input type="radio" name="activeDatetimeYN" value="N" checked><input type="radio" name="activeDatetimeYN" value="Y">
+	<input type="radio" name="activeDatetimeByMonth" value="Y" checked disabled>
+	<input type="hidden" name="CheckRef" value="false"><input type="checkbox" name="CheckRef" value="true">
+	<input type="checkbox" name="enabled" checked><input name="disabled" value="bad" disabled>
+	<input type="submit" name="submit" value="bad"><input type="file" name="file" value="bad">
+	<textarea name="note">text &amp; content</textarea>
+	<select name="AccountNbr"><option value="decoy" selected disabled>bad</option><option value="target" selected>good</option></select>
+	<select name="fallback"><option value="" disabled>bad</option><option value="">empty</option><option value="wrong">later</option></select>
+	</form><form action="/other"><input name="dse_nextEventName" value="byDate"><input name="dse_sessionId" value="foreign"></form>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"activeDatetimeYN": "N", "CheckRef": "false", "enabled": "on", "note": "text & content", "AccountNbr": "target", "fallback": "", "dse_nextEventName": "byMonth"} {
+		if got, ok := form.Fields[key]; !ok || got != want {
+			t.Fatalf("%s: got %q present=%v want %q", key, got, ok, want)
+		}
+	}
+	for _, key := range []string{"activeDatetimeByMonth", "disabled", "submit", "file", "dse_sessionId"} {
+		if _, ok := form.Fields[key]; ok {
+			t.Fatalf("retained unsuccessful/foreign control %s", key)
+		}
+	}
+}
+
+func TestExtractHistoryFormDoesNotMergeIncompleteForms(t *testing.T) {
+	_, err := ExtractHistoryForm(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"></form><form action="/other"><input name="dse_processorState" value="foreign"></form>`)
+	if err == nil {
+		t.Fatal("merged state across forms")
+	}
+}

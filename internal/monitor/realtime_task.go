@@ -396,6 +396,11 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 			slog.Warn("ACB session expired during history fetch; transitioned to AUTH_REQUIRED", "phase", "history", "generation", conn.Generation, "status", histResp.StatusCode, "classifier_reason", histResp.ClassifierReason, "path", acb.SafePath(histResp.URL))
 			return t.finishPoll(ctx, "AUTH_REQUIRED", authFail.Reason)
 		}
+		if errors.Is(histErr, acb.ErrHistoryUnavailable) {
+			t.poll.Classifier = string(histResp.Kind)
+			t.poll.HTTPStatus = histResp.StatusCode
+			return t.finishPoll(ctx, "PARTIAL", "HISTORY_UNAVAILABLE")
+		}
 		if errors.Is(histErr, acb.ErrConversationReset) {
 			return t.finishPoll(ctx, "PARTIAL", "CONVERSATION_RESET")
 		}
@@ -542,6 +547,13 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 						t.poll.AuthConfirmed = true
 						return t.finishPoll(ctx, "AUTH_REQUIRED", authFail.Reason)
 					}
+					if errors.Is(nextErr, acb.ErrHistoryUnavailable) {
+						t.poll.Classifier = string(nextResp.Kind)
+						t.poll.HTTPStatus = nextResp.StatusCode
+						isPartial = true
+						pollErr = errors.New("HISTORY_UNAVAILABLE")
+						break
+					}
 					if errors.Is(nextErr, acb.ErrConversationReset) {
 						isPartial = true
 						pollErr = nextErr
@@ -686,6 +698,11 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 			t.poll.Classifier = string(authFail.Kind)
 			t.poll.AuthConfirmed = true
 			return t.finishPoll(ctx, "AUTH_REQUIRED", authFail.Reason)
+		}
+		if errors.Is(err, acb.ErrHistoryUnavailable) {
+			t.poll.Classifier = string(resp.Kind)
+			t.poll.HTTPStatus = resp.StatusCode
+			return t.finishPoll(ctx, "PARTIAL", "HISTORY_UNAVAILABLE")
 		}
 		if errors.Is(err, acb.ErrConversationReset) {
 			return t.finishPoll(ctx, "PARTIAL", "CONVERSATION_RESET")

@@ -166,48 +166,73 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 			if node.Type == html.ElementNode {
 				tag := strings.ToLower(node.Data)
 				switch tag {
-				case "input", "textarea":
-					var name, value string
+				case "input", "textarea", "select":
+					var name, value, inputType string
+					var disabled, checked, valuePresent bool
 					for _, attr := range node.Attr {
 						switch strings.ToLower(attr.Key) {
 						case "name":
 							name = attr.Val
 						case "value":
-							value = attr.Val
+							value, valuePresent = attr.Val, true
+						case "type":
+							inputType = strings.ToLower(attr.Val)
+						case "disabled":
+							disabled = true
+						case "checked":
+							checked = true
 						}
 					}
-					if name != "" {
-						state.Fields[name] = value
+					if name == "" || disabled {
+						return
 					}
-				case "select":
-					var name string
-					for _, attr := range node.Attr {
-						if strings.EqualFold(attr.Key, "name") {
-							name = attr.Val
+					switch tag {
+					case "input":
+						switch inputType {
+						case "submit", "button", "reset", "image", "file":
+							return
+						case "radio", "checkbox":
+							if !checked {
+								return
+							}
+							if !valuePresent {
+								value = "on"
+							}
 						}
-					}
-					if name != "" {
-						var selectedVal, firstVal string
-						var foundSelected bool
+					case "textarea":
+						var content strings.Builder
+						for child := node.FirstChild; child != nil; child = child.NextSibling {
+							if child.Type == html.TextNode {
+								content.WriteString(child.Data)
+							}
+						}
+						value = content.String()
+					case "select":
+						var found bool
 						var scanOption func(*html.Node)
 						scanOption = func(opt *html.Node) {
-							if opt.Type == html.ElementNode && strings.EqualFold(opt.Data, "option") {
-								var optVal string
-								var isSelected bool
+							if opt.Type == html.ElementNode {
 								for _, attr := range opt.Attr {
-									if strings.EqualFold(attr.Key, "value") {
-										optVal = attr.Val
-									}
-									if strings.EqualFold(attr.Key, "selected") {
-										isSelected = true
+									if strings.EqualFold(attr.Key, "disabled") {
+										return
 									}
 								}
-								if firstVal == "" {
-									firstVal = optVal
-								}
-								if isSelected {
-									selectedVal = optVal
-									foundSelected = true
+								if strings.EqualFold(opt.Data, "option") {
+									optionValue := nodeText(opt)
+									isSelected := false
+									for _, attr := range opt.Attr {
+										if strings.EqualFold(attr.Key, "value") {
+											optionValue = attr.Val
+										}
+										if strings.EqualFold(attr.Key, "selected") {
+											isSelected = true
+										}
+									}
+									if !found || isSelected {
+										value = optionValue
+									}
+									found = true
+									return
 								}
 							}
 							for c := opt.FirstChild; c != nil; c = c.NextSibling {
@@ -215,12 +240,11 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 							}
 						}
 						scanOption(node)
-						if foundSelected {
-							state.Fields[name] = selectedVal
-						} else if firstVal != "" {
-							state.Fields[name] = firstVal
+						if !found {
+							return
 						}
 					}
+					state.Fields[name] = value
 				}
 			}
 			for child := node.FirstChild; child != nil; child = child.NextSibling {
@@ -256,14 +280,10 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 		return bestState, nil
 	}
 
-	whole := extractFields(doc)
-	if whole.Action == "" && len(forms) > 0 {
-		for _, attr := range forms[0].Attr {
-			if strings.EqualFold(attr.Key, "action") {
-				whole.Action = attr.Val
-			}
-		}
+	if len(forms) > 0 {
+		return FormState{}, errors.New("ACB account form state is incomplete")
 	}
+	whole := extractFields(doc)
 	if whole.Action == "" {
 		whole.Action = "/acbib/Request"
 	}

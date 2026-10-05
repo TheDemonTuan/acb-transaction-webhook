@@ -604,6 +604,11 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 				t.finish(authErr)
 				return scheduler.TaskStepResult{Done: true, Error: authErr, Outcome: scheduler.OutcomeAuth}, authErr
 			}
+			if errors.Is(histErr, acb.ErrHistoryUnavailable) {
+				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "HISTORY_UNAVAILABLE", "HISTORY_UNAVAILABLE")
+				t.finish(histErr)
+				return scheduler.TaskStepResult{Done: true, Error: histErr, Outcome: scheduler.OutcomeFatal}, histErr
+			}
 			if errors.Is(histErr, acb.ErrConversationReset) {
 				if dayResets == 0 {
 					dayResets++

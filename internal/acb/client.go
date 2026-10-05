@@ -386,58 +386,53 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	targetAccount, fromDate, toDate := hFields["AccountNbr"], hFields["FromDate"], hFields["ToDate"]
 	resp, err := c.do(req, hFields["AccountNbr"])
 	if err != nil {
 		return Response{}, err
 	}
 	c.logHistoryContract("history", hFields, resp)
-	if isAuthChallengeKind(resp.Kind) {
+	if isAuthChallengeKind(resp.Kind) || (resp.StatusCode == http.StatusOK && resp.Kind == AccountDetailPage) {
+		defer func() {
+			if c.bootstrapFields != nil {
+				c.bootstrapFields["AccountNbr"] = targetAccount
+			}
+		}()
+		if err := ctx.Err(); err != nil {
+			return resp, err
+		}
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 		if probeErr != nil {
-			var authFail *AuthFailure
-			if errors.As(probeErr, &authFail) {
-				return probeResp, probeErr
+			// An authenticated page with unusable state is a protocol failure.
+			if probeResp.StatusCode == http.StatusOK && (probeResp.Kind == AccountDetailPage || probeResp.Kind == HistoryPage) {
+				return probeResp, ErrHistoryUnavailable
 			}
-			return resp, probeErr
+			return probeResp, probeErr
 		}
 		if !resynced {
-			return resp, ErrInconclusiveAuth
+			return probeResp, ErrInconclusiveAuth
 		}
-		slog.Info("ACB session state resynchronized after conversational token rejected in history", "classifier_reason", probeResp.ClassifierReason)
+		fresh, extractErr := ExtractHistoryForm(probeResp.Body)
+		if extractErr != nil || fresh.Fields["dse_operationName"] != "ibkacctDetailProc" || fresh.Fields["dse_sessionId"] == "" || fresh.Fields["dse_processorState"] == "" || c.bootstrap == nil {
+			return probeResp, ErrHistoryUnavailable
+		}
+		slog.Info("ACB history form resynchronized", "kind", probeResp.Kind, "classifier_reason", probeResp.ClassifierReason)
 		if isContinuation {
 			return probeResp, ErrConversationReset
 		}
-		// Page 1 replay: reuse target account and dates from fields
-		if fields != nil && fields["AccountNbr"] != "" && c.bootstrapFields != nil {
-			c.bootstrapFields["AccountNbr"] = fields["AccountNbr"]
+		if err := ctx.Err(); err != nil {
+			return probeResp, err
 		}
-		var replayFields map[string]string
-		if date != "" {
-			replayFields, err = PrepareHistoryFieldsForDate(c.bootstrapFields, date)
-		} else if fields != nil && fields["_explicitRange"] == "true" && fields["FromDate"] != "" && fields["ToDate"] != "" {
-			replayFields, err = PrepareHistoryFieldsWithRange(c.bootstrapFields, fields["FromDate"], fields["ToDate"])
-		} else {
-			replayFields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
-		}
+		replayFields, err := PrepareHistoryFieldsWithRange(fresh.Fields, fromDate, toDate)
 		if err != nil {
-			return probeResp, fmt.Errorf("prepare history replay after conversation resync: %w", err)
+			return probeResp, ErrHistoryUnavailable
 		}
-		if c.bootstrapFields != nil && c.bootstrapFields["AccountNbr"] != "" && replayFields["AccountNbr"] == "" {
-			replayFields["AccountNbr"] = c.bootstrapFields["AccountNbr"]
-		}
-		replayFields["dse_nextEventName"] = "byDate"
-		replayFields["activeDatetimeYN"] = "N"
-		delete(replayFields, "activeDatetimeByMonth")
-		delete(replayFields, "MonthCurr")
-		delete(replayFields, "YearCurr")
+		replayFields["AccountNbr"] = targetAccount
 		replayVals := url.Values{}
 		for k, v := range replayFields {
 			replayVals.Set(k, v)
 		}
 		replayURL := c.bootstrap
-		if replayURL == nil {
-			replayURL = requestURL
-		}
 		replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
 		if err != nil {
 			return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
@@ -449,7 +444,20 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		}
 		c.logHistoryContract("replay", replayFields, replayResp)
 		if isAuthChallengeKind(replayResp.Kind) {
-			return replayResp, &AuthFailure{Kind: replayResp.Kind, Reason: replayResp.ClassifierReason}
+			return replayResp, ErrInconclusiveAuth
+		}
+		if replayResp.StatusCode == http.StatusOK && replayResp.Kind != MaintenancePage {
+			if replayResp.Kind != HistoryPage {
+				return replayResp, ErrHistoryUnavailable
+			}
+			form, formErr := ExtractHistoryForm(replayResp.Body)
+			if formErr != nil || targetAccount == "" {
+				return replayResp, ErrHistoryUnavailable
+			}
+			account := form.Fields["AccountNbr"]
+			if (account != "" && account != targetAccount) || (account == "" && replayResp.RequestedAccount != targetAccount) {
+				return replayResp, ErrHistoryUnavailable
+			}
 		}
 		return replayResp, nil
 	}

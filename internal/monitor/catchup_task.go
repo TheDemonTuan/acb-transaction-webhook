@@ -528,6 +528,14 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			if errors.As(histErr, &authFail) {
 				return t.authRequired(ctx, conn, authFail, histResp, "history")
 			}
+			if errors.Is(histErr, acb.ErrHistoryUnavailable) {
+				t.poll.Classifier = string(histResp.Kind)
+				t.poll.HTTPStatus = histResp.StatusCode
+				_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "HISTORY_UNAVAILABLE", "HISTORY_UNAVAILABLE")
+				_ = t.finishPoll(ctx, "FAILED", "HISTORY_UNAVAILABLE")
+				t.finishDone(histErr)
+				return scheduler.TaskStepResult{Done: true, Error: histErr, Outcome: scheduler.OutcomeFatal}, histErr
+			}
 			if errors.Is(histErr, acb.ErrConversationReset) {
 				if dayResets == 0 {
 					dayResets++

@@ -61,6 +61,7 @@ func (c *Client) logHistoryContract(phase string, fields map[string]string, resp
 		responseFields[name] = safeHistoryControl(name, form.Fields[name])
 	}
 	slog.Info("ACB history contract diagnostic", "phase", phase, "request", request, "status", response.StatusCode,
+		"kind", response.Kind, "classifier_reason", response.ClassifierReason,
 		"response_form", responseFields, "form_valid", formErr == nil, "controls", controls,
 		"parse_valid", parseErr == nil, "rows", len(page.Transactions),
 		"transaction_days", HistoryDayCounts(page.Transactions), "effective_days", HistoryEffectiveDayCounts(page.Transactions),

@@ -36,6 +36,9 @@ var (
 	// cursor must be discarded and restarted from page 1.
 	ErrConversationReset = errors.New("ACB conversational state reset; pagination cursor invalidated")
 
+	// ErrHistoryUnavailable is an authenticated protocol failure, not empty history.
+	ErrHistoryUnavailable = errors.New("ACB history response unavailable after form resynchronization")
+
 	// ErrInconclusiveAuth indicates that a login-like response was received but a
 	// subsequent probe could not confirm authentication loss (e.g. network/5xx error
 	// or missing form state).
