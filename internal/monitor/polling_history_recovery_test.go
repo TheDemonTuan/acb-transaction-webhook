@@ -31,6 +31,7 @@ type protocolRecoveryBank struct {
 	repeatDetail     bool
 	summaryProbe     bool
 	incompleteDetail bool
+	tableOwned       bool
 	requestDate      string
 	pages            int
 	page             int
@@ -129,6 +130,10 @@ func (b *protocolRecoveryBank) RoundTrip(request *http.Request) (*http.Response,
 				}
 			}
 		}
+	}
+	if b.tableOwned {
+		body = strings.ReplaceAll(body, "<form ", "<table><form ")
+		body = strings.ReplaceAll(body, "</form>", "<tr><td></td></tr></form></table>")
 	}
 	b.events = append(b.events, phase)
 	block := b.blockPhase == phase
@@ -513,5 +518,63 @@ func TestBootstrapUnavailableRealClientDoesNotPersistOrVerify(t *testing.T) {
 			}
 			protocolRecoveryEvents(t, bank, "stale,get,detail")
 		})
+	}
+}
+
+func TestSessionVerifierAcceptsProvenTableOwnership(t *testing.T) {
+	ctx := context.Background()
+	bank := &protocolRecoveryBank{tableOwned: true, requestDate: time.Now().In(acb.DefaultLocation).Format("02/01/2006")}
+	store, conn, _, client, loader, mon := protocolRecoveryFixture(t, bank)
+	before, err := store.Session(ctx, conn.ID, conn.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := NewSessionVerifier(loader, client).VerifySession(ctx, conn.ID, conn.Generation, before.Envelope)
+	if err != nil || len(verified) == 0 {
+		t.Fatalf("native-owned table history rejected after OTP: %v", err)
+	}
+	// A verified candidate alone must not commit or ingest until the fenced
+	// finalizer/consumer accepts it. This is the existing verifier contract.
+	current, err := store.Connection(ctx)
+	if err != nil || current.Generation != conn.Generation || current.State != "MONITORING" {
+		t.Fatal("verification changed auth generation/state")
+	}
+	if protocolRecoveryCount(t, store, "transactions") != 0 {
+		t.Fatal("verification ingested transactions")
+	}
+	after, err := store.Session(ctx, conn.ID, conn.Generation)
+	if err != nil || !bytes.Equal(before.Envelope, after.Envelope) {
+		t.Fatal("verifier committed candidate before finalization")
+	}
+	if err := loader.Persist(ctx, conn.ID, conn.Generation); err != nil {
+		t.Fatal(err)
+	}
+	bank.requestDate = protocolRecoveryDate
+	protocolRecoveryStep(t, mon, conn, true)
+	polls, err := store.ListPollRuns(ctx, 1)
+	if err != nil || len(polls) != 1 || polls[0].Status != "SUCCEEDED" || polls[0].Classifier != string(acb.HistoryPage) || polls[0].RowsSeen != 2 {
+		t.Fatalf("verified table ownership did not reach successful polling: %+v %v", polls, err)
+	}
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 2 {
+		t.Fatalf("journal differs after verified table poll: %+v %v", txns, err)
+	}
+	for _, txn := range txns {
+		switch txn.SemanticKey {
+		case "ACB:TX101":
+			if txn.Credit != 100000 || txn.Debit != 0 {
+				t.Fatal("wrong credit")
+			}
+		case "ACB:TX102":
+			if txn.Debit != 50000 || txn.Credit != 0 {
+				t.Fatal("wrong debit")
+			}
+		default:
+			t.Fatal("wrong transaction identity")
+		}
+	}
+	protocolRecoveryStep(t, mon, conn, true)
+	if protocolRecoveryCount(t, store, "transactions") != 2 || protocolRecoveryCount(t, store, "events") != 1 || protocolRecoveryCount(t, store, "transaction_quarantine") != 0 {
+		t.Fatal("verified table polling broke dedupe/quarantine")
 	}
 }

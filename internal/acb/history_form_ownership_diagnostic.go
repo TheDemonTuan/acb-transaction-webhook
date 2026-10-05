@@ -97,7 +97,7 @@ func historyOwnershipKeys(fields map[string]string) []string {
 	return keys
 }
 
-// This is evidence only. Source spans never supply outbound request fields.
+// This value-free diagnostic is evidence only, not outbound request state.
 // Tokenizer raw byte lengths delimit source slices without copying markup.
 func diagnoseHistoryFormOwnership(markup string, doc *html.Node) historyFormOwnershipDiagnostic {
 	result := historyFormOwnershipDiagnostic{}
@@ -125,94 +125,8 @@ func diagnoseHistoryFormOwnership(markup string, doc *html.Node) historyFormOwne
 			}
 		}
 	})
-	z := html.NewTokenizer(strings.NewReader(markup))
-	var spans []historySourceFormSpan
-	var active []int
-	var stack []string
-	offset := 0
-	unsupported := func(tag string) bool { return tag == "select" || tag == "template" || tag == "svg" || tag == "math" }
-	for {
-		kind := z.Next()
-		start := offset
-		offset += len(z.Raw())
-		if kind == html.ErrorToken {
-			break
-		}
-		if kind != html.StartTagToken && kind != html.SelfClosingTagToken && kind != html.EndTagToken {
-			continue
-		}
-		token := z.Token()
-		tag := token.Data
-		if kind == html.EndTagToken {
-			if tag == "form" && len(active) > 0 {
-				index := active[len(active)-1]
-				if index >= 0 {
-					spans[index].end = offset
-					spans[index].candidate.Balanced = true
-				}
-				active = active[:len(active)-1]
-			}
-			for i := len(stack) - 1; i >= 0; i-- {
-				if stack[i] == tag {
-					stack = stack[:i]
-					break
-				}
-			}
-			continue
-		}
-		if unsupported(tag) {
-			for _, index := range active {
-				if index >= 0 {
-					spans[index].candidate.UnsupportedContext = true
-				}
-			}
-		}
-		if tag == "form" {
-			result.Forms++
-			if result.Forms > historyOwnershipCandidateLimit {
-				result.Truncated = true
-			}
-			span := historySourceFormSpan{start: start, candidate: historyFormOwnershipCandidate{Ordinal: result.Forms}}
-			for _, a := range token.Attr {
-				switch a.Key {
-				case "id":
-					span.id = a.Val
-				case "action":
-					span.action = a.Val
-				}
-			}
-			span.candidate.ActionKind = historyOwnershipAction(span.action)
-			for _, context := range stack {
-				if context == "table" {
-					span.candidate.OpenedInTable = true
-				}
-				if unsupported(context) {
-					span.candidate.UnsupportedContext = true
-				}
-			}
-			if len(active) > 0 {
-				span.candidate.NestedForm = true
-				for _, index := range active {
-					if index >= 0 {
-						spans[index].candidate.NestedForm = true
-					}
-				}
-			}
-			if len(spans) < historyOwnershipCandidateLimit {
-				spans = append(spans, span)
-				active = append(active, len(spans)-1)
-			} else {
-				active = append(active, -1)
-			}
-		}
-		if kind == html.StartTagToken {
-			switch tag {
-			case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
-			default:
-				stack = append(stack, tag)
-			}
-		}
-	}
+	spans, total, truncated := historySourceFormSpans(markup)
+	result.Forms, result.Truncated = total, truncated
 	limit := len(spans)
 	if limit > historyOwnershipCandidateLimit {
 		limit = historyOwnershipCandidateLimit
@@ -286,4 +200,97 @@ func diagnoseHistoryFormOwnership(markup string, doc *html.Node) historyFormOwne
 		result.Candidates = append(result.Candidates, candidate)
 	}
 	return result
+}
+
+func historySourceFormSpans(markup string) ([]historySourceFormSpan, int, bool) {
+	var result historyFormOwnershipDiagnostic
+	z := html.NewTokenizer(strings.NewReader(markup))
+	var spans []historySourceFormSpan
+	var active []int
+	var stack []string
+	offset := 0
+	unsupported := func(tag string) bool { return tag == "select" || tag == "template" || tag == "svg" || tag == "math" }
+	for {
+		kind := z.Next()
+		start := offset
+		offset += len(z.Raw())
+		if kind == html.ErrorToken {
+			break
+		}
+		if kind != html.StartTagToken && kind != html.SelfClosingTagToken && kind != html.EndTagToken {
+			continue
+		}
+		token := z.Token()
+		tag := token.Data
+		if kind == html.EndTagToken {
+			if tag == "form" && len(active) > 0 {
+				index := active[len(active)-1]
+				if index >= 0 {
+					spans[index].end = offset
+					spans[index].candidate.Balanced = true
+				}
+				active = active[:len(active)-1]
+			}
+			for i := len(stack) - 1; i >= 0; i-- {
+				if stack[i] == tag {
+					stack = stack[:i]
+					break
+				}
+			}
+			continue
+		}
+		if tag != "select" && unsupported(tag) {
+			for _, index := range active {
+				if index >= 0 {
+					spans[index].candidate.UnsupportedContext = true
+				}
+			}
+		}
+		if tag == "form" {
+			result.Forms++
+			if result.Forms > historyOwnershipCandidateLimit {
+				result.Truncated = true
+			}
+			span := historySourceFormSpan{start: start, candidate: historyFormOwnershipCandidate{Ordinal: result.Forms}}
+			for _, a := range token.Attr {
+				switch a.Key {
+				case "id":
+					span.id = a.Val
+				case "action":
+					span.action = a.Val
+				}
+			}
+			span.candidate.ActionKind = historyOwnershipAction(span.action)
+			for _, context := range stack {
+				if context == "table" {
+					span.candidate.OpenedInTable = true
+				}
+				if unsupported(context) {
+					span.candidate.UnsupportedContext = true
+				}
+			}
+			if len(active) > 0 {
+				span.candidate.NestedForm = true
+				for _, index := range active {
+					if index >= 0 {
+						spans[index].candidate.NestedForm = true
+					}
+				}
+			}
+			if len(spans) < historyOwnershipCandidateLimit {
+				spans = append(spans, span)
+				active = append(active, len(spans)-1)
+			} else {
+				active = append(active, -1)
+			}
+		}
+		if kind == html.StartTagToken {
+			switch tag {
+			case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
+			default:
+				stack = append(stack, tag)
+			}
+		}
+	}
+	return spans, result.Forms, result.Truncated
 }

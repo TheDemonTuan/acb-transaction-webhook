@@ -87,9 +87,6 @@ func TestHistoryFormOwnershipEvidence(t *testing.T) {
 				}
 			}
 			if tc.name == "table" {
-				if _, err := ExtractHistoryForm(tc.markup); err == nil {
-					t.Fatal("fixture must expose failed descendant extraction")
-				}
 				if c.OperationKind != "DETAIL" || !c.SourceHasSession || c.DOMHasSession {
 					t.Fatalf("source completeness lost: %+v", c)
 				}

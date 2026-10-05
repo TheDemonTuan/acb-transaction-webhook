@@ -185,21 +185,9 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 	var bestScore int = -1
 	for _, f := range forms {
 		s := extractFields(f)
-		if s.Action != "" && s.Fields["dse_processorState"] != "" && s.Fields["dse_operationName"] != "" {
-			score := 1
-			if s.Fields["dse_operationName"] == "ibkacctDetailProc" {
-				score += 5
-			}
-			if s.Fields["dse_nextEventName"] == "byDate" || (s.Fields["FromDate"] != "" && s.Fields["ToDate"] != "") {
-				score += 10
-			}
-			if s.Fields["AccountNbr"] != "" {
-				score += 2
-			}
-			if score > bestScore {
-				bestScore = score
-				bestState = s
-			}
+		if score := historyFormScore(s); score > bestScore {
+			bestScore = score
+			bestState = s
 		}
 	}
 	if bestScore >= 0 {
@@ -207,6 +195,9 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 	}
 
 	if len(forms) > 0 {
+		if state, ok := legacyTableHistoryForm(markup, doc); ok {
+			return state, nil
+		}
 		return FormState{}, errors.New("ACB account form state is incomplete")
 	}
 	whole := extractFields(doc)
@@ -307,4 +298,92 @@ func successfulHistoryControl(node *html.Node) (string, string, bool) {
 		}
 	}
 	return name, value, true
+}
+
+func historyFormScore(state FormState) int {
+	if state.Action == "" || state.Fields["dse_processorState"] == "" || state.Fields["dse_operationName"] == "" {
+		return -1
+	}
+	score := 1
+	if state.Fields["dse_operationName"] == "ibkacctDetailProc" {
+		score += 5
+	}
+	if state.Fields["dse_nextEventName"] == "byDate" || state.Fields["FromDate"] != "" && state.Fields["ToDate"] != "" {
+		score += 10
+	}
+	if state.Fields["AccountNbr"] != "" {
+		score += 2
+	}
+	return score
+}
+
+// x/net/html pops a table-opened form from its stack. Native Chromium still
+// owns its following controls. Recover only a complete, bounded source span;
+// never combine tokens/accounts across forms or bless ambiguous ownership.
+func legacyTableHistoryForm(markup string, doc *html.Node) (FormState, bool) {
+	spans, _, truncated := historySourceFormSpans(markup)
+	if truncated {
+		return FormState{}, false
+	}
+	ids := make(map[string][]*html.Node)
+	walk(doc, func(n *html.Node) {
+		if n.Type == html.ElementNode && attrVal(n, "id") != "" {
+			ids[attrVal(n, "id")] = append(ids[attrVal(n, "id")], n)
+		}
+	})
+	bestScore := -1
+	var best FormState
+	ambiguous := false
+	for _, span := range spans {
+		shape := span.candidate
+		if !shape.OpenedInTable || !shape.Balanced || shape.NestedForm || shape.UnsupportedContext || span.action == "" {
+			continue
+		}
+		if span.id != "" && (len(ids[span.id]) != 1 || ids[span.id][0].Data != "form") {
+			continue
+		}
+		source, err := html.Parse(strings.NewReader(markup[span.start:span.end]))
+		if err != nil {
+			continue
+		}
+		conflict := false
+		walk(source, func(n *html.Node) {
+			if !hasAttr(n, "form") {
+				return
+			}
+			name, _, successful := successfulHistoryControl(n)
+			if !successful || !historyOwnershipKey(name) {
+				return
+			}
+			owner := attrVal(n, "form")
+			if owner == "" || owner != span.id || len(ids[owner]) != 1 || ids[owner][0].Data != "form" {
+				conflict = true
+			}
+		})
+		// An explicit external successful control could supply/override a
+		// critical field. This source-only fallback cannot prove its ordering.
+		if span.id != "" {
+			walk(doc, func(n *html.Node) {
+				name, _, successful := successfulHistoryControl(n)
+				if successful && historyOwnershipKey(name) && hasAttr(n, "form") && attrVal(n, "form") == span.id {
+					conflict = true
+				}
+			})
+		}
+		if conflict {
+			continue
+		}
+		fields := historyOwnershipFields(source, span.id)
+		if fields["dse_operationName"] != "ibkacctDetailProc" || fields["dse_sessionId"] == "" || fields["dse_processorState"] == "" {
+			continue
+		}
+		state := FormState{Action: span.action, Fields: fields}
+		score := historyFormScore(state)
+		if score > bestScore {
+			best, bestScore, ambiguous = state, score, false
+		} else if score == bestScore && fields["AccountNbr"] != best.Fields["AccountNbr"] {
+			ambiguous = true
+		}
+	}
+	return best, bestScore >= 0 && !ambiguous
 }
