@@ -193,36 +193,65 @@ container_image_check() {
   [[ "$expected" == "$actual" ]] || fail "$1 image mismatch"
 }
 route_file() { printf '%s\n' "${ACB_CONFIG:-/opt/platform/edge/dynamic/acb.yml}"; }
+route_replace() {
+  local src="$1" dst="${2:-${ROUTE:-$(route_file)}}" expected="${3:-}"
+  if [[ "$dst" == /opt/platform/edge/dynamic/acb.yml ]]; then
+    python3 - "$src" "$dst" "$expected" <<'PY' | sudo -n /usr/local/libexec/acb-route-publish
+import base64,hashlib,json,sys
+from pathlib import Path
+src,dst=map(Path,sys.argv[1:3]);expected=sys.argv[3]
+data=src.read_bytes()
+if not data or len(data)>131072: raise SystemExit('route publication size limit exceeded')
+print(json.dumps({'expected_sha256':expected or hashlib.sha256(dst.read_bytes()).hexdigest(),
+                  'route_base64':base64.b64encode(data).decode('ascii')}))
+PY
+  else
+    # Disposable rehearsal uses its own route path and never calls a privileged
+    # writer. Production has exactly one destination, regardless of ownership.
+    python3 - "$src" "$dst" "$expected" <<'PY'
+import hashlib,os,stat,sys,tempfile
+src,dst,expected=sys.argv[1:]
+with open(src,'rb') as stream: data=stream.read()
+metadata=os.stat(dst,follow_symlinks=False)
+if not stat.S_ISREG(metadata.st_mode): raise SystemExit('route must be a regular file')
+if expected:
+    with open(dst,'rb') as stream: current=hashlib.sha256(stream.read()).hexdigest()
+    if current!=expected: raise SystemExit('route drift: compare-before-write refused')
+fd,tmp=tempfile.mkstemp(prefix='.acb-',suffix='.tmp',dir=os.path.dirname(dst))
+try:
+    with os.fdopen(fd,'wb') as stream:
+        os.fchmod(stream.fileno(),stat.S_IMODE(metadata.st_mode))
+        os.fchown(stream.fileno(),metadata.st_uid,metadata.st_gid)
+        stream.write(data);stream.flush();os.fsync(stream.fileno())
+    os.replace(tmp,dst)
+    directory=os.open(os.path.dirname(dst),os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PY
+  fi
+}
 validate_route() {
-  python3 - "$1" "${2:-}" "${3:-}" <<'PY'
-import sys,yaml
-p,gw,fe=sys.argv[1:]
-cfg=yaml.safe_load(open(p))['http']; r=cfg['routers']; s=cfg['services']
-assert s['acb-service']['loadBalancer']['servers']==[{'url':f'http://acb-web-{gw}:8090'}]
-assert s['acb-frontend-service']['loadBalancer']['servers']==[{'url':f'http://acb-frontend-{fe}:8080'}]
-assert s['acb-service']['loadBalancer']['responseForwarding']['flushInterval']=='100ms'
-for service in ('acb-service','acb-frontend-service'):
-    assert s[service]['loadBalancer']['healthCheck']['path']=='/readyz'
-for name,service,rule in (('acb-deploy-gateway','acb-service','Host(`gateway-deploy.acb.internal.invalid`) && Path(`/readyz`)'),('acb-deploy-frontend','acb-frontend-service','Host(`frontend-deploy.acb.internal.invalid`)')):
-    assert r[name]['service']==service and r[name]['entryPoints']==['slot-probe'] and r[name]['rule']==rule
-    assert not r[name].get('middlewares')
-expected={'acb-deny-internal':1000,'acb-public-deny-private':1000,'acb-public-sse-router':1200,'acb-public-api-router':1100,'acb-api-router':200,'acb-credentials-router':250,'acb-public-frontend-router':100,'acb-frontend-router':100}
-for name,priority in expected.items(): assert r[name]['priority']==priority and r[name]['entryPoints']==['web']
-credential=r['acb-credentials-router']
-owner_rule=r['acb-frontend-router']['rule']
-assert credential['rule']==owner_rule+' && Path(`/admin/acb-credentials`)'
-assert credential['middlewares']==['tunnel-only','acb-credentials-security']
-assert credential['service']=='acb-frontend-service'
-assert cfg['middlewares']['acb-credentials-security']['headers']['customResponseHeaders']=={
-    'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY',
-    'Content-Security-Policy':"default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; script-src-attr 'none'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'"}
+  [[ $# == 2 && ( "$2" == blue || "$2" == green ) ]] || fail 'usage: validate_route <file> <gateway-slot>' || return 1
+  python3 - "$1" "$2" "$(dirname "${BASH_SOURCE[0]}")/render-route.sh" <<'PY'
+import subprocess,sys,yaml
+class UniqueLoader(yaml.SafeLoader):
+    pass
+def unique_mapping(loader,node):
+    result={}
+    for key_node,value_node in node.value:
+        key=loader.construct_object(key_node)
+        if key in result: raise ValueError('duplicate route key: '+str(key))
+        result[key]=loader.construct_object(value_node)
+    return result
+UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,unique_mapping)
+p,gw,renderer=sys.argv[1:]
+with open(p,encoding='utf-8') as f: actual=yaml.load(f,Loader=UniqueLoader)
+expected=yaml.load(subprocess.check_output(['bash',renderer,gw],text=True),Loader=UniqueLoader)
+if actual!=expected: raise SystemExit('backend route topology/policy/slot mismatch')
 PY
 }
 validate_baseline_route() {
-  python3 - "$1" "$2" "$3" <<'PY'
-import sys,yaml
-c=yaml.safe_load(open(sys.argv[1]))['http']['services']
-for service,url in (('acb-service','http://acb-web-'+sys.argv[2]+':8090'),('acb-frontend-service','http://acb-frontend-'+sys.argv[3]+':8080')):
-    assert c[service]['loadBalancer']['servers']==[{'url':url}],(service,c[service])
-PY
+  validate_route "$@"
 }

@@ -373,10 +373,6 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 		t.Errorf("public-sse-inflight-global must have amount 128 and requestHost: true: %s", sseGlobalBlock)
 	}
 
-	if !strings.Contains(mw, "Content-Security-Policy") {
-		t.Errorf("middlewares.yml must apply CSP at the edge for the standalone frontend")
-	}
-
 	// 2. Check acb.yml with structured router & service parsing
 	acbPath := filepath.Join(edgeDir, "dynamic", "acb.yml")
 	acbContent, err := os.ReadFile(acbPath)
@@ -454,15 +450,6 @@ func TestTraefikDynamicMiddlewaresAndRouteProtection(t *testing.T) {
 	}
 	if !strings.Contains(acbService, "healthCheck:") || !strings.Contains(acbService, "/readyz") {
 		t.Errorf("acb.yml must configure /readyz healthcheck for acb-service")
-	}
-
-	// Validate frontend service
-	feService, ok := acbServices["acb-frontend-service"]
-	if !ok {
-		t.Fatalf("acb.yml missing acb-frontend-service")
-	}
-	if !strings.Contains(feService, "/readyz") {
-		t.Errorf("acb.yml acb-frontend-service must configure /readyz healthcheck")
 	}
 
 	// 3. Check bark.yml

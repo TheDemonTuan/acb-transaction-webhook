@@ -54,9 +54,7 @@ def trusted(path, directory=False):
 
 def scope(config):
     routers = {'acb-deny-internal', 'acb-public-deny-private', 'acb-public-sse-router',
-               'acb-public-api-router', 'acb-api-router', 'acb-credentials-router',
-               'acb-public-frontend-router', 'acb-frontend-router',
-               'acb-deploy-gateway', 'acb-deploy-frontend'}
+               'acb-public-api-router', 'acb-api-router', 'acb-deploy-gateway'}
     if not isinstance(config, dict) or set(config) != {'http'}:
         raise PublishError('Only ACB HTTP topology may be published')
     http = config['http']
@@ -64,22 +62,21 @@ def scope(config):
         raise PublishError('Unsupported route configuration objects')
     if not {'routers', 'services'} <= http.keys():
         raise PublishError('Missing ACB topology')
-    if set(http['routers']) - routers or set(http['services']) - {'acb-service', 'acb-frontend-service'}:
+    if set(http['routers']) - routers or set(http['services']) - {'acb-service'}:
         raise PublishError('Route contains objects outside ACB ownership')
-    if set(http.get('middlewares', {})) - {'acb-credentials-security'}:
+    if http.get('middlewares'):
         raise PublishError('Route contains foreign middleware definitions')
-    for name, service in http['services'].items():
-        prefix, port = ('acb-web', '8090') if name == 'acb-service' else ('acb-frontend', '8080')
+    for service in http['services'].values():
         servers = service.get('loadBalancer', {}).get('servers')
         if not isinstance(servers, list) or len(servers) != 1 or set(servers[0]) != {'url'}:
             raise PublishError('Unsupported ACB upstream topology')
-        if not re.fullmatch(f'http://{prefix}-(blue|green):{port}', servers[0]['url']):
+        if not re.fullmatch(r'http://acb-web-(blue|green):8090', servers[0]['url']):
             raise PublishError('Upstream is outside ACB ownership')
 
 
 def validate(route, templates):
     try:
-        candidate = yaml.load(route, Loader=UniqueLoader)
+        candidate = yaml.load(route, Loader=UniqueLoader)  # nosec B506: UniqueLoader subclasses yaml.SafeLoader
         scope(candidate)
         trusted(templates, directory=True)
         matches = False
@@ -91,7 +88,7 @@ def validate(route, templates):
             data = template.read_bytes()
             if len(data) > LIMIT:
                 raise PublishError('Publisher template too large')
-            authorized = yaml.load(data, Loader=UniqueLoader)
+            authorized = yaml.load(data, Loader=UniqueLoader)  # nosec B506: UniqueLoader subclasses yaml.SafeLoader
             scope(authorized)
             matches = matches or candidate == authorized
             count += 1
