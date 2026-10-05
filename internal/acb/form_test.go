@@ -217,3 +217,100 @@ func TestExtractHistoryFormDoesNotMergeIncompleteForms(t *testing.T) {
 		t.Fatal("merged state across forms")
 	}
 }
+
+func TestPrepareTodayHistoryFieldsSourceAndNavigation(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		name := "page_one"
+		if raw {
+			name = "continuation"
+		}
+		t.Run(name, func(t *testing.T) {
+			original := map[string]string{
+				"dse_operationName":     "ibkacctDetailProc",
+				"dse_processorState":    "returned-state",
+				"dse_sessionId":         "returned-session",
+				"dse_nextEventName":     "byMonth",
+				"AccountNbr":            recoveryAccount,
+				"activeDatetimeYN":      "N",
+				"activeDatetimeByMonth": "Y",
+				"MonthCurr":             "9",
+				"YearCurr":              "2026",
+				"FromDate":              "01/09/2026",
+				"ToDate":                "30/09/2026",
+				"CheckRef":              "false",
+				"CheckDoiUng":           "false",
+			}
+			wantEvent := "byDate"
+			if raw {
+				original["_raw"] = "true"
+				original["dse_nextEventName"] = "nextPage"
+				original["cursor"] = "returned-cursor"
+				wantEvent = "nextPage"
+			} else {
+				original["CheckRef"], original["CheckDoiUng"] = "true", "true"
+			}
+			prepared, err := PrepareTodayHistoryFields(original, recoveryDate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared["activeDatetimeYN"] != "Y" || prepared["FromDate"] != recoveryDate || prepared["ToDate"] != recoveryDate || prepared["dse_nextEventName"] != wantEvent || prepared["CheckRef"] != "false" || prepared["CheckDoiUng"] != "false" {
+				t.Fatal("today form lost source mode, date, navigation or disabled filters")
+			}
+			for _, key := range []string{"dse_operationName", "dse_processorState", "dse_sessionId", "AccountNbr", "cursor"} {
+				if prepared[key] != original[key] {
+					t.Fatalf("today preparation replaced returned %s", key)
+				}
+			}
+			for _, key := range []string{"_raw", "_explicitRange", "MonthCurr", "YearCurr", "activeDatetimeByMonth"} {
+				if _, present := prepared[key]; present {
+					t.Fatalf("today preparation retained internal/month field %s", key)
+				}
+			}
+			if original["activeDatetimeYN"] != "N" || original["FromDate"] != "01/09/2026" || original["MonthCurr"] != "9" {
+				t.Fatal("today preparation mutated caller-owned state")
+			}
+		})
+	}
+}
+
+func TestPrepareTodayHistoryFieldsRejectsExplicitRange(t *testing.T) {
+	for _, raw := range []string{"false", "true"} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := PrepareTodayHistoryFields(map[string]string{
+				"dse_operationName":  "ibkacctDetailProc",
+				"dse_processorState": "fresh-state",
+				"_raw":               raw,
+				"_explicitRange":     "true",
+				"FromDate":           recoveryDate,
+				"ToDate":             recoveryDate,
+			}, recoveryDate)
+			if err == nil || err.Error() != "ACB realtime request cannot use an explicit range" {
+				t.Fatalf("today request accepted historical explicit range: %v", err)
+			}
+		})
+	}
+}
+
+func TestHistoricalRangeEndingTodayRetainsHistoricalSource(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		fields := map[string]string{
+			"dse_operationName":  "ibkacctDetailProc",
+			"dse_processorState": "fresh-state",
+			"dse_sessionId":      "fresh-session",
+			"activeDatetimeYN":   "N",
+			"_explicitRange":     "true",
+			"FromDate":           "29/09/2026",
+			"ToDate":             recoveryDate,
+		}
+		if raw {
+			fields["_raw"], fields["dse_nextEventName"] = "true", "nextPage"
+		}
+		prepared, err := PrepareHistoryFields(fields, time.Date(2026, 10, 5, 12, 0, 0, 0, DefaultLocation), DefaultLocation)
+		if err != nil || prepared["activeDatetimeYN"] != "N" || prepared["FromDate"] != "29/09/2026" || prepared["ToDate"] != recoveryDate {
+			t.Fatalf("historical range ending today switched source scope: %v", err)
+		}
+		if raw && prepared["dse_nextEventName"] != "nextPage" {
+			t.Fatal("historical continuation lost returned navigation")
+		}
+	}
+}

@@ -178,7 +178,7 @@ func TestRestoreSessionRejectsUntrustedBootstrapURL(t *testing.T) {
 	}
 }
 
-func TestHistoryForDatePinsHistoricalDateAndOmitsInternalFields(t *testing.T) {
+func TestHistoryPinsExplicitHistoricalDateAndOmitsInternalFields(t *testing.T) {
 	var posted url.Values
 	client, err := NewClient("https://online.acb.com.vn", roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost {
@@ -197,7 +197,7 @@ func TestHistoryForDatePinsHistoricalDateAndOmitsInternalFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.HistoryForDate(context.Background(), "/acbib/Request", map[string]string{
+	_, err = client.History(context.Background(), "/acbib/Request", map[string]string{
 		"dse_operationName":     "ibkacctDetailProc",
 		"dse_processorState":    "fresh",
 		"dse_sessionId":         "session",
@@ -207,14 +207,17 @@ func TestHistoryForDatePinsHistoricalDateAndOmitsInternalFields(t *testing.T) {
 		"activeDatetimeByMonth": "Y",
 		"MonthCurr":             "8",
 		"YearCurr":              "2026",
-		"FromDate":              "01/09/2026",
-		"ToDate":                "30/09/2026",
-	}, "21/09/2026")
+		"FromDate":              "21/09/2026",
+		"ToDate":                "21/09/2026",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if posted.Get("FromDate") != "21/09/2026" || posted.Get("ToDate") != "21/09/2026" {
 		t.Fatalf("wrong historical range: %v", posted)
+	}
+	if posted.Get("activeDatetimeYN") != "N" {
+		t.Fatal("explicit historical date switched to today's source mode")
 	}
 	for _, key := range []string{"_raw", "_explicitRange", "MonthCurr", "YearCurr", "activeDatetimeByMonth"} {
 		if posted.Has(key) {
@@ -686,7 +689,7 @@ func TestClientHistoryAccountOmissionKeepsSelectionAcrossSnapshot(t *testing.T) 
 		{name: "omitted"},
 		{name: "empty", markup: `<input name="AccountNbr" value="">`},
 	} {
-		for _, operation := range []string{"bootstrap", "bootstrap_date", "history", "history_date"} {
+		for _, operation := range []string{"bootstrap", "bootstrap_today", "history", "history_today"} {
 			t.Run(field.name+"/"+operation, func(t *testing.T) {
 				posted := make(chan url.Values, 4)
 				var calls atomic.Int32
@@ -701,6 +704,7 @@ func TestClientHistoryAccountOmissionKeepsSelectionAcrossSnapshot(t *testing.T) 
 					call := calls.Add(1)
 					io.WriteString(w, accountContinuityForm(field.markup, fmt.Sprintf("fresh-%d", call))+accountContinuityHistoryTable)
 				})
+				client.WithClock(func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, DefaultLocation) })
 				handoff := accountContinuityHandoff("12345678")
 				if err := client.RestoreSession(handoff); err != nil {
 					t.Fatal(err)
@@ -711,16 +715,16 @@ func TestClientHistoryAccountOmissionKeepsSelectionAcrossSnapshot(t *testing.T) 
 				switch operation {
 				case "bootstrap":
 					response, err = client.Bootstrap(context.Background())
-				case "bootstrap_date":
-					response, err = client.BootstrapForDate(context.Background(), "03/10/2026")
-				case "history", "history_date":
+				case "bootstrap_today":
+					response, err = client.BootstrapToday(context.Background(), recoveryDate)
+				case "history", "history_today":
 					fields := cloneFields(handoff.Fields)
 					selected = "87654321" // Caller-selected account must remain authoritative for the request.
 					fields["AccountNbr"] = selected
 					if operation == "history" {
 						response, err = client.History(context.Background(), handoff.Action, fields)
 					} else {
-						response, err = client.HistoryForDate(context.Background(), handoff.Action, fields, "03/10/2026")
+						response, err = client.HistoryToday(context.Background(), handoff.Action, fields, recoveryDate)
 					}
 				}
 				if err != nil {
@@ -751,7 +755,7 @@ func TestClientHistoryAccountOmissionKeepsSelectionAcrossSnapshot(t *testing.T) 
 				}
 				form.Fields["_raw"] = "true"
 				form.Fields["dse_nextEventName"] = "nextPage"
-				nextResponse, err := client.HistoryForDate(context.Background(), form.Action, form.Fields, "03/10/2026")
+				nextResponse, err := client.HistoryToday(context.Background(), form.Action, form.Fields, recoveryDate)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -767,15 +771,16 @@ func TestClientHistoryAccountOmissionKeepsSelectionAcrossSnapshot(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
+				restarted.WithClock(func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, DefaultLocation) })
 				if err := restarted.RestoreSession(snapshot); err != nil {
 					t.Fatal(err)
 				}
-				response, err = restarted.BootstrapForDate(context.Background(), "04/10/2026")
+				response, err = restarted.BootstrapToday(context.Background(), recoveryDate)
 				if err != nil {
 					t.Fatal(err)
 				}
 				last := <-posted
-				if response.RequestedAccount != selected || last.Get("AccountNbr") != selected || last.Get("dse_processorState") != "fresh-2-state" || last.Get("dse_sessionId") != "fresh-2-session" || last.Get("FromDate") != "04/10/2026" || last.Get("ToDate") != "04/10/2026" {
+				if response.RequestedAccount != selected || last.Get("AccountNbr") != selected || last.Get("dse_processorState") != "fresh-2-state" || last.Get("dse_sessionId") != "fresh-2-session" || last.Get("FromDate") != recoveryDate || last.Get("ToDate") != recoveryDate {
 					t.Fatal("restored snapshot lost the exact account, fresh tokens, or query day")
 				}
 			})

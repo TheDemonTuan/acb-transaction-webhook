@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -172,5 +173,64 @@ func TestKeepaliveTask_RateLimitAndMaintenanceBackoff(t *testing.T) {
 	}
 	if !monMaint.IsBackoffActive() {
 		t.Fatal("expected backoff to be active after maintenance page")
+	}
+}
+
+type keepaliveTodayMockClient struct {
+	keepaliveDetailsMockClient
+	todayCalls int
+	todayDate  string
+	todayErr   error
+}
+
+func (m *keepaliveTodayMockClient) BootstrapToday(_ context.Context, date string) (acb.Response, error) {
+	m.todayCalls++
+	m.todayDate = date
+	return acb.Response{StatusCode: 200, Kind: acb.HistoryPage, Body: `<table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>KEEPALIVE_ONLY</td><td>22/09/2026</td><td>0</td><td>100</td></tr></table>`}, m.todayErr
+}
+
+func (m *keepaliveTodayMockClient) HistoryToday(ctx context.Context, endpoint string, fields map[string]string, _ string) (acb.Response, error) {
+	return m.History(ctx, endpoint, fields)
+}
+
+func TestKeepaliveTask_UsesTodayBootstrapWithoutIngestion(t *testing.T) {
+	for _, rollover := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollover=%t", rollover), func(t *testing.T) {
+			ctx := context.Background()
+			store, conn := newRealtimeRegressionStore(t, ctx)
+			defer store.Close()
+			client := &keepaliveTodayMockClient{}
+			if rollover {
+				client.todayErr = fmt.Errorf("today bootstrap: %w", acb.ErrRealtimeDateRollover)
+			}
+			mon := New(store, client, 5*time.Second, 15*time.Second)
+			mon.now = fixedRealtimeTime
+			res, err := NewKeepaliveTask(mon, conn.ID, conn.Generation).Step(ctx)
+			if err != nil || !res.Done || !res.RequeueAt.IsZero() || res.Outcome != scheduler.OutcomeSuccess {
+				t.Fatalf("keepalive today result=%+v err=%v", res, err)
+			}
+			if client.todayCalls != 1 || client.todayDate != fixedRealtimeTime().Format("02/01/2006") || client.bootstrapCalls.Load() != 0 || client.historyCalls.Load() != 0 {
+				t.Fatalf("keepalive must call only pinned Today bootstrap: today=%d day=%q generic=%d history=%d", client.todayCalls, client.todayDate, client.bootstrapCalls.Load(), client.historyCalls.Load())
+			}
+			runs, err := store.ListPollRuns(ctx, 1)
+			wantStatus, wantError := "SUCCEEDED", ""
+			if rollover {
+				wantStatus, wantError = "PARTIAL", acb.ErrRealtimeDateRollover.Error()
+			}
+			if err != nil || len(runs) != 1 || runs[0].Status != wantStatus || runs[0].Error != wantError || runs[0].Pages != 0 || runs[0].RowsSeen != 0 || runs[0].RowsMatched != nil {
+				t.Fatalf("keepalive must not parse history rows: polls=%+v err=%v", runs, err)
+			}
+			var transactions, events int
+			if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions").Scan(&transactions); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.Connection(ctx)
+			if err != nil || current.State != "MONITORING" || current.Generation != conn.Generation || mon.IsBackoffActive() || transactions != 0 || events != 0 {
+				t.Fatalf("keepalive must preserve state without ingestion/backoff: conn=%+v transactions=%d events=%d err=%v", current, transactions, events, err)
+			}
+		})
 	}
 }

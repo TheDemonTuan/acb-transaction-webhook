@@ -83,8 +83,8 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 				wantSession, wantState, wantCookie := "synthetic-session", "stale-state", "synthetic-cookie"
 				if call > 1 {
 					wantSession, wantState, wantCookie = "fresh-session", "fresh-state", "fresh-cookie"
-					if r.PostForm.Get("FromDate") != "04/10/2026" || r.PostForm.Get("ToDate") != "04/10/2026" {
-						t.Error("restored query lost its requested date")
+					if r.PostForm.Get("FromDate") != "05/10/2026" || r.PostForm.Get("ToDate") != "05/10/2026" || r.PostForm.Get("activeDatetimeYN") != "Y" {
+						t.Error("restored query lost its pinned today's source operation")
 					}
 				}
 				cookie, cookieErr := r.Cookie("session")
@@ -168,12 +168,13 @@ func TestVerificationAccountResultAcrossRPCFinalizerCoordinator(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				restarted.WithClock(func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, acb.DefaultLocation) })
 				defer restarted.CloseIdleConnections()
 				loader := monitor.NewSessionLoader(f.store, keyring, restarted)
 				if err := loader.Restore(f.ctx, e.ConnectionID, e.Generation); err != nil {
 					t.Fatal(err)
 				}
-				response, err := restarted.BootstrapForDate(f.ctx, "04/10/2026")
+				response, err := restarted.BootstrapToday(f.ctx, "05/10/2026")
 				if err != nil || response.RequestedAccount != "222222222" {
 					t.Fatalf("committed session could not query its exact account: %v", err)
 				}

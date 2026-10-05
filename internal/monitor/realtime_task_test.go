@@ -620,72 +620,47 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 		t.Fatal(err)
 	}
 
-	var requestCount atomic.Int32
+	var probes, successfulQueries, staleQueries int
+	var token int
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		count := requestCount.Add(1)
-		switch count {
-		case 1:
-			// Poll 1: Bootstrap probe
-			body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"><input name="AccountNbr" value="***1234"></form>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		case 2:
-			// Poll 1: History request -> returns valid transactions
-			body := `
-			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"><input name="AccountNbr" value="***1234"></form>
-			<table>
-				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-				<tr><td>TXN_1</td><td>25/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer 1</td></tr>
-				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
-			</table>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyFixtureToday(body))), Request: r}, nil
-		case 3:
-			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token1"><input name="dse_sessionId" value="sess1"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_1</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		case 4:
-			// Poll 2: Bootstrap with stale state -> returns LoginPage
-			loginBody := `<input name="username"><input type="password" name="password">`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(loginBody)), Request: r}, nil
-		case 5:
-			// Poll 2: Probe confirms session still alive and returns fresh tokens.
-			body := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		case 6:
-			// Poll 2: Bootstrap query with fresh token2 -> returns current form
-			body := `
-			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>
-			<table>
-				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-				<tr><td>TXN_2</td><td>25/09/2026</td><td>0</td><td>200,000</td><td>1,200,000</td><td>Transfer 2</td></tr>
-				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
-			</table>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyFixtureToday(body))), Request: r}, nil
-		case 7:
-			// Poll 2: Explicit query with fresh token2 -> succeeds
-			body := `
-			<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token2"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form>
-			<table>
-				<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
-				<tr><td>TXN_3</td><td>25/09/2026</td><td>0</td><td>300,000</td><td>1,500,000</td><td>Transfer 3</td></tr>
-				<tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>
-			</table>`
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(historyFixtureToday(body))), Request: r}, nil
-		case 8:
-			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token3"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_3</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		case 9:
-			body := fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token4"><input name="dse_sessionId" value="sess2"><input name="AccountNbr" value="***1234"></form><table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TXN_4</td><td>%s</td><td>0</td><td>100</td></tr></table>`, time.Now().In(acb.DefaultLocation).Format("02/01/2006"))
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-		default:
-			return nil, fmt.Errorf("unexpected request %d", count)
+		respond := func(body string) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 		}
+		form := func() string {
+			return fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="token%d"><input name="dse_sessionId" value="sess1"><input name="AccountNbr" value="***1234"></form>`, token)
+		}
+		if r.Method == http.MethodGet {
+			probes++
+			token++
+			return respond(form())
+		}
+		if r.Method != http.MethodPost || r.ParseForm() != nil {
+			t.Fatal("expected a valid history POST")
+		}
+		if r.Form.Get("activeDatetimeYN") != "Y" || r.Form.Get("FromDate") != fixedRealtimeTime().Format("02/01/2006") || r.Form.Get("ToDate") != fixedRealtimeTime().Format("02/01/2006") || r.Form.Get("AccountNbr") != "***1234" || r.Form.Get("dse_nextEventName") != "byDate" {
+			t.Fatal("today query changed its mode/account/day contract")
+		}
+		if r.Form.Get("dse_processorState") != fmt.Sprintf("token%d", token) {
+			t.Fatal("history reused a consumed token")
+		}
+		if successfulQueries == 1 && staleQueries == 0 {
+			staleQueries++
+			return respond(`<input name="username"><input type="password" name="password">`)
+		}
+		successfulQueries++
+		token++
+		body := form() + fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr><tr><td>TXN_%d</td><td>%s</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Transfer %d</td></tr><tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr></table>`, successfulQueries, fixedRealtimeTime().Format("02/01/2006"), successfulQueries)
+		return respond(body)
 	})
 
 	acbClient, err := acb.NewClient("https://online.acb.com.vn", transport)
 	if err != nil {
 		t.Fatal(err)
 	}
+	acbClient.WithClock(fixedRealtimeTime)
 
 	mon := New(store, acbClient, 5*time.Second, 15*time.Second)
+	mon.now = fixedRealtimeTime
 
 	// Poll 1
 	task1 := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
@@ -725,6 +700,20 @@ func TestRealtimeTask_SessionResyncRecoveryDoesNotTransitionAuthRequired(t *test
 	if err != nil || len(txns) != 3 {
 		t.Fatalf("expected 3 transactions ingested, got %d (err: %v)", len(txns), err)
 	}
+	identities := map[string]bool{"ACB:TXN_1": true, "ACB:TXN_2": true, "ACB:TXN_3": true}
+	for _, tx := range txns {
+		if !identities[tx.SemanticKey] || tx.TransactionDay != fixedRealtimeTime().Format("2006-01-02") {
+			t.Fatalf("unexpected recovered transaction identity/day: %+v", tx)
+		}
+		delete(identities, tx.SemanticKey)
+	}
+	var events int
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&events); err != nil || events != 3 {
+		t.Fatalf("expected one event for each recovered identity: events=%d err=%v", events, err)
+	}
+	if probes != 2 || staleQueries != 1 || successfulQueries != 3 {
+		t.Fatalf("expected one bounded stale-state recovery: probes=%d stale=%d successful=%d", probes, staleQueries, successfulQueries)
+	}
 }
 
 func TestRealtimeTask_BootstrapClassifiedAsHistoryPageSubmitsHistoryQuery(t *testing.T) {
@@ -743,15 +732,16 @@ func TestRealtimeTask_BootstrapClassifiedAsHistoryPageSubmitsHistoryQuery(t *tes
 		t.Fatal(err)
 	}
 
-	todayVN := time.Now().In(time.FixedZone("Asia/Ho_Chi_Minh", 7*3600)).Format("02/01/2006")
+	todayVN := fixedRealtimeTime().Format("02/01/2006")
 
-	// Custom mock client where Bootstrap returns a page classified as HistoryPage
-	// (matching real ACB bootstrap page with ibkacctDetailProc and table headers but no data).
+	// An unproved generic bootstrap table is not the result of today's query,
+	// even when its classifier and stale rows look like history.
 	mockClient := &bootstrapHistoryPageMockClient{
 		todayVN: todayVN,
 	}
 
 	mon := New(store, mockClient, 5*time.Second, 15*time.Second)
+	mon.now = fixedRealtimeTime
 	task := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
 
 	res, err := task.Step(ctx)
@@ -796,8 +786,8 @@ func TestRealtimeTask_QueriesTodayEvenWhenBootstrapHasOlderTransactions(t *testi
 		t.Fatal(err)
 	}
 
-	today := time.Now().In(acb.DefaultLocation).Format("02/01/2006")
-	older := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("02/01/2006")
+	today := fixedRealtimeTime().Format("02/01/2006")
+	older := fixedRealtimeTime().AddDate(0, 0, -1).Format("02/01/2006")
 	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="ps1"><input name="dse_sessionId" value="session1"><input name="AccountNbr" value="***1234"></form>`
 	var queries int
 	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -814,8 +804,8 @@ func TestRealtimeTask_QueriesTodayEvenWhenBootstrapHasOlderTransactions(t *testi
 			if parseErr != nil {
 				t.Fatal(parseErr)
 			}
-			if values.Get("FromDate") != today || values.Get("ToDate") != today || values.Get("dse_nextEventName") != "byDate" || values.Get("CheckRef") != "false" || values.Get("CheckDoiUng") != "false" {
-				t.Fatalf("wrong date-query controls (values redacted): from_today=%t to_today=%t by_date=%t check_ref=%t check_doi_ung=%t", values.Get("FromDate") == today, values.Get("ToDate") == today, values.Get("dse_nextEventName") == "byDate", values.Get("CheckRef") == "false", values.Get("CheckDoiUng") == "false")
+			if values.Get("FromDate") != today || values.Get("ToDate") != today || values.Get("activeDatetimeYN") != "Y" || values.Get("dse_nextEventName") != "byDate" || values.Get("CheckRef") != "false" || values.Get("CheckDoiUng") != "false" {
+				t.Fatal("wrong today date-query controls")
 			}
 			body = form + fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TODAY</td><td>%s</td><td>0</td><td>100</td></tr></table>`, today)
 		}
@@ -824,18 +814,20 @@ func TestRealtimeTask_QueriesTodayEvenWhenBootstrapHasOlderTransactions(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.WithClock(fixedRealtimeTime)
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	mon.now = fixedRealtimeTime
 	res, err := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
-	if err != nil || !res.Done || res.Outcome != scheduler.OutcomeSuccess || queries != 2 {
-		t.Fatalf("poll must query today after bootstrap: result=%+v err=%v posts=%d", res, err, queries)
+	if err != nil || !res.Done || res.Outcome != scheduler.OutcomeSuccess || queries != 1 {
+		t.Fatalf("proved today bootstrap must query once and ignore older GET rows: result=%+v err=%v posts=%d", res, err, queries)
 	}
 	txns, err := store.ListTransactions(ctx, 10)
-	if err != nil || len(txns) != 1 || txns[0].TransactionDay != time.Now().In(acb.DefaultLocation).Format("2006-01-02") {
+	if err != nil || len(txns) != 1 || txns[0].TransactionDay != fixedRealtimeTime().Format("2006-01-02") {
 		t.Fatalf("expected only today's transaction, count=%d err=%v", len(txns), err)
 	}
 }
 
-func TestRealtimeTask_FiltersPriorTransactionDayWithDifferentEffectiveDays(t *testing.T) {
+func TestRealtimeTask_RejectsPriorTransactionDayWithDifferentEffectiveDays(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "effective_day.db"))
 	if err != nil {
@@ -849,9 +841,9 @@ func TestRealtimeTask_FiltersPriorTransactionDayWithDifferentEffectiveDays(t *te
 	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
 		t.Fatal(err)
 	}
-	today := time.Now().In(acb.DefaultLocation).Format("02/01/2006")
-	prior := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("02/01/2006")
-	next := time.Now().In(acb.DefaultLocation).AddDate(0, 0, 1).Format("02/01/2006")
+	today := fixedRealtimeTime().Format("02/01/2006")
+	prior := fixedRealtimeTime().AddDate(0, 0, -1).Format("02/01/2006")
+	next := fixedRealtimeTime().AddDate(0, 0, 1).Format("02/01/2006")
 	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="ps1"><input name="dse_sessionId" value="s1"></form>`
 	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body := form
@@ -861,7 +853,7 @@ func TestRealtimeTask_FiltersPriorTransactionDayWithDifferentEffectiveDays(t *te
 				t.Fatal(readErr)
 			}
 			values, parseErr := url.ParseQuery(string(payload))
-			if parseErr != nil || values.Get("FromDate") != today || values.Get("ToDate") != today {
+			if parseErr != nil || values.Get("FromDate") != today || values.Get("ToDate") != today || values.Get("activeDatetimeYN") != "Y" {
 				t.Fatal("history request did not target today")
 			}
 			body += fmt.Sprintf(`<table><tr><th>Số GD</th><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>PRIOR</td><td>%s</td><td>%s</td><td>0</td><td>100</td></tr><tr><td>TODAY_1</td><td>%s</td><td>%s</td><td>0</td><td>100</td></tr><tr><td>TODAY_2</td><td>%s</td><td>%s</td><td>0</td><td>200</td></tr></table>`, today, prior, today, today, next, today)
@@ -871,27 +863,24 @@ func TestRealtimeTask_FiltersPriorTransactionDayWithDifferentEffectiveDays(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := NewRealtimeTask(New(store, client, 5*time.Second, 15*time.Second), PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
-	if err != nil || !res.Done {
-		t.Fatalf("poll did not finish: result=%+v err=%v", res, err)
+	client.WithClock(fixedRealtimeTime)
+	mon := New(store, client, 5*time.Second, 15*time.Second)
+	mon.now = fixedRealtimeTime
+	res, err := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
+	if err != nil || !res.Done || res.Outcome != scheduler.OutcomeTransient || !res.RequeueAt.IsZero() || mon.IsBackoffActive() {
+		t.Fatalf("source mismatch must terminate without network backoff: result=%+v err=%v", res, err)
 	}
 	runs, err := store.ListPollRuns(ctx, 1)
-	if err != nil || len(runs) != 1 || runs[0].Status != "SUCCEEDED" || runs[0].RowsSeen != 3 {
-		t.Fatalf("expected complete scoped poll with three scanned rows: runs=%+v err=%v", runs, err)
+	if err != nil || len(runs) != 1 || runs[0].Status != "PARTIAL" || runs[0].Error != "REALTIME_SOURCE_DATE_MISMATCH" || runs[0].RowsSeen != 3 || runs[0].RowsMatched == nil || *runs[0].RowsMatched != 2 {
+		t.Fatalf("expected source mismatch with truthful raw/matched counts: runs=%+v err=%v", runs, err)
 	}
 	txns, err := store.ListTransactions(ctx, 10)
-	if err != nil || len(txns) != 2 {
-		t.Fatalf("expected two today transactions: count=%d err=%v", len(txns), err)
-	}
-	todayISO := time.Now().In(acb.DefaultLocation).Format("2006-01-02")
-	for _, tx := range txns {
-		if tx.TransactionDay != todayISO {
-			t.Fatalf("ingested transaction has wrong day: %+v", tx)
-		}
+	if err != nil || len(txns) != 0 {
+		t.Fatalf("source-violating page must ingest no transactions: count=%d err=%v", len(txns), err)
 	}
 }
 
-func TestRealtimeTask_IgnoresPriorTransactionDayWhenNoTodayTransactions(t *testing.T) {
+func TestRealtimeTask_RejectsPriorTransactionDayWhenNoTodayTransactions(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rt_reject_wrong_day.db"))
 	if err != nil {
@@ -905,7 +894,7 @@ func TestRealtimeTask_IgnoresPriorTransactionDayWhenNoTodayTransactions(t *testi
 	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING'"); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().In(acb.DefaultLocation).AddDate(0, 0, -1).Format("02/01/2006")
+	old := fixedRealtimeTime().AddDate(0, 0, -1).Format("02/01/2006")
 	form := `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="ps1"><input name="dse_sessionId" value="s1"></form>`
 	client, err := acb.NewClient("https://online.acb.com.vn", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body := form
@@ -917,14 +906,16 @@ func TestRealtimeTask_IgnoresPriorTransactionDayWhenNoTodayTransactions(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.WithClock(fixedRealtimeTime)
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	mon.now = fixedRealtimeTime
 	res, err := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
-	if err != nil || !res.Done || res.Outcome != scheduler.OutcomeSuccess {
-		t.Fatalf("poll should succeed without ingesting prior transactions: result=%+v err=%v", res, err)
+	if err != nil || !res.Done || res.Outcome != scheduler.OutcomeTransient || !res.RequeueAt.IsZero() || mon.IsBackoffActive() {
+		t.Fatalf("source mismatch must finish without network/auth backoff: result=%+v err=%v", res, err)
 	}
 	runs, err := store.ListPollRuns(ctx, 1)
-	if err != nil || len(runs) != 1 || runs[0].Status != "SUCCEEDED" || runs[0].RowsSeen != 1 {
-		t.Fatalf("expected successful poll with one row scanned: runs=%+v err=%v", runs, err)
+	if err != nil || len(runs) != 1 || runs[0].Status != "PARTIAL" || runs[0].Error != "REALTIME_SOURCE_DATE_MISMATCH" || runs[0].RowsSeen != 1 || runs[0].RowsMatched == nil || *runs[0].RowsMatched != 0 {
+		t.Fatalf("expected source mismatch with one raw row and no matched rows: runs=%+v err=%v", runs, err)
 	}
 	txns, err := store.ListTransactions(ctx, 10)
 	if err != nil || len(txns) != 0 {
@@ -957,7 +948,9 @@ func TestRealtimeTask_RejectsMalformedDatesBeforeIngest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.WithClock(fixedRealtimeTime)
 	mon := New(store, client, 5*time.Second, 15*time.Second)
+	mon.now = fixedRealtimeTime
 	res, err := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
 	if err != nil || !res.Done {
 		t.Fatalf("poll did not finish: result=%+v err=%v", res, err)
@@ -989,6 +982,7 @@ func (m *bootstrapHistoryPageMockClient) Bootstrap(ctx context.Context) (acb.Res
 	</form>
 	<table>
 		<tr><th>Số GD</th><th>Ngày giao dịch</th><th>Ghi nợ</th><th>Ghi có</th><th>Số dư</th><th>Nội dung giao dịch</th></tr>
+		<tr><td>STALE_BOOTSTRAP</td><td>21/09/2026</td><td>0</td><td>100,000</td><td>1,000,000</td><td>Stale bootstrap payment</td></tr>
 	</table>`
 	return acb.Response{
 		StatusCode: 200,

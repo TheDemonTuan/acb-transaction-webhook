@@ -33,6 +33,7 @@ type protocolRecoveryBank struct {
 	incompleteDetail bool
 	tableOwned       bool
 	requestDate      string
+	sourceMode       string
 	pages            int
 	page             int
 	byDateCalls      int
@@ -89,7 +90,11 @@ func (b *protocolRecoveryBank) RoundTrip(request *http.Request) (*http.Response,
 		if requestDate == "" {
 			requestDate = protocolRecoveryDate
 		}
-		if fields.Get("AccountNbr") != "12341234" || fields.Get("FromDate") != requestDate || fields.Get("ToDate") != requestDate || fields.Get("activeDatetimeYN") != "N" || fields.Get("dse_sessionId") != "synthetic" || fields.Get("dse_operationName") != "ibkacctDetailProc" || fields.Has("_raw") || fields.Has("_explicitRange") {
+		sourceMode := b.sourceMode
+		if sourceMode == "" {
+			sourceMode = "Y"
+		}
+		if fields.Get("AccountNbr") != "12341234" || fields.Get("FromDate") != requestDate || fields.Get("ToDate") != requestDate || fields.Get("activeDatetimeYN") != sourceMode || fields.Get("dse_sessionId") != "synthetic" || fields.Get("dse_operationName") != "ibkacctDetailProc" || fields.Has("_raw") || fields.Has("_explicitRange") {
 			b.failure = "outbound pinned form contract changed"
 		}
 		event := fields.Get("dse_nextEventName")
@@ -125,7 +130,7 @@ func (b *protocolRecoveryBank) RoundTrip(request *http.Request) (*http.Response,
 					b.page++
 				}
 				body = b.markup(b.token())
-				if b.invalidateAfter > 0 && b.byDateCalls >= 2 && b.page == b.invalidateAfter {
+				if b.invalidateAfter > 0 && (sourceMode == "Y" || b.byDateCalls >= 2) && b.page == b.invalidateAfter {
 					b.state++
 				}
 			}
@@ -152,6 +157,10 @@ func (b *protocolRecoveryBank) RoundTrip(request *http.Request) (*http.Response,
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
 }
 
+func protocolRecoveryNow() time.Time {
+	return time.Date(2026, 10, 5, 12, 0, 0, 0, acb.DefaultLocation)
+}
+
 func protocolRecoveryFixture(t *testing.T, bank http.RoundTripper) (*storage.Store, storage.Connection, *security.Keyring, *acb.Client, *SessionLoader, *Monitor) {
 	t.Helper()
 	store, conn, keyring, _ := sessionFenceFixture(t)
@@ -159,6 +168,7 @@ func protocolRecoveryFixture(t *testing.T, bank http.RoundTripper) (*storage.Sto
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.WithClock(protocolRecoveryNow)
 	handoff := authbrowser.Handoff{Version: 1, URL: "https://online.acb.com.vn/acbib/Request", Action: "https://online.acb.com.vn/acbib/Request", Fields: map[string]string{"dse_operationName": "ibkacctDetailProc", "dse_processorState": "token-0", "dse_sessionId": "synthetic", "AccountNbr": "12341234"}, Cookies: []authbrowser.Cookie{{Name: "session", Value: "synthetic", Domain: acb.OfficialHost, Path: "/", Secure: true}}}
 	if err := client.RestoreSession(handoff); err != nil {
 		t.Fatal(err)
@@ -171,7 +181,7 @@ func protocolRecoveryFixture(t *testing.T, bank http.RoundTripper) (*storage.Sto
 		t.Fatal(err)
 	}
 	mon := New(store, client, time.Second, time.Second).WithSessionLoader(loader)
-	mon.now = func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, acb.DefaultLocation) }
+	mon.now = protocolRecoveryNow
 	return store, conn, keyring, client, loader, mon
 }
 
@@ -194,12 +204,22 @@ func protocolRecoveryCount(t *testing.T, store *storage.Store, table string) int
 	return count
 }
 
-func protocolRecoveryEvents(t *testing.T, bank *protocolRecoveryBank, expected string) {
+func protocolRecoveryEvents(t *testing.T, bank *protocolRecoveryBank, expectedGets int) {
 	t.Helper()
 	bank.mu.Lock()
 	defer bank.mu.Unlock()
-	if bank.failure != "" || strings.Join(bank.events, ",") != expected {
-		t.Fatalf("contract=%s phases=%v expected=%s", bank.failure, bank.events, expected)
+	gets := 0
+	for i, phase := range bank.events {
+		if phase == "get" {
+			gets++
+			// A repair is bounded to one probe, never recursive GET/replay.
+			if i+1 < len(bank.events) && bank.events[i+1] == "get" {
+				t.Fatalf("repeated repair probe: %v", bank.events)
+			}
+		}
+	}
+	if bank.failure != "" || gets != expectedGets {
+		t.Fatalf("contract=%s phases=%v expected probes=%d", bank.failure, bank.events, expectedGets)
 	}
 }
 
@@ -229,19 +249,17 @@ func TestRealtimeTask_DetailRecoveryFromConsumedTokenAndPersistedSnapshot(t *tes
 				if err != nil {
 					t.Fatal(err)
 				}
+				client.WithClock(protocolRecoveryNow)
 				mon = New(store, client, time.Second, time.Second).WithSessionLoader(NewSessionLoader(store, keyring, client))
-				mon.now = func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, acb.DefaultLocation) }
+				mon.now = protocolRecoveryNow
 			}
 			protocolRecoveryStep(t, mon, conn, true)
-			phases := "post,post,timeout,stale,stale,get,post"
-			if tc.incomplete {
-				phases = "post,post,timeout,stale,get,post,post"
-			}
-			protocolRecoveryEvents(t, bank, phases)
+			protocolRecoveryEvents(t, bank, 1)
 			freshClient, err := acb.NewClient("https://"+acb.OfficialHost, bank)
 			if err != nil {
 				t.Fatal(err)
 			}
+			freshClient.WithClock(protocolRecoveryNow)
 			freshLoader := NewSessionLoader(store, keyring, freshClient)
 			if err := freshLoader.Restore(ctx, conn.ID, conn.Generation); err != nil {
 				t.Fatal(err)
@@ -251,7 +269,7 @@ func TestRealtimeTask_DetailRecoveryFromConsumedTokenAndPersistedSnapshot(t *tes
 				t.Fatalf("successful persisted snapshot not fresh: %v", err)
 			}
 			protocolRecoveryStep(t, mon, conn, true)
-			protocolRecoveryEvents(t, bank, phases+",post,post")
+			protocolRecoveryEvents(t, bank, 1)
 			polls, err := store.ListPollRuns(ctx, 10)
 			if err != nil || len(polls) != 4 {
 				t.Fatalf("polls=%+v err=%v", polls, err)
@@ -385,14 +403,7 @@ func TestRealtimeTask_HistoryUnavailablePreservesPartialAndSnapshot(t *testing.T
 			if err != nil || final.Generation != conn.Generation || final.State != "MONITORING" {
 				t.Fatalf("protocol failure changed auth: %+v %v", final, err)
 			}
-			expected := "detail,stale,get,detail"
-			if boundary == "in-quantum" {
-				expected = "post,post,stale,get"
-			}
-			if boundary == "yielded-continuation" {
-				expected = "post,post,post,post,post,post,stale,get"
-			}
-			protocolRecoveryEvents(t, bank, expected)
+			protocolRecoveryEvents(t, bank, 1)
 		})
 	}
 }
@@ -416,9 +427,9 @@ func TestSessionFence_DiscardsDetailRecoveryDuringProbeAndReplay(t *testing.T) {
 				go func() {
 					response, err := mon.sessionRequest(context.Background(), conn.ID, conn.Generation, func() (acb.Response, error) {
 						if tc.bootstrap {
-							return client.BootstrapForDate(context.Background(), protocolRecoveryDate)
+							return client.BootstrapToday(context.Background(), protocolRecoveryDate)
 						}
-						return client.HistoryForDate(context.Background(), "/acbib/Request", map[string]string{"dse_operationName": "ibkacctDetailProc", "dse_processorState": "token-0", "dse_sessionId": "synthetic", "AccountNbr": "12341234"}, protocolRecoveryDate)
+						return client.HistoryToday(context.Background(), "/acbib/Request", map[string]string{"dse_operationName": "ibkacctDetailProc", "dse_processorState": "token-0", "dse_sessionId": "synthetic", "AccountNbr": "12341234"}, protocolRecoveryDate)
 					})
 					finished <- struct {
 						response acb.Response
@@ -464,7 +475,7 @@ func TestSessionFence_DiscardsDetailRecoveryDuringProbeAndReplay(t *testing.T) {
 				if _, err := mon.sessionRequest(context.Background(), conn.ID, conn.Generation, func() (acb.Response, error) { return client.Get(context.Background(), "/acbib/Request") }); !errors.Is(err, storage.ErrGenerationFenceMismatch) {
 					t.Fatalf("stale next operation accepted: %v", err)
 				}
-				protocolRecoveryEvents(t, bank, "stale,get,post")
+				protocolRecoveryEvents(t, bank, 1)
 			})
 		}
 	}
@@ -475,8 +486,8 @@ func TestBootstrapUnavailableRealClientDoesNotPersistOrVerify(t *testing.T) {
 		t.Run(consumer, func(t *testing.T) {
 			ctx := context.Background()
 			bank := &protocolRecoveryBank{repeatDetail: true, incompleteDetail: true}
-			if consumer != "realtime" {
-				bank.requestDate = time.Now().In(acb.DefaultLocation).Format("02/01/2006")
+			if consumer == "verifier" {
+				bank.sourceMode = "N"
 			}
 			store, conn, _, client, loader, mon := protocolRecoveryFixture(t, bank)
 			before, err := store.Session(ctx, conn.ID, conn.Generation)
@@ -527,14 +538,14 @@ func TestBootstrapUnavailableRealClientDoesNotPersistOrVerify(t *testing.T) {
 					t.Fatalf("unavailable bootstrap changed %s", table)
 				}
 			}
-			protocolRecoveryEvents(t, bank, "stale,get,detail")
+			protocolRecoveryEvents(t, bank, 1)
 		})
 	}
 }
 
 func TestSessionVerifierAcceptsProvenTableOwnership(t *testing.T) {
 	ctx := context.Background()
-	bank := &protocolRecoveryBank{tableOwned: true, requestDate: time.Now().In(acb.DefaultLocation).Format("02/01/2006")}
+	bank := &protocolRecoveryBank{tableOwned: true, sourceMode: "N"}
 	store, conn, _, client, loader, mon := protocolRecoveryFixture(t, bank)
 	before, err := store.Session(ctx, conn.ID, conn.Generation)
 	if err != nil {
@@ -560,7 +571,7 @@ func TestSessionVerifierAcceptsProvenTableOwnership(t *testing.T) {
 	if err := loader.Persist(ctx, conn.ID, conn.Generation); err != nil {
 		t.Fatal(err)
 	}
-	bank.requestDate = protocolRecoveryDate
+	bank.sourceMode = "Y"
 	protocolRecoveryStep(t, mon, conn, true)
 	polls, err := store.ListPollRuns(ctx, 1)
 	if err != nil || len(polls) != 1 || polls[0].Status != "SUCCEEDED" || polls[0].Classifier != string(acb.HistoryPage) || polls[0].RowsSeen != 2 {

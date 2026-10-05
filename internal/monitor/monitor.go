@@ -25,9 +25,9 @@ type BankClient interface {
 	History(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error)
 }
 
-type realtimeDateBankClient interface {
-	BootstrapForDate(ctx context.Context, date string) (acb.Response, error)
-	HistoryForDate(ctx context.Context, endpoint string, fields map[string]string, date string) (acb.Response, error)
+type todayBankClient interface {
+	BootstrapToday(ctx context.Context, date string) (acb.Response, error)
+	HistoryToday(ctx context.Context, endpoint string, fields map[string]string, date string) (acb.Response, error)
 }
 
 var (

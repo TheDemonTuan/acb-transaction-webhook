@@ -7,11 +7,9 @@ import (
 
 var ErrHistoryDayMismatch = errors.New("ACB history response contains transactions outside requested day")
 
-// FilterHistoryTransactionDay returns transactions whose transaction date matches
-// the requested day. Responses from ACB often include adjacent transactions due
-// to business-day or effective-date query behavior; those rows are safely
-// excluded from ingestion rather than failing the poll. Unparseable dates
-// continue to fail closed.
+// FilterHistoryTransactionDay validates dates and returns the requested transaction day.
+// Historical effective-date queries may legitimately include adjacent days.
+// Today consumers must reject a source page when the returned count differs.
 func FilterHistoryTransactionDay(transactions []Transaction, requested string) ([]Transaction, error) {
 	if err := validateHistoryDateRange(requested, requested); err != nil {
 		return nil, err

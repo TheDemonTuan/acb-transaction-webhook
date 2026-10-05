@@ -84,6 +84,21 @@ func NewClient(base string, transport http.RoundTripper) (*Client, error) {
 	}}}, nil
 }
 
+// WithClock sets the clock used to fence transaction-day requests.
+func (c *Client) WithClock(now func() time.Time) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
+	return c
+}
+
+func (c *Client) checkTodayLocked(date string) error {
+	if date != "" && c.now().In(c.location).Format(historyDateLayout) != date {
+		return ErrRealtimeDateRollover
+	}
+	return nil
+}
+
 func isAllowedACBCookieDomain(domain string) bool {
 	d := strings.ToLower(strings.TrimPrefix(domain, "."))
 	return d == "" || d == OfficialHost || d == "acb.com.vn"
@@ -230,8 +245,8 @@ func (c *Client) Bootstrap(ctx context.Context) (Response, error) {
 	return c.bootstrapForDate(ctx, "")
 }
 
-// BootstrapForDate keeps a realtime poll on one immutable local day.
-func (c *Client) BootstrapForDate(ctx context.Context, date string) (Response, error) {
+// BootstrapToday submits transaction-day history for the current local day.
+func (c *Client) BootstrapToday(ctx context.Context, date string) (Response, error) {
 	if err := validateHistoryDateRange(date, date); err != nil {
 		return Response{}, err
 	}
@@ -279,9 +294,15 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	if err := ctx.Err(); err != nil {
 		return Response{}, err
 	}
+	if err := c.checkTodayLocked(date); err != nil {
+		return Response{}, err
+	}
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
 		probed = true
 		probeResp, resynced, err := c.probeAuthLocked(ctx)
+		if rollover := c.checkTodayLocked(date); rollover != nil {
+			return probeResp, rollover
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return probeResp, ctx.Err()
@@ -302,7 +323,7 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	var fields map[string]string
 	var err error
 	if date != "" {
-		fields, err = PrepareHistoryFieldsForDate(c.bootstrapFields, date)
+		fields, err = PrepareTodayHistoryFields(c.bootstrapFields, date)
 	} else {
 		fields, err = PrepareHistoryFields(c.bootstrapFields, requestTime, c.location)
 	}
@@ -310,6 +331,9 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 		return Response{}, err
 	}
 	if err := ctx.Err(); err != nil {
+		return Response{}, err
+	}
+	if err := c.checkTodayLocked(date); err != nil {
 		return Response{}, err
 	}
 	values := url.Values{}
@@ -327,11 +351,17 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 		return Response{}, err
 	}
 	c.logHistoryContract("bootstrap", fields, resp)
+	if err := c.checkTodayLocked(date); err != nil {
+		return resp, err
+	}
 	if isAuthChallengeKind(resp.Kind) {
 		if probed {
 			return resp, ErrInconclusiveAuth
 		}
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
+		if err := c.checkTodayLocked(date); err != nil {
+			return probeResp, err
+		}
 		if probeErr != nil {
 			var authFail *AuthFailure
 			if errors.As(probeErr, &authFail) {
@@ -360,8 +390,8 @@ func (c *Client) History(ctx context.Context, endpoint string, fields map[string
 	return c.historyForDate(ctx, endpoint, fields, "")
 }
 
-// HistoryForDate preserves the realtime poll day while retaining server navigation state.
-func (c *Client) HistoryForDate(ctx context.Context, endpoint string, fields map[string]string, date string) (Response, error) {
+// HistoryToday retains returned navigation for today's transaction-day query.
+func (c *Client) HistoryToday(ctx context.Context, endpoint string, fields map[string]string, date string) (Response, error) {
 	if err := validateHistoryDateRange(date, date); err != nil {
 		return Response{}, err
 	}
@@ -375,7 +405,7 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 	var hFields map[string]string
 	var err error
 	if date != "" {
-		hFields, err = PrepareHistoryFieldsForDate(fields, date)
+		hFields, err = PrepareTodayHistoryFields(fields, date)
 	} else {
 		hFields, err = PrepareHistoryFields(fields, c.now(), c.location)
 	}
@@ -394,7 +424,6 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 	if !isContinuation || hFields["dse_nextEventName"] == "" {
 		hFields["dse_nextEventName"] = "byDate"
 	}
-	hFields["activeDatetimeYN"] = "N"
 	delete(hFields, "activeDatetimeByMonth")
 	delete(hFields, "MonthCurr")
 	delete(hFields, "YearCurr")
@@ -412,11 +441,17 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := c.checkTodayLocked(date); err != nil {
+		return Response{}, err
+	}
 	resp, err := c.do(req, hFields["AccountNbr"])
 	if err != nil {
 		return Response{}, err
 	}
 	c.logHistoryContract("history", hFields, resp)
+	if err := c.checkTodayLocked(date); err != nil {
+		return resp, err
+	}
 	if isAuthChallengeKind(resp.Kind) || (resp.StatusCode == http.StatusOK && resp.Kind == AccountDetailPage) {
 		return c.resyncHistoryLocked(ctx, resp, hFields, isContinuation)
 	}
@@ -427,6 +462,13 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 // page one with the original account and range. The caller must hold c.mu.
 func (c *Client) resyncHistoryLocked(ctx context.Context, failed Response, prepared map[string]string, isContinuation bool) (Response, error) {
 	targetAccount, fromDate, toDate := prepared["AccountNbr"], prepared["FromDate"], prepared["ToDate"]
+	today := ""
+	if prepared["activeDatetimeYN"] == "Y" {
+		today = fromDate
+		if err := c.checkTodayLocked(today); err != nil {
+			return failed, err
+		}
+	}
 	defer func() {
 		if c.bootstrapFields != nil {
 			c.bootstrapFields["AccountNbr"] = targetAccount
@@ -437,6 +479,9 @@ func (c *Client) resyncHistoryLocked(ctx context.Context, failed Response, prepa
 	}
 	probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 	c.logHistoryContract("probe", prepared, probeResp)
+	if err := c.checkTodayLocked(today); err != nil {
+		return probeResp, err
+	}
 	if probeErr != nil {
 		// Authenticated but unusable state is a protocol failure, not expiration.
 		if probeResp.StatusCode == http.StatusOK && (probeResp.Kind == AccountDetailPage || probeResp.Kind == HistoryPage) {
@@ -461,7 +506,13 @@ func (c *Client) resyncHistoryLocked(ctx context.Context, failed Response, prepa
 	if targetAccount == "" {
 		return probeResp, ErrHistoryUnavailable
 	}
-	replayFields, err := PrepareHistoryFieldsWithRange(fresh.Fields, fromDate, toDate)
+	var replayFields map[string]string
+	var err error
+	if today != "" {
+		replayFields, err = PrepareTodayHistoryFields(fresh.Fields, today)
+	} else {
+		replayFields, err = PrepareHistoryFieldsWithRange(fresh.Fields, fromDate, toDate)
+	}
 	if err != nil {
 		return probeResp, ErrHistoryUnavailable
 	}
@@ -475,11 +526,17 @@ func (c *Client) resyncHistoryLocked(ctx context.Context, failed Response, prepa
 		return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
 	}
 	replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := c.checkTodayLocked(today); err != nil {
+		return probeResp, err
+	}
 	replayResp, replayErr := c.do(replayReq, replayFields["AccountNbr"])
 	if replayErr != nil {
 		return Response{}, replayErr
 	}
 	c.logHistoryContract("replay", replayFields, replayResp)
+	if err := c.checkTodayLocked(today); err != nil {
+		return replayResp, err
+	}
 	if isAuthChallengeKind(replayResp.Kind) {
 		return replayResp, ErrInconclusiveAuth
 	}
