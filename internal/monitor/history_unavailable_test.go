@@ -81,6 +81,18 @@ func (b *unavailableHistoryBank) RoundTrip(r *http.Request) (*http.Response, err
 	}
 	if r.Method == http.MethodGet {
 		b.probes++
+		if b.stage == "bootstrap_probe" {
+			limit := 1
+			if b.mode == "restart_bootstrap_unavailable" {
+				limit = 2 // One continuation reset, then one bootstrap resync.
+			}
+			if b.probes != limit {
+				b.t.Fatal("bootstrap recovery exceeded its single fresh probe")
+			}
+			b.token++
+			b.stage = "terminal"
+			return respond(b.form("ibkacctSumProc"))
+		}
 		if b.probes > 1 || b.stage != "probe" {
 			b.t.Fatal("consumer exceeded the bounded recovery probe or probed out of sequence")
 		}
@@ -110,6 +122,10 @@ func (b *unavailableHistoryBank) RoundTrip(r *http.Request) (*http.Response, err
 	case "bootstrap":
 		if fields.Get("dse_nextEventName") != "byDate" {
 			b.t.Fatal("bootstrap did not restart the history conversation")
+		}
+		if b.mode == "bootstrap_unavailable" || b.mode == "restart_bootstrap_unavailable" && b.probes == 1 {
+			b.stage = "bootstrap_probe"
+			return respond(fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_sessionId" value="session-%d"><input name="AccountNbr" value="%s"></form>`, b.token, unavailableAccount))
 		}
 		b.stage = "page1"
 		return respond(b.form("ibkacctDetailProc"))
@@ -244,17 +260,24 @@ func assertUnavailableSequence(t *testing.T, bank *unavailableHistoryBank, conti
 	} else {
 		want = append(want, "GET:", "POST:byDate")
 	}
+	probes := 1
+	if bank.mode == "bootstrap_unavailable" {
+		want = []string{"POST:byDate", "GET:"}
+	} else if bank.mode == "restart_bootstrap_unavailable" {
+		want = []string{"POST:byDate", "POST:byDate", "POST:nextPage", "GET:", "POST:byDate", "GET:"}
+		probes = 2
+	}
 	got := make([]string, len(bank.requests))
 	for i, request := range bank.requests {
 		got[i] = request.method + ":" + request.event
 	}
-	if !reflect.DeepEqual(got, want) || bank.probes != 1 {
+	if !reflect.DeepEqual(got, want) || bank.probes != probes {
 		t.Fatalf("bounded recovery sequence=%v want=%v probes=%d", got, want, bank.probes)
 	}
 }
 
 func TestCatchUpHistoryUnavailableIsTerminalWithoutDurableDayChanges(t *testing.T) {
-	for _, mode := range []string{"initial_unavailable", "continuation_unavailable"} {
+	for _, mode := range []string{"initial_unavailable", "continuation_unavailable", "bootstrap_unavailable", "restart_bootstrap_unavailable"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			store, conn, _ := setupRecoveryTestEnv(t, "unavailable_catchup.db")
@@ -291,7 +314,7 @@ func TestCatchUpHistoryUnavailableIsTerminalWithoutDurableDayChanges(t *testing.
 }
 
 func TestHistoryJobUnavailableFailsWithoutRequeueOrFailedPageIngestion(t *testing.T) {
-	for _, mode := range []string{"initial_unavailable", "continuation_unavailable"} {
+	for _, mode := range []string{"initial_unavailable", "continuation_unavailable", "bootstrap_unavailable", "restart_bootstrap_unavailable"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			store, conn, _ := setupRecoveryTestEnv(t, "unavailable_job.db")
@@ -316,7 +339,7 @@ func TestHistoryJobUnavailableFailsWithoutRequeueOrFailedPageIngestion(t *testin
 			if err != nil || failed.Status != storage.HistoryJobStatusFailed || failed.ErrorCode != "HISTORY_UNAVAILABLE" || failed.ErrorMessage != "HISTORY_UNAVAILABLE" || failed.NextAttemptAt != "" {
 				t.Fatalf("job did not fail terminally: %+v err=%v", failed, err)
 			}
-			if mode == "continuation_unavailable" {
+			if mode == "continuation_unavailable" || mode == "restart_bootstrap_unavailable" {
 				// Jobs retain parsed valid prior pages; only failed-page data and
 				// incomplete-day coverage/checkpoint must be rejected.
 				before.txns++
@@ -437,5 +460,118 @@ func TestHistoryDayContinuationResetRestartsOriginalDayAndDeduplicates(t *testin
 				}
 			}
 		})
+	}
+}
+
+// Inject only the bootstrap boundary error; real Client history requests still
+// drive the continuation reset so the restart-day consumer path is exercised.
+type bootstrapUnavailableClient struct {
+	*acb.Client
+	calls  int
+	failAt int
+}
+
+func (c *bootstrapUnavailableClient) Bootstrap(ctx context.Context) (acb.Response, error) {
+	c.calls++
+	if c.calls == c.failAt {
+		return acb.Response{Kind: acb.AccountDetailPage, StatusCode: http.StatusOK}, fmt.Errorf("bootstrap protocol: %w", acb.ErrHistoryUnavailable)
+	}
+	return c.Client.Bootstrap(ctx)
+}
+
+func (c *bootstrapUnavailableClient) BootstrapForDate(ctx context.Context, _ string) (acb.Response, error) {
+	return c.Bootstrap(ctx)
+}
+
+func TestBootstrapHistoryUnavailableConsumersAreTerminal(t *testing.T) {
+	for _, consumer := range []string{"realtime", "catchup", "job", "keepalive"} {
+		for _, failAt := range []int{1, 2} {
+			if failAt == 2 && consumer != "catchup" && consumer != "job" {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/bootstrap=%d", consumer, failAt), func(t *testing.T) {
+				ctx := context.Background()
+				store, conn, _ := setupRecoveryTestEnv(t, "bootstrap_unavailable.db")
+				defer store.Close()
+				before := seedUnavailableDurability(t, store, conn, false)
+				realClient, bank := newUnavailableHistoryClient(t, "success")
+				client := &bootstrapUnavailableClient{Client: realClient, failAt: failAt}
+				mon := New(store, client, 5*time.Second, 15*time.Second)
+				mon.now = func() time.Time { return time.Date(2026, 10, 5, 12, 0, 0, 0, acb.DefaultLocation) }
+				var result scheduler.TaskStepResult
+				var stepErr error
+				switch consumer {
+				case "realtime":
+					result, stepErr = NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation).Step(ctx)
+				case "keepalive":
+					result, stepErr = NewKeepaliveTask(mon, conn.ID, conn.Generation).Step(ctx)
+				case "catchup":
+					run, _, err := store.EnsureRecoveryRunWithPlan(ctx, conn.ID, conn.Generation, "bootstrap-failure", storage.RecoveryRunPlan{Reason: "WORKER_STARTUP", RangeFrom: unavailableDay, RangeTo: unavailableDay, NextDay: unavailableDay})
+					if err != nil {
+						t.Fatal(err)
+					}
+					result, stepErr = NewRecoveryCatchUpTask(mon, conn.ID, conn.Generation, run.Reason, run.ID).Step(ctx)
+					failed, err := store.GetRecoveryRun(ctx, run.ID)
+					if err != nil || failed.Status != storage.RecoveryRunStatusFailed || failed.ErrorCode != "HISTORY_UNAVAILABLE" || failed.ErrorMessage != "HISTORY_UNAVAILABLE" || failed.NextDay != unavailableDay {
+						t.Fatalf("terminal recovery=%+v err=%v", failed, err)
+					}
+					open, err := store.ListOpenRecoveryRuns(ctx, conn.ID, conn.Generation)
+					if err != nil || len(open) != 0 {
+						t.Fatal("bootstrap failure remained runnable")
+					}
+				case "job":
+					runner := NewHistoryJobRunner(store, client, nil, nil).WithMonitor(mon)
+					job, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, unavailableDay, unavailableDay)
+					if err != nil {
+						t.Fatal(err)
+					}
+					claimed, ok, err := store.ClaimNextHistorySyncJob(ctx, time.Now())
+					if err != nil || !ok {
+						t.Fatalf("claim: %v", err)
+					}
+					result, stepErr = NewHistoryJobTask(runner, claimed, conn).Step(ctx)
+					failed, err := store.GetHistorySyncJob(ctx, job.ID)
+					if err != nil || failed.Status != storage.HistoryJobStatusFailed || failed.ErrorCode != "HISTORY_UNAVAILABLE" || failed.ErrorMessage != "HISTORY_UNAVAILABLE" || failed.NextAttemptAt != "" {
+						t.Fatalf("terminal job=%+v err=%v", failed, err)
+					}
+					if failAt == 2 {
+						before.txns++ // Retain the previously parsed FILTER_SYNC page.
+						var rows int
+						if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM transactions WHERE semantic_key='ACB:TX_DAY_1' AND credit=100000 AND debit=0 AND ingest_source='FILTER_SYNC'").Scan(&rows); err != nil || rows != 1 {
+							t.Fatalf("prior page rows=%d err=%v", rows, err)
+						}
+					}
+					if _, ok, err := store.ClaimNextHistorySyncJob(ctx, time.Now().Add(time.Hour)); err != nil || ok {
+						t.Fatal("bootstrap failure requeued")
+					}
+				}
+				if !result.Done || !result.RequeueAt.IsZero() || mon.IsBackoffActive() {
+					t.Fatalf("protocol failure retried/backed off: result=%+v err=%v", result, stepErr)
+				}
+				if consumer != "realtime" && (!errors.Is(stepErr, acb.ErrHistoryUnavailable) || result.Outcome != scheduler.OutcomeFatal) {
+					t.Fatalf("protocol failure outcome=%+v err=%v", result, stepErr)
+				}
+				if client.calls != failAt {
+					t.Fatalf("bootstrap calls=%d want=%d", client.calls, failAt)
+				}
+				if failAt == 1 && len(bank.requests) != 0 {
+					t.Fatal("bootstrap error fell through into bank history")
+				}
+				if consumer != "job" {
+					polls, err := store.ListPollRuns(ctx, 1)
+					status := "FAILED"
+					if consumer == "realtime" || consumer == "keepalive" {
+						status = "PARTIAL"
+					}
+					if err != nil || len(polls) != 1 || polls[0].Status != status || polls[0].Error != "HISTORY_UNAVAILABLE" || polls[0].Classifier != string(acb.AccountDetailPage) || polls[0].HTTPStatus != http.StatusOK {
+						t.Fatalf("poll metadata=%+v err=%v", polls, err)
+					}
+					if failAt == 1 && (polls[0].RowsSeen != 0 || consumer == "keepalive" && polls[0].Pages != 0) {
+						t.Fatalf("failed bootstrap ingested rows: %+v", polls[0])
+					}
+				}
+				assertUnavailableDurability(t, store, conn, before)
+			})
+		}
 	}
 }

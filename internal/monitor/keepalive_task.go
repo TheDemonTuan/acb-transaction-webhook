@@ -120,6 +120,17 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 			t.finishDone(nil)
 			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeAuth}, nil
 		}
+		if errors.Is(err, acb.ErrHistoryUnavailable) {
+			poll.Status = "PARTIAL"
+			poll.Error = "HISTORY_UNAVAILABLE"
+			poll.Classifier = string(resp.Kind)
+			poll.HTTPStatus = resp.StatusCode
+			if finishErr := t.m.finishPoll(ctx, poll, 0); finishErr != nil {
+				err = errors.Join(err, finishErr)
+			}
+			t.finishDone(err)
+			return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+		}
 		poll.Status = "FAILED"
 		poll.Error = acb.SanitizeTransportError(err)
 		if finishErr := t.m.finishPoll(ctx, poll, 0); finishErr != nil {

@@ -447,6 +447,14 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 			if errors.As(err, &authFail) {
 				return t.authRequired(ctx, conn, authFail, resp, "bootstrap")
 			}
+			if errors.Is(err, acb.ErrHistoryUnavailable) {
+				t.poll.Classifier = string(resp.Kind)
+				t.poll.HTTPStatus = resp.StatusCode
+				_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "HISTORY_UNAVAILABLE", "HISTORY_UNAVAILABLE")
+				_ = t.finishPoll(ctx, "FAILED", "HISTORY_UNAVAILABLE")
+				t.finishDone(err)
+				return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+			}
 			until := t.m.RecordNetworkFailure(err)
 			slog.Warn("ACB request failed", "phase", "catchup_bootstrap", "generation", conn.Generation, "backoff_until", until, "error", acb.SanitizeTransportError(err))
 			return scheduler.TaskStepResult{
@@ -550,6 +558,14 @@ func (t *CatchUpTask) Step(ctx context.Context) (scheduler.TaskStepResult, error
 						var bAuthFail *acb.AuthFailure
 						if errors.As(bootErr, &bAuthFail) {
 							return t.authRequired(ctx, conn, bAuthFail, bootResp, "bootstrap_resync")
+						}
+						if errors.Is(bootErr, acb.ErrHistoryUnavailable) {
+							t.poll.Classifier = string(bootResp.Kind)
+							t.poll.HTTPStatus = bootResp.StatusCode
+							_ = t.updateRecoveryProgress(ctx, conn, storage.RecoveryRunStatusFailed, "HISTORY_UNAVAILABLE", "HISTORY_UNAVAILABLE")
+							_ = t.finishPoll(ctx, "FAILED", "HISTORY_UNAVAILABLE")
+							t.finishDone(bootErr)
+							return scheduler.TaskStepResult{Done: true, Error: bootErr, Outcome: scheduler.OutcomeFatal}, bootErr
 						}
 						return scheduler.TaskStepResult{Done: false, Error: bootErr, Outcome: scheduler.OutcomeTransient}, bootErr
 					}

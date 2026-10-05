@@ -25,7 +25,8 @@ func (c *Client) logHistoryContract(phase string, fields map[string]string, resp
 	page, parseErr := ParseHistoryPage(response.Body)
 	form, formErr := ExtractHistoryForm(response.Body)
 	controls := make(map[string][]map[string]any)
-	if doc, err := html.Parse(strings.NewReader(response.Body)); err == nil {
+	doc, docErr := html.Parse(strings.NewReader(response.Body))
+	if docErr == nil {
 		walk(doc, func(n *html.Node) {
 			if n.Type != html.ElementNode || n.Data != "input" {
 				return
@@ -60,12 +61,24 @@ func (c *Client) logHistoryContract(phase string, fields map[string]string, resp
 		request[name] = safeHistoryControl(name, fields[name])
 		responseFields[name] = safeHistoryControl(name, form.Fields[name])
 	}
+	structure := DiagnosePageStructure(response.Body)
+	if formErr == nil {
+		structure.FormAction = historyOwnershipAction(form.Action)
+	}
+	keys := structure.FormKeys[:0]
+	for _, name := range structure.FormKeys {
+		if historyOwnershipKey(name) {
+			keys = append(keys, name)
+		}
+	}
+	structure.FormKeys = keys
 	slog.Info("ACB history contract diagnostic", "phase", phase, "request", request, "status", response.StatusCode,
 		"kind", response.Kind, "classifier_reason", response.ClassifierReason,
 		"response_form", responseFields, "form_valid", formErr == nil, "controls", controls,
+		"form_ownership", diagnoseHistoryFormOwnership(response.Body, doc),
 		"parse_valid", parseErr == nil, "rows", len(page.Transactions),
 		"transaction_days", HistoryDayCounts(page.Transactions), "effective_days", HistoryEffectiveDayCounts(page.Transactions),
-		"has_next", page.HasNext, "total_rows", page.TotalRows, "structure", DiagnosePageStructure(response.Body))
+		"has_next", page.HasNext, "total_rows", page.TotalRows, "structure", structure)
 }
 
 func safeHistoryControl(name, value string) string {

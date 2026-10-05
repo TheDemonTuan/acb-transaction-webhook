@@ -540,6 +540,11 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 			return t.runner.client.Bootstrap(ctx)
 		})
 		if err != nil {
+			if errors.Is(err, acb.ErrHistoryUnavailable) {
+				_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "HISTORY_UNAVAILABLE", "HISTORY_UNAVAILABLE")
+				t.finish(err)
+				return scheduler.TaskStepResult{Done: true, Error: err, Outcome: scheduler.OutcomeFatal}, err
+			}
 			bootErr := fmt.Errorf("bootstrap ACB session: %w", err)
 			retryAt := time.Now().Add(5 * time.Second)
 			if mon := t.runner.Monitor(); mon != nil {
@@ -625,6 +630,11 @@ func (t *HistoryJobTask) Step(ctx context.Context) (scheduler.TaskStepResult, er
 							_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "AUTH_REQUIRED", bAuthFail.Error())
 							t.finish(bAuthFail)
 							return scheduler.TaskStepResult{Done: true, Error: bAuthFail, Outcome: scheduler.OutcomeAuth}, bAuthFail
+						}
+						if errors.Is(bootErr, acb.ErrHistoryUnavailable) {
+							_ = t.runner.store.FailHistorySyncJob(ctx, t.job.ID, "HISTORY_UNAVAILABLE", "HISTORY_UNAVAILABLE")
+							t.finish(bootErr)
+							return scheduler.TaskStepResult{Done: true, Error: bootErr, Outcome: scheduler.OutcomeFatal}, bootErr
 						}
 						return scheduler.TaskStepResult{Done: false, Error: bootErr, Outcome: scheduler.OutcomeTransient}, bootErr
 					}

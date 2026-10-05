@@ -164,85 +164,11 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 		var visit func(*html.Node)
 		visit = func(node *html.Node) {
 			if node.Type == html.ElementNode {
-				tag := strings.ToLower(node.Data)
-				switch tag {
+				switch strings.ToLower(node.Data) {
 				case "input", "textarea", "select":
-					var name, value, inputType string
-					var disabled, checked, valuePresent bool
-					for _, attr := range node.Attr {
-						switch strings.ToLower(attr.Key) {
-						case "name":
-							name = attr.Val
-						case "value":
-							value, valuePresent = attr.Val, true
-						case "type":
-							inputType = strings.ToLower(attr.Val)
-						case "disabled":
-							disabled = true
-						case "checked":
-							checked = true
-						}
-					}
-					if name == "" || disabled {
+					name, value, ok := successfulHistoryControl(node)
+					if !ok {
 						return
-					}
-					switch tag {
-					case "input":
-						switch inputType {
-						case "submit", "button", "reset", "image", "file":
-							return
-						case "radio", "checkbox":
-							if !checked {
-								return
-							}
-							if !valuePresent {
-								value = "on"
-							}
-						}
-					case "textarea":
-						var content strings.Builder
-						for child := node.FirstChild; child != nil; child = child.NextSibling {
-							if child.Type == html.TextNode {
-								content.WriteString(child.Data)
-							}
-						}
-						value = content.String()
-					case "select":
-						var found bool
-						var scanOption func(*html.Node)
-						scanOption = func(opt *html.Node) {
-							if opt.Type == html.ElementNode {
-								for _, attr := range opt.Attr {
-									if strings.EqualFold(attr.Key, "disabled") {
-										return
-									}
-								}
-								if strings.EqualFold(opt.Data, "option") {
-									optionValue := nodeText(opt)
-									isSelected := false
-									for _, attr := range opt.Attr {
-										if strings.EqualFold(attr.Key, "value") {
-											optionValue = attr.Val
-										}
-										if strings.EqualFold(attr.Key, "selected") {
-											isSelected = true
-										}
-									}
-									if !found || isSelected {
-										value = optionValue
-									}
-									found = true
-									return
-								}
-							}
-							for c := opt.FirstChild; c != nil; c = c.NextSibling {
-								scanOption(c)
-							}
-						}
-						scanOption(node)
-						if !found {
-							return
-						}
 					}
 					state.Fields[name] = value
 				}
@@ -292,4 +218,93 @@ func ExtractHistoryForm(markup string) (FormState, error) {
 	}
 
 	return FormState{}, errors.New("ACB account form state is incomplete")
+}
+
+// successfulHistoryControl preserves the extraction successful-control rules.
+func successfulHistoryControl(node *html.Node) (string, string, bool) {
+	if node == nil || node.Type != html.ElementNode {
+		return "", "", false
+	}
+	tag := strings.ToLower(node.Data)
+	if tag != "input" && tag != "textarea" && tag != "select" {
+		return "", "", false
+	}
+	var name, value, inputType string
+	var disabled, checked, valuePresent bool
+	for _, attr := range node.Attr {
+		switch strings.ToLower(attr.Key) {
+		case "name":
+			name = attr.Val
+		case "value":
+			value, valuePresent = attr.Val, true
+		case "type":
+			inputType = strings.ToLower(attr.Val)
+		case "disabled":
+			disabled = true
+		case "checked":
+			checked = true
+		}
+	}
+	if name == "" || disabled {
+		return "", "", false
+	}
+	switch tag {
+	case "input":
+		switch inputType {
+		case "submit", "button", "reset", "image", "file":
+			return "", "", false
+		case "radio", "checkbox":
+			if !checked {
+				return "", "", false
+			}
+			if !valuePresent {
+				value = "on"
+			}
+		}
+	case "textarea":
+		var content strings.Builder
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			if child.Type == html.TextNode {
+				content.WriteString(child.Data)
+			}
+		}
+		value = content.String()
+	case "select":
+		var found bool
+		var scanOption func(*html.Node)
+		scanOption = func(opt *html.Node) {
+			if opt.Type == html.ElementNode {
+				for _, attr := range opt.Attr {
+					if strings.EqualFold(attr.Key, "disabled") {
+						return
+					}
+				}
+				if strings.EqualFold(opt.Data, "option") {
+					optionValue := nodeText(opt)
+					isSelected := false
+					for _, attr := range opt.Attr {
+						if strings.EqualFold(attr.Key, "value") {
+							optionValue = attr.Val
+						}
+						if strings.EqualFold(attr.Key, "selected") {
+							isSelected = true
+						}
+					}
+					if !found || isSelected {
+						value = optionValue
+					}
+					found = true
+					return
+				}
+			}
+			for c := opt.FirstChild; c != nil; c = c.NextSibling {
+				scanOption(c)
+			}
+		}
+		scanOption(node)
+		if !found {
+			return "", "", false
+		}
+	}
+	return name, value, true
 }

@@ -33,6 +33,7 @@ type historyRecoveryBank struct {
 	probes        int
 	replayPending bool
 	paginate      bool
+	incomplete    bool
 	probe         func(*http.Request) (*http.Response, error)
 	replay        func(*http.Request) (*http.Response, error)
 	initial       func(*http.Request) (*http.Response, error)
@@ -64,6 +65,9 @@ func (b *historyRecoveryBank) form(account string) string {
 }
 
 func (b *historyRecoveryBank) staleDetail() string {
+	if b.incomplete {
+		return `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value=""><input name="dse_sessionId" value="detail-session"><input name="AccountNbr" value="` + recoveryOtherAccount + `"></form><div>Account detail</div>`
+	}
 	return `<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="detail-only-state"><input name="dse_sessionId" value="detail-only-session"><input name="AccountNbr" value="` + recoveryOtherAccount + `"></form><div>Account detail</div>`
 }
 
@@ -798,4 +802,469 @@ func TestHistoryDetailRecoveryDoesNotUseFreshGetHistoryAsAccountProof(t *testing
 		t.Fatal("GET recovery evidence was fabricated into an echoed selection")
 	}
 	assertRecoveryTarget(t, client)
+}
+
+func TestBootstrapIncompleteRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart_%t", restart), func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			client := bank.client(bank.handoff())
+			first, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRecoveryTransactions(t, first)
+			snapshot, err := client.SnapshotSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			bank.timeoutNext = true
+			_, err = client.BootstrapForDate(context.Background(), recoveryDate)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("consumed POST lost timeout: %v", err)
+			}
+			if restart {
+				client = bank.client(snapshot)
+			}
+			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRecoveryTransactions(t, response)
+			assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodPost, http.MethodPost, http.MethodGet, http.MethodPost)
+			assertRecoveryTarget(t, client)
+			fresh, err := client.SnapshotSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fresh.Fields["dse_processorState"] != fmt.Sprintf("state-%d", bank.token) || fresh.Fields["dse_sessionId"] != fmt.Sprintf("session-%d", bank.token) {
+				t.Fatal("snapshot did not capture fresh server state")
+			}
+			if snapshot.Fields["dse_processorState"] != "state-2" || snapshot.Fields["AccountNbr"] != recoveryAccount {
+				t.Fatal("bootstrap mutated the persisted stale fields")
+			}
+			next, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRecoveryTransactions(t, next)
+			if bank.probes != 1 {
+				t.Fatal("fresh poll unexpectedly probed")
+			}
+		})
+	}
+}
+
+func TestBootstrapIncompleteRecoveryPinsClockAndRange(t *testing.T) {
+	for _, mode := range []string{"implicit_today", "caller_day", "explicit_range", "initial_probe"} {
+		t.Run(mode, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			handoff := bank.handoff()
+			if mode == "explicit_range" {
+				bank.from = "29/09/2026"
+				handoff.Fields["_explicitRange"] = "true"
+				handoff.Fields["FromDate"], handoff.Fields["ToDate"] = bank.from, bank.to
+			}
+			if mode == "initial_probe" {
+				handoff.Action, handoff.Fields = "", nil
+			}
+			client := bank.client(handoff)
+			clockCalls := 0
+			current := time.Date(2026, 10, 5, 23, 59, 59, 0, client.location)
+			client.now = func() time.Time { clockCalls++; return current }
+			bank.onProbe = func() { current = current.Add(2 * time.Second) }
+			bank.probe = func(r *http.Request) (*http.Response, error) {
+				return recoveryResponse(r, http.StatusOK, bank.form(recoveryAccount)), nil
+			}
+			if mode != "initial_probe" {
+				bank.token++
+			}
+			var response Response
+			var err error
+			if mode == "caller_day" {
+				response, err = client.BootstrapForDate(context.Background(), recoveryDate)
+			} else {
+				response, err = client.Bootstrap(context.Background())
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRecoveryTransactions(t, response)
+			if clockCalls != 1 {
+				t.Fatalf("bootstrap clock snapshots=%d want=1", clockCalls)
+			}
+			if mode == "initial_probe" {
+				assertRecoveryRequests(t, bank.requests, http.MethodGet, http.MethodPost)
+			} else {
+				assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet, http.MethodPost)
+			}
+			for _, request := range bank.requests {
+				if request.method == http.MethodPost && (request.fields.Get("FromDate") != bank.from || request.fields.Get("ToDate") != bank.to || request.fields.Get("AccountNbr") != recoveryAccount) {
+					t.Fatal("bootstrap lost original target/range across midnight")
+				}
+			}
+			if mode != "initial_probe" && (handoff.Fields["dse_processorState"] != "state-1" || handoff.Fields["AccountNbr"] != recoveryAccount) {
+				t.Fatal("bootstrap mutated caller fields")
+			}
+			assertRecoveryTarget(t, client)
+		})
+	}
+}
+
+func TestBootstrapIncompleteRecoveryRejectsFreshForm(t *testing.T) {
+	for _, invalid := range []string{"missing_state", "missing_session", "summary_only", "foreign_action", "wrong_operation"} {
+		t.Run(invalid, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			client := bank.client(bank.handoff())
+			bank.token++
+			lastBody := ""
+			bank.probe = func(r *http.Request) (*http.Response, error) {
+				lastBody = bank.form(recoveryOtherAccount)
+				switch invalid {
+				case "missing_state":
+					lastBody = strings.ReplaceAll(lastBody, fmt.Sprintf(`value="state-%d"`, bank.token), `value=""`)
+				case "missing_session":
+					lastBody = strings.ReplaceAll(lastBody, fmt.Sprintf(`value="session-%d"`, bank.token), `value=""`)
+				case "summary_only":
+					lastBody = strings.ReplaceAll(lastBody, "ibkacctDetailProc", "ibkacctSumProc")
+				case "foreign_action":
+					lastBody = strings.ReplaceAll(lastBody, `action="/acbib/Request"`, `action="https://example.test/acbib/Request"`)
+				case "wrong_operation":
+					lastBody = strings.ReplaceAll(lastBody, "ibkacctDetailProc", "unrelatedProc") + `<div>ibkacctDetailProc AccountNbr</div>`
+				}
+				return recoveryResponse(r, http.StatusOK, lastBody), nil
+			}
+			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			var authFailure *AuthFailure
+			if !errors.Is(err, ErrHistoryUnavailable) || errors.As(err, &authFailure) || response.Body != lastBody || response.Kind != AccountDetailPage {
+				t.Fatalf("invalid fresh form did not fail closed with final response: %v kind=%s", err, response.Kind)
+			}
+			assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet)
+			assertRecoveryTarget(t, client)
+		})
+	}
+}
+
+func TestBootstrapIncompleteRecoveryReplayProofAndFailures(t *testing.T) {
+	for _, result := range []string{"detail", "unknown", "exact_echo", "direct_no_echo", "different_echo", "masked_echo", "redirect_get", "redirect_post", "network", "rate_limit", "server_error", "maintenance", "schema_error"} {
+		t.Run(result, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			client := bank.client(bank.handoff())
+			bank.token++
+			transportErr := errors.New("synthetic bootstrap replay transport failure")
+			lastBody := ""
+			status := http.StatusOK
+			bank.replay = func(r *http.Request) (*http.Response, error) {
+				account := recoveryAccount
+				switch result {
+				case "direct_no_echo", "redirect_get", "redirect_post":
+					account = ""
+				case "different_echo":
+					account = recoveryOtherAccount
+				case "masked_echo":
+					account = "****5678"
+				}
+				lastBody = bank.history(account, false)
+				switch result {
+				case "detail":
+					lastBody = bank.staleDetail()
+				case "unknown":
+					lastBody = `<div>Unrecognized result</div>`
+				case "network":
+					return nil, transportErr
+				case "rate_limit":
+					status, lastBody = http.StatusTooManyRequests, bank.staleDetail()
+				case "server_error":
+					status, lastBody = http.StatusServiceUnavailable, bank.staleDetail()
+				case "maintenance":
+					lastBody = `<div>Hệ thống đang bảo trì</div>`
+				case "schema_error":
+					lastBody = bank.form(recoveryAccount) + `<table><tr><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr></table>`
+				}
+				if strings.HasPrefix(result, "redirect_") {
+					redirectStatus := http.StatusFound
+					if result == "redirect_post" {
+						redirectStatus = http.StatusTemporaryRedirect
+					}
+					response := recoveryResponse(r, redirectStatus, "")
+					response.Header.Set("Location", "/acbib/redirected")
+					return response, nil
+				}
+				return recoveryResponse(r, status, lastBody), nil
+			}
+			bank.redirect = func(r *http.Request) (*http.Response, error) {
+				return recoveryResponse(r, http.StatusOK, lastBody), nil
+			}
+			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			switch result {
+			case "exact_echo", "direct_no_echo":
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertRecoveryTransactions(t, response)
+			case "network":
+				if !errors.Is(err, transportErr) {
+					t.Fatalf("lost transport cause: %v", err)
+				}
+			case "rate_limit", "server_error", "maintenance":
+				if err != nil || response.StatusCode != status {
+					t.Fatalf("transient replay changed policy: %v status=%d", err, response.StatusCode)
+				}
+			case "schema_error":
+				if err != nil || response.Kind != HistoryPage {
+					t.Fatalf("client must leave proved schema validation to parser: %v", err)
+				}
+				if _, parseErr := ParseHistoryPage(response.Body); parseErr == nil {
+					t.Fatal("invalid schema parsed as empty history")
+				}
+			default:
+				if !errors.Is(err, ErrHistoryUnavailable) {
+					t.Fatalf("unproved replay accepted: %v kind=%s", err, response.Kind)
+				}
+			}
+			if result != "network" && response.Body != lastBody {
+				t.Fatal("final bank body was changed")
+			}
+			if strings.HasPrefix(result, "redirect_") {
+				method := http.MethodGet
+				if result == "redirect_post" {
+					method = http.MethodPost
+				}
+				assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet, http.MethodPost, method)
+				if response.RequestedAccount != "" {
+					t.Fatal("redirect was treated as exact POST proof")
+				}
+			} else {
+				assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet, http.MethodPost)
+			}
+			assertRecoveryTarget(t, client)
+		})
+	}
+}
+
+func TestBootstrapIncompleteRecoveryProbeBoundaries(t *testing.T) {
+	for _, result := range []string{"network", "rate_limit", "server_error", "maintenance", "unknown", "login", "otp", "captcha", "unauthorized", "forbidden"} {
+		for _, phase := range []string{"probe", "replay"} {
+			t.Run(result+"/"+phase, func(t *testing.T) {
+				bank := newHistoryRecoveryBank(t)
+				bank.incomplete = true
+				client := bank.client(bank.handoff())
+				bank.token++
+				transportErr := errors.New("synthetic bootstrap transport failure")
+				status, body := http.StatusOK, `<div>Unrecognized result</div>`
+				challenge := false
+				switch result {
+				case "rate_limit":
+					status, body = http.StatusTooManyRequests, bank.form(recoveryOtherAccount)
+				case "server_error":
+					status, body = http.StatusServiceUnavailable, bank.form(recoveryOtherAccount)
+				case "maintenance":
+					body = `<div>Hệ thống đang bảo trì</div>`
+				case "login":
+					body, challenge = `<input name="username"><input type="password" name="password">`, true
+				case "otp":
+					body, challenge = `Nhập mã OTP SafeKey`, true
+				case "captcha":
+					body, challenge = `captcha Mã xác nhận`, true
+				case "unauthorized":
+					status, challenge = http.StatusUnauthorized, true
+				case "forbidden":
+					status, challenge = http.StatusForbidden, true
+				}
+				respond := func(r *http.Request) (*http.Response, error) {
+					if result == "network" {
+						return nil, transportErr
+					}
+					return recoveryResponse(r, status, body), nil
+				}
+				if phase == "probe" {
+					bank.probe = respond
+				} else {
+					bank.replay = respond
+				}
+				response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+				var authFailure *AuthFailure
+				switch {
+				case result == "network":
+					if !errors.Is(err, transportErr) {
+						t.Fatalf("transport cause lost: %v", err)
+					}
+				case challenge && phase == "probe":
+					if !errors.As(err, &authFailure) {
+						t.Fatalf("fresh probe must confirm auth loss: %v", err)
+					}
+				case challenge || phase == "probe":
+					if !errors.Is(err, ErrInconclusiveAuth) || errors.As(err, &authFailure) {
+						t.Fatalf("challenge/transient incorrectly confirmed auth loss: %v", err)
+					}
+				case result == "unknown":
+					if !errors.Is(err, ErrHistoryUnavailable) {
+						t.Fatalf("unknown replay accepted: %v", err)
+					}
+				default:
+					if err != nil {
+						t.Fatalf("transient replay changed consumer policy: %v", err)
+					}
+				}
+				if result != "network" && (response.StatusCode != status || response.Body != body) {
+					t.Fatal("boundary lost final response")
+				}
+				if phase == "probe" {
+					assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet)
+				} else {
+					assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet, http.MethodPost)
+				}
+				assertRecoveryTarget(t, client)
+			})
+		}
+	}
+}
+
+func TestBootstrapOneProbeBudgetAndCleanChallenge(t *testing.T) {
+	for _, mode := range []string{"cookies_incomplete", "cookies_challenge", "stale_challenge", "cookies_canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			handoff := bank.handoff()
+			if strings.HasPrefix(mode, "cookies_") {
+				handoff.Action, handoff.Fields = "", nil
+			}
+			client := bank.client(handoff)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			bank.probe = func(r *http.Request) (*http.Response, error) {
+				if mode == "cookies_canceled" {
+					cancel()
+				}
+				return recoveryResponse(r, http.StatusOK, bank.form(recoveryAccount)), nil
+			}
+			if mode == "stale_challenge" {
+				bank.initial = func(r *http.Request) (*http.Response, error) {
+					return recoveryResponse(r, http.StatusOK, `Nhập mã OTP SafeKey`), nil
+				}
+			} else {
+				bank.replay = func(r *http.Request) (*http.Response, error) {
+					body := bank.staleDetail()
+					if mode == "cookies_challenge" {
+						body = `Nhập mã OTP SafeKey`
+					}
+					return recoveryResponse(r, http.StatusOK, body), nil
+				}
+			}
+			response, err := client.BootstrapForDate(ctx, recoveryDate)
+			var authFailure *AuthFailure
+			switch mode {
+			case "cookies_incomplete":
+				if !errors.Is(err, ErrHistoryUnavailable) || response.Kind != AccountDetailPage {
+					t.Fatalf("used probe budget must fail unavailable: %v", err)
+				}
+			case "cookies_challenge":
+				if !errors.Is(err, ErrInconclusiveAuth) || errors.As(err, &authFailure) {
+					t.Fatalf("post-probe challenge cannot confirm expiration: %v", err)
+				}
+			case "cookies_canceled":
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancellation lost: %v", err)
+				}
+			case "stale_challenge":
+				if err != nil || response.Kind != AccountDetailPage {
+					t.Fatalf("clean challenge probe semantics changed: %v kind=%s", err, response.Kind)
+				}
+			}
+			if mode == "stale_challenge" {
+				assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet)
+			} else if mode == "cookies_canceled" {
+				assertRecoveryRequests(t, bank.requests, http.MethodGet)
+			} else {
+				assertRecoveryRequests(t, bank.requests, http.MethodGet, http.MethodPost)
+			}
+			if bank.probes != 1 {
+				t.Fatal("bootstrap exceeded single probe budget")
+			}
+		})
+	}
+}
+
+func TestBootstrapIncompleteRecoveryCancellationAndEmptyTarget(t *testing.T) {
+	for _, mode := range []string{"before_post", "detail_response", "fresh_probe", "empty_target"} {
+		t.Run(mode, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			handoff := bank.handoff()
+			if mode == "empty_target" {
+				delete(handoff.Fields, "AccountNbr")
+			}
+			client := bank.client(handoff)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "before_post" {
+				cancel()
+			}
+			bank.initial = func(r *http.Request) (*http.Response, error) {
+				if mode == "detail_response" {
+					cancel()
+				}
+				return recoveryResponse(r, http.StatusOK, bank.staleDetail()), nil
+			}
+			if mode == "fresh_probe" {
+				bank.onProbe = cancel
+			}
+			_, err := client.BootstrapForDate(ctx, recoveryDate)
+			if mode == "empty_target" {
+				if !errors.Is(err, ErrHistoryUnavailable) {
+					t.Fatalf("missing original target accepted fresh DOM account: %v", err)
+				}
+				if len(bank.requests) > 2 {
+					t.Fatal("empty target replayed")
+				}
+				if client.SessionAccountNumber() != "" {
+					t.Fatal("empty original target replaced by fresh DOM selection")
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation lost: %v", err)
+			}
+			if mode == "detail_response" {
+				assertRecoveryRequests(t, bank.requests, http.MethodPost)
+			}
+			if mode == "fresh_probe" {
+				assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet)
+			}
+			if mode == "before_post" && len(bank.requests) > 1 {
+				t.Fatal("pre-canceled bootstrap triggered recovery")
+			}
+		})
+	}
+}
+
+func TestBootstrapPreservesNonRecoveryResponses(t *testing.T) {
+	for _, result := range []string{"valid_detail", "unknown", "rate_limit", "server_error", "maintenance", "history_schema_error"} {
+		t.Run(result, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.incomplete = true
+			client := bank.client(bank.handoff())
+			status, body, kind := http.StatusOK, bank.form(recoveryAccount), AccountDetailPage
+			switch result {
+			case "unknown":
+				body, kind = `<div>Unrecognized result</div>`, UnknownPage
+			case "rate_limit":
+				status, body = http.StatusTooManyRequests, bank.staleDetail()
+			case "server_error":
+				status, body = http.StatusServiceUnavailable, bank.staleDetail()
+			case "maintenance":
+				body, kind = `<div>Hệ thống đang bảo trì</div>`, MaintenancePage
+			case "history_schema_error":
+				body, kind = `<div>ibkacctDetailProc AccountNbr dse_processorState Số GD Ghi nợ Ghi có</div>`, HistoryPage
+			}
+			bank.initial = func(r *http.Request) (*http.Response, error) { return recoveryResponse(r, status, body), nil }
+			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			if err != nil || response.StatusCode != status || response.Kind != kind || response.Body != body {
+				t.Fatalf("non-recovery policy changed: %v kind=%s", err, response.Kind)
+			}
+			assertRecoveryRequests(t, bank.requests, http.MethodPost)
+		})
+	}
 }

@@ -243,6 +243,9 @@ func isAuthChallengeKind(kind PageKind) bool {
 }
 
 func (c *Client) probeAuthLocked(ctx context.Context) (Response, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Response{}, false, err
+	}
 	probeResp, getErr := c.getLocked(ctx, "/acbib/Request")
 	if getErr != nil {
 		return probeResp, false, getErr
@@ -271,9 +274,18 @@ func (c *Client) probeAuthLocked(ctx context.Context) (Response, bool, error) {
 func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	requestTime := c.now()
+	probed := false
+	if err := ctx.Err(); err != nil {
+		return Response{}, err
+	}
 	if c.bootstrap == nil || len(c.bootstrapFields) == 0 {
+		probed = true
 		probeResp, resynced, err := c.probeAuthLocked(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return probeResp, ctx.Err()
+			}
 			var authFail *AuthFailure
 			if errors.As(err, &authFail) {
 				return probeResp, err
@@ -292,9 +304,12 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	if date != "" {
 		fields, err = PrepareHistoryFieldsForDate(c.bootstrapFields, date)
 	} else {
-		fields, err = PrepareHistoryFields(c.bootstrapFields, c.now(), c.location)
+		fields, err = PrepareHistoryFields(c.bootstrapFields, requestTime, c.location)
 	}
 	if err != nil {
+		return Response{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return Response{}, err
 	}
 	values := url.Values{}
@@ -313,6 +328,9 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 	}
 	c.logHistoryContract("bootstrap", fields, resp)
 	if isAuthChallengeKind(resp.Kind) {
+		if probed {
+			return resp, ErrInconclusiveAuth
+		}
 		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
 		if probeErr != nil {
 			var authFail *AuthFailure
@@ -326,6 +344,14 @@ func (c *Client) bootstrapForDate(ctx context.Context, date string) (Response, e
 		}
 		slog.Info("ACB session state resynchronized after conversational token rejected", "classifier_reason", probeResp.ClassifierReason)
 		return probeResp, nil
+	}
+	if resp.StatusCode == http.StatusOK && resp.Kind == AccountDetailPage {
+		if _, extractErr := ExtractHistoryForm(resp.Body); extractErr != nil {
+			if probed {
+				return resp, ErrHistoryUnavailable
+			}
+			return c.resyncHistoryLocked(ctx, resp, fields, false)
+		}
 	}
 	return resp, nil
 }
@@ -386,82 +412,91 @@ func (c *Client) historyForDate(ctx context.Context, endpoint string, fields map
 		return Response{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	targetAccount, fromDate, toDate := hFields["AccountNbr"], hFields["FromDate"], hFields["ToDate"]
 	resp, err := c.do(req, hFields["AccountNbr"])
 	if err != nil {
 		return Response{}, err
 	}
 	c.logHistoryContract("history", hFields, resp)
 	if isAuthChallengeKind(resp.Kind) || (resp.StatusCode == http.StatusOK && resp.Kind == AccountDetailPage) {
-		defer func() {
-			if c.bootstrapFields != nil {
-				c.bootstrapFields["AccountNbr"] = targetAccount
-			}
-		}()
-		if err := ctx.Err(); err != nil {
-			return resp, err
-		}
-		probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
-		if probeErr != nil {
-			// An authenticated page with unusable state is a protocol failure.
-			if probeResp.StatusCode == http.StatusOK && (probeResp.Kind == AccountDetailPage || probeResp.Kind == HistoryPage) {
-				return probeResp, ErrHistoryUnavailable
-			}
-			return probeResp, probeErr
-		}
-		if !resynced {
-			return probeResp, ErrInconclusiveAuth
-		}
-		fresh, extractErr := ExtractHistoryForm(probeResp.Body)
-		if extractErr != nil || fresh.Fields["dse_operationName"] != "ibkacctDetailProc" || fresh.Fields["dse_sessionId"] == "" || fresh.Fields["dse_processorState"] == "" || c.bootstrap == nil {
-			return probeResp, ErrHistoryUnavailable
-		}
-		slog.Info("ACB history form resynchronized", "kind", probeResp.Kind, "classifier_reason", probeResp.ClassifierReason)
-		if isContinuation {
-			return probeResp, ErrConversationReset
-		}
-		if err := ctx.Err(); err != nil {
-			return probeResp, err
-		}
-		replayFields, err := PrepareHistoryFieldsWithRange(fresh.Fields, fromDate, toDate)
-		if err != nil {
-			return probeResp, ErrHistoryUnavailable
-		}
-		replayFields["AccountNbr"] = targetAccount
-		replayVals := url.Values{}
-		for k, v := range replayFields {
-			replayVals.Set(k, v)
-		}
-		replayURL := c.bootstrap
-		replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, replayURL.String(), strings.NewReader(replayVals.Encode()))
-		if err != nil {
-			return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
-		}
-		replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		replayResp, replayErr := c.do(replayReq, replayFields["AccountNbr"])
-		if replayErr != nil {
-			return Response{}, replayErr
-		}
-		c.logHistoryContract("replay", replayFields, replayResp)
-		if isAuthChallengeKind(replayResp.Kind) {
-			return replayResp, ErrInconclusiveAuth
-		}
-		if replayResp.StatusCode == http.StatusOK && replayResp.Kind != MaintenancePage {
-			if replayResp.Kind != HistoryPage {
-				return replayResp, ErrHistoryUnavailable
-			}
-			form, formErr := ExtractHistoryForm(replayResp.Body)
-			if formErr != nil || targetAccount == "" {
-				return replayResp, ErrHistoryUnavailable
-			}
-			account := form.Fields["AccountNbr"]
-			if (account != "" && account != targetAccount) || (account == "" && replayResp.RequestedAccount != targetAccount) {
-				return replayResp, ErrHistoryUnavailable
-			}
-		}
-		return replayResp, nil
+		return c.resyncHistoryLocked(ctx, resp, hFields, isContinuation)
 	}
 	return resp, nil
+}
+
+// resyncHistoryLocked establishes a fresh conversation once, then replays only
+// page one with the original account and range. The caller must hold c.mu.
+func (c *Client) resyncHistoryLocked(ctx context.Context, failed Response, prepared map[string]string, isContinuation bool) (Response, error) {
+	targetAccount, fromDate, toDate := prepared["AccountNbr"], prepared["FromDate"], prepared["ToDate"]
+	defer func() {
+		if c.bootstrapFields != nil {
+			c.bootstrapFields["AccountNbr"] = targetAccount
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return failed, err
+	}
+	probeResp, resynced, probeErr := c.probeAuthLocked(ctx)
+	c.logHistoryContract("probe", prepared, probeResp)
+	if probeErr != nil {
+		// Authenticated but unusable state is a protocol failure, not expiration.
+		if probeResp.StatusCode == http.StatusOK && (probeResp.Kind == AccountDetailPage || probeResp.Kind == HistoryPage) {
+			return probeResp, ErrHistoryUnavailable
+		}
+		return probeResp, probeErr
+	}
+	if !resynced {
+		return probeResp, ErrInconclusiveAuth
+	}
+	fresh, extractErr := ExtractHistoryForm(probeResp.Body)
+	if extractErr != nil || fresh.Fields["dse_operationName"] != "ibkacctDetailProc" || fresh.Fields["dse_sessionId"] == "" || fresh.Fields["dse_processorState"] == "" || c.bootstrap == nil {
+		return probeResp, ErrHistoryUnavailable
+	}
+	slog.Info("ACB history form resynchronized", "kind", probeResp.Kind, "classifier_reason", probeResp.ClassifierReason)
+	if isContinuation {
+		return probeResp, ErrConversationReset
+	}
+	if err := ctx.Err(); err != nil {
+		return probeResp, err
+	}
+	if targetAccount == "" {
+		return probeResp, ErrHistoryUnavailable
+	}
+	replayFields, err := PrepareHistoryFieldsWithRange(fresh.Fields, fromDate, toDate)
+	if err != nil {
+		return probeResp, ErrHistoryUnavailable
+	}
+	replayFields["AccountNbr"] = targetAccount
+	replayVals := url.Values{}
+	for k, v := range replayFields {
+		replayVals.Set(k, v)
+	}
+	replayReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.bootstrap.String(), strings.NewReader(replayVals.Encode()))
+	if err != nil {
+		return probeResp, fmt.Errorf("prepare history replay request after conversation resync: %w", err)
+	}
+	replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	replayResp, replayErr := c.do(replayReq, replayFields["AccountNbr"])
+	if replayErr != nil {
+		return Response{}, replayErr
+	}
+	c.logHistoryContract("replay", replayFields, replayResp)
+	if isAuthChallengeKind(replayResp.Kind) {
+		return replayResp, ErrInconclusiveAuth
+	}
+	if replayResp.StatusCode == http.StatusOK && replayResp.Kind != MaintenancePage {
+		if replayResp.Kind != HistoryPage {
+			return replayResp, ErrHistoryUnavailable
+		}
+		form, formErr := ExtractHistoryForm(replayResp.Body)
+		if formErr != nil {
+			return replayResp, ErrHistoryUnavailable
+		}
+		account := form.Fields["AccountNbr"]
+		if (account != "" && account != targetAccount) || (account == "" && replayResp.RequestedAccount != targetAccount) {
+			return replayResp, ErrHistoryUnavailable
+		}
+	}
+	return replayResp, nil
 }
 
 func (c *Client) CloseIdleConnections() {

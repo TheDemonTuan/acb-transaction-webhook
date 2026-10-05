@@ -348,6 +348,11 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 			slog.Warn("ACB confirmed the session is no longer authenticated; transitioned to AUTH_REQUIRED", "phase", "bootstrap", "generation", conn.Generation, "status", resp.StatusCode, "classifier_reason", resp.ClassifierReason, "path", acb.SafePath(resp.URL))
 			return t.finishPoll(ctx, "AUTH_REQUIRED", authFail.Reason)
 		}
+		if errors.Is(err, acb.ErrHistoryUnavailable) {
+			t.poll.Classifier = string(resp.Kind)
+			t.poll.HTTPStatus = resp.StatusCode
+			return t.finishPoll(ctx, "PARTIAL", "HISTORY_UNAVAILABLE")
+		}
 		if errors.Is(err, errRealtimeDateRollover) {
 			return t.rolloverResult(ctx)
 		}
