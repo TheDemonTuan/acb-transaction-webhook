@@ -1091,40 +1091,33 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 				continue
 			}
 		}
-		text, err := h.noticeText(ctx, n, e)
-		if err != nil {
-			return err
-		}
-		// Actionable notices use the same fence-aware operator menu. No nonce
-		// is created while maintenance locks mutations.
-		terminal := false
+		useProgress := e.StatusMessageID > 0 || e.AttemptCount > 0
 		switch n.Kind {
 		case "COMPLETED", "WAIT_OPERATOR", "MANUAL_REQUIRED", "FAILED", "CANCELLED", "CANCELED", "RETRY_WAIT", "MAINTENANCE_WAIT":
-			terminal = true
+			useProgress = true
 		}
-		beforeID := int64(0)
-		if !terminal && n.Kind != "CREDENTIALS_UPDATED" && (e.StatusMessageID > 0 || e.AttemptCount > 0) {
-			err = h.deliverProgress(ctx)
+		messageID := int64(0)
+		if n.Kind == "CREDENTIALS_UPDATED" {
+			text := "⚙️ THÔNG TIN ĐĂNG NHẬP ĐÃ LƯU\n────────────────────────\n✅ Đã lưu thông tin tài khoản ACB mới vào hệ thống.\n💡 Chưa đăng nhập ACB; bấm 'Đăng nhập' khi bạn sẵn sàng nhận OTP.\n🛡️ Thao tác này không làm thay đổi mật khẩu tại ngân hàng."
+			err = h.sendNoticePanel(ctx, c, e, text, &messageID)
+		} else if useProgress {
+			// Terminal results advance the existing panel, including when it must
+			// be created or replaced. The notice acknowledges its canonical ID.
+			messageID, err = h.updateProgressPanel(ctx, false, &e)
 			if err == nil {
-				updated, readErr := h.Store.AuthRecoveryEpisode(ctx, e.ID)
+				latestConnection, latestEpisode, readErr := h.snapshot(ctx)
 				if readErr != nil {
-					return readErr
+					err = readErr
+				} else if !progressFenceMatches(latestConnection, latestEpisode, e) || latestEpisode.StatusMessageID != messageID {
+					err = storage.ErrRecoverySuperseded
 				}
-				beforeID = updated.StatusMessageID
 			}
 		} else {
-			err = h.sendNoticePanel(ctx, c, e, text, &beforeID)
-		}
-		if err == nil && terminal {
-			latestConnection, latestEpisode, readErr := h.snapshot(ctx)
-			if readErr != nil {
-				err = readErr
-			} else if latestConnection.ID != c.ID || latestConnection.Generation != c.Generation || latestEpisode.ID != e.ID || latestEpisode.Generation != e.Generation || latestEpisode.ConfigRevision != e.ConfigRevision || latestEpisode.AttemptID != e.AttemptID || latestEpisode.AttemptCount != e.AttemptCount || latestEpisode.State != e.State {
-				err = storage.ErrRecoverySuperseded
+			text, textErr := h.stateText(ctx, c, e, false)
+			if textErr != nil {
+				return textErr
 			}
-			if err != nil {
-				_ = h.Client.DeleteMessage(ctx, h.ChatID, beforeID)
-			}
+			err = h.sendNoticePanel(ctx, c, e, text, &messageID)
 		}
 		if err != nil {
 			if persistErr := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, 0, time.Now().Add(deliveryDelay(err))); persistErr != nil {
@@ -1132,7 +1125,7 @@ func (h *Handler) DeliverNotices(ctx context.Context) error {
 			}
 			return err
 		}
-		if err := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, beforeID, time.Time{}); err != nil {
+		if err := h.Store.FinishAuthRecoveryNotice(ctx, n.ID, messageID, time.Time{}); err != nil {
 			return err
 		}
 	}
@@ -1144,22 +1137,34 @@ func (h *Handler) deliverProgress(ctx context.Context) error {
 }
 
 func (h *Handler) updateProgress(ctx context.Context, refreshControls bool) error {
+	_, err := h.updateProgressPanel(ctx, refreshControls, nil)
+	return err
+}
+
+func progressFenceMatches(c storage.Connection, e, expected storage.AuthRecoveryEpisode) bool {
+	return c.ID == expected.ConnectionID && c.Generation == expected.Generation && e.ID == expected.ID && e.Generation == expected.Generation && e.ConfigRevision == expected.ConfigRevision && e.AttemptID == expected.AttemptID && e.AttemptCount == expected.AttemptCount && e.State == expected.State
+}
+
+func (h *Handler) updateProgressPanel(ctx context.Context, refreshControls bool, expected *storage.AuthRecoveryEpisode) (int64, error) {
 	h.progressMu.Lock()
 	defer h.progressMu.Unlock()
 	c, e, err := h.snapshot(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if e.ID == "" || !progressKind(e.State) && e.StatusMessageID == 0 && e.AttemptCount == 0 && e.ConsentActionID == "" {
-		return nil
+	if expected != nil && !progressFenceMatches(c, e, *expected) {
+		return 0, storage.ErrRecoverySuperseded
+	}
+	if e.ID == "" || expected == nil && !progressKind(e.State) && e.StatusMessageID == 0 && e.AttemptCount == 0 && e.ConsentActionID == "" {
+		return 0, nil
 	}
 	text, err := h.stateText(ctx, c, e, true)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	p, err := h.planPanel(ctx, c, e, text)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Only a control/state transition creates nonces. Elapsed-time edits reuse
 	// the same message-bound controls; an expired click refreshes the panel.
@@ -1169,7 +1174,27 @@ func (h *Handler) updateProgress(ctx context.Context, refreshControls bool) erro
 	}
 	key := fmt.Sprintf("%s:%d:%d:%s:%s:%s:%v:%v", e.ID, c.Generation, e.ConfigRevision, e.AttemptID, e.State, captchaRevision, p.operations, p.keyboard.Rows)
 	if !refreshControls && h.progressEpisode == e.ID && h.progressText == p.text && h.progressKey == key {
-		return nil
+		return e.StatusMessageID, nil
+	}
+	if expected == nil && !refreshControls && !progressKind(e.State) {
+		// Background progress must not bypass a terminal notice's persisted
+		// transport deadline, including after a process restart.
+		notices, err := h.Store.PendingAuthRecoveryNotices(ctx)
+		if err != nil {
+			return 0, err
+		}
+		for _, n := range notices {
+			if n.EpisodeID != e.ID || n.Kind != e.State || n.EventKey != fmt.Sprintf("%s:%s:%d", e.ID, e.State, e.AttemptCount) || n.NextAttemptAt == "" {
+				continue
+			}
+			when, err := time.Parse(time.RFC3339Nano, n.NextAttemptAt)
+			if err != nil {
+				return 0, errors.New("TELEGRAM_NOTICE_RETRY_INVALID")
+			}
+			if time.Now().Before(when) {
+				return e.StatusMessageID, nil
+			}
+		}
 	}
 	if refreshControls {
 		h.progressKey = ""
@@ -1179,8 +1204,17 @@ func (h *Handler) updateProgress(ctx context.Context, refreshControls bool) erro
 	if h.progressKey != key {
 		markup, actions, err = h.renderPanel(ctx, c, e, p)
 		if err != nil {
-			return err
+			return 0, err
 		}
+	}
+	// Planning and nonce creation may race a recovery transition. Fence again
+	// before touching Telegram, not just before acknowledging the notice.
+	latestConnection, latestEpisode, err := h.snapshot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !progressFenceMatches(latestConnection, latestEpisode, e) || latestEpisode.StatusMessageID != e.StatusMessageID {
+		return 0, storage.ErrRecoverySuperseded
 	}
 	id := e.StatusMessageID
 	if id > 0 {
@@ -1188,43 +1222,52 @@ func (h *Handler) updateProgress(ctx context.Context, refreshControls bool) erro
 		if err != nil {
 			var transport *TransportError
 			if !errors.As(err, &transport) || transport.Code != "TELEGRAM_MESSAGE_UNEDITABLE" {
-				return err
+				return 0, err
 			}
 			id = 0
 			// A replacement message needs fresh message-bound controls.
 			if len(actions) == 0 {
 				markup, actions, err = h.renderPanel(ctx, c, e, p)
 				if err != nil {
-					return err
+					return 0, err
 				}
 			}
 		}
 	}
+	created := id == 0
 	if id == 0 {
+		latestConnection, latestEpisode, err = h.snapshot(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if !progressFenceMatches(latestConnection, latestEpisode, e) || latestEpisode.StatusMessageID != e.StatusMessageID {
+			return 0, storage.ErrRecoverySuperseded
+		}
 		id, err = h.Client.SendText(ctx, h.ChatID, p.text, markup)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if err := h.Store.SetAuthRecoveryStatusMessage(ctx, e.ID, c.Generation, id); err != nil {
 			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
-			return err
+			return 0, err
 		}
 	}
 	if err := h.bindActions(ctx, actions, id); err != nil {
-		return err
+		return 0, err
+	}
+	latestConnection, latestEpisode, err = h.snapshot(ctx)
+	if err == nil && (!progressFenceMatches(latestConnection, latestEpisode, e) || latestEpisode.StatusMessageID != id) {
+		err = storage.ErrRecoverySuperseded
+	}
+	if err != nil {
+		// Never delete the pre-existing canonical panel on a stale edit.
+		if created {
+			_ = h.Client.DeleteMessage(ctx, h.ChatID, id)
+		}
+		return 0, err
 	}
 	h.progressEpisode, h.progressText, h.progressKey, h.progressMarkup = e.ID, p.text, key, markup
-	return nil
-}
-func (h *Handler) noticeText(ctx context.Context, n storage.AuthRecoveryNotice, e storage.AuthRecoveryEpisode) (string, error) {
-	if n.Kind == "CREDENTIALS_UPDATED" {
-		return "⚙️ THÔNG TIN ĐĂNG NHẬP ĐÃ LƯU\n────────────────────────\n✅ Đã lưu thông tin tài khoản ACB mới vào hệ thống.\n💡 Chưa đăng nhập ACB; bấm 'Đăng nhập' khi bạn sẵn sàng nhận OTP.\n🛡️ Thao tác này không làm thay đổi mật khẩu tại ngân hàng.", nil
-	}
-	c, _, err := h.snapshot(ctx)
-	if err != nil {
-		return "", err
-	}
-	return h.stateText(ctx, c, e, false)
+	return id, nil
 }
 func (h *Handler) deliverLogoutNotices(ctx context.Context) error {
 	jobs, err := h.Store.PendingACBLogoutNotices(ctx)

@@ -138,6 +138,7 @@ export type PollRun = {
   httpStatus?: number;
   pages: number;
   rowsSeen: number;
+  rowsMatched?: number;
   error?: string;
   startedAt: string;
   finishedAt?: string;

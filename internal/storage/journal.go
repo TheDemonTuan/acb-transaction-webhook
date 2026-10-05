@@ -20,7 +20,7 @@ type JournalEntry struct {
 
 // PollCompletedPayload builds the JSON payload for a poll.completed journal event.
 func PollCompletedPayload(p PollRun, insertedCount int) ([]byte, error) {
-	return json.Marshal(map[string]any{
+	payload := map[string]any{
 		"pollId":        p.ID,
 		"status":        p.Status,
 		"classifier":    p.Classifier,
@@ -31,7 +31,11 @@ func PollCompletedPayload(p PollRun, insertedCount int) ([]byte, error) {
 		"error":         p.Error,
 		"startedAt":     p.StartedAt,
 		"finishedAt":    p.FinishedAt,
-	})
+	}
+	if p.RowsMatched != nil {
+		payload["rowsMatched"] = *p.RowsMatched
+	}
+	return json.Marshal(payload)
 }
 
 // AppendJournalEvent records a new event into the ordered event journal.

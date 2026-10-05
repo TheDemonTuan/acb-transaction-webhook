@@ -124,7 +124,7 @@ func TestCatchUpTaskFiltersAdjacentDaysAcrossPages(t *testing.T) {
 		t.Fatalf("coverage must count matched rows: rows=%d err=%v", rows, err)
 	}
 	runs, err := store.ListPollRuns(ctx, 1)
-	if err != nil || len(runs) != 1 || runs[0].Pages != 2 || runs[0].RowsSeen != 3 {
+	if err != nil || len(runs) != 1 || runs[0].Pages != 2 || runs[0].RowsSeen != 3 || runs[0].RowsMatched != nil {
 		t.Fatalf("poll must count original pages/rows: runs=%+v err=%v", runs, err)
 	}
 }

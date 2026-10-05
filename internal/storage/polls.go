@@ -15,6 +15,7 @@ type PollRun struct {
 	HTTPStatus    int    `json:"httpStatus,omitempty"`
 	Pages         int    `json:"pages"`
 	RowsSeen      int    `json:"rowsSeen"`
+	RowsMatched   *int   `json:"rowsMatched,omitempty"`
 	Error         string `json:"error,omitempty"`
 	StartedAt     string `json:"startedAt"`
 	FinishedAt    string `json:"finishedAt,omitempty"`
@@ -24,7 +25,7 @@ type PollRun struct {
 func (s *Store) LastSuccessfulPoll(ctx context.Context, connectionID string) (PollRun, error) {
 	var poll PollRun
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id,connection_id,generation,status,classifier,http_status,pages,rows_seen,
+		SELECT id,connection_id,generation,status,classifier,http_status,pages,rows_seen,rows_matched,
 		       COALESCE(sanitized_error,''),started_at,COALESCE(finished_at,'')
 		FROM poll_runs
 		WHERE connection_id=? AND status='SUCCEEDED'
@@ -32,7 +33,7 @@ func (s *Store) LastSuccessfulPoll(ctx context.Context, connectionID string) (Po
 		LIMIT 1
 	`, connectionID).Scan(
 		&poll.ID, &poll.ConnectionID, &poll.Generation, &poll.Status, &poll.Classifier,
-		&poll.HTTPStatus, &poll.Pages, &poll.RowsSeen, &poll.Error, &poll.StartedAt, &poll.FinishedAt,
+		&poll.HTTPStatus, &poll.Pages, &poll.RowsSeen, &poll.RowsMatched, &poll.Error, &poll.StartedAt, &poll.FinishedAt,
 	)
 	return poll, err
 }
@@ -58,7 +59,7 @@ func (s *Store) FinishPoll(ctx context.Context, poll PollRun) error {
 		return errors.New("cannot finish poll as AUTH_REQUIRED without confirmed auth proof")
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE poll_runs SET status=?,classifier=?,http_status=?,pages=?,rows_seen=?,sanitized_error=?,finished_at=? WHERE id=? AND status='RUNNING'`, poll.Status, poll.Classifier, poll.HTTPStatus, poll.Pages, poll.RowsSeen, poll.Error, now(), poll.ID)
+		result, err := tx.ExecContext(ctx, `UPDATE poll_runs SET status=?,classifier=?,http_status=?,pages=?,rows_seen=?,rows_matched=?,sanitized_error=?,finished_at=? WHERE id=? AND status='RUNNING'`, poll.Status, poll.Classifier, poll.HTTPStatus, poll.Pages, poll.RowsSeen, poll.RowsMatched, poll.Error, now(), poll.ID)
 		if err != nil {
 			return err
 		}
