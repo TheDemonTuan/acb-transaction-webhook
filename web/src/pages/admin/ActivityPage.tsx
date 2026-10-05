@@ -242,9 +242,12 @@ export const ActivityPage: React.FC = () => {
                       )}
                     </div>
 
-                    <div className="flex items-center gap-4 text-xs text-stone-600 font-mono">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-stone-600 font-mono">
                       <span>Trang: {p.pages}</span>
-                      <span>Số dòng quét: {p.rowsSeen}</span>
+                      <span>Dòng đọc từ ACB: <strong data-testid="poll-rows-scanned">{p.rowsSeen}</strong></span>
+                      {p.rowsMatched != null && (
+                        <span>Giao dịch đúng ngày: <strong data-testid="poll-rows-matched">{p.rowsMatched}</strong></span>
+                      )}
                     </div>
                   </div>
                 );

@@ -35,6 +35,7 @@ type RealtimeTask struct {
 	poll          storage.PollRun
 	pages         int
 	rowsSeen      int
+	rowsMatched   int
 	totalInserted int
 	nextAction    string
 	nextFields    map[string]string
@@ -327,6 +328,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	t.poll = poll
 	t.pages = 0
 	t.rowsSeen = 0
+	t.rowsMatched = 0
 	t.totalInserted = 0
 	t.continuation = false
 
@@ -455,6 +457,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return t.finishPoll(ctx, "PARTIAL", err.Error())
 	}
 	rowsSeen := len(pageResult.Transactions)
+	t.rowsSeen = rowsSeen
+	t.rowsMatched = len(todayTransactions)
+	t.poll.RowsMatched = &t.rowsMatched
 	totalInserted := 0
 	var pollErr error
 	isPartial := false
@@ -603,6 +608,8 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 					break
 				}
 				rowsSeen += len(nextPage.Transactions)
+				t.rowsSeen = rowsSeen
+				t.rowsMatched += len(todayTransactions)
 				nextInserted, nextIngestErr := ingestAndNotify(todayTransactions)
 				if nextIngestErr != nil {
 					return failIngest(nextIngestErr)
@@ -740,6 +747,8 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 	if err != nil {
 		return t.finishPoll(ctx, "PARTIAL", err.Error())
 	}
+	t.rowsSeen += len(page.Transactions)
+	t.rowsMatched += len(todayTransactions)
 	items := make([]storage.BatchTransactionItem, 0, len(todayTransactions))
 	for _, txn := range todayTransactions {
 		items = append(items, storage.BatchTransactionItem{
@@ -757,7 +766,6 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 	}
 	t.m.notifyNewEvents(res.NewEvents)
 	t.totalInserted += res.InsertedCount
-	t.rowsSeen += len(page.Transactions)
 	t.cursor.Step(page, len(page.Transactions))
 	t.pages = t.cursor.PageNumber
 	if t.cursor.Truncated {

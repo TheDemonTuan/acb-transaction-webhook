@@ -42,6 +42,7 @@ test('updates polling runs from a server-sent event without reloading', async ({
           status: 'SUCCEEDED',
           pages: 1,
           rowsSeen: 7,
+          rowsMatched: 2,
           startedAt: '2026-09-14T14:00:00Z',
           finishedAt: '2026-09-14T14:00:01Z',
         }];
@@ -63,6 +64,7 @@ test('updates polling runs from a server-sent event without reloading', async ({
     sources.at(-1)?.dispatchEvent(event);
   });
 
-  await expect(page.getByText('Số dòng quét: 7')).toBeVisible();
+  await expect(page.getByTestId('poll-rows-scanned')).toHaveText('7');
+  await expect(page.getByTestId('poll-rows-matched')).toHaveText('2');
   expect(pollRequests).toBeGreaterThanOrEqual(2);
 });

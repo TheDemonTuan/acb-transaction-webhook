@@ -31,6 +31,8 @@ type botFixture struct {
 	retryAfter      int
 	failEditCode    int
 	afterSend       func()
+	afterEdit       func()
+	deletedIDs      []int64
 }
 
 func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +42,7 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, method)
 	if method == "editMessageText" && f.failEditCode != 0 {
 		w.WriteHeader(f.failEditCode)
-		fmt.Fprintf(w, `{"ok":false,"error_code":%d,"description":"message cannot be edited"}`, f.failEditCode)
+		fmt.Fprintf(w, `{"ok":false,"error_code":%d,"description":"Bad Request: message can't be edited"}`, f.failEditCode)
 		return
 	}
 	if f.failCode != 0 {
@@ -61,6 +63,9 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.edits = append(f.edits, body)
+		if f.afterEdit != nil {
+			f.afterEdit()
+		}
 	case "sendMessage":
 		var body map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -73,6 +78,15 @@ func (f *botFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if f.afterSend != nil {
 			f.afterSend()
 		}
+	case "deleteMessage":
+		var body struct {
+			MessageID int64 `json:"message_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		f.deletedIDs = append(f.deletedIDs, body.MessageID)
 	case "answerCallbackQuery":
 		var body map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -783,8 +797,8 @@ func TestTelegramStoppedProgressKeepsSafeReasonAndUsableControls(t *testing.T) {
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.messages) != beforeMessages+1 {
-		t.Fatal("terminal event did not send one fresh result")
+	if len(f.messages) != beforeMessages {
+		t.Fatal("terminal event duplicated the canonical progress panel")
 	}
 	edited := f.edits[len(f.edits)-1]
 	var id int64
@@ -1036,7 +1050,6 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 		t.Fatal("accepted OTP added more than the broker receipt or reverted to waiting", err)
 	}
 	pending := h.progressText
-	receiptID := f.messageID
 	before = len(f.messages)
 	if err := h.HandleUpdate(ctx, command("/acb_login")); err != nil {
 		t.Fatal(err)
@@ -1058,16 +1071,16 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 	if err := h.DeliverNotices(ctx); err != nil {
 		t.Fatal(err)
 	}
-	terminalID := f.messageID
-	if len(f.messages) != beforeTerminal+1 || terminalID <= receiptID || terminalID <= current.StatusMessageID {
-		t.Fatal("terminal result was not sent below the accepted-OTP receipt")
+	terminalID := current.StatusMessageID
+	if len(f.messages) != beforeTerminal {
+		t.Fatal("terminal result duplicated the panel after the accepted-OTP receipt")
 	}
 	var resultText string
 	var resultKeyboard inlineKeyboard
-	if err := json.Unmarshal(f.messages[len(f.messages)-1]["text"], &resultText); err != nil {
+	if err := json.Unmarshal(f.edits[len(f.edits)-1]["text"], &resultText); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(f.messages[len(f.messages)-1]["reply_markup"], &resultKeyboard); err != nil {
+	if err := json.Unmarshal(f.edits[len(f.edits)-1]["reply_markup"], &resultKeyboard); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(resultText, "001234") || strings.Contains(resultText, e.ID) {
@@ -1095,20 +1108,23 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 	}
 	var sentID int64
 	if err := s.DB().QueryRowContext(ctx, `SELECT message_id FROM auth_recovery_notices WHERE episode_id=? AND kind='MANUAL_REQUIRED' AND status='SENT'`, e.ID).Scan(&sentID); err != nil || sentID != terminalID {
-		t.Fatal("terminal ack did not persist fresh message ID", err)
+		t.Fatal("terminal ack did not persist canonical message ID", err)
 	}
 	if err := h.deliverProgress(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.DeliverNotices(ctx); err != nil || f.messageID != terminalID {
+	if err := h.DeliverNotices(ctx); err != nil || len(f.messages) != beforeTerminal {
 		t.Fatal("next delivery tick replayed SENT terminal", err)
 	}
 	restarted, err := NewHandler(h.HandlerOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := restarted.DeliverNotices(ctx); err != nil || f.messageID != terminalID {
+	if err := restarted.DeliverNotices(ctx); err != nil || len(f.messages) != beforeTerminal {
 		t.Fatal("restart replayed SENT terminal", err)
+	}
+	if err := restarted.deliverProgress(ctx); err != nil || len(f.messages) != beforeTerminal {
+		t.Fatal("restart progress duplicated the canonical terminal", err)
 	}
 	terminal := h.progressText
 	before = len(f.messages)

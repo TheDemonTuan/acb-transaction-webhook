@@ -65,6 +65,7 @@ export interface PollCompletedData {
   httpStatus?: number;
   pages?: number;
   rowsSeen?: number;
+  rowsMatched?: number;
   insertedCount?: number;
   durationMs?: number;
   error?: string;

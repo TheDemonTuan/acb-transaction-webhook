@@ -152,7 +152,7 @@ func (b *protocolRecoveryBank) RoundTrip(request *http.Request) (*http.Response,
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
 }
 
-func protocolRecoveryFixture(t *testing.T, bank *protocolRecoveryBank) (*storage.Store, storage.Connection, *security.Keyring, *acb.Client, *SessionLoader, *Monitor) {
+func protocolRecoveryFixture(t *testing.T, bank http.RoundTripper) (*storage.Store, storage.Connection, *security.Keyring, *acb.Client, *SessionLoader, *Monitor) {
 	t.Helper()
 	store, conn, keyring, _ := sessionFenceFixture(t)
 	client, err := acb.NewClient("https://"+acb.OfficialHost, bank)
@@ -261,10 +261,16 @@ func TestRealtimeTask_DetailRecoveryFromConsumedTokenAndPersistedSnapshot(t *tes
 					if poll.Status != "FAILED" || poll.Error != "ACB_REQUEST_TIMEOUT" {
 						t.Fatalf("timeout poll=%+v", poll)
 					}
+					if poll.RowsMatched != nil {
+						t.Fatalf("unparsed timeout has known matched count: %+v", poll)
+					}
 					continue
 				}
 				if poll.Status != "SUCCEEDED" || poll.Classifier != string(acb.HistoryPage) || poll.HTTPStatus != 200 || poll.RowsSeen != 2 || poll.Generation != conn.Generation {
 					t.Fatalf("recovered poll=%+v", poll)
+				}
+				if poll.RowsMatched == nil || *poll.RowsMatched != 2 {
+					t.Fatalf("recovered/repeated poll matched count=%+v", poll)
 				}
 			}
 			final, err := store.Connection(ctx)
@@ -348,6 +354,11 @@ func TestRealtimeTask_HistoryUnavailablePreservesPartialAndSnapshot(t *testing.T
 			if err != nil || len(polls) != 1 || polls[0].Status != "PARTIAL" || polls[0].Error != "HISTORY_UNAVAILABLE" || polls[0].Classifier != string(acb.AccountDetailPage) || polls[0].HTTPStatus != 200 || polls[0].RowsSeen != expectedRows {
 				t.Fatalf("protocol failure polls=%+v err=%v", polls, err)
 			}
+			var expectedMatched *int
+			if expectedRows > 0 {
+				expectedMatched = &expectedRows
+			}
+			assertMatchedRows(t, polls[0], "PARTIAL", expectedRows, expectedMatched)
 			if mon.IsBackoffActive() {
 				t.Fatal("protocol failure recorded network backoff")
 			}

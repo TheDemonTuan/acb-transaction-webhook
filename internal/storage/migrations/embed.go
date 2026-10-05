@@ -31,3 +31,8 @@ var AuthRecoverySQL string
 //
 //go:embed 013_telegram_session_control.sql
 var TelegramSessionControlSQL string
+
+// PollRowsMatchedSQL embeds schema version 14 nullable transaction-day poll counts.
+//
+//go:embed 014_poll_rows_matched.sql
+var PollRowsMatchedSQL string

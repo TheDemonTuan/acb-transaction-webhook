@@ -340,7 +340,7 @@ func (s *Store) ListPollRunsPage(ctx context.Context, limit int, cursor string) 
 	if err != nil {
 		return Page[PollRun]{}, err
 	}
-	query := `SELECT id,connection_id,generation,status,COALESCE(classifier,''),COALESCE(http_status,0),pages,rows_seen,COALESCE(sanitized_error,''),started_at,COALESCE(finished_at,'') FROM poll_runs`
+	query := `SELECT id,connection_id,generation,status,COALESCE(classifier,''),COALESCE(http_status,0),pages,rows_seen,rows_matched,COALESCE(sanitized_error,''),started_at,COALESCE(finished_at,'') FROM poll_runs`
 	args := []any{}
 	if sortValue != "" {
 		query += ` WHERE started_at < ? OR (started_at = ? AND id < ?)`
@@ -356,7 +356,7 @@ func (s *Store) ListPollRunsPage(ctx context.Context, limit int, cursor string) 
 	items := make([]PollRun, 0, limit)
 	for rows.Next() {
 		var item PollRun
-		if err := rows.Scan(&item.ID, &item.ConnectionID, &item.Generation, &item.Status, &item.Classifier, &item.HTTPStatus, &item.Pages, &item.RowsSeen, &item.Error, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ConnectionID, &item.Generation, &item.Status, &item.Classifier, &item.HTTPStatus, &item.Pages, &item.RowsSeen, &item.RowsMatched, &item.Error, &item.StartedAt, &item.FinishedAt); err != nil {
 			return Page[PollRun]{}, err
 		}
 		items = append(items, item)
