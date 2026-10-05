@@ -18,8 +18,6 @@ import (
 // RealtimeTask executes a realtime adaptive transaction poll or an operator manual sync.
 const realtimeMaxPages = 20
 
-var errRealtimeDateRollover = errors.New("REALTIME_DATE_ROLLOVER")
-
 type RealtimeTask struct {
 	m            *Monitor
 	id           string
@@ -51,7 +49,7 @@ func (t *RealtimeTask) pinToday(fields map[string]string) map[string]string {
 	}
 	pinned["FromDate"] = t.today
 	pinned["ToDate"] = t.today
-	pinned["activeDatetimeYN"] = "N"
+	pinned["activeDatetimeYN"] = "Y"
 	if pinned["dse_nextEventName"] == "" {
 		pinned["dse_nextEventName"] = "byDate"
 	}
@@ -73,11 +71,11 @@ func (t *RealtimeTask) rolloverResult(ctx context.Context) (scheduler.TaskStepRe
 
 func (t *RealtimeTask) bootstrap(ctx context.Context) (acb.Response, error) {
 	if !t.todayStillCurrent() {
-		return acb.Response{}, errRealtimeDateRollover
+		return acb.Response{}, acb.ErrRealtimeDateRollover
 	}
 	return t.sessionRequest(ctx, func() (acb.Response, error) {
-		if client, ok := t.m.client.(realtimeDateBankClient); ok {
-			return client.BootstrapForDate(ctx, t.today)
+		if client, ok := t.m.client.(todayBankClient); ok {
+			return client.BootstrapToday(ctx, t.today)
 		}
 		return t.m.client.Bootstrap(ctx)
 	})
@@ -85,11 +83,11 @@ func (t *RealtimeTask) bootstrap(ctx context.Context) (acb.Response, error) {
 
 func (t *RealtimeTask) history(ctx context.Context, endpoint string, fields map[string]string) (acb.Response, error) {
 	if !t.todayStillCurrent() {
-		return acb.Response{}, errRealtimeDateRollover
+		return acb.Response{}, acb.ErrRealtimeDateRollover
 	}
 	return t.sessionRequest(ctx, func() (acb.Response, error) {
-		if client, ok := t.m.client.(realtimeDateBankClient); ok {
-			return client.HistoryForDate(ctx, endpoint, fields, t.today)
+		if client, ok := t.m.client.(todayBankClient); ok {
+			return client.HistoryToday(ctx, endpoint, fields, t.today)
 		}
 		return t.m.client.History(ctx, endpoint, fields)
 	})
@@ -355,7 +353,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 			t.poll.HTTPStatus = resp.StatusCode
 			return t.finishPoll(ctx, "PARTIAL", "HISTORY_UNAVAILABLE")
 		}
-		if errors.Is(err, errRealtimeDateRollover) {
+		if errors.Is(err, acb.ErrRealtimeDateRollover) {
 			return t.rolloverResult(ctx)
 		}
 		sanitized := acb.SanitizeTransportError(err)
@@ -364,6 +362,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		return t.finishPoll(ctx, "FAILED", sanitized)
 	}
 
+	if !t.todayStillCurrent() {
+		return t.rolloverResult(ctx)
+	}
 	classifyRealtimeResponse(&resp)
 	t.poll.Classifier = string(resp.Kind)
 	t.poll.HTTPStatus = resp.StatusCode
@@ -391,9 +392,15 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	form.Fields["FromDate"] = t.today
 	form.Fields["ToDate"] = t.today
 	form.Fields["dse_nextEventName"] = "byDate"
-	form.Fields["activeDatetimeYN"] = "N"
-	slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
-	histResp, histErr := t.history(ctx, form.Action, form.Fields)
+	form.Fields["activeDatetimeYN"] = "Y"
+	histResp := resp
+	var histErr error
+	_, todayClient := t.m.client.(todayBankClient)
+	provedBootstrap := todayClient && resp.StatusCode == http.StatusOK && resp.Kind == acb.HistoryPage && resp.RequestedAccount != "" && (form.Fields["AccountNbr"] == "" || form.Fields["AccountNbr"] == resp.RequestedAccount)
+	if !provedBootstrap {
+		slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", 1, "phase", "history")
+		histResp, histErr = t.history(ctx, form.Action, form.Fields)
+	}
 
 	if histErr != nil {
 		var authFail *acb.AuthFailure
@@ -411,13 +418,16 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		if errors.Is(histErr, acb.ErrConversationReset) {
 			return t.finishPoll(ctx, "PARTIAL", "CONVERSATION_RESET")
 		}
-		if errors.Is(histErr, errRealtimeDateRollover) {
+		if errors.Is(histErr, acb.ErrRealtimeDateRollover) {
 			return t.rolloverResult(ctx)
 		}
 		sanitized := acb.SanitizeTransportError(histErr)
 		until := t.m.RecordNetworkFailure(histErr)
 		slog.Warn("ACB request failed", "phase", "history", "generation", conn.Generation, "elapsed_backoff_until", until, "error", sanitized)
 		return t.finishPoll(ctx, "FAILED", sanitized)
+	}
+	if !t.todayStillCurrent() {
+		return t.rolloverResult(ctx)
 	}
 	classifyRealtimeResponse(&histResp)
 	historyMarkup = histResp.Body
@@ -460,6 +470,9 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 	t.rowsSeen = rowsSeen
 	t.rowsMatched = len(todayTransactions)
 	t.poll.RowsMatched = &t.rowsMatched
+	if len(todayTransactions) != len(pageResult.Transactions) {
+		return t.finishPoll(ctx, "PARTIAL", "REALTIME_SOURCE_DATE_MISMATCH")
+	}
 	totalInserted := 0
 	var pollErr error
 	isPartial := false
@@ -548,6 +561,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 					break
 				}
 				pinnedFields["_raw"] = "true"
+				pinnedFields["activeDatetimeYN"] = "Y"
 				slog.Debug("ACB realtime request", "task", t.Kind(), "task_id", t.id, "reason", "REALTIME", "connection_id", conn.ID, "generation", conn.Generation, "from_date", t.today, "to_date", t.today, "page", pagesCount+1, "phase", "foreground_continuation")
 				nextResp, nextErr := t.history(ctx, curAction, pinnedFields)
 				if nextErr != nil {
@@ -569,7 +583,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 						pollErr = nextErr
 						break
 					}
-					if errors.Is(nextErr, errRealtimeDateRollover) {
+					if errors.Is(nextErr, acb.ErrRealtimeDateRollover) {
 						return t.rolloverResult(ctx)
 					}
 					until := t.m.RecordNetworkFailure(nextErr)
@@ -577,6 +591,10 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 					isPartial = true
 					pollErr = errors.New(acb.SanitizeTransportError(nextErr))
 					break
+				}
+				if !t.todayStillCurrent() {
+					t.totalInserted = totalInserted
+					return t.rolloverResult(ctx)
 				}
 				classifyRealtimeResponse(&nextResp)
 				if nextResp.Kind == acb.LoginPage || nextResp.Kind == acb.OTPChallenge || nextResp.Kind == acb.CaptchaPage {
@@ -610,6 +628,11 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 				rowsSeen += len(nextPage.Transactions)
 				t.rowsSeen = rowsSeen
 				t.rowsMatched += len(todayTransactions)
+				if len(todayTransactions) != len(nextPage.Transactions) {
+					isPartial = true
+					pollErr = errors.New("REALTIME_SOURCE_DATE_MISMATCH")
+					break
+				}
 				nextInserted, nextIngestErr := ingestAndNotify(todayTransactions)
 				if nextIngestErr != nil {
 					return failIngest(nextIngestErr)
@@ -643,7 +666,7 @@ func (t *RealtimeTask) Step(ctx context.Context) (scheduler.TaskStepResult, erro
 		}
 	}
 
-	if lastHasNext && pagesCount >= 5 && curAction != "" && len(curFields) > 0 {
+	if !isPartial && lastHasNext && pagesCount >= 5 && curAction != "" && len(curFields) > 0 {
 		// Keep the poll open; the scheduler will resume this same cursor.
 		t.pages = pagesCount
 		t.rowsSeen = rowsSeen
@@ -719,11 +742,14 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 		if errors.Is(err, acb.ErrConversationReset) {
 			return t.finishPoll(ctx, "PARTIAL", "CONVERSATION_RESET")
 		}
-		if errors.Is(err, errRealtimeDateRollover) {
+		if errors.Is(err, acb.ErrRealtimeDateRollover) {
 			return t.rolloverResult(ctx)
 		}
 		t.m.RecordNetworkFailure(err)
 		return t.finishPoll(ctx, "PARTIAL", acb.SanitizeTransportError(err))
+	}
+	if !t.todayStillCurrent() {
+		return t.rolloverResult(ctx)
 	}
 	classifyRealtimeResponse(&resp)
 	if resp.Kind == acb.LoginPage || resp.Kind == acb.OTPChallenge || resp.Kind == acb.CaptchaPage {
@@ -749,6 +775,9 @@ func (t *RealtimeTask) stepContinuation(ctx context.Context, conn storage.Connec
 	}
 	t.rowsSeen += len(page.Transactions)
 	t.rowsMatched += len(todayTransactions)
+	if len(todayTransactions) != len(page.Transactions) {
+		return t.finishPoll(ctx, "PARTIAL", "REALTIME_SOURCE_DATE_MISMATCH")
+	}
 	items := make([]storage.BatchTransactionItem, 0, len(todayTransactions))
 	for _, txn := range todayTransactions {
 		items = append(items, storage.BatchTransactionItem{

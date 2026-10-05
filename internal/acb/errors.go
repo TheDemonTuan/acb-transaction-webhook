@@ -31,6 +31,8 @@ func (e *AuthFailure) Error() string {
 }
 
 var (
+	ErrRealtimeDateRollover = errors.New("REALTIME_DATE_ROLLOVER")
+
 	// ErrConversationReset indicates that conversational tokens were rejected,
 	// but the underlying session remains valid after resync. Any active pagination
 	// cursor must be discarded and restarted from page 1.

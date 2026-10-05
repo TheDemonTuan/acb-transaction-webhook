@@ -71,22 +71,28 @@ func PrepareHistoryFieldsWithRange(fields map[string]string, fromDate, toDate st
 	return prepared, nil
 }
 
-// PrepareHistoryFieldsForDate converts a form into a by-date query for one
-// caller-selected local date. It is used when a multi-page poll must keep its
-// original Asia/Ho_Chi_Minh day across requests.
-func PrepareHistoryFieldsForDate(fields map[string]string, date string) (map[string]string, error) {
+// PrepareTodayHistoryFields selects transaction-day history on one pinned local day.
+func PrepareTodayHistoryFields(fields map[string]string, date string) (map[string]string, error) {
 	if err := validateHistoryDateRange(date, date); err != nil {
 		return nil, err
 	}
-	if fields != nil && fields["_raw"] == "true" {
-		prepared := cloneFields(fields)
-		delete(prepared, "_raw")
-		if prepared["_explicitRange"] == "true" {
-			return nil, errors.New("ACB realtime request cannot use an explicit range")
-		}
-		return PinDateRangePreservingPagination(prepared, date, date)
+	if fields["_explicitRange"] == "true" {
+		return nil, errors.New("ACB realtime request cannot use an explicit range")
 	}
-	return PrepareHistoryFieldsWithRange(fields, date, date)
+	var prepared map[string]string
+	var err error
+	if fields["_raw"] == "true" {
+		prepared, err = PinDateRangePreservingPagination(fields, date, date)
+	} else {
+		prepared, err = PrepareHistoryFieldsWithRange(fields, date, date)
+	}
+	if err != nil {
+		return nil, err
+	}
+	delete(prepared, "_raw")
+	delete(prepared, "_explicitRange")
+	prepared["activeDatetimeYN"] = "Y"
+	return prepared, nil
 }
 
 // PrepareHistoryFields converts the current ACB account-detail form into an
@@ -104,6 +110,7 @@ func PrepareHistoryFields(fields map[string]string, now time.Time, location *tim
 				return nil, err
 			}
 			delete(res, "_explicitRange")
+			res["activeDatetimeYN"] = "N"
 			return res, nil
 		}
 		if location == nil {

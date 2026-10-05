@@ -103,11 +103,22 @@ func (t *KeepaliveTask) Step(ctx context.Context) (scheduler.TaskStepResult, err
 		return scheduler.TaskStepResult{Done: true, Error: startErr, Outcome: scheduler.OutcomeFatal}, startErr
 	}
 
-	// Bootstrap page only to keep session alive and rotate cookies - NEVER calls History!
+	localDate := t.m.now().In(acb.DefaultLocation).Format("02/01/2006")
+	// Rotate today's authenticated form only; never fetch continuations or ingest rows.
 	resp, err := t.m.sessionRequest(ctx, conn.ID, conn.Generation, func() (acb.Response, error) {
+		if client, ok := t.m.client.(todayBankClient); ok {
+			return client.BootstrapToday(ctx, localDate)
+		}
 		return t.m.client.Bootstrap(ctx)
 	})
 	if err != nil {
+		if errors.Is(err, acb.ErrRealtimeDateRollover) {
+			poll.Status = "PARTIAL"
+			poll.Error = "REALTIME_DATE_ROLLOVER"
+			finishErr := t.m.finishPoll(ctx, poll, 0)
+			t.finishDone(finishErr)
+			return scheduler.TaskStepResult{Done: true, Outcome: scheduler.OutcomeSuccess}, finishErr
+		}
 		var authFail *acb.AuthFailure
 		if errors.As(err, &authFail) {
 			poll.Status = "AUTH_REQUIRED"

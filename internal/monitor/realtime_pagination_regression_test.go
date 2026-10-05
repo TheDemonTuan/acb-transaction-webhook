@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/scheduler"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
@@ -94,11 +95,19 @@ func TestRealtimeTask_DateRolloverStopsOldCursor(t *testing.T) {
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("expected one poll run, got %+v (%v)", runs, err)
 	}
-	if runs[0].Status != "PARTIAL" || runs[0].Error != "REALTIME_DATE_ROLLOVER" {
+	if runs[0].Status != "PARTIAL" || runs[0].Error != acb.ErrRealtimeDateRollover.Error() {
 		t.Fatalf("expected rollover partial poll, got status=%q error=%q", runs[0].Status, runs[0].Error)
 	}
-	if runs[0].Pages != 1 || runs[0].RowsSeen != 1 {
-		t.Fatalf("expected committed page counters on rollover, got pages=%d rows=%d", runs[0].Pages, runs[0].RowsSeen)
+	if runs[0].Pages != 1 || runs[0].RowsSeen != 0 {
+		t.Fatalf("rollover records the attempted page without parsing rows, got pages=%d rows=%d", runs[0].Pages, runs[0].RowsSeen)
+	}
+	txns, err := store.ListTransactions(ctx, 10)
+	if err != nil || len(txns) != 0 {
+		t.Fatalf("response received after rollover must not be ingested: count=%d err=%v", len(txns), err)
+	}
+	currentConn, err := store.Connection(ctx)
+	if err != nil || currentConn.State != "MONITORING" || currentConn.Generation != conn.Generation || mon.IsBackoffActive() {
+		t.Fatalf("rollover must preserve session state without backoff: conn=%+v err=%v", currentConn, err)
 	}
 }
 
@@ -224,5 +233,101 @@ func TestRealtimeTask_TruncationFinishesPartial(t *testing.T) {
 	}
 	if runs[0].Status != "PARTIAL" || runs[0].Error != "REALTIME_PAGINATION_TRUNCATED" {
 		t.Fatalf("expected truncation partial result, got status=%q error=%q", runs[0].Status, runs[0].Error)
+	}
+}
+
+type todayBoundaryRegressionClient struct {
+	multiPageMockClient
+	t              *testing.T
+	bootstrapCalls int
+	historyCalls   int
+	bootstrapErr   error
+	failOnHistory  int
+}
+
+func (m *todayBoundaryRegressionClient) BootstrapToday(ctx context.Context, date string) (acb.Response, error) {
+	m.bootstrapCalls++
+	if date != fixedRealtimeTime().Format("02/01/2006") {
+		m.t.Fatal("bootstrap did not receive the monitor's pinned local day")
+	}
+	if m.bootstrapErr != nil {
+		return acb.Response{}, m.bootstrapErr
+	}
+	return m.Bootstrap(ctx)
+}
+
+func (m *todayBoundaryRegressionClient) HistoryToday(ctx context.Context, endpoint string, fields map[string]string, date string) (acb.Response, error) {
+	m.historyCalls++
+	if date != fixedRealtimeTime().Format("02/01/2006") || fields["FromDate"] != date || fields["ToDate"] != date || fields["activeDatetimeYN"] != "Y" {
+		m.t.Fatal("today history lost its pinned day or verified source mode")
+	}
+	if m.historyCalls > 1 && (fields["_raw"] != "true" || fields["dse_nextEventName"] != "nextPage") {
+		m.t.Fatal("today continuation lost the bank's raw navigation event")
+	}
+	if m.historyCalls == m.failOnHistory {
+		return acb.Response{}, fmt.Errorf("today history: %w", acb.ErrRealtimeDateRollover)
+	}
+	return m.History(ctx, endpoint, fields)
+}
+
+func TestRealtimeTask_TodayRolloverIsPartialWithoutBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bootstrap bool
+		page      int
+	}{
+		{name: "bootstrap", bootstrap: true},
+		{name: "initial_history", page: 1},
+		{name: "foreground_continuation", page: 2},
+		{name: "yielded_continuation", page: 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, conn := newRealtimeRegressionStore(t, ctx)
+			defer store.Close()
+			client := &todayBoundaryRegressionClient{multiPageMockClient: multiPageMockClient{maxPages: 8}, t: t, failOnHistory: tc.page}
+			if tc.bootstrap {
+				client.bootstrapErr = fmt.Errorf("today bootstrap: %w", acb.ErrRealtimeDateRollover)
+			}
+			mon := New(store, client, 5*time.Second, 15*time.Second)
+			mon.now = fixedRealtimeTime
+			task := NewRealtimeTask(mon, PriorityRealtimePoll, conn.ID, conn.Generation)
+			res, err := task.Step(ctx)
+			if tc.page == 6 && (err != nil || res.Done) {
+				t.Fatalf("expected foreground quantum to yield before page six: res=%+v err=%v", res, err)
+			}
+			for i := 0; i < 3 && !res.Done; i++ {
+				res, err = task.Step(ctx)
+			}
+			if err != nil || !res.Done || !res.RequeueAt.IsZero() || res.Outcome != scheduler.OutcomeTransient {
+				t.Fatalf("rollover should finish without auth/network retry: res=%+v err=%v", res, err)
+			}
+			wantPages := 0
+			if tc.page > 1 {
+				wantPages = tc.page - 1
+			}
+			if client.bootstrapCalls != 1 || client.historyCalls != tc.page || int(client.pagesReturned.Load()) != wantPages {
+				t.Fatalf("today interface request boundary: bootstrap=%d history=%d returned=%d", client.bootstrapCalls, client.historyCalls, client.pagesReturned.Load())
+			}
+			runs, err := store.ListPollRuns(ctx, 1)
+			wantPollPages := wantPages
+			if wantPollPages == 0 {
+				wantPollPages = 1
+			}
+			if err != nil || len(runs) != 1 || runs[0].Status != "PARTIAL" || runs[0].Error != acb.ErrRealtimeDateRollover.Error() || runs[0].Pages != wantPollPages || runs[0].RowsSeen != wantPages {
+				t.Fatalf("rollover must retain only earlier page counters: polls=%+v err=%v", runs, err)
+			}
+			if wantPages > 0 && (runs[0].RowsMatched == nil || *runs[0].RowsMatched != wantPages) {
+				t.Fatalf("earlier valid matched count must survive rollover: %+v", runs[0])
+			}
+			txns, err := store.ListTransactions(ctx, 10)
+			if err != nil || len(txns) != wantPages {
+				t.Fatalf("only valid earlier rows may survive rollover: count=%d err=%v", len(txns), err)
+			}
+			current, err := store.Connection(ctx)
+			if err != nil || current.State != "MONITORING" || current.Generation != conn.Generation || mon.IsBackoffActive() {
+				t.Fatalf("rollover changed auth state or activated backoff: conn=%+v err=%v", current, err)
+			}
+		})
 	}
 }

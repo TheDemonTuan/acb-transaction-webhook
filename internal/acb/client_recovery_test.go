@@ -28,6 +28,8 @@ type historyRecoveryBank struct {
 	token         int
 	from          string
 	to            string
+	mode          string
+	empty         bool
 	requests      []recoveryRequest
 	timeoutNext   bool
 	probes        int
@@ -49,7 +51,7 @@ type recoveryRequest struct {
 
 func newHistoryRecoveryBank(t *testing.T) *historyRecoveryBank {
 	t.Helper()
-	return &historyRecoveryBank{t: t, token: 1, from: recoveryDate, to: recoveryDate}
+	return &historyRecoveryBank{t: t, token: 1, from: recoveryDate, to: recoveryDate, mode: "Y"}
 }
 
 func recoveryResponse(r *http.Request, status int, body string) *http.Response {
@@ -61,7 +63,7 @@ func (b *historyRecoveryBank) form(account string) string {
 	if account != "" {
 		selection = `<input name="AccountNbr" value="` + account + `">`
 	}
-	return fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="state-%d"><input name="dse_sessionId" value="session-%d"><input name="dse_nextEventName" value="byMonth"><input name="activeDatetimeYN" value="Y"><input name="MonthCurr" value="10"><input name="YearCurr" value="2026">%s</form>`, b.token, b.token, selection)
+	return fmt.Sprintf(`<form action="/acbib/Request"><input name="dse_operationName" value="ibkacctDetailProc"><input name="dse_processorState" value="state-%d"><input name="dse_sessionId" value="session-%d"><input name="dse_nextEventName" value="byMonth"><input name="activeDatetimeYN" value="N"><input name="MonthCurr" value="10"><input name="YearCurr" value="2026">%s</form>`, b.token, b.token, selection)
 }
 
 func (b *historyRecoveryBank) staleDetail() string {
@@ -73,6 +75,9 @@ func (b *historyRecoveryBank) staleDetail() string {
 
 func (b *historyRecoveryBank) history(account string, next bool) string {
 	body := b.form(account) + `<table><tr><th>Ngày hiệu lực</th><th>Ngày giao dịch</th><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th><th>Nội dung giao dịch</th></tr>`
+	if b.empty {
+		return body + `<tr><td colspan="6">Không có giao dịch</td></tr></table><div>Tổng số dòng: 0</div>`
+	}
 	if next {
 		body += `<tr><td>05/10/2026</td><td>05/10/2026</td><td>TX101</td><td>0</td><td>100.000</td><td>Synthetic credit</td></tr><tr><td colspan="6"><a href="/acbib/Request" onclick="submitEvent('nextPage')">Trang sau</a></td></tr>`
 	} else {
@@ -80,6 +85,10 @@ func (b *historyRecoveryBank) history(account string, next bool) string {
 			body += `<tr><td>05/10/2026</td><td>05/10/2026</td><td>TX101</td><td>0</td><td>100.000</td><td>Synthetic credit</td></tr>`
 		}
 		body += `<tr><td>06/10/2026</td><td>05/10/2026</td><td>TX102</td><td>50.000</td><td>0</td><td>Synthetic debit</td></tr><tr><td colspan="6"><span class="disabled">Trang sau</span></td></tr>`
+	}
+	if b.mode == "N" && !b.paginate {
+		body += `<tr><td>05/10/2026</td><td>04/10/2026</td><td>TX099</td><td>0</td><td>75.000</td><td>Historical settlement</td></tr>`
+		return body + `</table><div>Tổng số dòng: 3</div>`
 	}
 	return body + `</table><div>Tổng số dòng: 2</div>`
 }
@@ -137,7 +146,7 @@ func (b *historyRecoveryBank) RoundTrip(r *http.Request) (*http.Response, error)
 	if fields.Get("dse_processorState") != fmt.Sprintf("state-%d", b.token) || fields.Get("dse_sessionId") != fmt.Sprintf("session-%d", b.token) {
 		return recoveryResponse(r, http.StatusOK, b.staleDetail()), nil
 	}
-	if fields.Get("dse_operationName") != "ibkacctDetailProc" || fields.Get("AccountNbr") != recoveryAccount || fields.Get("FromDate") != b.from || fields.Get("ToDate") != b.to || fields.Get("activeDatetimeYN") != "N" {
+	if fields.Get("dse_operationName") != "ibkacctDetailProc" || fields.Get("AccountNbr") != recoveryAccount || fields.Get("FromDate") != b.from || fields.Get("ToDate") != b.to || fields.Get("activeDatetimeYN") != b.mode {
 		b.t.Fatal("history POST lost operation, exact target, original range, or date mode")
 	}
 	if fields.Has("_raw") || fields.Has("_explicitRange") || fields.Has("MonthCurr") || fields.Has("YearCurr") || fields.Has("activeDatetimeByMonth") {
@@ -168,6 +177,10 @@ func (b *historyRecoveryBank) handoff() authbrowser.Handoff {
 	handoff := accountContinuityHandoff(recoveryAccount)
 	handoff.Fields["dse_processorState"] = fmt.Sprintf("state-%d", b.token)
 	handoff.Fields["dse_sessionId"] = fmt.Sprintf("session-%d", b.token)
+	handoff.Fields["dse_nextEventName"] = "byMonth"
+	handoff.Fields["activeDatetimeYN"] = "N"
+	handoff.Fields["MonthCurr"], handoff.Fields["YearCurr"] = "9", "2026"
+	handoff.Fields["FromDate"], handoff.Fields["ToDate"] = "01/09/2026", "30/09/2026"
 	return handoff
 }
 
@@ -225,6 +238,27 @@ func assertRecoveryTransactions(t *testing.T, response Response) HistoryPageResu
 	return page
 }
 
+func assertRecoveryHistoricalTransactions(t *testing.T, response Response) {
+	t.Helper()
+	if response.StatusCode != http.StatusOK || response.Kind != HistoryPage || response.RequestedAccount != recoveryAccount {
+		t.Fatal("historical response lost exact account proof")
+	}
+	page, err := ParseHistoryPage(response.Body)
+	want := []Transaction{
+		{Number: "TX101", EffectiveDate: recoveryDate, TransactionAt: recoveryDate, Credit: 100000, Description: "Synthetic credit"},
+		{Number: "TX102", EffectiveDate: "06/10/2026", TransactionAt: recoveryDate, Debit: 50000, Description: "Synthetic debit"},
+		{Number: "TX099", EffectiveDate: recoveryDate, TransactionAt: "04/10/2026", Credit: 75000, Description: "Historical settlement"},
+	}
+	if err != nil || page.HasNext || page.TotalRows != len(want) || len(page.Transactions) != len(want) {
+		t.Fatalf("historical mode did not retain adjacent transaction days: %v", err)
+	}
+	for i := range want {
+		if page.Transactions[i] != want[i] {
+			t.Fatalf("historical transaction %d lost its identity or dates", i)
+		}
+	}
+}
+
 func assertRecoveryTarget(t *testing.T, client *Client) {
 	t.Helper()
 	if client.SessionAccountNumber() != recoveryAccount {
@@ -237,7 +271,7 @@ func TestHistoryDetailRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *testing.T)
 		t.Run(fmt.Sprintf("restart_%t", restart), func(t *testing.T) {
 			bank := newHistoryRecoveryBank(t)
 			client := bank.client(bank.handoff())
-			first, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			first, err := client.BootstrapToday(context.Background(), recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -247,7 +281,7 @@ func TestHistoryDetailRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *testing.T)
 				t.Fatal(err)
 			}
 			bank.timeoutNext = true
-			_, err = client.HistoryForDate(context.Background(), snapshot.Action, snapshot.Fields, recoveryDate)
+			_, err = client.HistoryToday(context.Background(), snapshot.Action, snapshot.Fields, recoveryDate)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("consumed POST did not return deadline failure: %v", err)
 			}
@@ -255,7 +289,7 @@ func TestHistoryDetailRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *testing.T)
 			if restart {
 				client = bank.client(snapshot)
 			}
-			response, err := client.HistoryForDate(context.Background(), snapshot.Action, snapshot.Fields, recoveryDate)
+			response, err := client.HistoryToday(context.Background(), snapshot.Action, snapshot.Fields, recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -272,7 +306,7 @@ func TestHistoryDetailRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *testing.T)
 			if snapshot.Fields["dse_processorState"] != "state-2" || snapshot.Fields["AccountNbr"] != recoveryAccount {
 				t.Fatal("recovery mutated the persisted pre-timeout snapshot")
 			}
-			next, err := client.HistoryForDate(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
+			next, err := client.HistoryToday(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -288,7 +322,7 @@ func TestHistoryDetailContinuationResetsWithoutReplayingCursor(t *testing.T) {
 	bank := newHistoryRecoveryBank(t)
 	bank.paginate = true
 	client := bank.client(bank.handoff())
-	response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+	response, err := client.BootstrapToday(context.Background(), recoveryDate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +333,7 @@ func TestHistoryDetailContinuationResetsWithoutReplayingCursor(t *testing.T) {
 	fields := cloneFields(page.NextFields)
 	fields["_raw"] = "true"
 	bank.token++ // The server expires this cursor while the client still has it.
-	response, err = client.HistoryForDate(context.Background(), page.NextAction, fields, recoveryDate)
+	response, err = client.HistoryToday(context.Background(), page.NextAction, fields, recoveryDate)
 	if !errors.Is(err, ErrConversationReset) || response.Kind != AccountDetailPage {
 		t.Fatalf("stale continuation must return the fresh form and reset: %v kind=%s", err, response.Kind)
 	}
@@ -313,7 +347,7 @@ func TestHistoryDetailContinuationResetsWithoutReplayingCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	bank.paginate = false
-	response, err = client.HistoryForDate(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
+	response, err = client.HistoryToday(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +372,7 @@ func TestHistoryDetailRecoveryBoundedReplayFailure(t *testing.T) {
 				}
 				return recoveryResponse(r, http.StatusOK, lastBody), nil
 			}
-			response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+			response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 			if err == nil {
 				t.Fatal("authenticated wrong page was accepted as history")
 			}
@@ -383,7 +417,7 @@ func TestHistoryDetailRecoveryRejectsIncompatibleFreshForm(t *testing.T) {
 					fields["_raw"] = "true"
 					fields["dse_nextEventName"] = "nextPage"
 				}
-				response, err := client.HistoryForDate(context.Background(), handoff.Action, fields, recoveryDate)
+				response, err := client.HistoryToday(context.Background(), handoff.Action, fields, recoveryDate)
 				var authFailure *AuthFailure
 				if !errors.Is(err, ErrHistoryUnavailable) || errors.As(err, &authFailure) || errors.Is(err, ErrConversationReset) || response.Kind != AccountDetailPage {
 					t.Fatalf("incompatible fresh form must fail closed, not confirm auth loss/reset: %v kind=%s", err, response.Kind)
@@ -421,7 +455,7 @@ func TestHistoryDetailRecoveryProbeFailuresDoNotConfirmAuthenticationLoss(t *tes
 				}
 				return recoveryResponse(r, status, body), nil
 			}
-			response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+			response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 			var authFailure *AuthFailure
 			if err == nil || errors.As(err, &authFailure) || errors.Is(err, ErrHistoryUnavailable) {
 				t.Fatalf("probe transient must remain inconclusive/transport, not auth/protocol failure: %v", err)
@@ -466,7 +500,7 @@ func TestHistoryDetailRecoveryOnlyProbeConfirmsAuthenticationLoss(t *testing.T) 
 				} else {
 					bank.replay = respond
 				}
-				response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+				response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 				var authFailure *AuthFailure
 				if phase == "probe" {
 					if !errors.As(err, &authFailure) || authFailure.Kind != challenge.kind {
@@ -521,7 +555,7 @@ func TestHistoryDetailRecoveryRequiresExactAccountProof(t *testing.T) {
 			bank.redirect = func(r *http.Request) (*http.Response, error) {
 				return recoveryResponse(r, http.StatusOK, lastBody), nil
 			}
-			response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+			response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 			accepted := proof == "exact_echo" || proof == "direct_no_echo"
 			if accepted {
 				if err != nil {
@@ -559,7 +593,7 @@ func TestHistoryDetailRecoveryRequiresExactAccountProof(t *testing.T) {
 				t.Fatal(snapshotErr)
 			}
 			bank.replay = nil
-			response, err = client.HistoryForDate(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
+			response, err = client.HistoryToday(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -572,9 +606,10 @@ func TestHistoryDetailRecoveryRequiresExactAccountProof(t *testing.T) {
 }
 
 func TestHistoryDetailRecoveryPinsOriginalDateRangeAcrossRollover(t *testing.T) {
-	for _, mode := range []string{"implicit_today", "caller_day", "explicit_range"} {
+	for _, mode := range []string{"implicit_range", "explicit_range"} {
 		t.Run(mode, func(t *testing.T) {
 			bank := newHistoryRecoveryBank(t)
+			bank.mode = "N"
 			handoff := bank.handoff()
 			client := bank.client(handoff)
 			fields := cloneFields(handoff.Fields)
@@ -595,17 +630,11 @@ func TestHistoryDetailRecoveryPinsOriginalDateRangeAcrossRollover(t *testing.T) 
 				body := strings.Replace(bank.form(recoveryOtherAccount), "</form>", `<input name="_raw" value="true"><input name="_explicitRange" value="true"><input name="FromDate" value="06/10/2026"><input name="ToDate" value="06/10/2026"></form>`, 1)
 				return recoveryResponse(r, http.StatusOK, body), nil
 			}
-			var response Response
-			var err error
-			if mode == "caller_day" {
-				response, err = client.HistoryForDate(context.Background(), handoff.Action, fields, recoveryDate)
-			} else {
-				response, err = client.History(context.Background(), handoff.Action, fields)
-			}
+			response, err := client.History(context.Background(), handoff.Action, fields)
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertRecoveryTransactions(t, response)
+			assertRecoveryHistoricalTransactions(t, response)
 			assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet, http.MethodPost)
 			original, replay := bank.requests[0].fields, bank.requests[2].fields
 			if original.Get("FromDate") != replay.Get("FromDate") || original.Get("ToDate") != replay.Get("ToDate") || replay.Get("AccountNbr") != recoveryAccount || replay.Get("dse_processorState") != "state-3" || replay.Get("dse_sessionId") != "session-3" {
@@ -621,9 +650,10 @@ func TestHistoryDetailRecoveryPinsOriginalDateRangeAcrossRollover(t *testing.T) 
 
 func TestHistoryContinuationRetainsServerEventAcrossRollover(t *testing.T) {
 	bank := newHistoryRecoveryBank(t)
+	bank.mode = "N"
 	bank.paginate = true
 	client := bank.client(bank.handoff())
-	response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+	response, err := client.Bootstrap(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,8 +663,10 @@ func TestHistoryContinuationRetainsServerEventAcrossRollover(t *testing.T) {
 	}
 	fields := cloneFields(page.NextFields)
 	fields["_raw"] = "true"
+	fields["_explicitRange"] = "true"
+	fields["FromDate"], fields["ToDate"] = recoveryDate, recoveryDate
 	client.now = func() time.Time { return time.Date(2026, 10, 6, 0, 0, 1, 0, client.location) }
-	response, err = client.HistoryForDate(context.Background(), page.NextAction, fields, recoveryDate)
+	response, err = client.History(context.Background(), page.NextAction, fields)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +704,7 @@ func TestHistoryDetailRecoveryReplayTransientResponseKeepsConsumerPolicy(t *test
 				}
 				return recoveryResponse(r, status, body), nil
 			}
-			response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+			response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 			if failure == "network" {
 				if !errors.Is(err, transportErr) {
 					t.Fatalf("replay transport cause was lost: %v", err)
@@ -698,7 +730,7 @@ func TestHistoryDetailRecoveryLeavesHistorySchemaValidationToParser(t *testing.T
 	bank.replay = func(r *http.Request) (*http.Response, error) {
 		return recoveryResponse(r, http.StatusOK, bank.form(recoveryAccount)+`<table><tr><th>Số GD</th><th>Ghi nợ</th><th>Ghi có</th></tr><tr><td>TX101</td><td>0</td><td>100.000</td></tr></table>`), nil
 	}
-	response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+	response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 	if err != nil || response.Kind != HistoryPage || response.RequestedAccount != recoveryAccount {
 		t.Fatalf("client reclassified a proved HistoryPage instead of returning it to its parser: %v kind=%s", err, response.Kind)
 	}
@@ -733,7 +765,7 @@ func TestHistoryDoesNotResynchronizeNonDetailFailures(t *testing.T) {
 			bank.initial = func(r *http.Request) (*http.Response, error) {
 				return recoveryResponse(r, failure.status, body), nil
 			}
-			response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+			response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 			if err != nil || response.StatusCode != failure.status || response.Kind != failure.kind || response.Body != body {
 				t.Fatalf("non-recovery response changed policy: %v status=%d kind=%s", err, response.StatusCode, response.Kind)
 			}
@@ -761,7 +793,7 @@ func TestHistoryDetailRecoveryDoesNotProbeCanceledContext(t *testing.T) {
 					return recoveryResponse(r, http.StatusOK, bank.staleDetail()), nil
 				}
 			}
-			_, err := client.HistoryForDate(ctx, handoff.Action, handoff.Fields, recoveryDate)
+			_, err := client.HistoryToday(ctx, handoff.Action, handoff.Fields, recoveryDate)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("canceled request did not retain its cancellation cause: %v", err)
 			}
@@ -791,7 +823,7 @@ func TestHistoryDetailRecoveryDoesNotUseFreshGetHistoryAsAccountProof(t *testing
 	bank.replay = func(r *http.Request) (*http.Response, error) {
 		return recoveryResponse(r, http.StatusOK, bank.history("", false)), nil
 	}
-	response, err := client.HistoryForDate(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+	response, err := client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +842,7 @@ func TestBootstrapIncompleteRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *test
 			bank := newHistoryRecoveryBank(t)
 			bank.incomplete = true
 			client := bank.client(bank.handoff())
-			first, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			first, err := client.BootstrapToday(context.Background(), recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -820,14 +852,14 @@ func TestBootstrapIncompleteRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *test
 				t.Fatal(err)
 			}
 			bank.timeoutNext = true
-			_, err = client.BootstrapForDate(context.Background(), recoveryDate)
+			_, err = client.BootstrapToday(context.Background(), recoveryDate)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("consumed POST lost timeout: %v", err)
 			}
 			if restart {
 				client = bank.client(snapshot)
 			}
-			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			response, err := client.BootstrapToday(context.Background(), recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -844,7 +876,7 @@ func TestBootstrapIncompleteRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *test
 			if snapshot.Fields["dse_processorState"] != "state-2" || snapshot.Fields["AccountNbr"] != recoveryAccount {
 				t.Fatal("bootstrap mutated the persisted stale fields")
 			}
-			next, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			next, err := client.BootstrapToday(context.Background(), recoveryDate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -857,9 +889,10 @@ func TestBootstrapIncompleteRecoveryAfterConsumedTimeoutAndStaleSnapshot(t *test
 }
 
 func TestBootstrapIncompleteRecoveryPinsClockAndRange(t *testing.T) {
-	for _, mode := range []string{"implicit_today", "caller_day", "explicit_range", "initial_probe"} {
+	for _, mode := range []string{"implicit_range", "explicit_range", "initial_probe"} {
 		t.Run(mode, func(t *testing.T) {
 			bank := newHistoryRecoveryBank(t)
+			bank.mode = "N"
 			bank.incomplete = true
 			handoff := bank.handoff()
 			if mode == "explicit_range" {
@@ -871,9 +904,8 @@ func TestBootstrapIncompleteRecoveryPinsClockAndRange(t *testing.T) {
 				handoff.Action, handoff.Fields = "", nil
 			}
 			client := bank.client(handoff)
-			clockCalls := 0
 			current := time.Date(2026, 10, 5, 23, 59, 59, 0, client.location)
-			client.now = func() time.Time { clockCalls++; return current }
+			client.now = func() time.Time { return current }
 			bank.onProbe = func() { current = current.Add(2 * time.Second) }
 			bank.probe = func(r *http.Request) (*http.Response, error) {
 				return recoveryResponse(r, http.StatusOK, bank.form(recoveryAccount)), nil
@@ -881,20 +913,11 @@ func TestBootstrapIncompleteRecoveryPinsClockAndRange(t *testing.T) {
 			if mode != "initial_probe" {
 				bank.token++
 			}
-			var response Response
-			var err error
-			if mode == "caller_day" {
-				response, err = client.BootstrapForDate(context.Background(), recoveryDate)
-			} else {
-				response, err = client.Bootstrap(context.Background())
-			}
+			response, err := client.Bootstrap(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertRecoveryTransactions(t, response)
-			if clockCalls != 1 {
-				t.Fatalf("bootstrap clock snapshots=%d want=1", clockCalls)
-			}
+			assertRecoveryHistoricalTransactions(t, response)
 			if mode == "initial_probe" {
 				assertRecoveryRequests(t, bank.requests, http.MethodGet, http.MethodPost)
 			} else {
@@ -937,7 +960,7 @@ func TestBootstrapIncompleteRecoveryRejectsFreshForm(t *testing.T) {
 				}
 				return recoveryResponse(r, http.StatusOK, lastBody), nil
 			}
-			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			response, err := client.BootstrapToday(context.Background(), recoveryDate)
 			var authFailure *AuthFailure
 			if !errors.Is(err, ErrHistoryUnavailable) || errors.As(err, &authFailure) || response.Body != lastBody || response.Kind != AccountDetailPage {
 				t.Fatalf("invalid fresh form did not fail closed with final response: %v kind=%s", err, response.Kind)
@@ -999,7 +1022,7 @@ func TestBootstrapIncompleteRecoveryReplayProofAndFailures(t *testing.T) {
 			bank.redirect = func(r *http.Request) (*http.Response, error) {
 				return recoveryResponse(r, http.StatusOK, lastBody), nil
 			}
-			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			response, err := client.BootstrapToday(context.Background(), recoveryDate)
 			switch result {
 			case "exact_echo", "direct_no_echo":
 				if err != nil {
@@ -1086,7 +1109,7 @@ func TestBootstrapIncompleteRecoveryProbeBoundaries(t *testing.T) {
 				} else {
 					bank.replay = respond
 				}
-				response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+				response, err := client.BootstrapToday(context.Background(), recoveryDate)
 				var authFailure *AuthFailure
 				switch {
 				case result == "network":
@@ -1155,7 +1178,7 @@ func TestBootstrapOneProbeBudgetAndCleanChallenge(t *testing.T) {
 					return recoveryResponse(r, http.StatusOK, body), nil
 				}
 			}
-			response, err := client.BootstrapForDate(ctx, recoveryDate)
+			response, err := client.BootstrapToday(ctx, recoveryDate)
 			var authFailure *AuthFailure
 			switch mode {
 			case "cookies_incomplete":
@@ -1213,7 +1236,7 @@ func TestBootstrapIncompleteRecoveryCancellationAndEmptyTarget(t *testing.T) {
 			if mode == "fresh_probe" {
 				bank.onProbe = cancel
 			}
-			_, err := client.BootstrapForDate(ctx, recoveryDate)
+			_, err := client.BootstrapToday(ctx, recoveryDate)
 			if mode == "empty_target" {
 				if !errors.Is(err, ErrHistoryUnavailable) {
 					t.Fatalf("missing original target accepted fresh DOM account: %v", err)
@@ -1260,11 +1283,201 @@ func TestBootstrapPreservesNonRecoveryResponses(t *testing.T) {
 				body, kind = `<div>ibkacctDetailProc AccountNbr dse_processorState Số GD Ghi nợ Ghi có</div>`, HistoryPage
 			}
 			bank.initial = func(r *http.Request) (*http.Response, error) { return recoveryResponse(r, status, body), nil }
-			response, err := client.BootstrapForDate(context.Background(), recoveryDate)
+			response, err := client.BootstrapToday(context.Background(), recoveryDate)
 			if err != nil || response.StatusCode != status || response.Kind != kind || response.Body != body {
 				t.Fatalf("non-recovery policy changed: %v kind=%s", err, response.Kind)
 			}
 			assertRecoveryRequests(t, bank.requests, http.MethodPost)
+		})
+	}
+}
+
+func TestTodayHistoryNavigationAndEmptySource(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty_%t", empty), func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			bank.empty, bank.paginate = empty, !empty
+			client := bank.client(bank.handoff())
+			response, err := client.BootstrapToday(context.Background(), recoveryDate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := ParseHistoryPage(response.Body)
+			if err != nil || response.RequestedAccount != recoveryAccount {
+				t.Fatalf("today source is not proved/parseable: %v", err)
+			}
+			if empty {
+				if len(page.Transactions) != 0 || page.TotalRows != 0 || page.HasNext {
+					t.Fatal("valid empty today's history did not remain empty")
+				}
+				assertRecoveryRequests(t, bank.requests, http.MethodPost)
+				return
+			}
+			if !page.HasNext || len(page.Transactions) != 1 || page.Transactions[0].Number != "TX101" {
+				t.Fatal("today page one lost its exact returned row/navigation")
+			}
+			fields := cloneFields(page.NextFields)
+			fields["_raw"] = "true"
+			response, err = client.HistoryToday(context.Background(), page.NextAction, fields, recoveryDate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last, err := ParseHistoryPage(response.Body)
+			want := Transaction{Number: "TX102", EffectiveDate: "06/10/2026", TransactionAt: recoveryDate, Debit: 50000, Description: "Synthetic debit"}
+			if err != nil || last.HasNext || last.TotalRows != 2 || len(last.Transactions) != 1 || last.Transactions[0] != want || response.RequestedAccount != recoveryAccount {
+				t.Fatalf("today continuation lost the exact second row: %v", err)
+			}
+			assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodPost)
+			if bank.probes != 0 || bank.requests[1].fields.Get("dse_nextEventName") != "nextPage" {
+				t.Fatal("valid today navigation was reset or unnecessarily probed")
+			}
+		})
+	}
+}
+
+func TestTodayRejectsInvalidDatesAndOldDayBeforePOST(t *testing.T) {
+	for _, operation := range []string{"bootstrap", "history", "continuation"} {
+		for _, date := range []string{"", "2026-10-05", "5/10/2026", "31/02/2026", "04/10/2026"} {
+			t.Run(operation+"/"+date, func(t *testing.T) {
+				bank := newHistoryRecoveryBank(t)
+				handoff := bank.handoff()
+				client := bank.client(handoff)
+				var err error
+				if operation == "bootstrap" {
+					_, err = client.BootstrapToday(context.Background(), date)
+				} else {
+					fields := cloneFields(handoff.Fields)
+					if operation == "continuation" {
+						fields["_raw"], fields["dse_nextEventName"] = "true", "nextPage"
+					}
+					_, err = client.HistoryToday(context.Background(), handoff.Action, fields, date)
+				}
+				if date == "04/10/2026" {
+					if !errors.Is(err, ErrRealtimeDateRollover) {
+						t.Fatalf("old day did not return rollover: %v", err)
+					}
+				} else if err == nil || errors.Is(err, ErrRealtimeDateRollover) {
+					t.Fatalf("invalid date lost date-validation failure: %v", err)
+				}
+				if len(bank.requests) != 0 {
+					t.Fatal("invalid or expired today request reached the bank")
+				}
+			})
+		}
+	}
+}
+
+func TestTodayRolloverRetainsFreshFormWithoutReplayOrSuccess(t *testing.T) {
+	for _, operation := range []string{"bootstrap", "history"} {
+		for _, phase := range []string{"probe", "response", "replay_response"} {
+			t.Run(operation+"/"+phase, func(t *testing.T) {
+				bank := newHistoryRecoveryBank(t)
+				bank.incomplete = operation == "bootstrap"
+				handoff := bank.handoff()
+				client := bank.client(handoff)
+				current := time.Date(2026, 10, 5, 23, 59, 59, 0, client.location)
+				client.now = func() time.Time { return current }
+				rollover := func() { current = current.Add(2 * time.Second) }
+				if phase == "response" {
+					bank.initial = func(r *http.Request) (*http.Response, error) {
+						bank.token++
+						rollover()
+						return recoveryResponse(r, http.StatusOK, bank.history(recoveryAccount, false)), nil
+					}
+				} else {
+					bank.token++
+					if phase == "probe" {
+						bank.onProbe = rollover
+					} else {
+						bank.replay = func(r *http.Request) (*http.Response, error) {
+							rollover()
+							return recoveryResponse(r, http.StatusOK, bank.history(recoveryAccount, false)), nil
+						}
+					}
+				}
+				var err error
+				if operation == "bootstrap" {
+					_, err = client.BootstrapToday(context.Background(), recoveryDate)
+				} else {
+					_, err = client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+				}
+				var authFailure *AuthFailure
+				if !errors.Is(err, ErrRealtimeDateRollover) || errors.As(err, &authFailure) {
+					t.Fatalf("rollover became success/auth failure: %v", err)
+				}
+				switch phase {
+				case "probe":
+					assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet)
+				case "response":
+					assertRecoveryRequests(t, bank.requests, http.MethodPost)
+				case "replay_response":
+					assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodGet, http.MethodPost)
+				}
+				fresh, snapshotErr := client.SnapshotSession()
+				if snapshotErr != nil || fresh.Fields["dse_processorState"] != fmt.Sprintf("state-%d", bank.token) || fresh.Fields["dse_sessionId"] != fmt.Sprintf("session-%d", bank.token) {
+					t.Fatalf("rollover discarded fresh form rotation: %v", snapshotErr)
+				}
+				assertRecoveryTarget(t, client)
+				before := len(bank.requests)
+				_, err = client.HistoryToday(context.Background(), fresh.Action, fresh.Fields, recoveryDate)
+				if !errors.Is(err, ErrRealtimeDateRollover) || len(bank.requests) != before {
+					t.Fatal("old task date sent another request after rollover")
+				}
+			})
+		}
+	}
+}
+
+func TestTodaySnapshotRestartRetainsSourceRows(t *testing.T) {
+	bank := newHistoryRecoveryBank(t)
+	client := bank.client(bank.handoff())
+	response, err := client.BootstrapToday(context.Background(), recoveryDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := assertRecoveryTransactions(t, response)
+	snapshot, err := client.SnapshotSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := bank.client(snapshot)
+	response, err = restarted.BootstrapToday(context.Background(), recoveryDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := assertRecoveryTransactions(t, response)
+	for i := range first.Transactions {
+		if first.Transactions[i] != second.Transactions[i] {
+			t.Fatal("snapshot restart changed today's exact returned identities")
+		}
+	}
+	assertRecoveryRequests(t, bank.requests, http.MethodPost, http.MethodPost)
+	if bank.probes != 0 {
+		t.Fatal("successful persisted today conversation required a fresh probe")
+	}
+	assertRecoveryTarget(t, restarted)
+}
+
+func TestTodayExplicitRangeRejectedBeforeBankRequest(t *testing.T) {
+	for _, operation := range []string{"bootstrap", "history", "continuation"} {
+		t.Run(operation, func(t *testing.T) {
+			bank := newHistoryRecoveryBank(t)
+			handoff := bank.handoff()
+			handoff.Fields["_explicitRange"] = "true"
+			handoff.Fields["FromDate"], handoff.Fields["ToDate"] = recoveryDate, recoveryDate
+			if operation == "continuation" {
+				handoff.Fields["_raw"], handoff.Fields["dse_nextEventName"] = "true", "nextPage"
+			}
+			client := bank.client(handoff)
+			var err error
+			if operation == "bootstrap" {
+				_, err = client.BootstrapToday(context.Background(), recoveryDate)
+			} else {
+				_, err = client.HistoryToday(context.Background(), handoff.Action, handoff.Fields, recoveryDate)
+			}
+			if err == nil || err.Error() != "ACB realtime request cannot use an explicit range" || len(bank.requests) != 0 {
+				t.Fatalf("today explicit range reached the bank or lost its validation error: %v", err)
+			}
 		})
 	}
 }

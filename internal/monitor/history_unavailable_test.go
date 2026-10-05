@@ -479,7 +479,7 @@ func (c *bootstrapUnavailableClient) Bootstrap(ctx context.Context) (acb.Respons
 	return c.Client.Bootstrap(ctx)
 }
 
-func (c *bootstrapUnavailableClient) BootstrapForDate(ctx context.Context, _ string) (acb.Response, error) {
+func (c *bootstrapUnavailableClient) BootstrapToday(ctx context.Context, _ string) (acb.Response, error) {
 	return c.Bootstrap(ctx)
 }
 
