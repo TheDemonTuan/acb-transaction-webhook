@@ -654,12 +654,28 @@ func TestChallengeFormatPreservesCaseAndLeadingZeros(t *testing.T) {
 
 type receiptSender struct {
 	*fixtureSender
-	received chan string
+	received              chan string
+	receiptSendErr        error
+	receiptDeleteErr      error
+	receiptDeleteAttempts atomic.Int32
 }
 
 func (s *receiptSender) SendText(_ context.Context, _ int64, text string, _ any) (int64, error) {
+	if s.receiptSendErr != nil {
+		return 0, s.receiptSendErr
+	}
 	s.received <- text
 	return 457, nil
+}
+
+func (s *receiptSender) DeleteMessage(ctx context.Context, chatID, id int64) error {
+	if id == 457 {
+		s.receiptDeleteAttempts.Add(1)
+		if s.receiptDeleteErr != nil {
+			return s.receiptDeleteErr
+		}
+	}
+	return s.fixtureSender.DeleteMessage(ctx, chatID, id)
 }
 
 func TestAcceptedReplyAcknowledgesBeforeWaitingForBank(t *testing.T) {
@@ -672,8 +688,14 @@ func TestAcceptedReplyAcknowledgesBeforeWaitingForBank(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			b.Submitter.(*fixtureSubmitter).after = func() { close(entered); <-release }
 			done := make(chan error, 1)
-			go func() { done <- b.HandleReply(context.Background(), 123, c.PromptMessageID, 1000, "001234") }()
-			defer func() { close(release); <-done }()
+			finished := make(chan struct{})
+			var once sync.Once
+			releaseSubmit := func() { once.Do(func() { close(release) }) }
+			go func() {
+				defer close(finished)
+				done <- b.HandleReply(context.Background(), 123, c.PromptMessageID, 1000, "001234")
+			}()
+			t.Cleanup(func() { releaseSubmit(); <-finished })
 			select {
 			case <-entered:
 			case <-time.After(3 * time.Second):
@@ -686,6 +708,55 @@ func TestAcceptedReplyAcknowledgesBeforeWaitingForBank(t *testing.T) {
 				}
 			default:
 				t.Fatal("accepted reply was silent while waiting for the bank")
+			}
+			if sender.wasDeleted(457) {
+				t.Fatal("receipt was deleted while submission was pending")
+			}
+			releaseSubmit()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if sender.wasDeleted(457) != (kind == "OTP") || !sender.wasDeleted(1000) || !sender.wasDeleted(c.PromptMessageID) || b.Submitter.(*fixtureSubmitter).submits.Load() != 1 {
+				t.Fatal("receipt lifecycle, reply/prompt cleanup, or consume-once submission changed")
+			}
+		})
+	}
+}
+
+func TestOTPReceiptCleanupFailures(t *testing.T) {
+	for _, name := range []string{"submit-unknown", "receipt-send-failed", "receipt-delete-failed"} {
+		t.Run(name, func(t *testing.T) {
+			b, e, _ := brokerFixture(t, "OTP")
+			c := promptFixture(t, b, e, "OTP")
+			sender := &receiptSender{fixtureSender: b.Sender.(*fixtureSender), received: make(chan string, 1)}
+			b.Sender = sender
+			submitter := b.Submitter.(*fixtureSubmitter)
+			status, attempts := "CONSUMED", int32(1)
+			var wantErr error
+			switch name {
+			case "submit-unknown":
+				submitter.fail = true
+				status, wantErr = "INVALIDATED", ErrOutcomeUnknown
+			case "receipt-send-failed":
+				sender.receiptSendErr = errors.New("synthetic receipt send failure")
+				attempts = 0
+			case "receipt-delete-failed":
+				sender.receiptDeleteErr = errors.New("synthetic receipt delete failure")
+			}
+			ctx := context.Background()
+			if err := b.HandleReply(ctx, 123, c.PromptMessageID, 1000, "001234"); !errors.Is(err, wantErr) {
+				t.Fatalf("unexpected reply outcome: %v", err)
+			}
+			assertOTPChallengeState(t, b, e, c, status, 1)
+			if sender.receiptDeleteAttempts.Load() != attempts || sender.wasDeleted(457) != (name == "submit-unknown") || sender.wasDeleted(0) || !sender.wasDeleted(1000) || !sender.wasDeleted(c.PromptMessageID) {
+				t.Fatal("receipt failure changed best-effort cleanup")
+			}
+			if err := b.HandleReply(ctx, 123, c.PromptMessageID, 1001, "001234"); !errors.Is(err, storage.ErrChallengeConsumed) {
+				t.Fatalf("replay was not rejected: %v", err)
+			}
+			assertOTPChallengeState(t, b, e, c, status, 1)
+			if submitter.submits.Load() != 1 {
+				t.Fatal("receipt failure replayed the OTP submission")
 			}
 		})
 	}
