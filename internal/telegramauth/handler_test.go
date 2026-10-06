@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1024,7 +1025,11 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 	ctx, s, h, f, e, ch, b := telegramOTPFlow(t)
 	waiting := h.progressText
 	id := h.progressEpisode
+	var receiptID int64
 	b.onSubmit = func(consuming storage.AuthChallenge) {
+		f.mu.Lock()
+		receiptID = f.messageID
+		f.mu.Unlock()
 		if consuming.Status != "CONSUMING" {
 			t.Fatal("bank submit did not receive a durable reservation")
 		}
@@ -1037,7 +1042,6 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 	}
 	reply := command("001234")
 	reply.Message.ReplyTo = &Message{ID: ch.PromptMessageID}
-	before := len(f.messages)
 	if err := h.HandleUpdate(ctx, reply); err != nil {
 		t.Fatal(err)
 	}
@@ -1046,11 +1050,18 @@ func TestTelegramAcceptedOTPUsesDurablePendingAndCanonicalTerminal(t *testing.T)
 		t.Fatal("accepted OTP did not preserve durable consumption and prompt cleanup", err)
 	}
 	current, err := s.AuthRecoveryEpisode(ctx, e.ID)
-	if err != nil || current.OTPSubmissions != 1 || h.progressText == waiting || len(f.messages) != before+1 || b.submits != 1 {
-		t.Fatal("accepted OTP added more than the broker receipt or reverted to waiting", err)
+	if err != nil || current.OTPSubmissions != 1 || h.progressText == waiting || b.submits != 1 {
+		t.Fatal("accepted OTP lost consumption or reverted to waiting", err)
+	}
+	f.mu.Lock()
+	receiptDeleted := receiptID > 0 && receiptID != current.StatusMessageID && slices.Contains(f.deletedIDs, receiptID)
+	canonicalDeleted := slices.Contains(f.deletedIDs, current.StatusMessageID)
+	f.mu.Unlock()
+	if !receiptDeleted || canonicalDeleted {
+		t.Fatal("accepted OTP retained its receipt or deleted the canonical panel")
 	}
 	pending := h.progressText
-	before = len(f.messages)
+	before := len(f.messages)
 	if err := h.HandleUpdate(ctx, command("/acb_login")); err != nil {
 		t.Fatal(err)
 	}

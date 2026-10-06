@@ -402,9 +402,12 @@ func (b *Broker) HandleReply(ctx context.Context, chatID, promptID, incomingID i
 		receipt = "📩 ĐÃ NHẬN MÃ OTP\n────────────────────────\nĐang gửi mã tới ACB để xác thực phiên...\n⏳ Vui lòng theo dõi kết quả ở tin tiến độ bên dưới. (Không gửi lại mã)"
 	}
 	// Receipt failure must not replay or abandon an already consumed answer.
-	_, _ = b.Sender.SendText(ctx, chatID, receipt, nil)
+	receiptID, _ := b.Sender.SendText(ctx, chatID, receipt, nil)
 	_, submitErr := b.Submitter.SubmitChallenge(ctx, consumed, value)
 	value, text = "", ""
+	if c.Kind == "OTP" && receiptID > 0 {
+		_ = b.Sender.DeleteMessage(ctx, chatID, receiptID)
+	}
 	// CONSUMING is already durable: even a failed terminal write must ACK the
 	// update, not replay plaintext or call the bank again after restart.
 	deleteReply()

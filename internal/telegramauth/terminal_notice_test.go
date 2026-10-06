@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,13 +76,19 @@ func TestTelegramCompletedNoticeUsesCanonicalPanelHTTP(t *testing.T) {
 		t.Fatal("progress must exist before the OTP receipt", err)
 	}
 	canonicalID := current.StatusMessageID
+	var receiptID int64
+	b.onSubmit = func(storage.AuthChallenge) {
+		f.mu.Lock()
+		receiptID = f.messageID
+		f.mu.Unlock()
+	}
 	reply := command("001234")
 	reply.Message.ReplyTo = &Message{ID: ch.PromptMessageID}
 	if err := h.HandleUpdate(ctx, reply); err != nil {
 		t.Fatal(err)
 	}
-	if b.submits != 1 || f.messageID <= canonicalID {
-		t.Fatal("fixture did not submit OTP and deliver its separate receipt")
+	if b.submits != 1 || receiptID <= 0 || receiptID == canonicalID || !slices.Contains(f.deletedIDs, receiptID) || slices.Contains(f.deletedIDs, canonicalID) {
+		t.Fatal("OTP receipt was not removed independently of the canonical panel")
 	}
 	terminalNoticeFixture(t, ctx, s, e, "COMPLETED")
 	before := len(f.messages)
@@ -93,6 +100,9 @@ func TestTelegramCompletedNoticeUsesCanonicalPanelHTTP(t *testing.T) {
 	var editedID int64
 	if err := json.Unmarshal(body["message_id"], &editedID); err != nil || editedID != canonicalID {
 		t.Fatal("completion did not edit the pre-OTP canonical panel", err)
+	}
+	if !slices.Contains(f.deletedIDs, receiptID) || slices.Contains(f.deletedIDs, canonicalID) {
+		t.Fatal("completion retained the receipt or deleted the canonical panel")
 	}
 	assertTerminalControls(t, ctx, s, body, canonicalID)
 	if strings.Contains(string(body["text"]), "001234") {
