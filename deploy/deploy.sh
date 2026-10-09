@@ -219,10 +219,11 @@ worker_switch() {
   renew
   docker stop -t 30 acb-worker >/dev/null
   [[ "$(docker inspect -f '{{.State.Running}}' acb-worker)" == false ]] || fail 'worker still running'
-  QUIESCED=0
   compose "$target" up -d --no-deps worker
   EXPECTED_IMAGE_REF="$new" "$HERE/healthcheck.sh" container acb-worker 120
   container_image_check acb-worker "$new"
+  docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -resume >/dev/null
+  QUIESCED=0
 }
 ensure_restore_gate() {
   local gate
