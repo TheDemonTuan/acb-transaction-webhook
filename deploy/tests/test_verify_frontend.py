@@ -28,6 +28,7 @@ FILES = {"/index.html": HTML, "/__release": (SHA + "\n").encode(),
          "/assets/index-abcdefgh.js": b'console.log("synthetic entry");',
          "/assets/vendor-abcdefgh.js": b'export const fixture = true;',
          "/assets/index-abcdefgh.css": b'body { color: black; }'}
+PAYMENT_PAGES = ("/pay", "/pay/", "/pay/smoke-order", "/pay/smoke-order?status=PAID&success=true")
 BEACON = (b'<script defer type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v' + b'a' * 32 +
           b'" integrity="sha512-YWJj" data-cf-beacon=\'{"token":"synthetic"}\' crossorigin="anonymous"></script>')
 BOOTSTRAP = (b"<script>window.__CF$cv$params={r:'a4566af14c049fe9',t:'MTc5MTE0MDMwMw==',u:'01a1084812f171899f34caceedc09acf',"
@@ -54,11 +55,11 @@ class FrontendTests(unittest.TestCase):
             def do_GET(self):
                 owner.requests.append((self.path, dict(self.headers)))
                 path = urllib.parse.urlsplit(self.path).path
-                credentials = path in {"/admin/acb-credentials", "/admin/acb-credentials/"}
+                payment = path == "/pay" or path.startswith("/pay/")
                 headers = {
                     "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
-                    "Referrer-Policy": "no-referrer" if credentials else "strict-origin-when-cross-origin",
-                    "Content-Security-Policy": verify.CREDENTIALS_CSP if credentials else verify.GLOBAL_CSP,
+                    "Referrer-Policy": "no-referrer" if payment else "strict-origin-when-cross-origin",
+                    "Content-Security-Policy": verify.GLOBAL_CSP,
                     "Cache-Control": "public, max-age=0, must-revalidate",
                     "Set-Cookie": "synthetic=never-forward; Path=/",
                 }
@@ -81,7 +82,7 @@ class FrontendTests(unittest.TestCase):
                 else:
                     body = HTML
                     headers["Content-Type"] = "text/html; charset=utf-8"
-                    if credentials:
+                    if payment:
                         headers["Cache-Control"] = "no-store"
                 status, headers, body = owner.mutate(self.path, status, headers, body)
                 self.send_response(status)
@@ -117,12 +118,14 @@ class FrontendTests(unittest.TestCase):
         with self.assertRaisesRegex(verify.VerificationError, diagnostic):
             self.run_static(surface)
 
-    def test_static_local_checks_all_entries_and_credentials_without_cookies(self):
+    def test_static_local_checks_all_entries_and_payment_pages_without_cookies(self):
         self.assertIn("checksums verified", self.run_static())
         paths = [path for path, _ in self.requests]
         self.assertIn("/admin/activity", paths)
-        self.assertIn("/admin/acb-credentials?test=1", paths)
-        self.assertIn("/admin/acb-credentials/?test=1", paths)
+        self.assertIn("/admin/connection", paths)
+        for path in PAYMENT_PAGES:
+            self.assertIn(path, paths)
+        self.assertFalse(any(path.startswith("/admin/acb-credentials") for path in paths))
         self.assertIn("/assets/vendor-abcdefgh.js", paths)
         self.assertTrue(any("If-None-Match" in headers for _, headers in self.requests))
         self.assertFalse(any("Cookie" in headers or "Authorization" in headers for _, headers in self.requests))
@@ -130,6 +133,8 @@ class FrontendTests(unittest.TestCase):
     def test_viewer_never_probes_admin(self):
         self.run_static("viewer")
         self.assertFalse(any(path.startswith("/admin") for path, _ in self.requests))
+        for path in PAYMENT_PAGES:
+            self.assertIn(path, [requested for requested, _ in self.requests])
 
     def test_timestamped_beacon_does_not_hide_application_tampering(self):
         beacon = BEACON.replace(b'a' * 32 + b'"', b'a' * 32 + b'1788362987495"')
@@ -257,24 +262,41 @@ class FrontendTests(unittest.TestCase):
         self.mutate = mutation
         self.run_static()
 
-    def test_strict_csp_intersection_fallback_allowed(self):
-        def mutation(path, status, headers, body):
-            headers["Referrer-Policy"] = "no-referrer"
-            if path.startswith("/admin/acb-credentials"):
-                headers["Content-Security-Policy"] = [verify.GLOBAL_CSP, verify.CREDENTIALS_CSP]
-            return status, headers, body
-        self.mutate = mutation
-        self.run_static()
+    def test_payment_pages_reject_missing_global_or_joined_referrers(self):
+        for surface in ("local", "viewer"):
+            for target in PAYMENT_PAGES:
+                for value in ("", "strict-origin-when-cross-origin", "unsafe-url",
+                              "strict-origin-when-cross-origin, no-referrer",
+                              "no-referrer, strict-origin-when-cross-origin",
+                              ["strict-origin-when-cross-origin", "no-referrer"]):
+                    with self.subTest(surface=surface, target=target, value=value):
+                        def mutation(path, status, headers, body):
+                            if path == target:
+                                headers["Referrer-Policy"] = value
+                            return status, headers, body
+                        self.fail_mutation(mutation, "referrer policy mismatch", surface)
 
-    def test_credentials_cannot_keep_only_global_policy_or_join_referrers(self):
-        for key, value, diagnostic in [("Content-Security-Policy", verify.GLOBAL_CSP, "credentials CSP"),
-                                       ("Referrer-Policy", "strict-origin-when-cross-origin, no-referrer", "referrer")]:
-            with self.subTest(key=key):
-                def mutation(path, status, headers, body):
-                    if path.startswith("/admin/acb-credentials"):
-                        headers[key] = value
-                    return status, headers, body
-                self.fail_mutation(mutation, diagnostic)
+    def test_payment_pages_require_no_store_and_the_global_csp(self):
+        for target in PAYMENT_PAGES:
+            for key, value, diagnostic in (
+                    ("Cache-Control", "public, max-age=0, must-revalidate", "payment response is not no-store"),
+                    ("Content-Security-Policy", "default-src *", "global CSP policy mismatch")):
+                with self.subTest(target=target, key=key):
+                    def mutation(path, status, headers, body):
+                        if path == target:
+                            headers[key] = value
+                        return status, headers, body
+                    self.fail_mutation(mutation, diagnostic)
+
+    def test_generic_pages_and_assets_keep_the_global_referrer_policy(self):
+        for target in ("/", "/t/smoke-record", "/admin/connection", "/assets/index-abcdefgh.js"):
+            for value in ("no-referrer", "unsafe-url", "strict-origin-when-cross-origin, no-referrer"):
+                with self.subTest(target=target, value=value):
+                    def mutation(path, status, headers, body):
+                        if path == target:
+                            headers["Referrer-Policy"] = value
+                        return status, headers, body
+                    self.fail_mutation(mutation, "referrer policy mismatch")
 
     def test_conflicting_cache_rules_fail(self):
         for policy in ["no-store, public, max-age=0", "public, max-age=31536000, max-age=0, immutable",
@@ -345,7 +367,7 @@ class FrontendTests(unittest.TestCase):
     def test_rule_budget_fallback_revalidates_all_assets(self):
         for number in range(97):
             (self.artifact / "assets" / f"extra{number}-abcdefgh.js").write_bytes(b"export {};")
-        (self.artifact / "_headers").write_text("/*\n  X-Frame-Options: DENY\n/__release\n  Cache-Control: no-store\n/admin/acb-credentials\n  Cache-Control: no-store\n/admin/acb-credentials/\n  Cache-Control: no-store\n")
+        (self.artifact / "_headers").write_text((Path(__file__).parents[2] / "web/public/_headers").read_text())
         def mutation(path, status, headers, body):
             if path.startswith("/assets/"):
                 headers["Cache-Control"] = "public, max-age=0, must-revalidate"

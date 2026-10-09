@@ -4,6 +4,9 @@
 Static mode compares decoded responses to a verified dist directory. Rollback
 mode deliberately cannot attest artifact checksums. Access mode checks only the
 unauthenticated bank login redirect, never the bank's deployed release.
+
+Payment entry and capability pages require no-referrer and no-store; other
+frontend assets retain the global strict-origin-when-cross-origin policy.
 """
 
 import argparse
@@ -22,7 +25,6 @@ import zlib
 
 
 GLOBAL_CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; script-src 'self' https://static.cloudflareinsights.com; script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'; script-src-attr 'none'; connect-src 'self' ws: wss: https://cloudflareinsights.com; img-src 'self' data: blob: https:; font-src 'self' data:; style-src 'self' 'unsafe-inline'"
-CREDENTIALS_CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; script-src-attr 'none'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'"
 ACCESS_HOST = "thedemontuan.cloudflareaccess.com"
 TIMEOUT = 15
 MAX_BODY = 25 * 1024 * 1024
@@ -329,24 +331,18 @@ def csp_policy(value):
     return directives
 
 
-def security(response, credentials=False):
+def security(response, payment=False):
     require(response.header("X-Content-Type-Options").strip().lower() == "nosniff", "nosniff header mismatch")
     require(response.header("X-Frame-Options").strip().upper() == "DENY", "frame protection header mismatch")
     referrer = response.header("Referrer-Policy").strip().lower()
-    require(referrer in ({"no-referrer"} if credentials else {"strict-origin-when-cross-origin", "no-referrer"}),
+    require(referrer == ("no-referrer" if payment else "strict-origin-when-cross-origin"),
             "referrer policy mismatch")
     values = response.header("Content-Security-Policy").split(",")
     require(all(value.strip() for value in values), "missing CSP policy")
     policies = [csp_policy(value) for value in values]
-    global_policy, strict_policy = csp_policy(GLOBAL_CSP), csp_policy(CREDENTIALS_CSP)
-    if credentials:
-        # Multiple CSP policies are enforced by intersection, not last-write wins.
-        # Strict script-src also governs script-src-elem absent from that policy.
-        require(policies == [strict_policy] or (len(policies) == 2 and global_policy in policies and strict_policy in policies),
-                "credentials CSP must be the strict policy or the approved policy intersection")
-        require("no-store" in cache_directives(response), "credentials response is not no-store")
-    else:
-        require(policies == [global_policy], "global CSP policy mismatch")
+    require(policies == [csp_policy(GLOBAL_CSP)], "global CSP policy mismatch")
+    if payment:
+        require("no-store" in cache_directives(response), "payment response is not no-store")
 
 
 class EntryHTML(HTMLParser):
@@ -589,11 +585,12 @@ class Verifier:
             security(conditional)
         self.assets[path] = kind
 
-    def page(self, path, credentials=False):
+    def page(self, path):
         response = self.client.get(path)
         require(response.status == 200 and response.mime() == "text/html", "SPA page status or MIME mismatch")
         revalidating(response)
-        security(response, credentials)
+        page_path = urllib.parse.urlsplit(path).path
+        security(response, payment=page_path == "/pay" or page_path.startswith("/pay/"))
         entries = local_entries(response.body, self.origin + path, self.origin)
         if self.artifact:
             self.artifact.compare("/index.html", response.body)
@@ -614,14 +611,12 @@ class Verifier:
 
     def run(self):
         self.release()
-        pages = ["/", "/t/smoke-record", "/index.html"]
+        pages = ["/", "/t/smoke-record", "/index.html", "/pay", "/pay/",
+                 "/pay/smoke-order", "/pay/smoke-order?status=PAID&success=true"]
         if self.surface == "local":
-            pages.insert(1, "/admin/activity")
+            pages[1:1] = ["/admin/activity", "/admin/connection"]
         for page in pages:
             self.page(page)
-        if self.surface == "local":
-            self.page("/admin/acb-credentials?test=1", credentials=True)
-            self.page("/admin/acb-credentials/?test=1", credentials=True)
         self.missing()
         if self.surface == "viewer":
             self.backend()
