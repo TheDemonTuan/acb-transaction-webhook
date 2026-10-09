@@ -148,7 +148,7 @@ public_smoke() {
   PUBLIC_SMOKE_TMP="$(mktemp -d "$DEPLOY_PATH/.public-smoke.XXXXXXXX")" || return 1
   if ! bank_status="$(curl -sS --max-time 15 -D "$PUBLIC_SMOKE_TMP/bank.headers" -o /dev/null -w '%{http_code}' "${PUBLIC_ORIGIN%/}/api/v1/status")" ||
      ! viewer_status="$(curl -sS --max-time 15 -H 'Accept: application/json' -D "$PUBLIC_SMOKE_TMP/viewer.headers" -o "$PUBLIC_SMOKE_TMP/viewer.json" -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/public/v1/transactions?limit=1")" ||
-     ! callback_status="$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' --data '{}' -D "$PUBLIC_SMOKE_TMP/callback.headers" -o "$PUBLIC_SMOKE_TMP/callback.json" -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/integrations/payos/webhook")" ||
+     ! callback_status="$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' --data '{' -D "$PUBLIC_SMOKE_TMP/callback.headers" -o "$PUBLIC_SMOKE_TMP/callback.json" -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/integrations/payos/webhook")" ||
      ! private_status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/v1/status")"; then
     rm -rf "$PUBLIC_SMOKE_TMP"; PUBLIC_SMOKE_TMP=''
     fail 'public backend smoke transport failed'; return 1
@@ -179,7 +179,7 @@ try:
     if sys.argv[4]!='400' or callback.get_content_type()!='application/json' or callback.get('cf-mitigated') or callback.get('Location'):
         raise ValueError('exact callback did not return unchallenged HTTP 400 JSON')
     with (root/'callback.json').open(encoding='utf-8') as response: callback_body=json.load(response)
-    if not isinstance(callback_body,dict): raise ValueError('callback error JSON contract mismatch')
+    if not isinstance(callback_body,dict) or callback_body.get('error')!='INVALID_WEBHOOK': raise ValueError('callback error JSON contract mismatch')
     if sys.argv[5]!='403': raise ValueError('public host did not deny private API')
 except (OSError,ValueError) as error:
     # Do not log response bodies, transaction data, or redirect query values.
