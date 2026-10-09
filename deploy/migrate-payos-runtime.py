@@ -649,7 +649,8 @@ class Migration:
             def redirect_request(self, req, fp, code, msg, hdrs, newurl):
                 return None
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-        request = urllib.request.Request(origin + path, data=body, method=method, headers=headers or {})
+        request = urllib.request.Request(origin + path, data=body, method=method, headers={
+            'Accept-Encoding': 'identity', 'User-Agent': 'acb-frontend-verifier/1', **(headers or {})})
         try:
             try:
                 response = opener.open(request, timeout=15)
