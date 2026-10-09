@@ -208,11 +208,13 @@ class Migration:
         return self.command(['bash', '-Eeuo', 'pipefail', '-c', script, 'cutover', bundle, *args],
                             timeout, {'DEPLOY_PATH': str(self.root), **(env or {})})
 
-    def dbtool(self, image, *args, readonly=False):
+    def dbtool(self, image, *args, readonly=False, wal_metadata=False):
         require(DIGEST.fullmatch(image), 'dbtool must be digest pinned')
+        require(not wal_metadata or readonly and any(arg in ('-readonly', '-payment-counts') for arg in args),
+                'WAL metadata access requires a readonly database command')
         return self.command(['docker', 'run', '--rm', '--network', 'none', '--user', '1000:1000',
                              *(['--read-only'] if readonly else []), '-v',
-                             VOLUME + ':/data:' + ('ro' if readonly else 'rw'), image,
+                             VOLUME + ':/data:' + ('ro' if readonly and not wal_metadata else 'rw'), image,
                              '-path', '/data/gateway.db', *args])
 
     def inspect(self, name):
@@ -555,9 +557,15 @@ class Migration:
             if recovered:
                 receipt_path = str(recovered[0])
             else:
-                receipt_path = self.command(['bash', Path(self.plan['legacy_bundle']) / 'backup-db.sh', '--snapshot'], env={
-                    'DEPLOY_PATH': str(self.root), 'DBTOOL_IMAGE_REF': self.plan['legacy_dbtool'],
-                    'RELEASE_COMMIT': self.plan['legacy_sha'], 'ACTIVE_SLOT': self.plan['legacy_slot']}).decode().strip()
+                backup_env = {'DEPLOY_PATH': str(self.root), 'DBTOOL_IMAGE_REF': self.plan['legacy_dbtool'],
+                              'RELEASE_COMMIT': self.plan['legacy_sha'], 'ACTIVE_SLOT': self.plan['legacy_slot']}
+                backup_command = ['bash', Path(self.plan['legacy_bundle']) / 'backup-db.sh', '--snapshot']
+                if os.name == 'posix' and os.geteuid() == 0:
+                    # The pinned legacy script creates owner-only files and requires
+                    # application ownership. Root must drop privileges, not relax it.
+                    backup_command = ['sudo', '-n', '-u', '#1000', '-g', '#1000', 'env',
+                                      *(key + '=' + value for key, value in backup_env.items()), *backup_command]
+                receipt_path = self.command(backup_command, env=backup_env).decode().strip()
             receipt = decode(regular(receipt_path))
             backup_path = Path(receipt['path'])
             require(backup_path.is_relative_to(self.root / 'data/backups') and receipt.get('sha') == self.plan['legacy_sha']
@@ -578,7 +586,9 @@ class Migration:
             self.plan['legacy_retired'] = True
             self.save()
         self.dbtool(image, '-migrate')
-        self.dbtool(image, '-readonly', '-check', readonly=True)
+        # WAL-mode SQLite may need to create its sidecars once all connections
+        # have closed. The DB remains mode=ro/query_only; only metadata is writable.
+        self.dbtool(image, '-readonly', '-check', readonly=True, wal_metadata=True)
         require(self.database_summary(self.volume_database()) == backup['history'], 'migration changed financial history/journal/deliveries')
         self.save('SCHEMA_READY')
 
@@ -599,7 +609,7 @@ class Migration:
         self.command(['bash', bundle / 'healthcheck.sh', 'route', slot, sha], env={'DEPLOY_PATH': str(self.root)}, timeout=150)
 
     def counts(self):
-        values = decode(self.dbtool(self.plan['candidate_images']['DBTOOL_IMAGE_REF'], '-payment-counts', readonly=True))
+        values = decode(self.dbtool(self.plan['candidate_images']['DBTOOL_IMAGE_REF'], '-payment-counts', readonly=True, wal_metadata=True))
         require(all(type(values.get(k)) is int and values[k] >= 0 for k in ('orders', 'receipts', 'journalSeq')), 'invalid payment counts')
         return values
 
@@ -660,13 +670,17 @@ class Migration:
                 if first_frame:
                     data = bytearray()
                     deadline = time.monotonic() + 15
-                    while len(data) < 65536 and not data.endswith(b'\n\n'):
+                    while len(data) < 65536:
                         require(time.monotonic() < deadline, 'SSE initial frame timed out')
                         chunk = response.read(1)
                         require(chunk, 'SSE ended before initial frame')
                         data.extend(chunk)
+                        # retry/comment frames precede application events on startup.
+                        if data.endswith((b'\n\n', b'\r\n\r\n')) and b'event: initial_state' in data.splitlines():
+                            break
                     data = bytes(data)
-                    require(data.endswith(b'\n\n'), 'SSE initial frame exceeds limit')
+                    require(data.endswith((b'\n\n', b'\r\n\r\n')) and b'event: initial_state' in data.splitlines(),
+                            'SSE initial state exceeds limit')
                 else:
                     data = response.read(1024 * 1024 + 1)
                 require(len(data) <= 1024 * 1024, 'public response exceeds limit')
@@ -676,11 +690,16 @@ class Migration:
             raise MigrationError('public HTTP verification failed') from None
 
     def backend_smoke(self):
+        # Malformed JSON is rejected before credential availability is checked.
         status, headers, data = self.http(PUBLIC, '/api/integrations/payos/webhook', 'POST',
-                                          {'Content-Type': 'application/json'}, b'{}')
-        require(status == 400 and headers.get_content_type() == 'application/json' and isinstance(decode(data), dict),
-                'exact callback must return JSON 400, not login/challenge/SPA')
-        for path in ('/api/v1/status', '/internal', '/api/integrations/payos/webhook'):
+                                          {'Content-Type': 'application/json'}, b'{')
+        require(status == 400 and headers.get_content_type() == 'application/json'
+                and decode(data).get('error') == 'INVALID_WEBHOOK',
+                'exact callback must reject malformed JSON, not return login/challenge/SPA')
+        # Internal paths are denied by the verified root-owned route policy;
+        # the public URL may instead be served by Cloudflare's outer challenge.
+        self.publisher_ready()
+        for path in ('/api/v1/status', '/api/integrations/payos/webhook'):
             status, _, _ = self.http(PUBLIC, path)
             require(status in (403, 404), 'public private/wrong-method route exposed')
         status, headers, data = self.http(PUBLIC, '/api/public/v1/transactions?limit=1')
@@ -691,7 +710,7 @@ class Migration:
         require(status == 200 and cfg.get('provider') == 'PAYOS' and cfg.get('ready') is False,
                 'new-order gate unexpectedly open')
         status, headers, data = self.http(PUBLIC, '/api/public/v1/events', first_frame=True)
-        require(status == 200 and headers.get_content_type() == 'text/event-stream' and b'event:' in data,
+        require(status == 200 and headers.get_content_type() == 'text/event-stream' and b'event: initial_state' in data.splitlines(),
                 'public SSE initial frame unavailable')
 
     def access_headers(self, path):
@@ -916,7 +935,7 @@ class Migration:
         if self.plan.get('rollback_legacy_starting'):
             # Legacy may already be taking money after a successful gate release.
             # Never replay a database restore or use the auth-independent candidate gate.
-            version = decode(self.dbtool(self.plan['legacy_dbtool'], '-readonly', '-schema-version', readonly=True))
+            version = decode(self.dbtool(self.plan['legacy_dbtool'], '-readonly', '-schema-version', readonly=True, wal_metadata=True))
             require(version.get('version') == self.plan['legacy_schema_version'], 'legacy rollback completion requires unchanged pinned schema')
             self.volume_permissions()
             self.gate(self.plan['legacy_dbtool'])

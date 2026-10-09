@@ -5,6 +5,7 @@ observe durable state and command effects, not script source/wording.
 """
 import contextlib
 import email.message
+import http.server
 import importlib.util
 import io
 import json
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import zipfile
@@ -238,7 +240,7 @@ class Fixture(migration.Migration):
             self.dispatches.append(tuple(args))
             self.current_frontend = FRONTEND if 'mode=rollback' in args else NEW
             return b''
-        if args[0] == 'bash' and args[-1] == '--snapshot':
+        if args[-1] == '--snapshot':
             self.action('backup')
             if any(c['State']['Running'] for name, c in self.containers.items()
                    if name in ('acb-worker', 'acb-auth-browser', 'acb-recovery-controller', 'acb-gateway-blue', 'acb-gateway-green')):
@@ -311,7 +313,7 @@ class Fixture(migration.Migration):
             hdr.replace_header('Content-Type', 'text/html')
             return 200, hdr, b'<html>fixture SPA</html>'
         if path == '/api/integrations/payos/webhook' and method == 'POST':
-            return (503 if self.gate_token else 400), hdr, b'{"code":"INVALID_JSON"}'
+            return (503 if self.gate_token else 400), hdr, b'{"error":"INVALID_WEBHOOK"}'
         if path == '/api/public/v1/transactions?limit=1':
             return 200, hdr, b'{"items":[]}'
         if path == '/api/public/v1/payment-config':
@@ -320,6 +322,39 @@ class Fixture(migration.Migration):
             hdr.replace_header('Content-Type', 'text/event-stream')
             return 200, hdr, b'event: initial_state\ndata: {}\n\n'
         return 403, hdr, b'{}'
+
+
+class MigrationStreamTests(unittest.TestCase):
+    def test_initial_state_follows_control_frames_and_requires_application_event(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.end_headers()
+                self.wfile.write(self.server.body)
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        driver = migration.Migration(str(Path.cwd()), NEW)
+        origin = 'http://127.0.0.1:' + str(server.server_port)
+        for separator in (b'\n', b'\r\n'):
+            with self.subTest(separator=separator):
+                server.body = separator.join([b'retry: 1000', b'', b': connected', b'',
+                                              b'event: initial_state', b'data: {"ready":false}', b'', b''])
+                status, headers, body = driver.http(origin, '/events', first_frame=True)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get_content_type(), 'text/event-stream')
+                self.assertEqual(body, server.body)
+        server.body = b'retry: 1000\n\n'
+        with self.assertRaises(migration.MigrationError):
+            driver.http(origin, '/events', first_frame=True)
 
 
 class MigrationDrill(unittest.TestCase):
