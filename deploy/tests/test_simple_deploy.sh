@@ -170,7 +170,7 @@ log_test_pass "Packaged migration companion detects corruption"
 python3 - "$root" <<'PY'
 import os,secrets,sys
 root=sys.argv[1]
-for name in ('worker_internal_token','tts_internal_token','payos_client_id','payos_api_key','payos_checksum_key','bark_basic_auth_user','bark_basic_auth_password','app_master_key'):
+for name in ('worker_internal_token','tts_internal_token','bark_basic_auth_user','bark_basic_auth_password','app_master_key'):
     path=f'{root}/deploy/secrets/{name}'
     with open(path,'w') as f:f.write(secrets.token_hex(32)+'\n')
     os.chown(path,1000,1000)
@@ -646,12 +646,12 @@ PY
   [[ "$(sha256sum "$root/state.env")" == "$state_before" ]] || fail 'Same SHA rewrote committed state'
   [[ "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$route_before" ]] || fail 'Same SHA rewrote app route'
   log_test_pass "No-op deployment rerun passed (no mutation)"
-  log_test_start "Production-parity payOS secrets and disabled-create gate"
+  log_test_start "Production-parity unconfigured runtime and retained secret hardening"
   for name in acb-worker acb-gateway-green; do
-    docker inspect "$name" | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert c["HostConfig"]["ReadonlyRootfs"]; assert c["Config"]["User"]=="1000:1000"; mounts={m["Destination"]:m for m in c["Mounts"]}; assert all(not mounts["/run/secrets/"+n]["RW"] for n in ("payos_client_id","payos_api_key","payos_checksum_key")); env=dict(x.split("=",1) for x in c["Config"]["Env"]); assert env["PAYMENTS_ENABLED"]=="false" and env["PAYOS_WEBHOOK_CONFIRMED"]=="false"; assert not any("AUTH_BROWSER" in k or "POLL_MIN" in k for k in env)'
+    docker inspect "$name" | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert c["HostConfig"]["ReadonlyRootfs"]; assert c["Config"]["User"]=="1000:1000"; assert "ALL" in c["HostConfig"]["CapDrop"]; assert "no-new-privileges:true" in c["HostConfig"]["SecurityOpt"]; mounts={m["Destination"]:m for m in c["Mounts"]}; assert all(not mounts["/run/secrets/"+n]["RW"] for n in ("app_master_key","worker_internal_token")); assert not any("/run/secrets/"+n in mounts for n in ("payos_client_id","payos_api_key","payos_checksum_key")); env=dict(x.split("=",1) for x in c["Config"]["Env"]); assert not any("AUTH_BROWSER" in k or "POLL_MIN" in k for k in env)'
   done
   config="$(docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -fsS -H 'Host: transactions.tuannguyenviet.site' http://127.0.0.1:8080/api/public/v1/payment-config)"
-  printf '%s' "$config" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c["provider"]=="PAYOS" and c["ready"] is False and c["status"]=="DISABLED"'
+  printf '%s' "$config" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c["provider"]=="PAYOS" and c["ready"] is False and c["status"]=="UNCONFIGURED"'
   [[ -z "$(docker ps -aq --filter name='^/acb-auth-browser$' --filter name='^/acb-recovery-controller$')" ]] || fail 'Retired runtime containers created'
   log_test_pass "payOS runtime is hardened and cannot issue orders before confirmation"
 

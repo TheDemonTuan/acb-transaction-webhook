@@ -351,7 +351,6 @@ func (s *Store) ListDeliveriesPage(ctx context.Context, limit int, cursor string
 	return page, nil
 }
 
-
 func (s *Store) ListAuditLogsPage(ctx context.Context, limit int, cursor string) (Page[AuditLogView], error) {
 	limit = normalizePageSize(limit)
 	sortValue, cursorID, err := decodeCursor(cursor)

@@ -17,7 +17,6 @@ type JournalEntry struct {
 	CreatedAt   string `json:"createdAt"`
 }
 
-
 // AppendJournalEvent records a new event into the ordered event journal.
 func (s *Store) AppendJournalEvent(ctx context.Context, epoch, eventType, aggregateID string, payload []byte) (int64, error) {
 	if epoch == "" {

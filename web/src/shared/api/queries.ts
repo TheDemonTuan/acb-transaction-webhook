@@ -7,6 +7,8 @@ import {
   type PaymentOrderStatus,
   type PaymentOrigin,
   type PaymentReview,
+  type PaymentProviderConfig,
+  type PaymentProviderConfigInput,
 } from '../../features/payment-qr/payment-orders';
 import type {
   AuditLog,
@@ -26,6 +28,18 @@ export const fetchStatus = async (): Promise<Status> => {
 
 export const fetchPaymentConfig = async (): Promise<PaymentConfig> =>
   publicApi<PaymentConfig>('/payment-config');
+
+export const fetchPaymentProviderConfig = async (): Promise<PaymentProviderConfig> =>
+  api<PaymentProviderConfig>('/payment-provider/config', { cache: 'no-store' });
+
+// Call directly from the form, not a cached mutation: inputs contain raw secrets.
+export const savePaymentProviderConfig = async (input: PaymentProviderConfigInput): Promise<PaymentProviderConfig> =>
+  api<PaymentProviderConfig>('/payment-provider/config', {
+    method: 'PUT',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
 
 const paymentCreateInit = (amountVnd: number, idempotencyKey: string, origin?: PaymentOrigin): RequestInit => {
   if (!isValidPaymentAmount(amountVnd, Number.MAX_SAFE_INTEGER)) {

@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -82,7 +81,7 @@ func paymentBadRequest(w http.ResponseWriter, code string) {
 func (s *Server) publicPaymentConfig(w http.ResponseWriter, r *http.Request) {
 	service := s.payments
 	if service == nil {
-		service = payments.NewService(s.cfg, s.store, nil, nil)
+		service = payments.NewManagedService(s.cfg, s.store, nil)
 	}
 	config := service.Config()
 	status, err := service.Status(r.Context())
@@ -223,15 +222,11 @@ func (s *Server) payment(w http.ResponseWriter, r *http.Request) {
 		paymentHTTPError(w, payments.ErrPaymentNotFound)
 		return
 	}
-	if s.store == nil {
-		paymentHTTPError(w, payments.ErrPaymentUnavailable)
-		return
+	service := s.payments
+	if service == nil {
+		service = payments.NewManagedService(s.cfg, s.store, nil)
 	}
-	order, err := s.store.PaymentOrder(r.Context(), id)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && order.ChannelID != s.cfg.PayOSClientID) {
-		paymentHTTPError(w, payments.ErrPaymentNotFound)
-		return
-	}
+	order, err := service.Order(r.Context(), id)
 	if err != nil {
 		paymentHTTPError(w, err)
 		return
@@ -245,11 +240,11 @@ func (s *Server) paymentOrders(w http.ResponseWriter, r *http.Request) {
 		paymentBadRequest(w, "INVALID_PAGINATION")
 		return
 	}
-	if s.store == nil {
-		paymentHTTPError(w, payments.ErrPaymentUnavailable)
-		return
+	service := s.payments
+	if service == nil {
+		service = payments.NewManagedService(s.cfg, s.store, nil)
 	}
-	page, err := s.store.ListPaymentOrders(r.Context(), storage.PaymentOrderFilter{ChannelID: s.cfg.PayOSClientID, Status: r.URL.Query().Get("status"), Cursor: cursor, Limit: limit})
+	page, err := service.Orders(r.Context(), r.URL.Query().Get("status"), cursor, limit)
 	if err != nil {
 		if errors.Is(err, storage.ErrInvalidPaymentOrder) || cursor != "" {
 			paymentBadRequest(w, "INVALID_PAGINATION")
@@ -318,7 +313,7 @@ func (s *Server) confirmPaymentWebhook(w http.ResponseWriter, r *http.Request) {
 		paymentHTTPError(w, payments.ErrPaymentUnavailable)
 		return
 	}
-	if err := s.payments.ConfirmWebhook(r.Context()); err != nil {
+	if err := s.payments.ConfirmProviderWebhook(r.Context(), paymentProviderActor(r)); err != nil {
 		paymentHTTPError(w, err)
 		return
 	}

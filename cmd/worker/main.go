@@ -481,15 +481,7 @@ func main() {
 	}()
 
 	workerRealtimeHub := eventhub.New()
-	var provider payments.Provider
-	if cfg.PayOSClientID != "" && cfg.PayOSAPIKey != "" && cfg.PayOSChecksumKey != "" {
-		provider, err = payments.NewPayOS(cfg.PayOSClientID, cfg.PayOSAPIKey, cfg.PayOSChecksumKey)
-		if err != nil {
-			logger.Error("initialize payment provider", "error", err)
-			os.Exit(1)
-		}
-	}
-	paymentService := payments.NewService(cfg, store, provider, newWorkerPaymentNotifier(dispatcher, workerRealtimeHub))
+	paymentService := payments.NewManagedService(cfg, store, newWorkerPaymentNotifier(dispatcher, workerRealtimeHub))
 	paymentsRunning.Store(true)
 	workerWg.Add(1)
 	go func() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select independent releases against the last successful main push of this workflow."""
+"""Select paired main releases and independent explicitly requested artifacts."""
 
 import json
 import os
@@ -109,6 +109,9 @@ def select(event_name, inputs, auto):
     for name, value in [('deploy', deploy), ('rehearse', rehearse)]:
         if type(value) is not bool:
             raise ValueError(f'{name} must be a boolean')
+    if event_name == 'push':
+        return {'frontend': 'true', 'backend': 'true', 'base_sha': None,
+                'reason': 'Main push requires an exact backend/frontend pair for successful-run production followup'}
     if target == 'auto':
         frontend, backend, reason, base = auto()
     else:

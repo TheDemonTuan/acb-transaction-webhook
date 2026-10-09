@@ -61,6 +61,19 @@ class RuntimePreflightTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     runtime.deployment_mode(self.root)
 
+    def test_pending_cutover_or_publication_cannot_bypass_driver(self):
+        self.write('PAYMENT_RUNTIME=payos\n', 'PAYMENT_RUNTIME=payos\n')
+        for name in ('.payos-cutover-pending', '.payos-production-pending'):
+            marker = self.root / name
+            marker.write_text('{}\n')
+            self.assertEqual(runtime.deployment_mode(self.root), 'stage')
+            marker.unlink()
+
+    def test_invalid_pending_marker_is_rejected(self):
+        (self.root / '.payos-cutover-pending').mkdir()
+        with self.assertRaises(ValueError):
+            runtime.deployment_mode(self.root)
+
 
 class WorkflowBuildTests(unittest.TestCase):
     def setUp(self):
@@ -128,37 +141,35 @@ class WorkflowBuildTests(unittest.TestCase):
         verification = subprocess.run(['sha256sum', '-c', 'SHA256SUMS'], cwd=bundle, capture_output=True)
         self.assertEqual(verification.returncode, 0, verification.stderr)
 
-    @unittest.skipIf(os.name == 'nt' or not shutil.which('bash'), 'POSIX runner required for remote staging execution')
-    def test_remote_legacy_staging_never_logs_in_or_invokes_normal_deploy(self):
-        root = self.root / 'runtime'
-        stage_dir = root / 'releases' / 'stage'
-        stage_dir.mkdir(parents=True)
-        (root / 'state.env').write_text('RELEASE_SHA=' + SHA + '\nGATEWAY_SLOT=green\n')
-        (root / 'runtime.env').write_text('BROWSER_IMAGE_REF=historical-digest\n')
-        legacy = {name: (root / name).read_bytes() for name in ('state.env', 'runtime.env')}
-        bundle_script = step(self.document, 'verified-bundle', 'Assemble verified bundle')['run']
-        names = re.search(r'files=\(([^)]+)\)', bundle_script).group(1).split()
-        for name in names:
-            (stage_dir / name).write_text('fixture\n')
-        (stage_dir / 'workflow-runtime.py').write_bytes((ROOT / 'deploy/workflow-runtime.py').read_bytes())
-        (stage_dir / 'deploy.sh').write_text('touch "$DEPLOY_PATH/normal-deploy-called"\nexit 99\n')
-        checksum = subprocess.run(['sha256sum', *names], cwd=stage_dir, text=True, capture_output=True)
-        self.assertEqual(checksum.returncode, 0, checksum.stderr)
-        (stage_dir / 'SHA256SUMS').write_text(checksum.stdout)
-        workflow_script = step(self.document, 'deploy', 'Stage and deploy one immutable bundle')['run']
-        remote = workflow_script.split("cat <<'REMOTE'\n", 1)[1].split('\nREMOTE\n', 1)[0]
-        remote = remote.replace('${{ github.actor }}', 'fixture-user')
-        result = subprocess.run(['bash', '-c', remote], cwd=self.root, text=True, capture_output=True,
-                                env={**os.environ, 'DEPLOY_PATH': str(root), 'STAGE': str(stage_dir),
-                                     'SHA': SHA, 'MODE': 'stage', 'SOURCE_RUN_ID': '1234', 'GH_TOKEN': 'fixture-token'})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('PAYOS_RUNTIME_MIGRATION_REQUIRED', result.stdout)
-        self.assertNotIn('fixture-token', result.stdout + result.stderr)
-        self.assertEqual({name: (root / name).read_bytes() for name in legacy}, legacy)
-        self.assertFalse((root / 'normal-deploy-called').exists())
-        self.assertFalse((root / '.deploy.lock').exists())
-        self.assertFalse(list(root.glob('.docker-auth.*')))
-        self.assertTrue((root / 'releases' / SHA / 'workflow-runtime.py').is_file())
+    def test_source_deployment_is_manual_candidate_staging_only(self):
+        job = self.document['jobs']['deploy']
+        self.assertIn("github.event_name == 'workflow_dispatch'", job['if'])
+        self.assertIn('inputs.deploy == true', job['if'])
+        script = step(self.document, 'deploy', 'Stage immutable bundle without production runtime changes')['run']
+        self.assertIn('sudo -n bash', script)
+        self.assertIn('sha256sum -c', script)
+        self.assertNotIn('docker login', script)
+        self.assertNotIn('DEPLOY_GITHUB_TOKEN', script)
+        self.assertNotIn('bash "$target/deploy.sh"', script)
+
+    def test_successful_followup_checks_out_exact_source_without_credentials(self):
+        document = workflow('production.yml')
+        trigger = document.get('on', document.get(True))['workflow_run']
+        self.assertEqual(trigger['workflows'], ['Build and deploy gateway'])
+        self.assertEqual(trigger['types'], ['completed'])
+        job = document['jobs']['production']
+        self.assertIn("conclusion == 'success'", job['if'])
+        self.assertIn("head_branch == 'main'", job['if'])
+        self.assertEqual(job['permissions']['packages'], 'read')
+        checkout = next(item for item in job['steps'] if 'checkout@' in item.get('uses', ''))
+        self.assertEqual(checkout['with']['ref'], '${{ github.event.workflow_run.head_sha }}')
+        self.assertFalse(checkout['with']['persist-credentials'])
+        deploy = step(document, 'production', 'Install verified bundle and broker automatic migration and exact publication')
+        self.assertEqual(deploy['env']['DEPLOY_GITHUB_TOKEN'], '${{ secrets.DEPLOY_GITHUB_TOKEN }}')
+        self.assertEqual(deploy['env']['REGISTRY_TOKEN'], '${{ secrets.GITHUB_TOKEN }}')
+        self.assertNotIn('PAYOS_API_KEY', deploy['env'])
+        self.assertNotIn('CF_ACCESS_CLIENT_SECRET', deploy['env'])
+        self.assertEqual(document['concurrency'], self.document['concurrency'])
 
     @unittest.skipIf(os.name == 'nt' or not shutil.which('bash'), 'POSIX runner required for smoke command execution')
     def test_image_smoke_uses_three_secret_files_and_keeps_provider_gates_closed(self):

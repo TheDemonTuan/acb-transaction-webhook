@@ -15,6 +15,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/httpapi"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
@@ -230,15 +231,20 @@ func TestTwoGatewaysNoSingletonMaintenance(t *testing.T) {
 	}
 }
 
-func TestPaymentProviderRequiresCompleteCredentials(t *testing.T) {
+func TestManagedPaymentsBootWithoutEnvironmentCredentials(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
 	for _, cfg := range []config.Config{
 		{},
-		{PayOSClientID: "channel"},
-		{PayOSClientID: "channel", PayOSAPIKey: "api-key"},
-		{PayOSAPIKey: "api-key", PayOSChecksumKey: "checksum"},
+		{PayOSClientID: "legacy-channel", PayOSAPIKey: "legacy-key", PayOSChecksumKey: "legacy-checksum", PaymentsEnabled: true, PayOSWebhookConfirmed: true},
 	} {
-		if provider := paymentProvider(cfg, nil); provider != nil {
-			t.Fatal("incomplete development credentials must leave provider unconfigured")
+		service := payments.NewManagedService(cfg, store, nil)
+		if got := service.Config(); got.Status != "UNCONFIGURED" || got.Ready {
+			t.Fatalf("unexpected managed readiness: %+v", got)
 		}
 	}
 }

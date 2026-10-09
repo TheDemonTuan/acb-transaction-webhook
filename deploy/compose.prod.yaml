@@ -22,12 +22,7 @@ services:
       WORKER_REALTIME_ADDR: 0.0.0.0:8191
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
-      PAYOS_CLIENT_ID_FILE: /run/secrets/payos_client_id
-      PAYOS_API_KEY_FILE: /run/secrets/payos_api_key
-      PAYOS_CHECKSUM_KEY_FILE: /run/secrets/payos_checksum_key
       PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-https://transactions.tuannguyenviet.site}
-      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
-      PAYOS_WEBHOOK_CONFIRMED: ${PAYOS_WEBHOOK_CONFIRMED:-false}
       PAYMENT_MAX_AMOUNT_VND: ${PAYMENT_MAX_AMOUNT_VND:-500000000}
       BARK_SERVER_URL: http://bark:8080
       BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
@@ -48,9 +43,6 @@ services:
     secrets:
       - app_master_key
       - worker_internal_token
-      - payos_client_id
-      - payos_api_key
-      - payos_checksum_key
       - bark_basic_auth_user
       - bark_basic_auth_password
     stop_grace_period: 30s
@@ -203,12 +195,7 @@ services:
       WORKER_REALTIME_URL: http://acb-worker:8191
       WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
-      PAYOS_CLIENT_ID_FILE: /run/secrets/payos_client_id
-      PAYOS_API_KEY_FILE: /run/secrets/payos_api_key
-      PAYOS_CHECKSUM_KEY_FILE: /run/secrets/payos_checksum_key
       PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-https://transactions.tuannguyenviet.site}
-      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
-      PAYOS_WEBHOOK_CONFIRMED: ${PAYOS_WEBHOOK_CONFIRMED:-false}
       PAYMENT_MAX_AMOUNT_VND: ${PAYMENT_MAX_AMOUNT_VND:-500000000}
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
@@ -226,9 +213,6 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
-      - payos_client_id
-      - payos_api_key
-      - payos_checksum_key
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -279,12 +263,7 @@ services:
       WORKER_REALTIME_URL: http://acb-worker:8191
       WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
-      PAYOS_CLIENT_ID_FILE: /run/secrets/payos_client_id
-      PAYOS_API_KEY_FILE: /run/secrets/payos_api_key
-      PAYOS_CHECKSUM_KEY_FILE: /run/secrets/payos_checksum_key
       PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-https://transactions.tuannguyenviet.site}
-      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
-      PAYOS_WEBHOOK_CONFIRMED: ${PAYOS_WEBHOOK_CONFIRMED:-false}
       PAYMENT_MAX_AMOUNT_VND: ${PAYMENT_MAX_AMOUNT_VND:-500000000}
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
@@ -302,9 +281,6 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
-      - payos_client_id
-      - payos_api_key
-      - payos_checksum_key
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -386,12 +362,6 @@ secrets:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/tts_internal_token
   worker_internal_token:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/worker_internal_token
-  payos_client_id:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/payos_client_id
-  payos_api_key:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/payos_api_key
-  payos_checksum_key:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/payos_checksum_key
   bark_basic_auth_user:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/bark_basic_auth_user
   bark_basic_auth_password:

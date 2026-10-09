@@ -17,6 +17,14 @@ var ErrPaymentNotFound = &ServiceError{Code: "PAYMENT_NOT_FOUND", HTTPStatus: ht
 // CancelOrder does not consult new-order operational flags: an issued order must
 // remain cancellable/reconcilable while new payments are disabled.
 func (s *Service) CancelOrder(ctx context.Context, id string) (storage.PaymentOrder, error) {
+	if s.managed {
+		operation, operationCtx, done, err := s.pin(ctx)
+		if err != nil {
+			return storage.PaymentOrder{}, err
+		}
+		defer done()
+		return operation.CancelOrder(operationCtx, id)
+	}
 	if s.store == nil {
 		return storage.PaymentOrder{}, ErrPaymentUnavailable
 	}

@@ -41,3 +41,8 @@ var PollRowsMatchedSQL string
 //
 //go:embed 015_payos_payment_orders.sql
 var PayOSPaymentOrdersSQL string
+
+// PaymentProviderConfigSQL embeds schema version 16 encrypted web-managed payOS configuration.
+//
+//go:embed 016_payment_provider_config.sql
+var PaymentProviderConfigSQL string

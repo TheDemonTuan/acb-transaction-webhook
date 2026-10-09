@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read the remote payment runtime before any workflow staging or deployment."""
+"""Classify runtime without bypassing a pending migration/publication journal."""
 
 import re
 import sys
@@ -7,6 +7,16 @@ from pathlib import Path
 
 
 def deployment_mode(root):
+    # Only the automatic driver may resume a partially committed cutover or
+    # backend/frontend publication. A pair of runtime markers is not sufficient.
+    for name in ('.payos-cutover-pending', '.payos-production-pending'):
+        path = Path(root) / name
+        if path.is_symlink():
+            raise ValueError('PAYMENT_RUNTIME_STATE_INVALID')
+        if path.exists():
+            if not path.is_file():
+                raise ValueError('PAYMENT_RUNTIME_STATE_INVALID')
+            return 'stage'
     markers = []
     for name in ('state.env', 'runtime.env'):
         path = Path(root) / name

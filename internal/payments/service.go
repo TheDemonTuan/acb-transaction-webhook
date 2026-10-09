@@ -17,13 +17,18 @@ type Service struct {
 	provider         Provider
 	onCommit         func(storage.EventNotification)
 	channelNamespace string
-	reconcile        reconcileState
+	reconcile        *reconcileState
+	managed          bool
+	managedSnapshot  bool
+	providerRevision int64
+	providerFactory  func(storage.PaymentProviderCredentials) (Provider, error)
+	providerCache    *providerCache
 	reconcileWake    func(context.Context) error
 }
 
 func NewService(cfg config.Config, store *storage.Store, provider Provider, onCommit func(storage.EventNotification)) *Service {
 	sum := sha256.Sum256([]byte(cfg.PayOSClientID))
-	return &Service{cfg: cfg, store: store, provider: provider, onCommit: onCommit, channelNamespace: hex.EncodeToString(sum[:16])}
+	return &Service{cfg: cfg, store: store, provider: provider, onCommit: onCommit, channelNamespace: hex.EncodeToString(sum[:16]), reconcile: &reconcileState{}}
 }
 
 // Config reports operational readiness without exposing provider credentials.
@@ -38,6 +43,13 @@ type Config struct {
 }
 
 func (s *Service) Config() Config {
+	if s.managed {
+		snapshot, err := s.resolve(context.Background())
+		if err == nil {
+			return snapshot.Config()
+		}
+		return Config{Provider: "PAYOS", Bank: "KienlongBank", StaticURL: s.cfg.PaymentPublicOrigin + "/pay", MinAmountVND: 1, MaxAmountVND: s.cfg.PaymentMaxAmountVND, Status: "UNAVAILABLE"}
+	}
 	status := "READY"
 	switch {
 	case s.cfg.PayOSClientID == "" || s.cfg.PayOSAPIKey == "" || s.cfg.PayOSChecksumKey == "":

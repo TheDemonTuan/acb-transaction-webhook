@@ -21,10 +21,16 @@ if [[ "$mode" == check ]]; then
     exec 9<"$DEPLOY_PATH/.deploy.lock"
     flock -s -w 30 9 || { fail 'deploy lock unavailable'; exit 1; }
   fi
+elif [[ -n "${PAYOS_DEPLOY_LOCK_FD:-}" ]]; then
+  [[ "$PAYOS_DEPLOY_LOCK_FD" =~ ^[0-9]+$ && "$PAYOS_DEPLOY_LOCK_FD" -ge 3 ]] || { fail 'invalid inherited deployment lock'; exit 1; }
+  [[ "/proc/$$/fd/$PAYOS_DEPLOY_LOCK_FD" -ef "$DEPLOY_PATH/.deploy.lock" ]] || { fail 'inherited lock path mismatch'; exit 1; }
+  flock -n "$PAYOS_DEPLOY_LOCK_FD" || { fail 'inherited deployment lock unavailable'; exit 1; }
+  exec 9>&"$PAYOS_DEPLOY_LOCK_FD"
 else
   exec 9>"$DEPLOY_PATH/.deploy.lock"
   flock -w 30 9 || { fail 'deploy lock unavailable'; exit 1; }
 fi
+[ ! -e "$DEPLOY_PATH/.payos-production-pending" ] || [[ -n "${PAYOS_DEPLOY_LOCK_FD:-}" ]] || { fail 'PAYOS_PUBLICATION_PENDING'; exit 1; }
 [[ ! -e "$DEPLOY_PATH/.static-hosting-pending" ]] || { fail 'STATIC_HOSTING_MIGRATION_PENDING'; exit 1; }
 STATE="$DEPLOY_PATH/state.env"
 PENDING="$DEPLOY_PATH/.deploy-pending"

@@ -292,6 +292,9 @@ func (s *Store) ForceUnlockMutationGate(ctx context.Context, reason string) erro
 }
 
 func (s *Store) CheckMutationAllowed(ctx context.Context) error {
+	if err := checkPaymentProviderOperation(ctx, s.db); err != nil {
+		return err
+	}
 	if !s.deploymentControlTableExists(ctx, s.db) {
 		return nil
 	}
@@ -319,6 +322,9 @@ func (s *Store) CheckMutationAllowed(ctx context.Context) error {
 }
 
 func (s *Store) checkMutationAllowedTx(ctx context.Context, tx *sql.Tx) error {
+	if err := checkPaymentProviderOperation(ctx, tx); err != nil {
+		return err
+	}
 	if !s.deploymentControlTableExists(ctx, tx) {
 		return nil
 	}

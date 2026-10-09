@@ -26,18 +26,21 @@ type RoleSubjects struct {
 }
 
 type Config struct {
-	RuntimeRole           RuntimeRole
-	Address               string
-	DatabasePath          string
-	MasterKeyFile         string
-	Timezone              *time.Location
-	CloudflareIssuer      string
-	CloudflareAudience    string
-	CloudflareJWKSURL     string
-	Roles                 RoleSubjects
-	DevelopmentSubject    string
-	Production            bool
-	PublicOrigin          string
+	RuntimeRole        RuntimeRole
+	Address            string
+	DatabasePath       string
+	MasterKeyFile      string
+	Timezone           *time.Location
+	CloudflareIssuer   string
+	CloudflareAudience string
+	CloudflareJWKSURL  string
+	Roles              RoleSubjects
+	DevelopmentSubject string
+	Production         bool
+	PublicOrigin       string
+	// payOS credential fields support immutable service snapshots and injected
+	// fixtures only. Load never populates these or the legacy payment flags;
+	// production reads owner-managed encrypted configuration from shared storage.
 	PayOSClientID         string
 	PayOSAPIKey           string
 	PayOSChecksumKey      string
@@ -157,31 +160,13 @@ func Load() (Config, error) {
 		}
 	}
 
-	payOSClientID, err := ReadSecret("PAYOS_CLIENT_ID", "PAYOS_CLIENT_ID_FILE")
-	if err != nil {
-		return Config{}, err
-	}
-	payOSAPIKey, err := ReadSecret("PAYOS_API_KEY", "PAYOS_API_KEY_FILE")
-	if err != nil {
-		return Config{}, err
-	}
-	payOSChecksumKey, err := ReadSecret("PAYOS_CHECKSUM_KEY", "PAYOS_CHECKSUM_KEY_FILE")
-	if err != nil {
-		return Config{}, err
-	}
+	// payOS credentials are supplied exclusively through the encrypted owner API.
+	// Ignore stale environment values and secret-file paths during cutover.
 	paymentOriginDefault := "http://localhost:5173"
 	if production {
 		paymentOriginDefault = "https://transactions.tuannguyenviet.site"
 	}
 	paymentPublicOrigin, err := paymentOrigin(value("PAYMENT_PUBLIC_ORIGIN", paymentOriginDefault), production)
-	if err != nil {
-		return Config{}, err
-	}
-	paymentsEnabled, err := boolean("PAYMENTS_ENABLED", true)
-	if err != nil {
-		return Config{}, err
-	}
-	payOSWebhookConfirmed, err := boolean("PAYOS_WEBHOOK_CONFIRMED", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -290,17 +275,12 @@ func Load() (Config, error) {
 			Operators: set("OPERATOR_SUBJECTS"),
 			Viewers:   set("VIEWER_SUBJECTS"),
 		},
-		DevelopmentSubject:    value("DEVELOPMENT_SUBJECT", "local-owner"),
-		Production:            production,
-		PublicOrigin:          publicOrigin,
-		PayOSClientID:         payOSClientID,
-		PayOSAPIKey:           payOSAPIKey,
-		PayOSChecksumKey:      payOSChecksumKey,
-		PaymentPublicOrigin:   paymentPublicOrigin,
-		PaymentsEnabled:       paymentsEnabled,
-		PayOSWebhookConfirmed: payOSWebhookConfirmed,
-		PaymentMaxAmountVND:   paymentMaxAmountVND,
-		TTSGatewayURL:         ttsGatewayURL,
+		DevelopmentSubject:  value("DEVELOPMENT_SUBJECT", "local-owner"),
+		Production:          production,
+		PublicOrigin:        publicOrigin,
+		PaymentPublicOrigin: paymentPublicOrigin,
+		PaymentMaxAmountVND: paymentMaxAmountVND,
+		TTSGatewayURL:       ttsGatewayURL,
 
 		TTSInternalToken:      ttsToken,
 		BarkServerURL:         barkServerURL,
@@ -347,15 +327,6 @@ func Load() (Config, error) {
 			if cfg.WorkerInternalToken == "" {
 				return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required for worker in production")
 			}
-		}
-		if cfg.PayOSClientID == "" {
-			return Config{}, fmt.Errorf("PAYOS_CLIENT_ID or PAYOS_CLIENT_ID_FILE is required in production")
-		}
-		if cfg.PayOSAPIKey == "" {
-			return Config{}, fmt.Errorf("PAYOS_API_KEY or PAYOS_API_KEY_FILE is required in production")
-		}
-		if cfg.PayOSChecksumKey == "" {
-			return Config{}, fmt.Errorf("PAYOS_CHECKSUM_KEY or PAYOS_CHECKSUM_KEY_FILE is required in production")
 		}
 	}
 	if cfg.MasterKeyFile != "" && !filepath.IsAbs(cfg.MasterKeyFile) {

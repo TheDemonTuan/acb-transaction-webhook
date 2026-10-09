@@ -25,6 +25,25 @@ export interface PaymentConfig {
   status: PaymentProviderStatus;
 }
 
+// Owner-only safe snapshot. Raw credentials are write-only form values.
+export interface PaymentProviderConfig {
+  configured: boolean;
+  clientId?: string;
+  apiKeyConfigured: boolean;
+  checksumKeyConfigured: boolean;
+  webhookConfirmed: boolean;
+  enabled: boolean;
+  staticUrl: string;
+  webhookUrl: string;
+}
+
+export interface PaymentProviderConfigInput {
+  clientId: string;
+  apiKey: string;
+  checksumKey: string;
+  enabled: boolean;
+}
+
 export interface PaymentProviderState {
   provider: 'PAYOS';
   bank: 'KienlongBank';

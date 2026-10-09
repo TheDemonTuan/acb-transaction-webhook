@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Lease-fenced, resumable one-time migration; CLI documentation is in --help.
+"""Lease-fenced production cutover and exact-artifact publication.
 
-The pending journal is durable before every irreversible operation. Failures keep
-it and the receiver/database in place; there is deliberately no automatic restore.
-Operator evidence acknowledges external owner/bank actions, never performs them.
+The journal is durable before every irreversible operation. Automatic deployment
+stops at FRONTEND_READY; only the owner's web configuration can enable payments.
+Failures retain the receiver/database and never trigger an automatic restore.
 """
 from __future__ import annotations
 
@@ -167,6 +167,16 @@ class Migration:
         self.renewing = False
 
     def command(self, args, timeout=120, env=None):
+        if str(args[0]) == 'gh' and os.environ.get('PAYOS_GITHUB_BRIDGE') == '1':
+            # Cross-repository credentials stay on the Actions runner. The runner
+            # accepts only app-scoped read APIs and exact central workflow inputs.
+            print(json.dumps({'github_request': [str(a) for a in args[1:]]}), flush=True)
+            reply = decode(sys.stdin.buffer.readline(16 * 1024 * 1024))
+            require(set(reply) == {'github_response'}, 'runner GitHub bridge failed')
+            try:
+                return base64.b64decode(reply['github_response'], validate=True)
+            except (ValueError, TypeError):
+                raise MigrationError('invalid runner GitHub bridge response') from None
         if self.plan and self.plan.get('gate_token') and self.gate_image and not self.renewing \
                 and not any(str(arg) in ('-gate-renew', '-gate-acquire', '-gate-release') for arg in args):
             self.renewing = True
@@ -176,9 +186,12 @@ class Migration:
             finally:
                 self.renewing = False
         try:
+            inherited = getattr(self, 'deploy_lock_fd', None) if args[:2] == ['bash', self.release / 'deploy.sh'] else None
             result = subprocess.run([str(a) for a in args], stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, timeout=timeout,
-                                    env={**os.environ, **(env or {})})
+                                    pass_fds=(inherited,) if inherited is not None else (),
+                                    env={**os.environ, **(env or {}),
+                                         **({'PAYOS_DEPLOY_LOCK_FD': str(inherited)} if inherited is not None else {})})
         except (OSError, subprocess.TimeoutExpired):
             raise MigrationError('command unavailable or timed out: ' + str(args[0])) from None
         # Arguments/output may contain lease tokens, Access credentials, or data.
@@ -268,7 +281,7 @@ class Migration:
         require(run_id and str(run_id).isdigit(), '--source-run-id of successful staging run required')
         run = self.gh(f'repos/{SOURCE}/actions/runs/{run_id}')
         require(run.get('head_sha') == sha and run.get('conclusion') == 'success'
-                and run.get('status') == 'completed' and run.get('event') == 'workflow_dispatch'
+                and run.get('status') == 'completed' and run.get('event') in ('workflow_dispatch', 'push')
                 and run.get('head_branch') == 'main' and run.get('head_repository', {}).get('full_name') == SOURCE
                 and run.get('path') == '.github/workflows/deploy.yml', 'source run is not successful staged deploy.yml on main')
         jobs = self.gh(f'repos/{SOURCE}/actions/runs/{run_id}/jobs?per_page=100')['jobs']
@@ -314,7 +327,6 @@ class Migration:
 
     def prepare(self, prior):
         require(SHA.fullmatch(self.sha or ''), 'invalid release SHA')
-        require(prior is not None, '--prior-frontend private exact-version evidence is required for first check/apply')
         require(self.source_run_id and str(self.source_run_id).isdigit(),
                 '--source-run-id of successful staging-only source run is required for first check/apply')
         require(not (self.root / '.deploy-pending').exists() and not (self.root / '.static-hosting-pending').exists(),
@@ -333,7 +345,7 @@ class Migration:
             require(container['State']['Running'] is True and container['Config']['Image'] == runtime[key],
                     'actual legacy VPS runtime does not match pinned state')
             self.shell(legacy, 'container_image_check', [name, runtime[key]])
-        frontend = decode(regular(prior))
+        frontend = decode(regular(prior)) if prior else self.latest_central_publication()
         require(frontend.get('app') == 'acb' and SHA.fullmatch(frontend.get('sha', ''))
                 and UUID.fullmatch(frontend.get('version_id', '')), 'prior central SHA/version evidence required')
         prior_receipt = self.receipt_artifact(frontend.get('central_run_id'))
@@ -344,9 +356,9 @@ class Migration:
         frontend['receipt'] = prior_receipt
         self.frontend_release(frontend['sha'], frontend.get('bank_access_headers_file'), False)
         central = self.central_current()
-        self.publisher_ready()
         source = self.source_proof(self.sha, self.source_run_id, entries)
-        self.secrets_ready()
+        if not getattr(self, 'automatic', False):
+            self.publisher_ready()
         self.dbtool(old['DBTOOL_IMAGE_REF'], '-readonly', '-gate-status', readonly=True)
         legacy_schema = decode(self.dbtool(old['DBTOOL_IMAGE_REF'], '-readonly', '-schema-version', readonly=True)).get('version')
         require(type(legacy_schema) is int and legacy_schema in (13, 14), 'unsupported legacy schema version')
@@ -365,14 +377,18 @@ class Migration:
                 'runtime_sha256': digest(regular(legacy / 'runtime.env')),
                 'env_sha256': digest(regular(self.root / 'deploy/.env.production'))}
 
-    def secrets_ready(self):
-        for name in ('payos_client_id', 'payos_api_key', 'payos_checksum_key'):
-            path = self.root / 'deploy/secrets' / name
-            require(path.is_file() and not path.is_symlink() and path.stat().st_size > 0,
-                    'real payOS secret file required: ' + name)
-            st = path.stat()
-            require(st.st_mode & 0o777 == 0o600 and st.st_uid == st.st_gid == 1000,
-                    'payOS secret permissions must be 0600 1000:1000')
+
+    def upgrade_publisher(self):
+        # Fixed root-owned installer destinations and its publisher lock retain
+        # legacy policies; never grant the app arbitrary route write permission.
+        if self.route != Path('/opt/platform/edge/dynamic/acb.yml'):
+            return
+        require(os.geteuid() == 0, 'automatic route policy upgrade requires app-scoped root execution')
+        with tempfile.TemporaryDirectory(prefix='.payos-route-', dir=self.root) as directory:
+            for slot in ('blue', 'green'):
+                atomic(Path(directory) / (slot + '.yml'),
+                       self.command(['bash', self.release / 'render-route.sh', slot]))
+            self.command(['bash', self.release / 'install-route-publisher.sh', '--upgrade', directory])
 
     def publisher_ready(self):
         if self.route != Path('/opt/platform/edge/dynamic/acb.yml'):
@@ -417,7 +433,7 @@ class Migration:
     def save(self, phase=None):
         if phase:
             self.plan['phase'] = phase
-        atomic(self.marker, self.plan)
+        atomic(getattr(self, 'publication_journal', self.marker), self.plan)
 
     def stage(self, prior):
         self.plan = self.prepare(prior)
@@ -709,11 +725,22 @@ class Migration:
         require(os.name != 'posix' or Path(path).stat().st_mode & 0o077 == 0, 'Access headers file must be private')
         return headers
 
-    def frontend_release(self, sha, access_file, deep_link=True):
-        for origin in (BANK, PUBLIC):
-            status, headers, body = self.http(origin, '/__release', headers=self.access_headers(access_file) if origin == BANK else None)
+    def frontend_release(self, sha, access_file=None, deep_link=True):
+        status, headers, body = self.http(PUBLIC, '/__release')
+        require(status == 200 and headers.get_content_type() == 'text/plain'
+                and body == (sha + '\n').encode(), 'actual public frontend __release SHA mismatch')
+        status, headers, body = self.http(BANK, '/__release',
+                                          headers=self.access_headers(access_file) if access_file else None)
+        if access_file:
             require(status == 200 and headers.get_content_type() == 'text/plain'
-                    and body == (sha + '\n').encode(), 'actual frontend __release SHA mismatch')
+                    and body == (sha + '\n').encode(), 'actual authenticated bank frontend SHA mismatch')
+        else:
+            from urllib.parse import urlsplit
+            target = urlsplit(headers.get('Location', ''))
+            require(status in (302, 303) and target.scheme == 'https'
+                    and target.hostname and target.hostname.endswith('.cloudflareaccess.com')
+                    and target.path.startswith('/cdn-cgi/access/login'),
+                    'bank hostname must retain its Cloudflare Access redirect')
         if deep_link:
             # Deliberately nonexistent capability: SPA loading, not order creation.
             for path in ('/pay', '/pay/' + 'A' * 43):
@@ -733,8 +760,8 @@ class Migration:
             else:
                 prior = self.plan['prior_frontend']
                 inputs += ['-f', 'sha=' + prior['sha'], '-f', 'version_id=' + prior['version_id']]
-            # Persist intent BEFORE dispatch. Ambiguous dispatch is never repeated;
-            # operator supplies the exact run ID on resume via --central-run-id.
+            # Persist intent before dispatch; discover only the exact receipt
+            # input tuple on resume, never repeat an ambiguous dispatch.
             self.plan[key] = {'dispatched': False, 'requested_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
             self.save()
             self.command(['gh', 'workflow', 'run', 'cloudflare-deploy.yml', '--repo', CENTRAL, *inputs])
@@ -742,7 +769,7 @@ class Migration:
             self.save()
         return key
 
-    def latest_central_publication(self, expected_run):
+    def latest_central_publication(self, expected_run=None):
         runs = self.gh(f'repos/{CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?status=success&per_page=100')['workflow_runs']
         for run in runs:
             if run.get('event') != 'workflow_dispatch':
@@ -755,8 +782,13 @@ class Migration:
                 continue
             require(receipt.get('status') in ('passed', 'already_current') and receipt.get('public_checks_passed') is True,
                     'latest central ACB publication is not healthy exact-version evidence')
-            require(str(run['id']) == str(expected_run), 'prior frontend receipt is not the latest successful central ACB publication')
-            return
+            require(expected_run is None or str(run['id']) == str(expected_run),
+                    'prior frontend receipt is not the latest successful central ACB publication')
+            require(SHA.fullmatch(receipt.get('requested_sha', ''))
+                    and UUID.fullmatch(receipt.get('active_deployment', {}).get('version_id', '')),
+                    'latest central receipt has no exact SHA/version UUID')
+            return {'app': 'acb', 'sha': receipt['requested_sha'],
+                    'version_id': receipt['active_deployment']['version_id'], 'central_run_id': str(run['id'])}
         raise MigrationError('current central ACB publication receipt unavailable in recent successful runs')
 
     def receipt_artifact(self, run_id, publication=True):
@@ -786,10 +818,40 @@ class Migration:
                     'central receipt did not prove successful exact-version publication')
         return receipt
 
+    def discover_central_run(self, mode, intent):
+        deadline = time.monotonic() + 25 * 60
+        expected = self.sha if mode == 'publish' else self.plan['prior_frontend']['sha']
+        while True:
+            runs = self.gh(f'repos/{CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?'
+                           'event=workflow_dispatch&per_page=100&created=>=' + intent['requested_at'][:10])['workflow_runs']
+            matches = []
+            for run in runs:
+                if run.get('created_at', '') < intent['requested_at'] or run.get('status') != 'completed' \
+                        or run.get('conclusion') != 'success':
+                    continue
+                artifacts = self.gh(f'repos/{CENTRAL}/actions/runs/{run["id"]}/artifacts?per_page=100')['artifacts']
+                if not any(a.get('name') == 'cloudflare-receipt-acb-' + str(run['id']) and not a.get('expired') for a in artifacts):
+                    continue
+                receipt = self.receipt_artifact(run['id'], publication=False)
+                if receipt.get('mode') != mode or receipt.get('requested_sha') != expected:
+                    continue
+                if mode == 'publish' and str(receipt.get('source_run_id')) != self.plan['source']['source_run_id']:
+                    continue
+                if mode == 'rollback' and receipt.get('active_deployment', {}).get('version_id') != self.plan['prior_frontend']['version_id']:
+                    continue
+                matches.append(str(run['id']))
+            require(len(matches) <= 1, 'ambiguous exact central publication receipts; dispatch will not be repeated')
+            if matches:
+                intent['run_id'] = matches[0]
+                self.save()
+                return matches[0]
+            require(time.monotonic() < deadline,
+                    'central publication receipt unavailable; intent retained, automatic retry will not redispatch')
+            time.sleep(10)
+
     def central_receipt(self, mode, run_id):
         key = self.central_operation(mode)
-        run_id = run_id or self.plan[key].get('run_id')
-        require(run_id and str(run_id).isdigit(), 'central dispatch recorded; resume with exact --central-run-id')
+        run_id = run_id or self.plan[key].get('run_id') or self.discover_central_run(mode, self.plan[key])
         run = self.gh(f'repos/{CENTRAL}/actions/runs/{run_id}')
         require(run.get('created_at', '') >= self.plan[key]['requested_at'], 'central receipt predates this cutover request')
         receipt = self.receipt_artifact(run_id)
@@ -813,88 +875,8 @@ class Migration:
         self.frontend_release(self.sha, self.plan['prior_frontend'].get('bank_access_headers_file'))
         self.save('FRONTEND_READY')
 
-    def webhook_confirmed(self, evidence_path):
-        require(evidence_path, 'owner must confirm webhook while new orders disabled; resume with --webhook-evidence')
-        evidence = decode(regular(evidence_path))
-        require(evidence.get('app') == 'acb' and evidence.get('sha') == self.sha
-                and evidence.get('owner_confirmed') is True and evidence.get('sample_acknowledged') is True
-                and evidence.get('callback_url') == PUBLIC + '/api/integrations/payos/webhook',
-                'real owner confirm-webhook evidence required')
-        require(self.no_payments() == self.plan['baseline_counts'], 'confirm sample changed payment/journal counts')
-        self.plan['webhook_evidence_sha256'] = digest(regular(evidence_path))
-        self.save()
-        self.set_flags(False, True)
-        self.compose(False, 'up', '-d', '--no-deps', '--force-recreate', 'worker', 'gateway-' + self.plan['candidate_slot'])
-        self.health()
-        self.save('WEBHOOK_CONFIRMED')
 
-    def live(self, evidence_path, enable):
-        if not self.plan.get('payments_enabled_at'):
-            require(enable, 'webhook confirmed; --enable-payments explicitly opens live acceptance')
-            self.plan['payments_enabled_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            self.save()
-        self.set_flags(True, True)
-        self.compose(False, 'up', '-d', '--no-deps', '--force-recreate', 'worker', 'gateway-' + self.plan['candidate_slot'])
-        self.health()
-        require(evidence_path, 'new orders enabled; user must transfer money externally; resume with --live-evidence')
-        evidence = decode(regular(evidence_path))
-        require(evidence.get('app') == 'acb' and evidence.get('sha') == self.sha and evidence.get('provider') == 'PAYOS'
-                and evidence.get('bank') == 'KienlongBank' and evidence.get('user_transferred') is True
-                and all(evidence.get(k) is True for k in ('same_amount_out_of_order', 'sse', 'tts_once', 'outbound_deliveries',
-                                                         'lost_sse_recovered', 'replay_deduplicated')),
-                'complete real-bank live acceptance evidence required')
-        references = evidence.get('references')
-        require(isinstance(references, list) and len(references) == 3 and len(set(references)) == 3
-                and all(isinstance(v, str) and v for v in references), 'three actual provider receipt references required')
-        expected_total = evidence.get('amount_vnd')
-        require(type(expected_total) is int and expected_total > 0, 'live expected total must be integer VND')
-        # Independently validate financial receipt evidence against current DB.
-        db_path = self.volume_database()
-        with contextlib.closing(sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)) as db:
-            db.execute('BEGIN')  # Consistent acceptance evidence while receiver remains live.
-            expected_amounts = evidence.get('expected_amounts_vnd', [2000, 3000, 3000])
-            require(isinstance(expected_amounts, list) and len(expected_amounts) == 3
-                    and all(type(v) is int and v > 0 for v in expected_amounts)
-                    and expected_amounts[1] == expected_amounts[2] and sum(expected_amounts) == expected_total,
-                    'acceptance amounts must be static plus two equal operator orders')
-            if expected_amounts != [2000, 3000, 3000]:
-                require(evidence.get('minimum_amount_approved') is True
-                        and isinstance(evidence.get('minimum_amount_evidence'), str) and evidence['minimum_amount_evidence'],
-                        'non-default real-bank amounts require approved provider minimum evidence')
-            rows = db.execute('SELECT r.reference,r.amount_vnd,o.status,o.origin,r.transaction_id,o.order_code, '
-                              't.credit,t.debit,t.connection_id FROM payment_receipts r '
-                              'JOIN payment_orders o ON o.id=r.order_id JOIN transactions t ON t.id=r.transaction_id '
-                              'WHERE r.reference IN (?,?,?)', references).fetchall()
-            ordered = {row[0]: row for row in rows}
-            require(len(ordered) == 3 and all(ordered[reference][1] == amount for reference, amount in zip(references, expected_amounts))
-                    and all(row[2] == 'PAID' and row[6] == row[1] and row[7] == 0 and row[8] == 'payos-klb' for row in rows),
-                    'live references/amounts are not committed payOS credits')
-            require([ordered[r][3] for r in references] == ['STATIC_URL', 'OPERATOR_DYNAMIC', 'OPERATOR_DYNAMIC'],
-                    'live acceptance requires fixed URL and two separate operator orders')
-            for row in rows:
-                events = db.execute("SELECT id FROM events WHERE transaction_id=? AND event_type='bank.transaction.credit'", (row[4],)).fetchall()
-                journal = db.execute("SELECT payload_json FROM event_journal WHERE aggregate_id=? AND event_type='bank.transaction.credit'", (row[4],)).fetchall()
-                require(len(events) == len(journal) == 1, 'receipt has duplicate/missing credit event or journal')
-                payload = decode(journal[0][0])
-                require(payload.get('provider') == 'PAYOS' and str(payload.get('orderCode')) == str(row[5]),
-                        'journal credit does not correlate to the settled payOS order')
-                deliveries = db.execute('SELECT e.provider,d.status FROM deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id '
-                                        'WHERE d.event_id=?', (events[0][0],)).fetchall()
-                require(deliveries and all(status == 'DELIVERED' for _, status in deliveries)
-                        and {'BARK', 'WEBHOOK'} <= {provider for provider, _ in deliveries},
-                        'actual Bark and webhook deliveries must complete for every live receipt')
-            credited = db.execute('SELECT COALESCE(SUM(credit),0) FROM transactions').fetchone()[0]
-            require(credited - self.plan['backup']['history']['financial_totals']['credit_vnd'] == expected_total,
-                    'actual incoming total delta differs from approved live acceptance total')
-        self.stopped(['acb-auth-browser', 'acb-recovery-controller'])
-        self.plan['live_evidence_sha256'] = digest(regular(evidence_path))
-        self.plan['final_counts'] = self.counts()
-        self.save('LIVE')
-        atomic(self.done, self.plan)
-        self.marker.unlink()
-        fsync_directory(self.root)
-
-    def apply(self, prior=None, central_run_id=None, webhook_evidence=None, live_evidence=None, enable=False):
+    def apply(self, prior=None, central_run_id=None):
         if self.marker.exists() or self.done.exists():
             self.load()
             require(self.plan['phase'] != 'ROLLED_BACK', 'cutover rolled back; stage a new release')
@@ -915,6 +897,9 @@ class Migration:
             self.gate(self.plan['legacy_dbtool'])
             with self.lease_heartbeat(self.plan['legacy_dbtool']):
                 if self.plan['phase'] == 'STAGED':
+                    if getattr(self, 'automatic', False):
+                        self.upgrade_publisher()
+                        self.publisher_ready()
                     self.save('LEGACY_ADMITTED')
                 if self.plan['phase'] == 'LEGACY_ADMITTED':
                     self.drain_legacy()
@@ -926,10 +911,12 @@ class Migration:
             self.backend_ready()
         if self.plan['phase'] == 'BACKEND_READY':
             self.frontend_ready(central_run_id)
-        if self.plan['phase'] == 'FRONTEND_READY':
-            self.webhook_confirmed(webhook_evidence)
-        if self.plan['phase'] == 'WEBHOOK_CONFIRMED':
-            self.live(live_evidence, enable)
+        # Credentials and real confirmation belong only to the admin web UI.
+        if self.plan['phase'] == 'FRONTEND_READY' and getattr(self, 'automatic', False):
+            atomic(self.done, self.plan)
+            if self.marker.exists():
+                self.marker.unlink()
+                fsync_directory(self.root)
         return self.summary()
 
     def rollback_inputs(self):
@@ -1033,11 +1020,40 @@ class Migration:
         fsync_directory(self.root)
         return self.summary()
 
+    def deploy_and_publish(self):
+        # Post-cutover payOS deployments use standard deploy.sh under its lock,
+        # followed by exact central publication matching the successful source run.
+        pending = self.root / '.payos-production-pending'
+        self.publication_journal = pending
+        entries = self.verified_bundle(self.release, self.sha, True)[1]
+        source = self.source_proof(self.sha, self.source_run_id, entries)
+        self.central_current()
+        if pending.exists():
+            plan = decode(regular(pending))
+            require(plan.get('sha') == self.sha and plan.get('source') == source,
+                    'production publication journal differs from requested release')
+            self.plan = plan
+        else:
+            self.plan = {'sha': self.sha, 'source': source, 'prior_frontend': self.latest_central_publication()}
+            atomic(pending, self.plan)
+        state = keys(self.root / 'state.env')
+        if state.get('RELEASE_SHA') != self.sha:
+            self.command(['bash', self.release / 'deploy.sh', self.sha], timeout=300)
+        self.central_receipt('publish', None)
+        self.frontend_release(self.sha)
+        if pending.exists():
+            pending.unlink()
+            fsync_directory(self.root)
+        return {'phase': 'FRONTEND_READY', 'release_sha': self.sha,
+                'source_run_id': self.source_run_id, 'authoritative_backup': False,
+                'awaiting_owner_configuration': False, 'operation': 'deploy'}
+
     def summary(self):
         # Never include token, secrets, receipt payload, capabilities or paths.
         return {'phase': self.plan['phase'], 'release_sha': self.sha,
                 'source_run_id': self.plan['source']['source_run_id'],
                 'authoritative_backup': bool(self.plan.get('backup')),
+                'awaiting_owner_configuration': self.plan['phase'] == 'FRONTEND_READY',
                 'operation': 'rollback' if self.plan.get('rollback_requested') else 'apply',
                 'rollback_step': 'LEGACY_STARTING' if self.plan.get('rollback_legacy_starting') else
                                  'DATABASE_RESTORING' if self.plan.get('rollback_restore_intent') else None,
@@ -1049,20 +1065,21 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', metavar='SHA', help='readonly actual VPS/bundle/GitHub/secret preflight; does not acquire a gate')
     mode.add_argument('--apply', metavar='SHA', help='resume durable phases; never repeats ambiguous central dispatch')
+    mode.add_argument('--automatic', metavar='SHA', help='automatic unattended deploy stopping at FRONTEND_READY awaiting web config')
     mode.add_argument('--rollback-before-payments', action='store_true', help='restore only before any provider order/receipt exists')
     parser.add_argument('--source-run-id', help='successful staging-only deploy.yml run (target=all,deploy=false,rehearse=false)')
     parser.add_argument('--registry-path', default='cloudflare/registry/acb.json', help='central acb registry JSON path; automatic must be false')
     parser.add_argument('--prior-frontend', help='private JSON {app:acb,sha,version_id,central_run_id,bank_access_headers_file}; verified prior central version')
     parser.add_argument('--central-run-id', help='successful exact central publish/rollback run ID, provided after dispatch')
-    parser.add_argument('--webhook-evidence', help='owner JSON {app,sha,owner_confirmed:true,sample_acknowledged:true,callback_url}')
-    parser.add_argument('--enable-payments', action='store_true', help='explicitly enable real-bank acceptance after owner confirms')
-    parser.add_argument('--live-evidence', help='real-bank JSON: app,sha,provider,bank,user_transferred, references[static,operator1,operator2], amount_vnd; booleans same_amount_out_of_order,sse,tts_once,outbound_deliveries,lost_sse_recovered,replay_deduplicated. DB independently proves receipts, journal and delivered Bark/webhooks; expected_amounts_vnd defaults [2000,3000,3000].')
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
         require(os.name == 'posix', 'Linux deployment host required for readonly check and lease-fenced mutation; --help is platform independent')
-        driver = Migration(os.environ.get('DEPLOY_PATH', '/opt/bank-event-gateway'), args.check or args.apply,
+        target_sha = args.check or args.apply or args.automatic
+        driver = Migration(os.environ.get('DEPLOY_PATH', '/opt/bank-event-gateway'), target_sha,
                            args.source_run_id, args.registry_path)
+        if args.automatic:
+            driver.automatic = True
         if args.check:
             if driver.marker.exists() or driver.done.exists():
                 driver.load()
@@ -1075,11 +1092,14 @@ def main(argv=None):
             import fcntl
             with open(driver.root / '.deploy.lock', 'a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if args.rollback_before_payments:
+                driver.deploy_lock_fd = lock.fileno()
+                state = keys(driver.root / 'state.env')
+                if args.automatic and state.get('PAYMENT_RUNTIME') == 'payos' and not driver.marker.exists():
+                    result = driver.deploy_and_publish()
+                elif args.rollback_before_payments:
                     result = driver.rollback(args.central_run_id)
                 else:
-                    result = driver.apply(args.prior_frontend, args.central_run_id, args.webhook_evidence,
-                                          args.live_evidence, args.enable_payments)
+                    result = driver.apply(args.prior_frontend, args.central_run_id)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (MigrationError, OSError, KeyError, TypeError, ValueError, AttributeError, sqlite3.Error) as error:

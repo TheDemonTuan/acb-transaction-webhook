@@ -91,7 +91,7 @@ else
   TESTS_FAILED=$(( TESTS_FAILED + 1 ))
 fi
 
-for secret in app_master_key worker_internal_token payos_client_id payos_api_key payos_checksum_key tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for secret in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
   original="$T3/fixture/secrets/$secret"
   restored="$T3/canary_restored/secrets/$secret"
   if [[ -s "$original" && -s "$restored" ]] && cmp -s "$original" "$restored"; then

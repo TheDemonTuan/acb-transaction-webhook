@@ -162,6 +162,8 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requirePaymentMutationAllowed).Post("/payments/{id}/cancel", s.cancelPayment)
 		api.With(s.auth.Require(auth.Owner, auth.Operator)).Get("/payment-reviews", s.paymentReviews)
 		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Post("/payment-provider/confirm-webhook", s.confirmPaymentWebhook)
+		api.With(s.auth.Require(auth.Owner)).Get("/payment-provider/config", s.paymentProviderConfig)
+		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Put("/payment-provider/config", s.savePaymentProviderConfig)
 		api.Get("/status", s.status)
 		api.Get("/csrf", auth.CSRF)
 		api.Get("/telemetry", s.telemetry)
@@ -561,7 +563,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	service := s.payments
 	if service == nil {
-		service = payments.NewService(s.cfg, s.store, nil, nil)
+		service = payments.NewManagedService(s.cfg, s.store, nil)
 	}
 	paymentStatus, err := service.Status(r.Context())
 	if err != nil {
@@ -573,6 +575,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage_error"})
 		return
 	}
+	identity, _ := auth.FromContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service":       "HEALTHY",
 		"version":       "2.0.0-dev",
@@ -582,6 +585,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"webhooks":      summary.ByProvider[notification.ProviderWebhook],
 		"notifications": summary,
 		"role":          s.cfg.RuntimeRole,
+		"userRole":      identity.Role,
 		"slot":          s.cfg.Slot,
 		"release":       s.cfg.ReleaseCommit,
 	})

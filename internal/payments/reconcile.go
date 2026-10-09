@@ -97,6 +97,25 @@ func (s *Service) Wake() {
 // Quiesce denies new operations and drains complete network-and-commit work.
 // It does not cancel requests already admitted or abandon their durable results.
 func (s *Service) Quiesce(ctx context.Context) error {
+	if s.managed {
+		if err := s.store.SetPaymentProviderQuiesced(ctx, true); err != nil {
+			return err
+		}
+		for {
+			active, err := s.store.PaymentProviderActiveRequests(ctx)
+			if err != nil {
+				return err
+			}
+			if active == 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
 	s.reconcile.mu.Lock()
 	s.initReconcileLocked()
 	if !s.reconcile.quiesced {
@@ -118,6 +137,11 @@ func (s *Service) Quiesce(ctx context.Context) error {
 }
 
 func (s *Service) Resume() {
+	if s.managed {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.store.SetPaymentProviderQuiesced(ctx, false)
+		cancel()
+	}
 	s.reconcile.mu.Lock()
 	if s.reconcile.quiesced {
 		s.reconcile.pause = make(chan struct{})
@@ -128,6 +152,15 @@ func (s *Service) Resume() {
 }
 
 func (s *Service) ActiveRequests() int {
+	if s.managed {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		active, err := s.store.PaymentProviderActiveRequests(ctx)
+		if err != nil {
+			return 1
+		}
+		return active
+	}
 	s.reconcile.mu.Lock()
 	defer s.reconcile.mu.Unlock()
 	return s.reconcile.active
@@ -158,6 +191,22 @@ func (s *Service) endPaymentRequest() {
 // Every scheduled provider operation takes a slot, including recovery Create
 // and Cancel. Waiting is outside SQLite and outside the provider's 15s budget.
 func (s *Service) providerSlot(ctx context.Context) error {
+	if s.managedSnapshot {
+		at, err := s.store.PaymentProviderRequestSlot(ctx)
+		if err != nil {
+			return err
+		}
+		if delay := time.Until(at); delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		return s.store.CheckMutationAllowed(ctx)
+	}
 	s.reconcile.mu.Lock()
 	s.initReconcileLocked()
 	if s.reconcile.quiesced {
@@ -193,6 +242,38 @@ func (s *Service) providerSlot(ctx context.Context) error {
 }
 
 func (s *Service) reconcileDue(ctx context.Context) error {
+	if s.managed {
+		if s.store == nil {
+			return ErrPaymentUnavailable
+		}
+		paused, err := s.store.PaymentProviderQuiesced(ctx)
+		if err != nil {
+			return err
+		}
+		if paused {
+			return nil
+		}
+		operation, err := s.resolve(ctx)
+		if err != nil {
+			return err
+		}
+		if operation.provider == nil {
+			return nil
+		}
+		if err := s.store.WakePendingPaymentCallbacks(ctx, operation.cfg.PayOSClientID); err != nil {
+			return err
+		}
+		orders, err := s.store.DuePaymentOrders(ctx, operation.cfg.PayOSClientID, time.Now(), 20)
+		if err != nil {
+			return err
+		}
+		for _, order := range orders {
+			if err := s.reconcileOrder(ctx, order.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	s.reconcile.mu.Lock()
 	paused := s.reconcile.quiesced
 	s.reconcile.mu.Unlock()
@@ -237,6 +318,14 @@ func (s *Service) getClaimedLink(ctx context.Context, order storage.PaymentOrder
 }
 
 func (s *Service) reconcileOrder(ctx context.Context, id string) error {
+	if s.managed {
+		operation, operationCtx, done, err := s.pin(ctx)
+		if err != nil {
+			return err
+		}
+		defer done()
+		return operation.reconcileOrder(operationCtx, id)
+	}
 	if err := s.beginPaymentRequest(ctx); err != nil {
 		return err
 	}

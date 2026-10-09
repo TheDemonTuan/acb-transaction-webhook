@@ -29,13 +29,21 @@ func (s *Service) wakeReconciler(ctx context.Context) {
 // the confirmation sample. Every ACK represents either a financial commit, a
 // durable review record, or the exact verified nonfinancial confirmation sample.
 func (s *Service) HandleWebhook(ctx context.Context, body map[string]any) (resultErr error) {
+	if s.managed {
+		operation, operationCtx, done, err := s.pin(ctx)
+		if err != nil {
+			return ErrWebhookUnavailable
+		}
+		defer done()
+		return operation.HandleWebhook(operationCtx, body)
+	}
 	if !validWebhookShape(body) {
 		return ErrInvalidWebhook
 	}
 	if s.provider == nil || s.store == nil || s.cfg.PayOSClientID == "" {
 		return ErrWebhookUnavailable
 	}
-	data, err := s.provider.Verify(ctx, body)
+	data, err := s.verifyWebhook(ctx, body)
 	if err != nil {
 		if errors.Is(err, ErrInvalidSignature) || errors.Is(err, ErrInvalidWebhook) {
 			return err

@@ -307,8 +307,7 @@ func main() {
 			WithProviderReader(workerClient).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithWorkerProber(workerClient)
-		provider := paymentProvider(cfg, logger)
-		service := payments.NewService(cfg, store, provider, server.PaymentCommitNotifier()).
+		service := payments.NewManagedService(cfg, store, server.PaymentCommitNotifier()).
 			WithReconcileWake(workerClient.WakePaymentReconciler)
 		server.WithPayments(service)
 		if cfg.WorkerRealtimeEnabled {
@@ -389,8 +388,7 @@ func main() {
 				dispatcher.Wake()
 				return nil
 			})
-		provider := paymentProvider(cfg, logger)
-		service := payments.NewService(cfg, store, provider, server.PaymentCommitNotifier())
+		service := payments.NewManagedService(cfg, store, server.PaymentCommitNotifier())
 		server.WithPayments(service)
 		go service.Start(ctx)
 		monolithPayments = service
@@ -458,18 +456,4 @@ func main() {
 			os.Exit(1)
 		}
 	}
-}
-
-// Missing development credentials disable payments without preventing history
-// and administration from booting. Production configuration requires all keys.
-func paymentProvider(cfg config.Config, logger *slog.Logger) payments.Provider {
-	if cfg.PayOSClientID == "" || cfg.PayOSAPIKey == "" || cfg.PayOSChecksumKey == "" {
-		return nil
-	}
-	provider, err := payments.NewPayOS(cfg.PayOSClientID, cfg.PayOSAPIKey, cfg.PayOSChecksumKey)
-	if err != nil {
-		logger.Error("create payment provider failed")
-		os.Exit(1)
-	}
-	return provider
 }

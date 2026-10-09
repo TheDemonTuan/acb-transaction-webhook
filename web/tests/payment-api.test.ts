@@ -11,8 +11,10 @@ import {
   createPublicPaymentOrder,
   fetchPaymentConfig,
   fetchPaymentOrders,
+  fetchPaymentProviderConfig,
   fetchPaymentReviews,
   fetchPublicPaymentOrder,
+  savePaymentProviderConfig,
 } from '../src/shared/api/queries';
 
 const key = '3e628a46-7db9-4f7b-a95f-d9763e2af3de';
@@ -70,6 +72,7 @@ describe('public payment HTTP client', () => {
       [`/payments/${id}/cancel`, 'POST'],
       ['/payment-provider/confirm-webhook', 'POST'],
       ['/payment-activity', 'POST'],
+      ['/payment-provider/config', 'PUT'],
     ]) {
       await expect(publicApi(path, { method })).rejects.toMatchObject({ status: 405, code: 'PUBLIC_READ_ONLY' });
     }
@@ -130,5 +133,30 @@ describe('admin payment HTTP client', () => {
       '/api/v1/payments?status=CREATING&cursor=next+%2Fpage&limit=100',
       '/api/v1/payment-reviews?cursor=review+%2Fpage&limit=25',
     ]);
+  });
+
+  it('fetches only the Owner snapshot and saves write-only keys through CSRF-protected no-store PUT', async () => {
+    await fetchPaymentProviderConfig();
+    const input = { clientId: 'owner-channel', apiKey: 'write-only-api', checksumKey: 'write-only-checksum', enabled: true };
+    await savePaymentProviderConfig(input);
+    expect(requests.map((request) => request.url)).toEqual([
+      '/api/v1/payment-provider/config', '/api/v1/csrf', '/api/v1/payment-provider/config',
+    ]);
+    expect(requests[0].init?.cache).toBe('no-store');
+    const save = requests[2].init!;
+    expect(save.method).toBe('PUT');
+    expect(save.cache).toBe('no-store');
+    expect(new Headers(save.headers).get('Content-Type')).toBe('application/json');
+    expect(new Headers(save.headers).get('X-CSRF-Token')).toBe('csrf-test-token');
+    expect(JSON.parse(save.body as string)).toEqual(input);
+    expect(requests[2].url).not.toContain(input.apiKey);
+    expect(requests[2].url).not.toContain(input.checksumKey);
+  });
+
+  it('preserves empty key fields on subsequent saves instead of reading back existing secrets', async () => {
+    await savePaymentProviderConfig({ clientId: 'owner-channel', apiKey: '', checksumKey: '', enabled: false });
+    expect(JSON.parse(requests[1].init?.body as string)).toEqual({
+      clientId: 'owner-channel', apiKey: '', checksumKey: '', enabled: false,
+    });
   });
 });

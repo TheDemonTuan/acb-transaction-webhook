@@ -245,4 +245,5 @@ CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_provider_status ON webhook_endp
 	{12, "2026-10-02-v12-auth-recovery", migrationfiles.AuthRecoverySQL},
 	{13, "2026-10-02-v13-telegram-session-control", migrationfiles.TelegramSessionControlSQL},
 	{14, "2026-10-05-v14-poll-rows-matched", migrationfiles.PollRowsMatchedSQL},
-	{15, "2026-10-08-v15-payos-payment-orders", migrationfiles.PayOSPaymentOrdersSQL}}
+	{15, "2026-10-08-v15-payos-payment-orders", migrationfiles.PayOSPaymentOrdersSQL},
+	{16, "2026-10-09-v16-payment-provider-config", migrationfiles.PaymentProviderConfigSQL}}

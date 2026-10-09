@@ -6,6 +6,7 @@ export type Status = {
   service: string;
   version: string;
   uptimeSeconds: number;
+  userRole?: 'OWNER' | 'OPERATOR' | 'VIEWER';
   payments: PaymentProviderState;
   storage: { status: string };
   webhooks: { pending: number; deadLetter: number };

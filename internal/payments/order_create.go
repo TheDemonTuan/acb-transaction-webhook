@@ -41,6 +41,14 @@ var (
 // An uncertain outcome is a successful persisted CREATING snapshot, not a failed
 // payment; HTTP callers return 202 for new CREATING orders and 200 for replays.
 func (s *Service) CreateOrder(ctx context.Context, amountVnd int64, origin, idempotencyKey string) (storage.PaymentOrder, bool, error) {
+	if s.managed {
+		operation, operationCtx, done, err := s.pin(ctx)
+		if err != nil {
+			return storage.PaymentOrder{}, false, err
+		}
+		defer done()
+		return operation.CreateOrder(operationCtx, amountVnd, origin, idempotencyKey)
+	}
 	if amountVnd < 1 || amountVnd > s.cfg.PaymentMaxAmountVND || amountVnd > maxSafeInteger || int64(int(amountVnd)) != amountVnd {
 		return storage.PaymentOrder{}, false, ErrInvalidAmount
 	}

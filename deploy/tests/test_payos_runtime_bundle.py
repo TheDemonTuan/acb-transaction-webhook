@@ -122,7 +122,7 @@ class ComposeRuntimeTests(unittest.TestCase):
         compose = yaml.safe_load((DEPLOY / 'compose.prod.yaml').read_text())
         self.assertEqual(set(compose['services']), {'worker', 'gateway-blue', 'gateway-green', 'dbtool', 'tts-gateway', 'bark'})
         self.assertEqual(compose['volumes']['gateway_data']['name'], '${DATA_VOLUME_NAME:-bank-event-gateway_gateway_data}')
-        expected_secrets = {'app_master_key', 'worker_internal_token', 'tts_internal_token', 'payos_client_id', 'payos_api_key', 'payos_checksum_key', 'bark_basic_auth_user', 'bark_basic_auth_password'}
+        expected_secrets = {'app_master_key', 'worker_internal_token', 'tts_internal_token', 'bark_basic_auth_user', 'bark_basic_auth_password'}
         self.assertEqual(set(compose['secrets']), expected_secrets)
         for name in ('worker', 'gateway-blue', 'gateway-green'):
             service = compose['services'][name]
@@ -133,13 +133,20 @@ class ComposeRuntimeTests(unittest.TestCase):
             self.assertIn('gateway_data:/data', service['volumes'])
             self.assertIn('acb-core', service['networks'])
             env = service['environment']
-            self.assertEqual(env['PAYMENTS_ENABLED'], '${PAYMENTS_ENABLED:-false}')
-            self.assertEqual(env['PAYOS_WEBHOOK_CONFIRMED'], '${PAYOS_WEBHOOK_CONFIRMED:-false}')
+            self.assertNotIn('PAYMENTS_ENABLED', env)
+            self.assertNotIn('PAYOS_WEBHOOK_CONFIRMED', env)
             self.assertEqual(env['PAYMENT_MAX_AMOUNT_VND'], '${PAYMENT_MAX_AMOUNT_VND:-500000000}')
-            for secret, key in (('payos_client_id', 'PAYOS_CLIENT_ID_FILE'), ('payos_api_key', 'PAYOS_API_KEY_FILE'), ('payos_checksum_key', 'PAYOS_CHECKSUM_KEY_FILE')):
-                self.assertIn(secret, service['secrets'])
-                self.assertEqual(env[key], '/run/secrets/' + secret)
-            self.assertFalse(any(key.startswith(('POLL_', 'AUTH_BROWSER', 'AI_CAPTCHA', 'AUTH_RECOVERY')) for key in env))
+            self.assertIn('app_master_key', service['secrets'])
+            self.assertIn('worker_internal_token', service['secrets'])
+            self.assertEqual(env['APP_MASTER_KEY_FILE'], '/run/secrets/app_master_key')
+            self.assertEqual(env['WORKER_INTERNAL_TOKEN_FILE'], '/run/secrets/worker_internal_token')
+            self.assertFalse(any(key.startswith('PAYOS_') for key in env))
+        for name in ('gateway-blue', 'gateway-green', 'tts-gateway'):
+            self.assertIn('tts_internal_token', compose['services'][name]['secrets'])
+        for name in ('worker', 'bark'):
+            self.assertTrue({'bark_basic_auth_user', 'bark_basic_auth_password'} <= set(compose['services'][name]['secrets']))
+        for service in compose['services'].values():
+            self.assertFalse(any(key.startswith(('POLL_', 'AUTH_BROWSER', 'AI_CAPTCHA', 'AUTH_RECOVERY')) for key in service.get('environment', {})))
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ on:
         default: all
         options: [auto, all, frontend, backend]
       deploy:
-        description: Deploy selected backend to production (frontend artifacts publish centrally)
+        description: Stage selected backend bundle only (production follows successful deploy=false builds)
         type: boolean
         required: true
         default: false
@@ -45,6 +45,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Classify changes and validate dispatch
         id: select
         env:
@@ -83,6 +84,8 @@ jobs:
           - {component: tts-gateway, context: tts-gateway, dockerfile: tts-gateway/Dockerfile, target: '', suffix: '-tts-gateway', key: TTS_IMAGE_REF}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -165,6 +168,8 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: image-ref-*
@@ -264,6 +269,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-images
@@ -310,6 +316,8 @@ jobs:
           REHEARSAL: ${{ needs.rehearsal.result }}
         run: test "$SCAN" = success && { if [[ '${{ github.event_name }}' == workflow_dispatch && '${{ inputs.rehearse }}' == true ]]; then test "$REHEARSAL" = success; else test "$REHEARSAL" = skipped; fi; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-images
@@ -333,21 +341,20 @@ jobs:
           retention-days: 3
 
   deploy:
-    needs: [changes, verify, verify-contract, build, scan, verified-bundle]
-    if: always() && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.verify.result == 'success' && needs.verify-contract.result == 'success' && needs.build.result == 'success' && needs.scan.result == 'success' && needs.verified-bundle.result == 'success' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || inputs.deploy == true)
+    needs: [changes, verified-bundle]
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.deploy == true && needs.changes.result == 'success' && needs.changes.outputs.backend == 'true' && needs.verified-bundle.result == 'success'
     name: Deploy to VPS
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     environment: production
     permissions:
       contents: read
-      packages: read
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-bundle
           path: bundle
-      - name: Validate bundle and configure SSH
+      - name: Stage immutable bundle without production runtime changes
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/bank-event-gateway' }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -357,97 +364,39 @@ jobs:
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ && "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ && "$DEPLOY_PATH" != *..* ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ && "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ && "$DEPLOY_PATH" != *..* && "$DEPLOY_PATH" != / ]] || exit 1
           [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ && "$VPS_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ && "$VPS_PORT" =~ ^[0-9]{1,5}$ ]] || exit 1
           [[ -n "$VPS_SSH_KEY" && -n "$VPS_KNOWN_HOSTS" ]] || exit 1
           mkdir -m 700 -p ~/.ssh
           (umask 077; printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519; printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts)
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
-          files=(deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh restore-db.sh backup-secrets.sh migrate-payos-runtime.sh migrate-payos-runtime.py workflow-runtime.py acb-route-publish.py install-route-publisher.sh verify-frontend.py compose.prod.yaml bark-entrypoint.sh images.env source-run.env)
-          for file in "${files[@]}"; do [[ -s "bundle/$file" ]] || { echo "Missing $file" >&2; exit 1; }; done
-          chmod 700 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,restore-db.sh,backup-secrets.sh,migrate-payos-runtime.sh,migrate-payos-runtime.py,workflow-runtime.py,acb-route-publish.py,install-route-publisher.sh,verify-frontend.py,bark-entrypoint.sh}
           (cd bundle && sha256sum -c SHA256SUMS)
-      - name: Stage and deploy one immutable bundle
-        env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/bank-event-gateway' }}
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DASHBOARD_OWNER_EMAIL: ${{ vars.DASHBOARD_OWNER_EMAIL }}
-        run: |
-          set -euo pipefail
-          ssh_opts=(-i "$HOME/.ssh/id_ed25519" -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=10)
-          remote="$VPS_USER@$VPS_HOST"
-          mode="$(ssh "${ssh_opts[@]}" "$remote" "python3 - '$DEPLOY_PATH'" < bundle/workflow-runtime.py)"
-          [[ "$mode" == deploy || "$mode" == stage ]] || { echo 'PAYMENT_RUNTIME_PREFLIGHT_INVALID' >&2; exit 1; }
-          stage="$DEPLOY_PATH/releases/.stage-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          ssh "${ssh_opts[@]}" "$remote" "umask 077; mkdir -p '$DEPLOY_PATH/releases' '$stage'"
-          trap 'ssh "${ssh_opts[@]}" "$remote" "rm -rf '\''$stage'\''" || true' EXIT
-          scp -i "$HOME/.ssh/id_ed25519" -P "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 bundle/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,restore-db.sh,backup-secrets.sh,migrate-payos-runtime.sh,migrate-payos-runtime.py,workflow-runtime.py,acb-route-publish.py,install-route-publisher.sh,verify-frontend.py,compose.prod.yaml,bark-entrypoint.sh,images.env,source-run.env,SHA256SUMS} "$remote:$stage/"
-          [[ "$DASHBOARD_OWNER_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { echo "Invalid dashboard owner email" >&2; exit 1; }
-          { printf '%s\n' "$GH_TOKEN"; cat <<'REMOTE'
-          set -euo pipefail
-          target="$DEPLOY_PATH/releases/$SHA"
-          (cd "$STAGE" && sha256sum -c SHA256SUMS)
-          chmod 700 "$STAGE"/{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,restore-db.sh,backup-secrets.sh,migrate-payos-runtime.sh,migrate-payos-runtime.py,workflow-runtime.py,acb-route-publish.py,install-route-publisher.sh,verify-frontend.py}
-          chmod 644 "$STAGE"/{bark-entrypoint.sh,compose.prod.yaml,images.env,source-run.env,SHA256SUMS}
-          if [[ -e "$target" ]]; then
-            (cd "$target" && sha256sum -c "$STAGE/SHA256SUMS")
-            cmp "$target/SHA256SUMS" "$STAGE/SHA256SUMS"
+          # The source workflow only installs an immutable candidate. It never
+          # logs in to a registry, invokes deploy.sh, or acquires payment gates.
+          remote_script='set -euo pipefail
+          root="$1"; sha="$2"
+          [[ -d "$root" && ! -L "$root" ]] || exit 1
+          mkdir -p "$root/releases"
+          [[ ! -L "$root/releases" ]] || exit 1
+          stage="$(mktemp -d "$root/releases/.stage-$sha.XXXXXXXX")"
+          trap '\''rm -rf -- "$stage"'\'' EXIT
+          tar -xf - -C "$stage" --no-same-owner --no-same-permissions
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+          chmod 700 "$stage"/*.sh "$stage"/*.py
+          chmod 644 "$stage"/bark-entrypoint.sh "$stage"/compose.prod.yaml "$stage"/images.env "$stage"/source-run.env "$stage"/SHA256SUMS
+          exec 9>"$root/.deploy.lock"
+          flock -w 60 9
+          target="$root/releases/$sha"
+          if [[ -e "$target" || -L "$target" ]]; then
+            [[ -d "$target" && ! -L "$target" ]] || exit 1
+            cmp "$target/SHA256SUMS" "$stage/SHA256SUMS"
+            (cd "$target" && sha256sum -c "$stage/SHA256SUMS")
           else
-            mv "$STAGE" "$target"
-          fi
-          # Re-read before any login/runtime mutation; a concurrent migration may have changed the contract.
-          current_mode="$(python3 "$target/workflow-runtime.py" "$DEPLOY_PATH")"
-          if [[ "$MODE" == stage || "$current_mode" == stage ]]; then
-            unset GH_TOKEN
-            printf 'DEPLOY_SUMMARY: PAYOS_RUNTIME_MIGRATION_REQUIRED; immutable bundle staged only\n'
-            printf 'DEPLOY_SUMMARY: Candidate SHA: %s; source run: %s\n' "$SHA" "$SOURCE_RUN_ID"
-            printf 'DEPLOY_SUMMARY: Keep central automatic publishing disabled until BACKEND_READY; no runtime/route/database mutation performed\n'
-            exit 0
-          fi
-          auth="$(mktemp -d "$DEPLOY_PATH/.docker-auth.XXXXXXXX")"
-          chmod 700 "$auth"
-          trap 'rm -rf "$auth"' EXIT
-          printf '%s' "$GH_TOKEN" | DOCKER_CONFIG="$auth" docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-          unset GH_TOKEN
-          DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" DASHBOARD_OWNER_EMAIL="$DASHBOARD_OWNER_EMAIL" bash "$target/deploy.sh" "$SHA"
-          # Fence publication against another deploy/rollback after deploy.sh releases its lock.
-          exec 9>"$DEPLOY_PATH/.deploy.lock"
-          flock -w 30 9 || { echo 'Setup publication lock unavailable' >&2; exit 1; }
-          committed="$(sed -n 's/^RELEASE_SHA=//p' "$DEPLOY_PATH/state.env")"
-          gateway="$(sed -n 's/^GATEWAY_SLOT=//p' "$DEPLOY_PATH/state.env")"
-          [[ "$committed" == "$SHA" && "$gateway" =~ ^(blue|green)$ ]] || { echo 'Commit postcondition failed' >&2; exit 1; }
-          DEPLOY_PATH="$DEPLOY_PATH" DOCKER_CONFIG="$auth" bash "$target/healthcheck.sh" route "$gateway" "$SHA"
-          printf 'DEPLOY_SUMMARY: Requested SHA: %s\nDEPLOY_SUMMARY: Committed SHA: %s\nDEPLOY_SUMMARY: Gateway slot: %s\n' "$SHA" "$committed" "$gateway"
-          while IFS= read -r line; do
-            [[ "$line" =~ ^(GATEWAY|WORKER|DBTOOL|TTS|BARK)_IMAGE_REF=ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || continue
-            printf 'DEPLOY_SUMMARY: %s\n' "$line"
-          done < "$target/images.env"
-          if [[ -s "$target/backup-receipt-path" ]]; then
-            receipt="$(cat "$target/backup-receipt-path")"
-            [[ "$receipt" == "$DEPLOY_PATH/data/backups/"* ]] || exit 1
-            printf 'DEPLOY_SUMMARY: Backup receipt: %s\n' "$receipt"
-          else
-            printf 'DEPLOY_SUMMARY: Backup receipt: none (no new snapshot)\n'
-          fi
-          printf 'DEPLOY_SUMMARY: Internal ACK: passed\nDEPLOY_SUMMARY: Public smoke: passed\nDEPLOY_SUMMARY: Rollback: not required\n'
-          REMOTE
-          } | ssh "${ssh_opts[@]}" "$remote" "read -r GH_TOKEN; export GH_TOKEN; DEPLOY_PATH='$DEPLOY_PATH' STAGE='$stage' SHA='$GITHUB_SHA' MODE='$mode' SOURCE_RUN_ID='$GITHUB_RUN_ID' DASHBOARD_OWNER_EMAIL='$DASHBOARD_OWNER_EMAIL' bash -s" 2>&1 | tee "$RUNNER_TEMP/acb-deploy-output"
-          while IFS= read -r line; do
-            if [[ "$line" == 'DEPLOY_SUMMARY: '* ]]; then printf '%s\n' "${line#DEPLOY_SUMMARY: }" >> "$GITHUB_STEP_SUMMARY"; fi
-          done < "$RUNNER_TEMP/acb-deploy-output"
-          trap - EXIT
-      - name: Report failed deployment
-        if: failure()
-        run: |
-          printf 'Requested SHA: %s\nDeployment: failed\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
-          if [[ -f "$RUNNER_TEMP/acb-deploy-output" ]] && grep -q 'ROLLBACK_FAILED' "$RUNNER_TEMP/acb-deploy-output"; then
-            echo 'Rollback: failed; pending evidence preserved' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Rollback: inspect remote deploy log' >> "$GITHUB_STEP_SUMMARY"
-          fi
+            mv "$stage" "$target"
+          fi'
+          printf -v quoted_script '%q' "$remote_script"
+          tar -C bundle -cf - . | ssh -i "$HOME/.ssh/id_ed25519" -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "sudo -n bash -c $quoted_script stage-release '$DEPLOY_PATH' '$GITHUB_SHA'"
+          printf '### Manual candidate staging\n\nCandidate `%s` installed; production runtime unchanged. Use a successful `target=all, deploy=false` source build for automatic production followup.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
 
   frontend-build:
     name: Build verified static assets
@@ -459,6 +408,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
@@ -517,16 +467,13 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
-      - name: Report artifact handoff (not a production deployment)
+      - name: Report automatic production handoff
         run: |
           {
-            printf '### Frontend artifact built, not deployed\n\n'
+            printf '### Verified frontend artifact\n\n'
             printf 'Artifact: `frontend-dist-%s` (30-day retention). Source run: `%s`.\n\n' "$GITHUB_SHA" "$GITHUB_RUN_ID"
-            printf 'Cloudflare credentials and production publishing belong only to `TheDemonTuan/vps-deploy`, environment `production`.\n\n'
-            printf 'First legacy transition is staging-only: build with `target=all`, `deploy=false`, `rehearse=false`; retain this exact source SHA/run ID and artifact checksums.\n\n'
-            printf 'Re-read the central app registry and keep automatic publishing disabled throughout maintenance. A successful source run or staged bundle does not prove BACKEND_READY.\n\n'
-            printf 'Only after the complete source run succeeds and the cutover tool records BACKEND_READY, publish this exact artifact centrally:\n\n'
-            printf '```sh\ngh workflow run cloudflare-deploy.yml --repo TheDemonTuan/vps-deploy -f app=acb -f mode=publish -f source_run_id=%s\n```\n\n' "$GITHUB_RUN_ID"
-            printf 'Bootstrap and exact-version rollback are central-only operations; frontend-only source runs never SSH to or mutate the VPS. Rehearsal selects the backend but runs only on an isolated runner.\n'
+            printf 'After this complete main source run succeeds, `Automatic production deployment` installs the matching verified backend bundle, resumes any pending payOS migration, and publishes this exact frontend centrally.\n\n'
+            printf 'Main pushes always build both components. Manual `target=all, deploy=false` builds use the same followup; single-component or `deploy=true` staging runs do not change production runtime.\n\n'
+            printf 'Cloudflare credentials remain central-only. Initial deployment stops at FRONTEND_READY with payments disabled, awaiting owner payOS configuration and webhook confirmation.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 

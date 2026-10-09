@@ -124,9 +124,6 @@ class Fixture(migration.Migration):
                 'active_deployment': {'version_id': VERSION}, 'artifact_checksum': 'e' * 64,
                 'source_archive_digest': 'sha256:' + 'f' * 64}
 
-    def secrets_ready(self):
-        # Only external secret-file metadata is replaced; no fake provider requests.
-        self.calls.append(('secret-metadata-check',))
 
     @contextlib.contextmanager
     def lease_heartbeat(self, image):
@@ -208,7 +205,12 @@ class Fixture(migration.Migration):
                 import base64
                 return encoded({'sha': 'registry-pin', 'content': base64.b64encode(encoded(registry)).decode()})
             if '/actions/workflows/cloudflare-deploy.yml/runs?' in endpoint:
-                return encoded({'workflow_runs': [{'id': 88, 'event': 'workflow_dispatch'}]})
+                run_ids = [88]
+                if 'created=' in endpoint:
+                    run_ids = [101 if 'mode=rollback' in self.dispatches[-1] else 100] if self.dispatches else []
+                return encoded({'workflow_runs': [{'id': run_id, 'event': 'workflow_dispatch',
+                                                   'status': 'completed', 'conclusion': 'success',
+                                                   'created_at': '2999-01-01T00:00:00Z'} for run_id in run_ids]})
             if endpoint.endswith('/zip'):
                 return self.archives[int(endpoint.split('/')[-2])]
             if '/artifacts?' in endpoint:
@@ -257,6 +259,11 @@ class Fixture(migration.Migration):
         if args[0] == 'bash' and args[1].endswith('healthcheck.sh'):
             self.action('health')
             return b''
+        if args[0] == 'bash' and args[1].endswith('deploy.sh'):
+            state = migration.keys(self.root / 'state.env')
+            state['RELEASE_SHA'] = args[2]
+            (self.root / 'state.env').write_text(''.join(k + '=' + v + '\n' for k, v in state.items()))
+            return b''
         if args[:2] == ['bash', '-Eeuo']:
             function = args[4].split('; ')[-1].split()[0]
             bundle = Path(args[6])
@@ -295,6 +302,9 @@ class Fixture(migration.Migration):
         hdr = email.message.Message()
         hdr['Content-Type'] = 'application/json'
         if path == '/__release':
+            if origin == migration.BANK and not headers:
+                hdr['Location'] = 'https://fixture.cloudflareaccess.com/cdn-cgi/access/login/bank'
+                return 302, hdr, b''
             hdr.replace_header('Content-Type', 'text/plain')
             return 200, hdr, (self.current_frontend + '\n').encode()
         if path.startswith('/pay'):
@@ -319,8 +329,9 @@ class MigrationDrill(unittest.TestCase):
         self.driver = Fixture(Path(self.tmp.name))
 
     def stage_to_backend(self):
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(self.driver.prior)
+        with mock.patch.object(self.driver, 'discover_central_run', side_effect=migration.MigrationError('fixture publication paused')):
+            with self.assertRaises(migration.MigrationError):
+                self.driver.apply(self.driver.prior)
         self.assertEqual(self.driver.plan['phase'], 'BACKEND_READY')
 
     def test_readonly_check_no_lock_marker_snapshot_or_mutating_command(self):
@@ -387,8 +398,7 @@ class MigrationDrill(unittest.TestCase):
         self.stage_to_backend()
         self.assertFalse(self.driver.plan['central_publish']['dispatched'])
         self.driver.current_frontend = NEW  # externally completed ambiguous dispatch
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(central_run_id='100')
+        self.driver.apply(central_run_id='100')
         self.assertEqual(self.driver.plan['phase'], 'FRONTEND_READY')
         self.assertEqual(sum(c[:3] == ('gh', 'workflow', 'run') for c in self.driver.calls), 1)
         self.assertFalse(any('-gate-acquire' in c and CANDIDATE_TOOL in c for c in self.driver.calls))
@@ -413,30 +423,73 @@ class MigrationDrill(unittest.TestCase):
             self.assertFalse(any(c[:2] == ('docker', 'stop') or '-gate-acquire' in c for c in self.driver.calls[old_calls:]))
             self.driver.payment_counts[field] = 0
 
-    def test_owner_confirmation_cannot_mark_live_without_bank_receipts(self):
+    def test_automatic_deploy_reaches_frontend_ready_and_awaits_owner_configuration(self):
+        self.driver.automatic = True
+        summary = self.driver.apply()
+        self.assertEqual(summary['phase'], 'FRONTEND_READY')
+        self.assertTrue(summary['awaiting_owner_configuration'])
+        self.assertTrue(summary['authoritative_backup'])
+        self.assertTrue(self.driver.done.exists())
+        self.assertFalse(self.driver.marker.exists())
+        self.assertEqual(self.driver.http(migration.PUBLIC, '/api/integrations/payos/webhook', 'POST')[0], 400)
+        cfg = self.driver.http(migration.PUBLIC, '/api/public/v1/payment-config')[2]
+        self.assertFalse(json.loads(cfg)['ready'])
+
+    def test_automatic_subsequent_deploy_publishes_matching_frontend(self):
+        self.driver.automatic = True
+        self.driver.apply()
+        # Post-cutover state is now payos. A new release deploys via standard deploy.sh
+        # and records central publication without repeating authoritative DB backup.
+        other_sha = 'd' * 40
+        self.driver.bundle(other_sha, True)
+        self.driver.sha = other_sha
+        self.driver.release = self.driver.root / 'releases' / other_sha
+        self.driver.current_frontend = FRONTEND
+        self.driver.receipts['100'] = self.driver.receipt(other_sha, 'publish', '99')
+        self.driver.archives[1100] = zipped({'receipt.json': encoded(self.driver.receipts['100'])})
+        original = self.driver.command
+        def commands(args, **kwargs):
+            result = original(args, **kwargs)
+            if args[:3] == ['gh', 'workflow', 'run']:
+                self.driver.current_frontend = other_sha
+            return result
+        with mock.patch.object(self.driver, 'source_proof', return_value=self.driver.plan['source']), \
+                mock.patch.object(self.driver, 'command', side_effect=commands):
+            result = self.driver.deploy_and_publish()
+        self.assertEqual(result['phase'], 'FRONTEND_READY')
+        self.assertEqual(result['release_sha'], other_sha)
+        self.assertFalse(result['authoritative_backup'])
+        self.assertFalse(result['awaiting_owner_configuration'])
+
+    def test_unresolved_dispatch_times_out_without_redispatch(self):
         self.stage_to_backend()
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(central_run_id='100')
-        proof = self.driver.root / 'owner.json'
-        proof.write_bytes(encoded({'app': 'acb', 'sha': NEW, 'owner_confirmed': True, 'sample_acknowledged': True,
-                                   'callback_url': migration.PUBLIC + '/api/integrations/payos/webhook'}))
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(webhook_evidence=proof)
-        self.assertEqual(self.driver.plan['phase'], 'WEBHOOK_CONFIRMED')
-        self.assertFalse(self.driver.done.exists())
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(enable=True)
-        self.assertIn('PAYMENTS_ENABLED=true', (self.driver.root / 'deploy/.env.production').read_text())
-        self.assertFalse(self.driver.done.exists())
-        evidence = {'app': 'acb', 'sha': NEW, 'provider': 'PAYOS', 'bank': 'KienlongBank', 'user_transferred': True,
-                    'references': ['r-static', 'r-operator1', 'r-operator2'], 'amount_vnd': 8000,
-                    **{k: True for k in ('same_amount_out_of_order', 'sse', 'tts_once', 'outbound_deliveries', 'lost_sse_recovered', 'replay_deduplicated')}}
-        path = self.driver.root / 'live.json'
-        path.write_bytes(encoded(evidence))
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(live_evidence=path)
-        self.assertEqual(self.driver.plan['phase'], 'WEBHOOK_CONFIRMED')
-        self.assertFalse(self.driver.done.exists())
+        count = len(self.driver.dispatches)
+        with mock.patch.object(self.driver, 'gh', return_value={'workflow_runs': []}), \
+                mock.patch.object(migration.time, 'monotonic', side_effect=[0, 1501]):
+            with self.assertRaises(migration.MigrationError):
+                self.driver.apply()
+        self.assertEqual(len(self.driver.dispatches), count)
+        self.assertEqual(self.driver.plan['phase'], 'BACKEND_READY')
+        self.assertTrue(self.driver.plan['central_publish']['dispatched'])
+
+    def test_conflicting_exact_receipts_require_review_without_redispatch(self):
+        self.stage_to_backend()
+        original = self.driver.gh
+        def api(endpoint):
+            if 'created=' in endpoint:
+                return {'workflow_runs': [{'id': run, 'event': 'workflow_dispatch', 'status': 'completed',
+                                          'conclusion': 'success', 'created_at': '2999-01-01T00:00:00Z'}
+                                         for run in (100, 102)]}
+            if '/runs/102/artifacts?' in endpoint:
+                return {'artifacts': [{'name': 'cloudflare-receipt-acb-102', 'expired': False}]}
+            return original(endpoint)
+        receipt = self.driver.receipts['100']
+        with mock.patch.object(self.driver, 'gh', side_effect=api), \
+                mock.patch.object(self.driver, 'receipt_artifact', return_value=receipt):
+            with self.assertRaises(migration.MigrationError):
+                self.driver.apply()
+        self.assertEqual(len(self.driver.dispatches), 1)
+        self.assertEqual(self.driver.plan['phase'], 'BACKEND_READY')
 
     def test_partial_snapshot_crash_resumes_without_overwriting_before_images(self):
         original_atomic = migration.atomic
@@ -481,66 +534,6 @@ class MigrationDrill(unittest.TestCase):
         self.assertIsNone(self.driver.gate_token)
         self.assertFalse(self.driver.containers['acb-auth-browser']['State']['Running'])
 
-    def confirmed_acceptance(self):
-        self.stage_to_backend()
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(central_run_id='100')
-        proof = self.driver.root / 'owner.json'
-        proof.write_bytes(encoded({'app': 'acb', 'sha': NEW, 'owner_confirmed': True, 'sample_acknowledged': True,
-                                   'callback_url': migration.PUBLIC + '/api/integrations/payos/webhook'}))
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(webhook_evidence=proof, enable=True)
-        self.assertEqual(self.driver.plan['phase'], 'WEBHOOK_CONFIRMED')
-        evidence = {'app': 'acb', 'sha': NEW, 'provider': 'PAYOS', 'bank': 'KienlongBank', 'user_transferred': True,
-                    'references': ['r-static', 'r-operator1', 'r-operator2'], 'amount_vnd': 8000,
-                    **{k: True for k in ('same_amount_out_of_order', 'sse', 'tts_once', 'outbound_deliveries', 'lost_sse_recovered', 'replay_deduplicated')}}
-        path = self.driver.root / 'live.json'
-        path.write_bytes(encoded(evidence))
-        with contextlib.closing(sqlite3.connect(self.driver.db)) as db, db:
-            db.execute("INSERT INTO webhook_endpoints VALUES('hook','WEBHOOK')")
-            db.execute("INSERT INTO webhook_endpoints VALUES('bark','BARK')")
-            for i, (reference, amount) in enumerate(zip(evidence['references'], [2000, 3000, 3000])):
-                txn = 'paid-txn-' + str(i)
-                event = 'paid-event-' + str(i)
-                order = 'order-' + str(i)
-                code = 100000000000 + i
-                origin = 'STATIC_URL' if i == 0 else 'OPERATOR_DYNAMIC'
-                db.execute('INSERT INTO transactions VALUES(?,?,0,?)', (txn, amount, 'payos-klb'))
-                db.execute('INSERT INTO payment_orders VALUES(?,?,?,?)', (order, code, 'PAID', origin))
-                db.execute('INSERT INTO payment_receipts VALUES(?,?,?,?)', (reference, amount, order, txn))
-                db.execute('INSERT INTO events VALUES(?,?,?)', (event, txn, 'bank.transaction.credit'))
-                db.execute('INSERT INTO event_journal VALUES(?,?,?,?)', (6 + i, 'bank.transaction.credit', txn,
-                           json.dumps({'provider': 'PAYOS', 'orderCode': str(code)})))
-                for endpoint in ('hook', 'bark'):
-                    db.execute('INSERT INTO deliveries VALUES(?,?,?,?)', (event + '-' + endpoint, event, endpoint, 'DELIVERED'))
-        self.driver.payment_counts = {'orders': 3, 'receipts': 3, 'journalSeq': 8}
-        return path
-
-    def test_live_requires_actual_financial_and_delivered_notification_evidence(self):
-        path = self.confirmed_acceptance()
-        with contextlib.closing(sqlite3.connect(self.driver.db)) as db, db:
-            db.execute("UPDATE deliveries SET status='PENDING' WHERE id='paid-event-2-bark'")
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(live_evidence=path)
-        self.assertFalse(self.driver.done.exists())
-        with contextlib.closing(sqlite3.connect(self.driver.db)) as db, db:
-            db.execute("UPDATE deliveries SET status='DELIVERED' WHERE id='paid-event-2-bark'")
-        result = self.driver.apply(live_evidence=path)
-        self.assertEqual(result['phase'], 'LIVE')
-        self.assertEqual(result['payment_counts'], {'orders': 3, 'receipts': 3, 'journalSeq': 8})
-        self.assertTrue(self.driver.done.is_file())
-        self.assertFalse(self.driver.marker.exists())
-        with self.assertRaises(migration.MigrationError):
-            self.driver.rollback()
-
-    def test_duplicate_journal_credit_cannot_be_accepted_as_replay_deduplication(self):
-        path = self.confirmed_acceptance()
-        with contextlib.closing(sqlite3.connect(self.driver.db)) as db, db:
-            db.execute("INSERT INTO event_journal VALUES(99,'bank.transaction.credit','paid-txn-1','{}')")
-        with self.assertRaises(migration.MigrationError):
-            self.driver.apply(live_evidence=path)
-        self.assertEqual(self.driver.plan['phase'], 'WEBHOOK_CONFIRMED')
-        self.assertFalse(self.driver.done.exists())
 
     def test_rollback_completion_after_controller_failure_preserves_new_legacy_money(self):
         self.stage_to_backend()
@@ -590,9 +583,7 @@ class MigrationDrill(unittest.TestCase):
     def test_preorder_rollback_restores_exact_legacy_history_routes_env_and_central_version(self):
         self.stage_to_backend()
         original_db = self.driver.plan['backup']['history']
-        with self.assertRaises(migration.MigrationError):
-            self.driver.rollback()
-        result = self.driver.rollback(central_run_id='101')
+        result = self.driver.rollback()
         self.assertEqual(result['phase'], 'ROLLED_BACK')
         self.assertEqual(self.driver.database_summary(self.driver.db), original_db)
         self.assertEqual(self.driver.route.read_bytes(), b'legacy-route\n')

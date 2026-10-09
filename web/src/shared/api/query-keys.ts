@@ -12,6 +12,7 @@ export const queryKeys = {
     params !== undefined ? (['auditLogs', params] as const) : (['auditLogs'] as const),
   adminOverview: ['admin-overview'] as const,
   paymentConfig: ['payment-config'] as const,
+  paymentProviderConfig: ['payment-provider-config'] as const,
   payments: (params?: Record<string, unknown>) =>
     params !== undefined ? (['payments', params] as const) : (['payments'] as const),
   paymentOrder: (id: string) => ['payment-order', id] as const,

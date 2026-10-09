@@ -52,11 +52,13 @@ class ClassifyChangesTests(unittest.TestCase):
                                    lambda: self.fail('Unexpected auto'))
         self.assertEqual((result['frontend'], result['backend']), ('true', 'true'))
 
-    def test_auto_selected_on_push_and_dispatch(self):
-        auto = lambda: (True, False, 'auto', SHA_A)
-        for event, inputs in [('push', {}), ('workflow_dispatch', {'target': 'auto'})]:
-            result = classifier.select(event, inputs, auto)
-            self.assertEqual((result['frontend'], result['backend'], result['base_sha']), ('true', 'false', SHA_A))
+    def test_push_always_builds_pair_without_querying_previous_runs(self):
+        result = classifier.select('push', {}, lambda: self.fail('Push must not query a historical source run'))
+        self.assertEqual((result['frontend'], result['backend'], result['base_sha']), ('true', 'true', None))
+
+    def test_auto_dispatch_preserves_independent_selection(self):
+        result = classifier.select('workflow_dispatch', {'target': 'auto'}, lambda: (True, False, 'auto', SHA_A))
+        self.assertEqual((result['frontend'], result['backend'], result['base_sha']), ('true', 'false', SHA_A))
 
     def test_api_uses_current_workflow_and_paginates(self):
         api = classifier.ActionsAPI('owner/repo', 'not-a-real-token')

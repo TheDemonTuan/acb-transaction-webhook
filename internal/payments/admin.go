@@ -11,6 +11,13 @@ import (
 
 // ExistingOrderIntent validates a retry before HTTP applies new-intent quota.
 func (s *Service) ExistingOrderIntent(ctx context.Context, amount int64, origin, key string) (storage.PaymentOrder, bool, error) {
+	if s.managed {
+		operation, err := s.resolve(ctx)
+		if err != nil {
+			return storage.PaymentOrder{}, false, err
+		}
+		return operation.ExistingOrderIntent(ctx, amount, origin, key)
+	}
 	if amount < 1 || amount > s.cfg.PaymentMaxAmountVND || amount > maxSafeInteger {
 		return storage.PaymentOrder{}, false, ErrInvalidAmount
 	}
@@ -36,12 +43,14 @@ func (s *Service) ExistingOrderIntent(ctx context.Context, amount int64, origin,
 	return order, true, nil
 }
 
+// Order reads only committed local state. An issued capability stays readable
+// even when credentials cannot be loaded or the provider is unavailable.
 func (s *Service) Order(ctx context.Context, id string) (storage.PaymentOrder, error) {
 	if s.store == nil {
 		return storage.PaymentOrder{}, ErrPaymentUnavailable
 	}
 	order, err := s.store.PaymentOrder(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && order.ChannelID != s.cfg.PayOSClientID) {
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !s.managed && order.ChannelID != s.cfg.PayOSClientID) {
 		return storage.PaymentOrder{}, ErrPaymentNotFound
 	}
 	if err != nil {
@@ -54,11 +63,18 @@ func (s *Service) Orders(ctx context.Context, status, cursor string, limit int) 
 	if s.store == nil {
 		return storage.Page[storage.PaymentOrder]{}, ErrPaymentUnavailable
 	}
-	return s.store.ListPaymentOrders(ctx, storage.PaymentOrderFilter{ChannelID: s.cfg.PayOSClientID, Status: status, Cursor: cursor, Limit: limit})
+	channelID := s.cfg.PayOSClientID
+	if s.managed {
+		channelID = ""
+	}
+	return s.store.ListPaymentOrders(ctx, storage.PaymentOrderFilter{ChannelID: channelID, Status: status, Cursor: cursor, Limit: limit})
 }
 
 // ConfirmWebhook never takes a browser-supplied URL and does not change deployment flags.
 func (s *Service) ConfirmWebhook(ctx context.Context) error {
+	if s.managed {
+		return s.ConfirmProviderWebhook(ctx, storage.PaymentProviderActor{})
+	}
 	provider, ok := s.provider.(interface {
 		Confirm(context.Context, string) (string, error)
 	})
@@ -92,6 +108,13 @@ type Status struct {
 }
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
+	if s.managed {
+		operation, err := s.resolve(ctx)
+		if err != nil {
+			return Status{}, err
+		}
+		return operation.Status(ctx)
+	}
 	result := Status{Provider: "PAYOS", Bank: "KienlongBank", Configured: s.cfg.PayOSClientID != "" && s.cfg.PayOSAPIKey != "" && s.cfg.PayOSChecksumKey != "", Status: s.Config().Status, WebhookConfirmed: s.cfg.PayOSWebhookConfirmed}
 	if s.store == nil {
 		result.Status = "UNAVAILABLE"
@@ -105,6 +128,15 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	result.PendingOrders, result.ReviewCount = activity.PendingOrders, activity.ReviewCount
 	if err := s.store.CheckMutationAllowed(ctx); err != nil {
 		result.Status = "UNAVAILABLE"
+	}
+	if s.managedSnapshot {
+		paused, err := s.store.PaymentProviderQuiesced(ctx)
+		if err != nil {
+			return result, ErrPaymentUnavailable
+		}
+		if paused {
+			result.Status = "UNAVAILABLE"
+		}
 	}
 	s.reconcile.mu.Lock()
 	quiesced := s.reconcile.quiesced

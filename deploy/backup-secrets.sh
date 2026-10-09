@@ -14,7 +14,7 @@ check_required_secrets() {
     log_error "Secrets directory '$SECRETS_DIR' does not exist."
     return 1
   fi
-  local required_secrets=(app_master_key tts_internal_token worker_internal_token payos_client_id payos_api_key payos_checksum_key bark_basic_auth_user bark_basic_auth_password)
+  local required_secrets=(app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password)
   local missing=()
   for s in "${required_secrets[@]}"; do
     local s_file="$SECRETS_DIR/$s"
@@ -78,7 +78,7 @@ staging_manifest="$STAGING_DIR/manifest-secrets-${ts}.json"
 
 log_info "Streaming secrets directly into age encrypted tar archive..."
 # Archive only current runtime secrets; legacy recovery keys remain in prior encrypted snapshots.
-secret_names=(app_master_key tts_internal_token worker_internal_token payos_client_id payos_api_key payos_checksum_key bark_basic_auth_user bark_basic_auth_password)
+secret_names=(app_master_key tts_internal_token worker_internal_token bark_basic_auth_user bark_basic_auth_password)
 tar -C "$SECRETS_DIR" -cf - "${secret_names[@]}" | "$AGE_BIN" -r "$BACKUP_AGE_RECIPIENT" -o "$staging_enc"
 
 if [[ ! -s "$staging_enc" ]]; then

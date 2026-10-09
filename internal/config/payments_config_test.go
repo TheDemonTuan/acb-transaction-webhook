@@ -42,7 +42,7 @@ func TestLoadPaymentDefaultsWithoutDevelopmentCredentials(t *testing.T) {
 	if cfg.PayOSClientID != "" || cfg.PayOSAPIKey != "" || cfg.PayOSChecksumKey != "" {
 		t.Fatal("expected development to permit unconfigured payment credentials")
 	}
-	if !cfg.PaymentsEnabled || cfg.PayOSWebhookConfirmed || cfg.PaymentMaxAmountVND != 500000000 {
+	if cfg.PaymentsEnabled || cfg.PayOSWebhookConfirmed || cfg.PaymentMaxAmountVND != 500000000 {
 		t.Fatalf("unexpected payment defaults: enabled=%t confirmed=%t max=%d", cfg.PaymentsEnabled, cfg.PayOSWebhookConfirmed, cfg.PaymentMaxAmountVND)
 	}
 	if cfg.PaymentPublicOrigin != "http://localhost:5173" || cfg.PaymentStaticURL() != "http://localhost:5173/pay" || cfg.PayOSWebhookURL() != "http://localhost:5173/api/integrations/payos/webhook" {
@@ -50,79 +50,33 @@ func TestLoadPaymentDefaultsWithoutDevelopmentCredentials(t *testing.T) {
 	}
 }
 
-func TestLoadPayOSSecretSources(t *testing.T) {
-	for _, source := range []string{"environment", "file", "environment takes precedence"} {
-		t.Run(source, func(t *testing.T) {
+func TestLoadIgnoresLegacyPayOSSecrets(t *testing.T) {
+	for _, role := range []string{"gateway", "worker"} {
+		t.Run(role, func(t *testing.T) {
 			setupPaymentDevelopmentEnv(t)
+			setupBaseProductionEnv(t)
+			t.Setenv("RUNTIME_ROLE", role)
+			t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
+			t.Setenv("WORKER_RPC_URL", "http://worker:8190")
+			t.Setenv("BARK_SERVER_URL", "")
 			for _, key := range []string{"PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY"} {
-				if source != "file" {
-					t.Setenv(key, "  test-"+key+" \r\n")
-				}
-				if source == "file" {
-					path := filepath.Join(t.TempDir(), key)
-					if err := os.WriteFile(path, []byte("  test-"+key+" \r\n"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					t.Setenv(key+"_FILE", path)
-				} else if source == "environment takes precedence" {
-					t.Setenv(key+"_FILE", filepath.Join(t.TempDir(), "not-mounted"))
-				}
+				t.Setenv(key, "unused-legacy-credential")
+				t.Setenv(key+"_FILE", filepath.Join(t.TempDir(), "not-mounted"))
 			}
 			cfg, err := Load()
 			if err != nil {
-				t.Fatalf("load config: %v", err)
+				t.Fatal(err)
 			}
-			if cfg.PayOSClientID != "test-PAYOS_CLIENT_ID" || cfg.PayOSAPIKey != "test-PAYOS_API_KEY" || cfg.PayOSChecksumKey != "test-PAYOS_CHECKSUM_KEY" {
-				t.Fatal("payment credentials did not resolve and trim all three sources")
+			if cfg.PayOSClientID != "" || cfg.PayOSAPIKey != "" || cfg.PayOSChecksumKey != "" {
+				t.Fatal("legacy credentials were loaded")
+			}
+			for _, key := range []string{"PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY"} {
+				t.Setenv(key, "")
+			}
+			if _, err := Load(); err != nil {
+				t.Fatalf("unconfigured production must boot: %v", err)
 			}
 		})
-	}
-}
-
-func TestLoadRejectsUnreadableOrEmptyPayOSSecretFiles(t *testing.T) {
-	for _, key := range []string{"PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY"} {
-		for _, contents := range []string{"missing", "empty"} {
-			t.Run(key+"/"+contents, func(t *testing.T) {
-				setupPaymentDevelopmentEnv(t)
-				path := filepath.Join(t.TempDir(), "secret")
-				if contents == "empty" {
-					if err := os.WriteFile(path, []byte(" \r\n\t"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				t.Setenv(key+"_FILE", path)
-				if _, err := Load(); err == nil {
-					t.Fatal("expected invalid secret file to fail configuration loading")
-				}
-			})
-		}
-	}
-}
-
-func TestProductionRequiresEachPayOSCredentialEvenWhenPaymentsDisabled(t *testing.T) {
-	for _, role := range []string{"gateway", "worker"} {
-		for _, key := range []string{"PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY"} {
-			t.Run(role+"/"+key, func(t *testing.T) {
-				setupPaymentDevelopmentEnv(t)
-				setupBaseProductionEnv(t)
-				t.Setenv("RUNTIME_ROLE", role)
-				t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
-				t.Setenv("WORKER_RPC_URL", "http://worker:8190")
-				t.Setenv("BARK_SERVER_URL", "")
-				t.Setenv("PAYMENTS_ENABLED", "false")
-				t.Setenv("PAYOS_WEBHOOK_CONFIRMED", "false")
-				t.Setenv(key, "")
-				_, err := Load()
-				if err == nil || !strings.Contains(err.Error(), key) {
-					t.Fatalf("expected missing %s to reject production config, got %v", key, err)
-				}
-				for _, secret := range []string{"test-payos-client", "test-payos-api", "test-payos-checksum"} {
-					if strings.Contains(err.Error(), secret) {
-						t.Fatal("configuration error exposed a credential")
-					}
-				}
-			})
-		}
 	}
 }
 
@@ -142,7 +96,7 @@ func TestLoadProductionPaymentURLs(t *testing.T) {
 	}
 }
 
-func TestProductionAcceptsPayOSSecretFiles(t *testing.T) {
+func TestProductionIgnoresMountedLegacyPayOSSecrets(t *testing.T) {
 	for _, role := range []string{"gateway", "worker"} {
 		t.Run(role, func(t *testing.T) {
 			setupPaymentDevelopmentEnv(t)
@@ -159,8 +113,12 @@ func TestProductionAcceptsPayOSSecretFiles(t *testing.T) {
 				t.Setenv(key, "")
 				t.Setenv(key+"_FILE", path)
 			}
-			if _, err := Load(); err != nil {
-				t.Fatalf("production role %s rejected mounted payment secrets: %v", role, err)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unused mounted legacy files prevented boot: %v", err)
+			}
+			if cfg.PayOSClientID != "" || cfg.PayOSAPIKey != "" || cfg.PayOSChecksumKey != "" {
+				t.Fatal("legacy mounted credentials loaded")
 			}
 		})
 	}
@@ -224,7 +182,7 @@ func TestLoadRejectsInvalidPaymentOrigins(t *testing.T) {
 	}
 }
 
-func TestLoadPaymentGateAndAmountOverrides(t *testing.T) {
+func TestLoadIgnoresLegacyPaymentGatesAndAcceptsAmountOverrides(t *testing.T) {
 	setupPaymentDevelopmentEnv(t)
 	t.Setenv("PAYMENTS_ENABLED", "false")
 	t.Setenv("PAYOS_WEBHOOK_CONFIRMED", "true")
@@ -233,8 +191,8 @@ func TestLoadPaymentGateAndAmountOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.PaymentsEnabled || !cfg.PayOSWebhookConfirmed || cfg.PaymentMaxAmountVND != 123456 {
-		t.Fatal("payment gate or amount overrides were not applied")
+	if cfg.PaymentsEnabled || cfg.PayOSWebhookConfirmed || cfg.PaymentMaxAmountVND != 123456 {
+		t.Fatal("legacy payment gates affected managed configuration or amount override was lost")
 	}
 	for _, limit := range []string{"1", "9007199254740991"} {
 		t.Setenv("PAYMENT_MAX_AMOUNT_VND", limit)
@@ -244,13 +202,13 @@ func TestLoadPaymentGateAndAmountOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidPaymentGatesAndAmountLimits(t *testing.T) {
+func TestLoadIgnoresInvalidLegacyGatesAndRejectsInvalidAmountLimits(t *testing.T) {
 	for _, key := range []string{"PAYMENTS_ENABLED", "PAYOS_WEBHOOK_CONFIRMED"} {
 		t.Run(key, func(t *testing.T) {
 			setupPaymentDevelopmentEnv(t)
 			t.Setenv(key, "not-a-boolean")
-			if _, err := Load(); err == nil {
-				t.Fatal("expected invalid payment gate to be rejected")
+			if _, err := Load(); err != nil {
+				t.Fatal("unused legacy payment gate prevented boot")
 			}
 		})
 	}
