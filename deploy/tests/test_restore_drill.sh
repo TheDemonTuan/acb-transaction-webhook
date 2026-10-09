@@ -9,6 +9,13 @@ REPO_ROOT="$(cd -- "$DEPLOY_DIR/.." && pwd)"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/acb-restore-drill-tests.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
+# The financial fixture must use this checkout's schema, never a stale dbtool.
+if [[ -z "${DBTOOL_BIN:-}" ]]; then
+  DBTOOL_BIN="$TEST_TMP/dbtool"
+  (cd "$REPO_ROOT" && go build -o "$DBTOOL_BIN" ./cmd/dbtool)
+  export DBTOOL_BIN
+fi
+
 TESTS_PASSED=0
 TESTS_FAILED=0
 

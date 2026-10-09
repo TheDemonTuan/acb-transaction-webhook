@@ -93,7 +93,9 @@ jobs:
             path="$(dirname "$path")"
           done
           chmod a+rx deploy deploy/tests scripts scripts/ops
-          sudo -u '#1000' bash deploy/tests/test_restore_drill.sh
+          go build -o "$RUNNER_TEMP/payos-dbtool" ./cmd/dbtool
+          chmod a+rx "$RUNNER_TEMP" "$RUNNER_TEMP/payos-dbtool"
+          sudo -u '#1000' env DBTOOL_BIN="$RUNNER_TEMP/payos-dbtool" bash deploy/tests/test_restore_drill.sh
       - name: Test supply-chain validators
         run: bash deploy/test-supply-chain.sh
 
