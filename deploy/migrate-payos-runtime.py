@@ -582,31 +582,9 @@ class Migration:
         require(self.database_summary(self.volume_database()) == backup['history'], 'migration changed financial history/journal/deliveries')
         self.save('SCHEMA_READY')
 
-    def set_flags(self, enabled, confirmed):
-        path = self.root / 'deploy/.env.production'
-        lines = regular(path).decode().splitlines()
-        values = {'PAYMENTS_ENABLED': str(enabled).lower(), 'PAYOS_WEBHOOK_CONFIRMED': str(confirmed).lower()}
-        counts = {key: 0 for key in values}
-        output = []
-        for line in lines:
-            key = line.partition('=')[0]
-            if key in values:
-                counts[key] += 1
-                line = key + '=' + values[key]
-            output.append(line)
-        require(all(n <= 1 for n in counts.values()), 'duplicate operational payment gate')
-        output += [key + '=' + value for key, value in values.items() if not counts[key]]
-        atomic(path, ('\n'.join(output) + '\n').encode())
-
     def compose(self, legacy, *args):
         bundle = Path(self.plan['legacy_bundle']) if legacy else self.release
-        flags = {}
-        for line in regular(self.root / 'deploy/.env.production').decode().splitlines():
-            key, sep, value = line.partition('=')
-            if key in ('PAYMENTS_ENABLED', 'PAYOS_WEBHOOK_CONFIRMED'):
-                require(sep and key not in flags and value in ('true', 'false'), 'invalid operational payment flag')
-                flags[key] = value
-        return self.shell(bundle, 'compose_release', [bundle, bundle / 'runtime.env', *args], env=flags, timeout=180)
+        return self.shell(bundle, 'compose_release', [bundle, bundle / 'runtime.env', *args], timeout=180)
 
     def health(self, legacy=False):
         bundle = Path(self.plan['legacy_bundle']) if legacy else self.release
@@ -631,7 +609,6 @@ class Migration:
         return values
 
     def backend_ready(self):
-        self.set_flags(False, False)
         images = self.plan['candidate_images']
         slot = 'blue' if self.plan['legacy_slot'] == 'green' else 'green'
         self.plan['candidate_slot'] = slot
@@ -928,10 +905,7 @@ class Migration:
         route_hash = digest(regular(self.route))
         require(route_hash in (self.plan['route_sha256'], self.plan.get('candidate_route_sha256')),
                 'PAYOS_CUTOVER_ROUTE_DRIFT: refuse overwriting external route changes')
-        def without_flags(path):
-            return [line for line in regular(path).decode().splitlines()
-                    if line.partition('=')[0] not in ('PAYMENTS_ENABLED', 'PAYOS_WEBHOOK_CONFIRMED')]
-        require(without_flags(self.root / 'deploy/.env.production') == without_flags(self.snapshot / 'previous-env.production'),
+        require(regular(self.root / 'deploy/.env.production') == regular(self.snapshot / 'previous-env.production'),
                 'PAYOS_CUTOVER_ENV_DRIFT: refuse overwriting external environment changes')
 
     def rollback(self, central_run_id=None):
@@ -946,7 +920,7 @@ class Migration:
             self.volume_permissions()
             self.gate(self.plan['legacy_dbtool'])
             return self.rollback_finish()
-        # Boundary check BEFORE changing gates, flags, services, routes, or DB.
+        # Boundary check BEFORE changing gates, services, routes, or DB.
         if PHASES.index(self.plan['phase']) >= PHASES.index('SCHEMA_READY'):
             self.no_payments()
         self.volume_permissions()
@@ -963,7 +937,6 @@ class Migration:
                 raise
         self.plan['rollback_requested'] = True
         self.save()
-        self.set_flags(False, self.plan['phase'] in ('WEBHOOK_CONFIRMED', 'LIVE'))
         worker = self.inspect('acb-worker')
         legacy = worker['Config']['Image'] == keys(Path(self.plan['legacy_bundle']) / 'runtime.env')['WORKER_IMAGE_REF']
         self.stop(['acb-recovery-controller', 'acb-auth-browser'])

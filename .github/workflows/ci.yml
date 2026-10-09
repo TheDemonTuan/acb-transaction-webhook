@@ -117,24 +117,12 @@ jobs:
       - name: Run gateway boot and storage health smoke (not provider confirmation)
         run: |
           set -euo pipefail
-          secrets="$RUNNER_TEMP/payos-smoke-secrets"
-          mkdir -m 755 "$secrets"
-          printf 'ci-payos-client-id\n' > "$secrets/payos_client_id"
-          printf 'ci-payos-api-key\n' > "$secrets/payos_api_key"
-          printf 'ci-payos-checksum-key\n' > "$secrets/payos_checksum_key"
-          chmod 444 "$secrets"/*
-          trap 'docker rm -f smoke-test >/dev/null 2>&1 || true; rm -rf "$secrets"' EXIT
+          trap 'docker rm -f smoke-test >/dev/null 2>&1 || true' EXIT
           docker run -d --name smoke-test \
-            --mount "type=bind,src=$secrets,dst=/run/secrets,readonly" \
             -e APP_ENV=development \
             -e LISTEN_ADDR=0.0.0.0:8080 \
             -e DATA_DIR=/tmp/data \
-            -e PAYOS_CLIENT_ID_FILE=/run/secrets/payos_client_id \
-            -e PAYOS_API_KEY_FILE=/run/secrets/payos_api_key \
-            -e PAYOS_CHECKSUM_KEY_FILE=/run/secrets/payos_checksum_key \
             -e PAYMENT_PUBLIC_ORIGIN=http://localhost:8080 \
-            -e PAYMENTS_ENABLED=false \
-            -e PAYOS_WEBHOOK_CONFIRMED=false \
             acb-transaction-webhook:smoke-test
           for attempt in {1..30}; do
             if docker exec smoke-test /gateway --healthcheck; then exit 0; fi

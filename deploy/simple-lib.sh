@@ -126,7 +126,7 @@ validate_permissions() {
 import os,stat,sys
 root,backup=sys.argv[1:]
 checks=[(root+'/.env.production',0o600,1000,1000),(root+'/secrets',0o700,1000,1000),(backup,0o700,1000,1000)]
-checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','tts_internal_token','payos_client_id','payos_api_key','payos_checksum_key')]
+checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','tts_internal_token')]
 checks += [(root+'/secrets/'+n,0o640,1000,1000) for n in ('bark_basic_auth_user','bark_basic_auth_password')]
 for path,mode,uid,gid in checks:
     st=os.stat(path)

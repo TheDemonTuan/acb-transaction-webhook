@@ -363,7 +363,6 @@ class MigrationDrill(unittest.TestCase):
         snapshot = self.driver.plan['backup']
         self.assertEqual(snapshot['history'], self.driver.database_summary(Path(snapshot['receipt']['path'])))
         self.assertFalse(self.driver.containers['acb-auth-browser']['State']['Running'])
-        self.assertIn('PAYMENTS_ENABLED=false', (self.driver.root / 'deploy/.env.production').read_text())
         self.assertIsNone(self.driver.gate_token)
 
     def test_stop_crash_resume_keeps_before_images_and_uses_legacy_gate(self):

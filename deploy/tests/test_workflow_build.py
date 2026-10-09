@@ -171,45 +171,6 @@ class WorkflowBuildTests(unittest.TestCase):
         self.assertNotIn('CF_ACCESS_CLIENT_SECRET', deploy['env'])
         self.assertEqual(document['concurrency'], self.document['concurrency'])
 
-    @unittest.skipIf(os.name == 'nt' or not shutil.which('bash'), 'POSIX runner required for smoke command execution')
-    def test_image_smoke_uses_three_secret_files_and_keeps_provider_gates_closed(self):
-        bin_dir = self.root / 'bin'
-        bin_dir.mkdir()
-        docker = bin_dir / 'docker'
-        docker.write_text('#!' + sys.executable + '\n' + '''import json, os, pathlib, sys
-args = sys.argv[1:]
-if args[0] == 'run':
-    settings = [args[index + 1] for index, value in enumerate(args) if value == '-e']
-    mount = args[args.index('--mount') + 1]
-    directory = pathlib.Path(mount.split('src=', 1)[1].split(',', 1)[0])
-    pathlib.Path(os.environ['SMOKE_RECEIPT']).write_text(json.dumps({
-        'settings': settings, 'mount': mount,
-        'secrets': {p.name: p.read_text() for p in directory.iterdir()}}))
-elif args[0] == 'exec':
-    assert args == ['exec', 'smoke-test', '/gateway', '--healthcheck']
-elif args[0] != 'rm':
-    raise SystemExit('Unexpected smoke operation')
-''')
-        docker.chmod(0o755)
-        receipt = self.root / 'smoke.json'
-        script = step(workflow('ci.yml'), 'docker-smoke-gateway',
-                      'Run gateway boot and storage health smoke (not provider confirmation)')['run']
-        result = subprocess.run(['bash', '-c', script], cwd=self.root, text=True, capture_output=True,
-                                env={**os.environ, 'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
-                                     'RUNNER_TEMP': str(self.root), 'SMOKE_RECEIPT': str(receipt)})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        import json
-        recorded = json.loads(receipt.read_text())
-        settings = dict(value.split('=', 1) for value in recorded['settings'])
-        self.assertEqual(settings['PAYMENTS_ENABLED'], 'false')
-        self.assertEqual(settings['PAYOS_WEBHOOK_CONFIRMED'], 'false')
-        self.assertEqual(set(recorded['secrets']), {'payos_client_id', 'payos_api_key', 'payos_checksum_key'})
-        for key, name in [('PAYOS_CLIENT_ID_FILE', 'payos_client_id'),
-                          ('PAYOS_API_KEY_FILE', 'payos_api_key'), ('PAYOS_CHECKSUM_KEY_FILE', 'payos_checksum_key')]:
-            self.assertEqual(settings[key], '/run/secrets/' + name)
-        self.assertTrue(recorded['mount'].endswith(',readonly'))
-        self.assertFalse((self.root / 'payos-smoke-secrets').exists())
-
 
 if __name__ == '__main__':
     unittest.main()

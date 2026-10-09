@@ -184,8 +184,6 @@ CF_ACCESS_ISSUER=https://deploy-smoke.cloudflareaccess.com
 CF_ACCESS_AUDIENCE=deploy-smoke-audience
 CF_ACCESS_JWKS_URL=https://deploy-smoke.cloudflareaccess.com/cdn-cgi/access/certs
 PAYMENT_PUBLIC_ORIGIN=https://transactions.tuannguyenviet.site
-PAYMENTS_ENABLED=false
-PAYOS_WEBHOOK_CONFIRMED=false
 EOF
 chmod 600 "$root/deploy/.env.production"
 ln -s "$root/deploy/.env.production" "$baseline/.env.production"
