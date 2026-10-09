@@ -348,6 +348,8 @@ class Migration:
         source = self.source_proof(self.sha, self.source_run_id, entries)
         self.secrets_ready()
         self.dbtool(old['DBTOOL_IMAGE_REF'], '-readonly', '-gate-status', readonly=True)
+        legacy_schema = decode(self.dbtool(old['DBTOOL_IMAGE_REF'], '-readonly', '-schema-version', readonly=True)).get('version')
+        require(type(legacy_schema) is int and legacy_schema in (13, 14), 'unsupported legacy schema version')
         self.volume_permissions()
         for key, reference in candidate.items():
             if key.endswith('_IMAGE_REF'):
@@ -355,7 +357,7 @@ class Migration:
         route_hash = digest(regular(self.route))
         return {'schema': 1, 'phase': 'STAGED', 'sha': self.sha, 'legacy_sha': state['RELEASE_SHA'],
                 'legacy_slot': state['GATEWAY_SLOT'], 'legacy_bundle': str(legacy),
-                'legacy_dbtool': old['DBTOOL_IMAGE_REF'], 'candidate_images': candidate,
+                'legacy_dbtool': old['DBTOOL_IMAGE_REF'], 'legacy_schema_version': legacy_schema, 'candidate_images': candidate,
                 'candidate_manifest_sha256': manifest, 'legacy_manifest_sha256': old_manifest,
                 'prior_frontend': frontend, 'central': central, 'source': source,
                 'route_sha256': route_hash, 'gate_token': None, 'gate_owner': 'payos-cutover',
@@ -543,7 +545,7 @@ class Migration:
             receipt = decode(regular(receipt_path))
             backup_path = Path(receipt['path'])
             require(backup_path.is_relative_to(self.root / 'data/backups') and receipt.get('sha') == self.plan['legacy_sha']
-                    and receipt.get('schema_version') == 13 and receipt['sha256'] == file_digest(backup_path),
+                    and receipt.get('schema_version') == self.plan['legacy_schema_version'] and receipt['sha256'] == file_digest(backup_path),
                     'authoritative backup receipt mismatch')
             require(self.database_summary(backup_path) == intent['history'], 'backup differs from drained authoritative database')
             self.plan['backup'] = {'receipt': receipt, 'receipt_path': receipt_path, 'history': intent['history']}
@@ -953,7 +955,7 @@ class Migration:
             # Legacy may already be taking money after a successful gate release.
             # Never replay a database restore or use the auth-independent candidate gate.
             version = decode(self.dbtool(self.plan['legacy_dbtool'], '-readonly', '-schema-version', readonly=True))
-            require(version.get('version') == 13, 'legacy rollback completion requires unchanged schema 13')
+            require(version.get('version') == self.plan['legacy_schema_version'], 'legacy rollback completion requires unchanged pinned schema')
             self.volume_permissions()
             self.gate(self.plan['legacy_dbtool'])
             return self.rollback_finish()

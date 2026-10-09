@@ -247,7 +247,7 @@ class Fixture(migration.Migration):
             root.mkdir()
             with contextlib.closing(sqlite3.connect(self.db)) as source, contextlib.closing(sqlite3.connect(root / 'gateway.db')) as target:
                 source.backup(target)
-            receipt = {'sha': OLD, 'schema_version': 13, 'path': str(root / 'gateway.db'),
+            receipt = {'sha': OLD, 'schema_version': 14, 'path': str(root / 'gateway.db'),
                        'sha256': migration.digest((root / 'gateway.db').read_bytes()), 'created_at': '2026-10-09'}
             (root / 'receipt.json').write_bytes(encoded(receipt))
             self.action('backup-after-write')
