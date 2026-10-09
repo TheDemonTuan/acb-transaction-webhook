@@ -29,7 +29,7 @@ export const ViewerHeader: React.FC = () => {
             </div>
             <div>
               <h1 className="text-sm sm:text-base font-bold text-stone-900 leading-tight">
-                ACB Transaction Webhook
+                payOS Transaction Webhook
               </h1>
               <span className="text-[11px] font-medium text-stone-500 block">
                 Cổng theo dõi giao dịch thời gian thực
@@ -48,6 +48,7 @@ export const ViewerHeader: React.FC = () => {
             onClick={() => setIsQROpen(true)}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 shadow-2xs transition cursor-pointer"
             title="Xem mã QR nhận tiền"
+            aria-label="Mã QR nhận tiền"
           >
             <QrCode className="w-3.5 h-3.5 text-emerald-600" />
             <span className="hidden md:inline">Mã QR nhận tiền</span>

@@ -8,23 +8,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/simple-lib.sh
 source "$SCRIPT_DIR/simple-lib.sh"
 DEPLOY_PATH="${DEPLOY_PATH:-$(dirname "$SCRIPT_DIR")}"
-if [[ -f "$DEPLOY_PATH/deploy/.env.production" ]]; then
-  load_recovery_flags
-else
-  AUTH_RECOVERY_ENABLED=false
-  AI_CAPTCHA_ENABLED=false
-fi
 
 check_required_secrets() {
   if [[ ! -d "$SECRETS_DIR" ]]; then
     log_error "Secrets directory '$SECRETS_DIR' does not exist."
     return 1
   fi
-  local required_secrets=(app_master_key tts_internal_token worker_internal_token auth_browser_internal_token bark_basic_auth_user bark_basic_auth_password)
-  if [[ "$AUTH_RECOVERY_ENABLED" == true ]]; then
-    required_secrets+=(telegram_bot_token)
-    if [[ "$AI_CAPTCHA_ENABLED" == true ]]; then required_secrets+=(ninerouter_api_key); fi
-  fi
+  local required_secrets=(app_master_key tts_internal_token worker_internal_token payos_client_id payos_api_key payos_checksum_key bark_basic_auth_user bark_basic_auth_password)
   local missing=()
   for s in "${required_secrets[@]}"; do
     local s_file="$SECRETS_DIR/$s"
@@ -36,8 +26,7 @@ check_required_secrets() {
     log_error "Missing or empty required production secrets: [${missing[*]}]"
     return 1
   fi
-  # The archive below includes all provisioned files, even when recovery is paused/disabled.
-  for s in acb_username acb_password acb_account telegram_bot_token ninerouter_api_key; do
+  for s in "${required_secrets[@]}"; do
     check_secret_permissions "$SECRETS_DIR/$s" || return 1
   done
   return 0
@@ -88,8 +77,9 @@ staging_enc="$STAGING_DIR/secrets-${ts}.tar.age"
 staging_manifest="$STAGING_DIR/manifest-secrets-${ts}.json"
 
 log_info "Streaming secrets directly into age encrypted tar archive..."
-# Tar the secrets directory directly through pipe to age (Zero unencrypted secrets on backup disk)
-tar -C "$SECRETS_DIR" -cf - . | "$AGE_BIN" -r "$BACKUP_AGE_RECIPIENT" -o "$staging_enc"
+# Archive only current runtime secrets; legacy recovery keys remain in prior encrypted snapshots.
+secret_names=(app_master_key tts_internal_token worker_internal_token payos_client_id payos_api_key payos_checksum_key bark_basic_auth_user bark_basic_auth_password)
+tar -C "$SECRETS_DIR" -cf - "${secret_names[@]}" | "$AGE_BIN" -r "$BACKUP_AGE_RECIPIENT" -o "$staging_enc"
 
 if [[ ! -s "$staging_enc" ]]; then
   log_error "Encrypted secret bundle was not created or is empty"
@@ -103,7 +93,8 @@ recip_fp="$(printf '%s' "$BACKUP_AGE_RECIPIENT" | sha256sum 2>/dev/null | cut -d
 
 # Secret manifest list (file names and individual hashes, NO secret values)
 sec_entries=()
-for f in "$SECRETS_DIR"/*; do
+for name in "${secret_names[@]}"; do
+  f="$SECRETS_DIR/$name"
   if [[ -f "$f" ]]; then
     bname="$(basename "$f")"
     fsha="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1 || echo "")"

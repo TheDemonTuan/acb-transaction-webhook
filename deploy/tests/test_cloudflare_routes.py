@@ -167,5 +167,25 @@ class RouteTests(unittest.TestCase):
             routes.inspect(self.api.routes(), routes.HOSTS['viewer'], require=True)
 
 
+    def test_payment_callback_bypasses_assets_while_payment_pages_use_spa(self):
+        for host in routes.HOSTS.values():
+            path = Path(self.temp.name) / (host + '.json')
+            routes.apply(self.api, host, path)
+            for suffix, expected in (
+                    ('/api/integrations/payos/webhook', None),
+                    ('/api/integrations/payos/webhook?trace=1', None),
+                    ('/api/integrations/payos/webhook/', None),
+                    ('/api/public/v1/payments/capability', None),
+                    ('/pay', routes.WORKER),
+                    ('/pay/capability', routes.WORKER),
+                    ('/pay/capability?status=PAID', routes.WORKER)):
+                with self.subTest(host=host, path=suffix):
+                    matching = [record for record in self.records
+                                if __import__('fnmatch').fnmatchcase(host + suffix, record['pattern'])]
+                    selected = max(matching, key=lambda record: len(record['pattern']))
+                    self.assertEqual(selected.get('script'), expected)
+        self.assertTrue(all(body['pattern'].split('/', 1)[0] in routes.HOSTS.values()
+                            for method, body in self.writes if method == 'POST'))
+
 if __name__ == '__main__':
     unittest.main()

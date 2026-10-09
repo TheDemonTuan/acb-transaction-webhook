@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$images_env" && -n "$bundle" ]] || fail 'Usage: test_simple_deploy.sh --images-env /absolute/images.env --bundle /absolute/bundle [--suite all|lifecycle|fault-matrix]'
-[[ -f "$images_env" && -f "$bundle/deploy.sh" && -f "$bundle/migrate-static-hosting.py" && -f "$bundle/compose.prod.yaml" && -s "$bundle/SHA256SUMS" ]] || fail 'Missing images.env or complete checksummed bundle'
+[[ -f "$images_env" && -f "$bundle/deploy.sh" && -f "$bundle/migrate-payos-runtime.sh" && -f "$bundle/compose.prod.yaml" && -s "$bundle/SHA256SUMS" ]] || fail 'Missing images.env or complete checksummed bundle'
 [[ -z "$(docker ps -aq --filter name='^/acb-' --filter name='^/edge-traefik$')" ]] || fail 'Unsafe Docker daemon: ACB or edge-traefik container exists'
 for name in bank-event-gateway_gateway_data bank-event-gateway_bark_data; do
   ! docker volume inspect "$name" >/dev/null 2>&1 || fail "Unsafe Docker daemon: $name exists"
@@ -83,14 +83,12 @@ if (( EUID != 1000 )); then
   sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"
   sock="${sock#unix://}"
   [[ -S "$sock" ]] || fail "Missing local Docker socket: $sock"
-  git -C "$repo" cat-file -e "a6bc2a4739c7cd4776188d30d71cba6ecb79b970^{commit}" || fail 'Missing historical baseline commit; checkout must fetch full history'
-  archive_dir="$(mktemp -d "${TMPDIR:-/tmp}/acb-history.XXXXXXXX")"
-  git -C "$repo" archive a6bc2a4739c7cd4776188d30d71cba6ecb79b970 deploy/compose deploy/bark-entrypoint.sh deploy/seccomp-auth-browser.json > "$archive_dir/baseline.tar"
+  archive_dir="$(mktemp -d "${TMPDIR:-/tmp}/acb-fixture.XXXXXXXX")"
   cp "$repo/platform/edge/dynamic/acb.yml" "$archive_dir/acb.yml"
   cp "$repo/deploy/tests/simple_deploy_https_fixture.py" "$archive_dir/https_fixture.py"
   chmod 755 "$archive_dir"
   chmod 644 "$archive_dir/"*
-  export REHEARSAL_ARCHIVE="$archive_dir/baseline.tar" REHEARSAL_ROUTE_SOURCE="$archive_dir/acb.yml" REHEARSAL_HTTPS_FIXTURE="$archive_dir/https_fixture.py"
+  export REHEARSAL_ROUTE_SOURCE="$archive_dir/acb.yml" REHEARSAL_HTTPS_FIXTURE="$archive_dir/https_fixture.py"
   docker_group="$(stat -c '%G' "$sock")"
   [[ "$docker_group" != root && "$docker_group" != UNKNOWN ]] || fail 'Docker socket has no dedicated group for fixture UID 1000'
   sudo usermod -aG "$docker_group" "$account"
@@ -108,11 +106,6 @@ if (( EUID != 1000 )); then
 fi
 
 base_sha=a6bc2a4739c7cd4776188d30d71cba6ecb79b970
-if [[ -z "${REHEARSAL_ARCHIVE:-}" ]]; then
-  git -C "$repo" -c safe.directory="$repo" cat-file -e "${base_sha}^{commit}" || fail "Missing historical baseline commit: $base_sha"
-else
-  [[ -s "$REHEARSAL_ARCHIVE" ]] || fail 'Historical fixture archive unavailable to UID 1000'
-fi
 root="$(mktemp -d "${TMPDIR:-/tmp}/acb-rehearsal.XXXXXXXX")"
 cleanup() {
   rc=$?
@@ -133,17 +126,9 @@ cleanup() {
 trap cleanup EXIT
 
 log_step "Initializing fixture directories at $root (selected suite: $target_suite)..."
-mkdir -p "$root/releases/$base_sha/compose" "$root/data/backups" "$root/deploy/secrets" "$root/edge/dynamic"
+mkdir -p "$root/releases/$base_sha" "$root/data/backups" "$root/deploy/secrets" "$root/edge/dynamic"
 chmod 700 "$root/deploy/secrets" "$root/data/backups"
 baseline="$root/releases/$base_sha"
-if [[ -n "${REHEARSAL_ARCHIVE:-}" ]]; then
-  tar -xf "$REHEARSAL_ARCHIVE" -C "$root"
-else
-  git -C "$repo" -c safe.directory="$repo" archive "$base_sha" deploy/compose deploy/bark-entrypoint.sh deploy/seccomp-auth-browser.json | tar -x -C "$root"
-fi
-cp "$root/deploy/compose/"*.yaml "$baseline/compose/"
-cp "$root/deploy/bark-entrypoint.sh" "$root/deploy/seccomp-auth-browser.json" "$baseline/"
-chmod 644 "$baseline/bark-entrypoint.sh"
 
 release_sha="$(python3 - "$images_env" <<'PY'
 import re,sys
@@ -153,7 +138,8 @@ for line in open(sys.argv[1],encoding='utf8'):
     key,sep,value=line.strip().partition('=')
     assert sep and key not in values and value and re.fullmatch(r'[A-Z_]+',key),(key,value)
     values[key]=value
-assert set(values)=={'RELEASE_SHA','GATEWAY_IMAGE_REF','WORKER_IMAGE_REF','DBTOOL_IMAGE_REF','BROWSER_IMAGE_REF','TTS_IMAGE_REF','BARK_IMAGE_REF'}
+assert set(values)=={'RELEASE_SHA','PAYMENT_RUNTIME','GATEWAY_IMAGE_REF','WORKER_IMAGE_REF','DBTOOL_IMAGE_REF','TTS_IMAGE_REF','BARK_IMAGE_REF'}
+assert values['PAYMENT_RUNTIME']=='payos'
 assert re.fullmatch('[a-f0-9]{40}',values['RELEASE_SHA'])
 for key,value in values.items():
     if key.endswith('_IMAGE_REF'): assert re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}',value),(key,value)
@@ -162,33 +148,29 @@ PY
 )"
 target="$root/releases/$release_sha"
 mkdir -p "$target"
-cp "$bundle/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py} "$target/"
-chmod 644 "$target/bark-entrypoint.sh" "$target/compose.prod.yaml" "$target/compose.auth-recovery-ai.yaml"
+cp -a "$bundle/." "$target/"
+chmod 644 "$target/bark-entrypoint.sh" "$target/compose.prod.yaml"
 cp "$images_env" "$target/images.env"
 cp "$bundle/SHA256SUMS" "$target/"
 log_test_start "Uploaded release contains complete checksummed setup bundle"
 python3 - "$target/SHA256SUMS" <<'PY'
 import sys
-expected={'deploy.sh','simple-lib.sh','healthcheck.sh','render-route.sh','backup-db.sh','migrate-static-hosting.py','acb-route-publish.py','install-route-publisher.sh','setup-recovery.sh','setup-recovery.py','compose.prod.yaml','compose.auth-recovery-ai.yaml','seccomp-auth-browser.json','bark-entrypoint.sh','images.env'}
+expected={'deploy.sh','simple-lib.sh','healthcheck.sh','render-route.sh','backup-db.sh','restore-db.sh','backup-secrets.sh','migrate-payos-runtime.sh','migrate-payos-runtime.py','workflow-runtime.py','acb-route-publish.py','install-route-publisher.sh','verify-frontend.py','compose.prod.yaml','bark-entrypoint.sh','images.env','source-run.env'}
 names=[line.rstrip('\n').split('  ',1)[1] for line in open(sys.argv[1])]
 assert len(names)==len(expected) and set(names)==expected, ('incomplete uploaded checksum manifest',names)
 PY
 (cd "$target" && sha256sum -c SHA256SUMS) || fail 'Uploaded release checksum verification failed'
-[[ -x "$target/setup-recovery.sh" && -x "$target/setup-recovery.py" ]] || fail 'Packaged setup scripts are not executable'
-bash "$target/setup-recovery.sh" --help > "$root/setup-help.log"
-[[ ! -e "$root/state.env" ]] || fail 'Setup help mutated deployment state'
-cp "$target/setup-recovery.py" "$root/setup-recovery.py.saved"
-printf '\n# deliberate upload corruption\n' >> "$target/setup-recovery.py"
-if (cd "$target" && sha256sum -c SHA256SUMS) >"$root/corrupt-setup.log" 2>&1; then fail 'Corrupted uploaded setup passed checksum verification'; fi
-cp "$root/setup-recovery.py.saved" "$target/setup-recovery.py"
-(cd "$target" && sha256sum -c SHA256SUMS) || fail 'Restored uploaded setup checksum verification failed'
-[[ ! -e "$baseline/setup-recovery.sh" && ! -e "$baseline/setup-recovery.py" && ! -e "$baseline/compose.auth-recovery-ai.yaml" ]] || fail 'Historical baseline unexpectedly contains recovery setup'
-log_test_pass "Packaged setup resolves Python companion, detects corruption, and remains absent from baseline"
+cp "$target/migrate-payos-runtime.py" "$root/migration.py.saved"
+printf '\n# deliberate upload corruption\n' >> "$target/migrate-payos-runtime.py"
+if (cd "$target" && sha256sum -c SHA256SUMS) >"$root/corrupt-bundle.log" 2>&1; then fail 'Corrupted uploaded migration passed checksum verification'; fi
+cp "$root/migration.py.saved" "$target/migrate-payos-runtime.py"
+(cd "$target" && sha256sum -c SHA256SUMS) || fail 'Restored upload checksum verification failed'
+log_test_pass "Packaged migration companion detects corruption"
 
 python3 - "$root" <<'PY'
 import os,secrets,sys
 root=sys.argv[1]
-for name in ('worker_internal_token','auth_browser_internal_token','tts_internal_token','bark_basic_auth_user','bark_basic_auth_password','app_master_key'):
+for name in ('worker_internal_token','tts_internal_token','payos_client_id','payos_api_key','payos_checksum_key','bark_basic_auth_user','bark_basic_auth_password','app_master_key'):
     path=f'{root}/deploy/secrets/{name}'
     with open(path,'w') as f:f.write(secrets.token_hex(32)+'\n')
     os.chown(path,1000,1000)
@@ -201,6 +183,9 @@ OWNER_SUBJECTS=deploy-smoke@example.invalid
 CF_ACCESS_ISSUER=https://deploy-smoke.cloudflareaccess.com
 CF_ACCESS_AUDIENCE=deploy-smoke-audience
 CF_ACCESS_JWKS_URL=https://deploy-smoke.cloudflareaccess.com/cdn-cgi/access/certs
+PAYMENT_PUBLIC_ORIGIN=https://transactions.tuannguyenviet.site
+PAYMENTS_ENABLED=false
+PAYOS_WEBHOOK_CONFIRMED=false
 EOF
 chmod 600 "$root/deploy/.env.production"
 ln -s "$root/deploy/.env.production" "$baseline/.env.production"
@@ -219,58 +204,35 @@ fi
 for name in bank-event-gateway_gateway_data bank-event-gateway_bark_data; do docker volume create "$name" >/dev/null; done
 gateway_volume_id="$(docker volume inspect --format '{{.Name}}:{{.CreatedAt}}' bank-event-gateway_gateway_data)"
 
-cat > "$root/base-images.env" <<'EOF'
-GATEWAY_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook@sha256:95c6bc22a74b7027e3af1ef49499b1159dfc542ddf228216f2d694c99d488569
-WORKER_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:a948557ff7f56cb7ed2344e6986b4e855a251770d07afd69395d1e449b0c8152
-DBTOOL_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook-dbtool@sha256:89ab28eae8fabe777a686d7035667eefd1cd226ec19292986e1cbde8e56906ab
-BROWSER_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook-auth-browser@sha256:f79d5ca60ba93512caf8902f02d8c2bda4c0d220865ad9f08c4ac75dae8058bc
-TTS_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway@sha256:27edff9e9b1f1019dda85fa31de9b04649e1f5553d59d1af3c65ee0c1be447d3
-BARK_IMAGE_REF=ghcr.io/finb/bark-server@sha256:32d65b07fa835c99b31a396b77727a04ed058377fc2482da3e9dc7397167ffc4
-EOF
+cp "$images_env" "$root/base-images.env"
 set -a
 # shellcheck source=/dev/null
 source "$root/base-images.env"
-{ cat "$root/base-images.env"; printf 'IMAGE_REF_BLUE=%s\nIMAGE_REF_GREEN=%s\nRELEASE_COMMIT=%s\nBARK_SECRET_GROUP=1000\n' "$GATEWAY_IMAGE_REF" "$GATEWAY_IMAGE_REF" "$base_sha"; } > "$baseline/.release.env"
 set +a
-# Model an already-migrated canonical baseline, preserving historical backend definitions.
-# Compose expands the historical split files once; no live legacy JSON adoption is involved.
-docker compose --project-name acb --project-directory "$baseline" --env-file "$root/deploy/.env.production" --env-file "$baseline/.release.env" \
-  -f "$baseline/compose/base.yaml" -f "$baseline/compose/gateway.yaml" \
-  -f "$baseline/compose/worker.yaml" -f "$baseline/compose/auth-browser.yaml" -f "$baseline/compose/tts.yaml" \
-  -f "$baseline/compose/bark.yaml" config --no-env-resolution --format json > "$root/baseline-compose.json"
+# Baseline is the candidate payOS contract with a different release identity.
+# Legacy-tool admission/drain phases belong to the one-time cutover drill.
+cp "$target/compose.prod.yaml" "$target/bark-entrypoint.sh" "$baseline/"
 python3 - "$root" "$baseline" "$base_sha" <<'PY'
-import json,pathlib,sys,yaml
+import pathlib,sys
 root,baseline=map(pathlib.Path,sys.argv[1:3])
 sha=sys.argv[3]
-config=json.loads((root/'baseline-compose.json').read_text())
-names={'gateway-blue','gateway-green','worker','auth-browser','tts-gateway','bark'}
-assert set(config['services'])==names, set(config['services'])
-config['services']={name:config['services'][name] for name in sorted(names)}
-for service in config['services'].values():
-    for index,opt in enumerate(service.get('security_opt',[])):
-        if opt.startswith('seccomp:'):
-            source=pathlib.Path(opt[8:])
-            source=(source if source.is_absolute() else baseline/source).resolve()
-            assert source.is_file()
-            service['security_opt'][index]='seccomp:'+str(source)
-config.pop('name',None)
-(baseline/'compose.prod.yaml').write_text(yaml.safe_dump(config,sort_keys=False))
 refs=dict(line.split('=',1) for line in (root/'base-images.env').read_text().splitlines())
+refs.pop('RELEASE_SHA')
 (baseline/'images.env').write_text('RELEASE_SHA='+sha+'\n'+''.join(k+'='+v+'\n' for k,v in refs.items()))
 runtime={
     'IMAGE_REF_BLUE':refs['GATEWAY_IMAGE_REF'],'IMAGE_REF_GREEN':refs['GATEWAY_IMAGE_REF'],
-    **{key:refs[key] for key in ('WORKER_IMAGE_REF','BROWSER_IMAGE_REF','TTS_IMAGE_REF','BARK_IMAGE_REF','DBTOOL_IMAGE_REF')},
+    **{key:refs[key] for key in ('WORKER_IMAGE_REF','TTS_IMAGE_REF','BARK_IMAGE_REF','DBTOOL_IMAGE_REF')},
     'RELEASE_COMMIT_BLUE':sha,'RELEASE_COMMIT_GREEN':sha,'WORKER_RELEASE_COMMIT':sha,
-    'ENV_FILE':str(root/'deploy/.env.production'),'SECRETS_DIR':str(root/'deploy/secrets'),'BARK_SECRET_GROUP':'1000',
+    'ENV_FILE':str(root/'deploy/.env.production'),'SECRETS_DIR':str(root/'deploy/secrets'),'BARK_SECRET_GROUP':'1000','PAYMENT_RUNTIME':'payos',
 }
 (baseline/'runtime.env').write_text(''.join(k+'='+v+'\n' for k,v in runtime.items()))
 for name in ('compose.prod.yaml','images.env','runtime.env'):
     (baseline/name).chmod(0o600)
-(root/'state.env').write_text('RELEASE_SHA='+sha+'\nGATEWAY_SLOT=blue\n')
+(root/'state.env').write_text('RELEASE_SHA='+sha+'\nGATEWAY_SLOT=blue\nPAYMENT_RUNTIME=payos\n')
 (root/'state.env').chmod(0o600)
 PY
 cp "$target/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh} "$baseline/"
-(cd "$baseline" && sha256sum compose.prod.yaml images.env runtime.env deploy.sh simple-lib.sh healthcheck.sh render-route.sh bark-entrypoint.sh seccomp-auth-browser.json > SHA256SUMS)
+(cd "$baseline" && sha256sum compose.prod.yaml images.env runtime.env deploy.sh simple-lib.sh healthcheck.sh render-route.sh bark-entrypoint.sh > SHA256SUMS)
 docker volume rm bank-event-gateway_gateway_data >/dev/null
 if ACB_ROUTE_FILE="$root/edge/dynamic/acb.yml" FAILOVER_REGISTRY_DIR="$root/registry" DEPLOY_PATH="$root" \
   bash "$target/deploy.sh" --check "$release_sha" >"$root/missing-volume.log" 2>&1; then
@@ -280,7 +242,7 @@ fi
 docker volume create bank-event-gateway_gateway_data >/dev/null
 gateway_volume_id="$(docker volume inspect --format '{{.Name}}:{{.CreatedAt}}' bank-event-gateway_gateway_data)"
 log_step "Pulling baseline images and preparing volumes..."
-for ref in "$GATEWAY_IMAGE_REF" "$WORKER_IMAGE_REF" "$DBTOOL_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker pull --platform linux/arm64 "$ref" >/dev/null; done
+for ref in "$GATEWAY_IMAGE_REF" "$WORKER_IMAGE_REF" "$DBTOOL_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker pull "$ref" >/dev/null; done
 docker pull busybox:1.37.0 >/dev/null
 docker run --rm --network none -v bank-event-gateway_gateway_data:/data busybox:1.37.0 chown 1000:1000 /data
 docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data "$DBTOOL_IMAGE_REF" -path /data/gateway.db -migrate
@@ -290,10 +252,10 @@ docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_da
 
 log_step "Starting canonical baseline containers..."
 docker compose --project-name acb --project-directory "$baseline" --env-file "$root/deploy/.env.production" --env-file "$baseline/runtime.env" \
-  -f "$baseline/compose.prod.yaml" up -d --no-deps gateway-blue worker auth-browser tts-gateway bark
+  -f "$baseline/compose.prod.yaml" up -d --no-deps gateway-blue worker tts-gateway bark
 
 log_step "Waiting for baseline containers to become healthy..."
-for service in gateway-blue worker auth-browser tts-gateway bark; do
+for service in gateway-blue worker tts-gateway bark; do
   deadline=$((SECONDS+120))
   until [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "acb-$service")" == healthy ]]; do
     if (( SECONDS >= deadline )); then
@@ -345,6 +307,8 @@ EOF
 for file in portfolio bark 9router; do printf '# unrelated fixture %s\n' "$file" > "$root/edge/dynamic/$file.yml"; done
 sha256sum "$root/edge/dynamic/"{middlewares,portfolio,bark,9router}.yml > "$root/unrelated.sha256"
 cat > "$root/edge/traefik.yml" <<'EOF'
+accessLog:
+  format: json
 entryPoints:
   web:
     address: ':8080'
@@ -409,6 +373,34 @@ case "${DOCKER_FAULT_MODE:-}" in
     fi ;;
   quiesce-timeout)
     if [[ " $* " == *' /worker -quiesce '* ]]; then sleep 50; fi ;;
+  legacy-worker-capabilities|candidate-missing-payment-drain)
+    if [[ " $* " == *' /worker -deploy-capabilities '* ]] && { [[ "$DOCKER_FAULT_MODE" == legacy-worker-capabilities && " $* " == *' exec '* ]] || [[ "$DOCKER_FAULT_MODE" == candidate-missing-payment-drain && " $* " == *' run '* ]]; }; then
+      report="$("$REAL_DOCKER" "$@")"
+      printf '%s\n' "$DOCKER_FAULT_MODE" > "${IDENTITY_FAULT_MARKER:?}"
+      printf '%s' "$report" | python3 -c 'import json,os,sys; d=json.load(sys.stdin); d.pop("paymentDrain"); d.update(protocol=2,sessionCheckpoint=True) if os.environ["DOCKER_FAULT_MODE"]=="legacy-worker-capabilities" else None; json.dump(d,sys.stdout)'
+      exit 0
+    fi ;;
+  quiesce-active-payments|quiesce-active-deliveries|quiesce-dispatcher-active|quiesce-invalid-journal|quiesce-legacy|quiesce-counter-boolean)
+    if [[ " $* " == *' /worker -quiesce '* ]]; then
+      report="$("$REAL_DOCKER" "$@")"
+      printf '%s\n' "$DOCKER_FAULT_MODE" > "${IDENTITY_FAULT_MARKER:?}"
+      printf '%s' "$report" | python3 -c '
+import json,os,sys
+d=json.load(sys.stdin)
+mode=os.environ["DOCKER_FAULT_MODE"]
+if mode=="quiesce-active-payments": d["activePaymentRequests"]=1
+elif mode=="quiesce-active-deliveries": d["activeDeliveries"]=1
+elif mode=="quiesce-dispatcher-active": d["dispatcher"]="DRAINING"
+elif mode=="quiesce-invalid-journal": d["journalSeq"]=-1
+elif mode=="quiesce-counter-boolean": d["activePaymentRequests"]=False
+elif mode=="quiesce-legacy":
+    # Legacy fields intentionally appear only in this rejected reply fixture.
+    d.pop("activePaymentRequests")
+    d.update(activePoll=False,sessionCheckpointed=True,generation=0)
+json.dump(d,sys.stdout)
+'
+      exit 0
+    fi ;;
   wrong-gateway|wrong-gateway-slot)
     if [[ " $* " == *' up -d --no-deps gateway-green '* ]]; then
       args=("$@")
@@ -512,27 +504,19 @@ verify_baseline() {
   [[ "$(docker inspect -f '{{.Config.Image}}' acb-worker)" == "$WORKER_IMAGE_REF" ]] || fail "$1 changed worker image"
 }
 
-set_recovery_flags() {
-  python3 - "$root/deploy/.env.production" "$1" "$2" <<'PY'
-import sys
-path,recovery,ai=sys.argv[1:]
-lines=[line for line in open(path) if not line.startswith(('AUTH_RECOVERY_ENABLED=','AI_CAPTCHA_ENABLED='))]
-with open(path,'w') as f:
-    f.writelines(lines)
-    f.write('AUTH_RECOVERY_ENABLED='+recovery+'\nAI_CAPTCHA_ENABLED='+ai+'\n')
-PY
-}
 
 run_suite_lifecycle() {
-  log_test_start "Strict recovery flags reject ambiguous values"
-  cp "$root/deploy/.env.production" "$root/base-production.env"
-  printf 'AUTH_RECOVERY_ENABLED=yes\n' >> "$root/deploy/.env.production"
-  expect_unchanged_failure 'invalid recovery flag' bash "$target/deploy.sh" --check "$release_sha"
-  cp "$root/base-production.env" "$root/deploy/.env.production"
-  printf 'AUTH_RECOVERY_ENABLED=false\nAUTH_RECOVERY_ENABLED=true\n' >> "$root/deploy/.env.production"
-  expect_unchanged_failure 'duplicate recovery flag' bash "$target/deploy.sh" --check "$release_sha"
-  cp "$root/base-production.env" "$root/deploy/.env.production"
-  log_test_pass "Recovery flags are strict and fail before mutation"
+  log_test_start "Legacy manifests reject deployment before lockfile mutation"
+  cp "$root/state.env" "$root/payOS-state.saved"
+  printf 'RELEASE_SHA=%s\nGATEWAY_SLOT=blue\n' "$base_sha" > "$root/state.env"
+  rm -f "$root/.deploy.lock"
+  for operation in --check --reconcile ''; do
+    if bash "$target/deploy.sh" ${operation:+"$operation"} "$release_sha" >"$root/legacy.log" 2>&1; then fail 'Legacy state admitted by normal deploy'; fi
+    [[ "$(cat "$root/legacy.log")" == *PAYOS_RUNTIME_MIGRATION_REQUIRED* ]] || fail 'Missing legacy diagnostic'
+    [[ ! -e "$root/.deploy.lock" && ! -e "$root/.deploy-pending" ]] || fail 'Legacy rejection mutated deployment files'
+  done
+  cp "$root/payOS-state.saved" "$root/state.env"
+  log_test_pass "Legacy state requires explicit migration"
   log_test_start "Incomplete static-hosting migration blocks all backend operations"
   mkdir "$root/.static-hosting-pending"
   for operation in --check --reconcile ''; do
@@ -576,9 +560,6 @@ run_suite_lifecycle() {
   [[ "$(sed -n 's/^GATEWAY_SLOT=//p' "$root/state.env")" == green ]] || fail 'Gateway did not flip to green'
   [[ "$(docker volume inspect --format '{{.Name}}:{{.CreatedAt}}' bank-event-gateway_gateway_data)" == "$gateway_volume_id" ]] || fail 'Gateway data volume changed during deployment'
   DEPLOY_PATH="$root" bash "$target/healthcheck.sh" route green "$release_sha"
-  ln -s "$target/setup-recovery.sh" "$root/deploy/setup-recovery.sh"
-  bash "$root/deploy/setup-recovery.sh" --help > "$root/stable-setup-help.log"
-  cmp "$root/setup-help.log" "$root/stable-setup-help.log" || fail 'Stable setup command did not resolve the packaged Python companion'
   log_test_pass "Baseline deploy committed successfully to green slot"
   [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller 2>/dev/null || true)" != true ]] || fail 'Default-off deployment started recovery controller'
 
@@ -613,7 +594,7 @@ PY
   log_test_pass "Stale gateway service rejection passed"
 
   log_test_start "Runtime service health, public endpoint and probe isolation checks"
-  for name in acb-gateway-green acb-worker acb-auth-browser acb-tts-gateway acb-bark; do
+  for name in acb-gateway-green acb-worker acb-tts-gateway acb-bark; do
     [[ "$(docker inspect --format '{{.State.Health.Status}}' "$name")" == healthy ]] || fail "$name unhealthy after deployment"
   done
   for name in acb-gateway-blue; do
@@ -634,6 +615,7 @@ PY
   [[ "$(docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -s -o /dev/null -w '%{http_code}' \
     -H 'Host: gateway-deploy.acb.internal.invalid' http://127.0.0.1:18080/internal/private)" == 404 ]] || fail 'Internal gateway probe leaks private API'
   log_test_pass "Runtime service health and boundary isolation checks passed"
+  python3 "$repo/deploy/tests/payment_ingress_fixture.py"
 
   log_test_start "Verified snapshot receipt, schema migration and sentinel check"
   receipt="$(find "$root/data/backups" -name receipt.json -print -quit)"
@@ -664,179 +646,35 @@ PY
   [[ "$(sha256sum "$root/state.env")" == "$state_before" ]] || fail 'Same SHA rewrote committed state'
   [[ "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$route_before" ]] || fail 'Same SHA rewrote app route'
   log_test_pass "No-op deployment rerun passed (no mutation)"
-  log_test_start "Recovery controller opt-in, shared worker digest, human mode without AI key"
-  python3 - "$root/deploy/secrets" <<'PY'
-import os,sys
-root=sys.argv[1]
-values={'acb_username':'fixture-operator','acb_password':'fixture-password','acb_account':'123456789', 'telegram_bot_token':'123456:fixture-token'}
-for name,value in values.items():
-    path=root+'/'+name
-    with open(path,'w') as f: f.write(value+'\n')
-    os.chmod(path,0o600); os.chown(path,1000,1000)
-PY
-  printf 'TELEGRAM_CHAT_ID=123456\nTELEGRAM_USER_ID=123456\n' >> "$root/deploy/.env.production"
-  set_recovery_flags true false
-  [[ ! -e "$root/deploy/secrets/ninerouter_api_key" ]] || fail 'Human-mode fixture unexpectedly has AI key'
-  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
-  candidate_worker_ref="$(docker inspect -f '{{.Config.Image}}' acb-worker)"
-  [[ "$(docker inspect -f '{{.Config.Image}}' acb-recovery-controller)" == "$candidate_worker_ref" ]] || fail 'Controller does not share worker digest'
-  EXPECTED_IMAGE_REF="$candidate_worker_ref" bash "$target/healthcheck.sh" container acb-recovery-controller 120
-  [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Opting into recovery restarted worker'
-  docker inspect acb-recovery-controller | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert set(c["NetworkSettings"]["Networks"])=={"acb-core","acb-egress"}; assert not c["HostConfig"]["PortBindings"]; assert c["HostConfig"]["ReadonlyRootfs"]; assert not any(m["Destination"].endswith("ninerouter_api_key") for m in c["Mounts"])'
-  log_test_pass "Human-mode controller healthy with shared worker image and no AI key"
-
-  log_test_start "Legacy importer is no-overwrite and runtime survives absent legacy files"
-  credential_before="$(docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data:ro python:3.13-alpine python -c '
-import hashlib,sqlite3
-db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
-rows=db.execute("SELECT revision,envelope FROM acb_credentials").fetchall(); assert len(rows)==1
-revision,envelope=rows[0]; assert revision==1
-assert b"fixture-password" not in envelope and b"fixture-operator" not in envelope
-assert db.execute("SELECT count(*) FROM auth_attempts").fetchone()[0]==0
-print(str(revision)+":"+hashlib.sha256(envelope).hexdigest())')"
-  docker inspect acb-recovery-controller | python3 -c '
-import json,sys
-container=json.load(sys.stdin)[0]
-legacy_names={
-    "acb_username",
-    "acb_password",
-    "acb_account",
-}
-assert not any("/run/import" in mount["Destination"] or mount["Destination"].rsplit("/",1)[-1] in legacy_names for mount in container["Mounts"])
-'
-  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
-  mkdir "$root/legacy-import-fixture"
-  for name in acb_username acb_password acb_account; do mv "$root/deploy/secrets/$name" "$root/legacy-import-fixture/$name"; done
-  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
-  EXPECTED_IMAGE_REF="$candidate_worker_ref" bash "$target/healthcheck.sh" container acb-recovery-controller 120
-  credential_after="$(docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data:ro python:3.13-alpine python -c '
-import hashlib,sqlite3
-db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
-revision,envelope=db.execute("SELECT revision,envelope FROM acb_credentials").fetchone()
-assert db.execute("SELECT count(*) FROM auth_attempts").fetchone()[0]==0
-print(str(revision)+":"+hashlib.sha256(envelope).hexdigest())')"
-  [[ "$credential_before" == "$credential_after" ]] || fail 'Import rerun or missing files changed encrypted credentials'
-  if (source "$target/simple-lib.sh"; import_recovery_credentials "$target" "$target/runtime.env" true) >"$root/import-missing.log" 2>&1; then fail 'Explicit import accepted missing legacy files'; fi
-  for name in acb_username acb_password acb_account; do mv "$root/legacy-import-fixture/$name" "$root/deploy/secrets/$name"; done
-  chmod 644 "$root/deploy/secrets/acb_password"
-  if (source "$target/simple-lib.sh"; import_recovery_credentials "$target" "$target/runtime.env") >"$root/import-mode.log" 2>&1; then fail 'Importer accepted group/world-readable credential file'; fi
-  chmod 600 "$root/deploy/secrets/acb_password"
-  mv "$root/deploy/secrets/acb_password" "$root/legacy-import-fixture/acb_password"
-  ln -s "$root/legacy-import-fixture/acb_password" "$root/deploy/secrets/acb_password"
-  if (source "$target/simple-lib.sh"; import_recovery_credentials "$target" "$target/runtime.env") >"$root/import-symlink.log" 2>&1; then fail 'Importer accepted symlink credential file'; fi
-  rm "$root/deploy/secrets/acb_password"
-  mv "$root/legacy-import-fixture/acb_password" "$root/deploy/secrets/acb_password"
-  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Permission preflight interrupted running bot'
-  log_test_pass "Imported ciphertext unchanged on rerun and missing-file runtime; no bank attempt created"
-
-  log_test_start "AI override and conditional secret admission"
-  set_recovery_flags true true
-  mv "$target/compose.auth-recovery-ai.yaml" "$root/ai-override.tmp"
-  # Exercise conditional admission, not the bundle-integrity guard tested above.
-  mv "$target/SHA256SUMS" "$root/recovery-checksums.tmp"
-  if bash "$target/deploy.sh" --check "$release_sha" >"$root/missing-ai-override.log" 2>&1; then fail 'Enabled AI accepted missing override'; fi
-  mv "$root/ai-override.tmp" "$target/compose.auth-recovery-ai.yaml"
-  mv "$root/recovery-checksums.tmp" "$target/SHA256SUMS"
-  if bash "$target/deploy.sh" --check "$release_sha" >"$root/missing-ai-secret.log" 2>&1; then fail 'Enabled AI accepted missing key'; fi
-  printf 'synthetic-api-key\n' > "$root/deploy/secrets/ninerouter_api_key"
-  chmod 600 "$root/deploy/secrets/ninerouter_api_key"
-  (
-    source "$target/simple-lib.sh"
-    compose_release "$target" "$target/runtime.env" config --format json
-  ) | python3 -c 'import json,sys; c=json.load(sys.stdin); s=c["services"]["recovery-controller"]; assert s["environment"]["AI_CAPTCHA_ENABLED"]=="true"; assert any(x["source"]=="ninerouter_api_key" for x in s["secrets"])'
-  rm "$root/deploy/secrets/ninerouter_api_key"
-  set_recovery_flags true false
-  log_test_pass "AI key and override required only when enabled"
-
-  log_test_start "Enabled recovery rerun cannot interrupt an active authentication attempt"
-  recovery_before="$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)"
-  reconfigure_state_before="$(sha256sum "$root/state.env")"
-  reconfigure_route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
-  # A later fixture connection isolates the active-attempt admission check from
-  # the live controller. Prompt/browser behavior is covered by the real browser
-  # and broker suites; no fabricated prompt is bound to a nonexistent browser.
-  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
-import datetime,sqlite3
-db=sqlite3.connect("/data/gateway.db"); now=datetime.datetime.now(datetime.timezone.utc)
-db.execute("INSERT INTO connections(id,created_at,updated_at) VALUES(?,?,?)",("disable-auth",now.isoformat(),now.isoformat()))
-db.execute("INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",("disable-attempt","disable-auth",0,"system:acb-recovery","IN_PROGRESS",(now+datetime.timedelta(minutes=10)).isoformat(),now.isoformat()))
-revision=db.execute("SELECT config_revision FROM connections WHERE id=?",("disable-auth",)).fetchone()[0]
-db.execute("INSERT INTO auth_recovery_episodes(id,connection_id,trigger_generation,generation,config_revision,attempt_id,state,attempt_count,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",("disable-episode","disable-auth",0,0,revision,"disable-attempt","WAITING_OTP",1,now.isoformat(),now.isoformat()))
-db.commit()'
-  if bash "$target/deploy.sh" "$release_sha" >"$root/reconfigure-active-auth.log" 2>&1; then fail 'Enabled recovery rerun bypassed active-auth deploy gate'; fi
-  [[ "$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)" == "$recovery_before" && "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Enabled rerun restarted or stopped controller holding active authentication'
-  [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" && "$(sha256sum "$root/state.env")" == "$reconfigure_state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$reconfigure_route_before" ]] || fail 'Rejected enabled rerun mutated committed runtime'
-  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data:ro python:3.13-alpine python -c '
-import sqlite3
-db=sqlite3.connect("file:/data/gateway.db?mode=ro",uri=True)
-assert db.execute("SELECT status,generation,owner_subject FROM auth_attempts WHERE id=?",("disable-attempt",)).fetchone()==("IN_PROGRESS",0,"system:acb-recovery")
-assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)'
-  log_test_pass "Enabled rerun preserves active attempt and running controller without cancellation"
-
-  log_test_start "Reconciliation rejects a non-current release without redeploying"
-  if bash "$target/deploy.sh" --reconcile "$base_sha" >"$root/reconcile-wrong-release.log" 2>&1; then fail 'Reconciliation accepted a non-current release'; fi
-  [[ ! -d "$root/.deploy-pending" ]] || fail 'Mismatched reconciliation started deployment mutation'
-  [[ "$(sha256sum "$root/state.env")" == "$reconfigure_state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$reconfigure_route_before" && "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Mismatched reconciliation changed worker/state/route'
-  [[ "$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' acb-recovery-controller)" == "$recovery_before" && "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Mismatched reconciliation interrupted recovery controller'
-  log_test_pass "Non-current reconciliation preserves the current release and singleton processes"
-
-  log_test_start "Disabling new controller and re-enabling without worker disruption"
-  set_recovery_flags false false
-  if bash "$target/deploy.sh" "$release_sha" >"$root/disable-active-auth.log" 2>&1; then fail 'Disabling recovery bypassed active-auth deploy gate'; fi
-  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == true ]] || fail 'Failed admission stopped controller holding live authentication'
-  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
-import sqlite3
-db=sqlite3.connect("/data/gateway.db")
-assert db.execute("SELECT status FROM auth_attempts WHERE id=?",("disable-attempt",)).fetchone()[0]=="IN_PROGRESS"
-assert db.execute("SELECT state,finished_at FROM auth_recovery_episodes WHERE id=?",("disable-episode",)).fetchone()==("WAITING_OTP",None)
-db.execute("DELETE FROM auth_recovery_episodes WHERE id=?",("disable-episode",))
-db.execute("DELETE FROM auth_attempts WHERE id=?",("disable-attempt",)); db.execute("DELETE FROM connections WHERE id=?",("disable-auth",)); db.commit()'
-  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
-  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'Disabled controller still running'
-  [[ "$(docker inspect -f '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Disabling recovery restarted worker'
-  set_recovery_flags true false
-  DEPLOY_PATH="$root" bash "$target/deploy.sh" "$release_sha"
-  log_test_pass "New-bundle disable stops controller and opt-in restarts it"
-
+  log_test_start "Production-parity payOS secrets and disabled-create gate"
+  for name in acb-worker acb-gateway-green; do
+    docker inspect "$name" | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert c["HostConfig"]["ReadonlyRootfs"]; assert c["Config"]["User"]=="1000:1000"; mounts={m["Destination"]:m for m in c["Mounts"]}; assert all(not mounts["/run/secrets/"+n]["RW"] for n in ("payos_client_id","payos_api_key","payos_checksum_key")); env=dict(x.split("=",1) for x in c["Config"]["Env"]); assert env["PAYMENTS_ENABLED"]=="false" and env["PAYOS_WEBHOOK_CONFIRMED"]=="false"; assert not any("AUTH_BROWSER" in k or "POLL_MIN" in k for k in env)'
+  done
+  config="$(docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -fsS -H 'Host: transactions.tuannguyenviet.site' http://127.0.0.1:8080/api/public/v1/payment-config)"
+  printf '%s' "$config" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c["provider"]=="PAYOS" and c["ready"] is False and c["status"]=="DISABLED"'
+  [[ -z "$(docker ps -aq --filter name='^/acb-auth-browser$' --filter name='^/acb-recovery-controller$')" ]] || fail 'Retired runtime containers created'
+  log_test_pass "payOS runtime is hardened and cannot issue orders before confirmation"
 
   log_test_start "Deployment rollback check"
   DEPLOY_PATH="$root" bash "$target/deploy.sh" --rollback
   [[ "$(curl -s -o /dev/null -w '%{http_code}' 'https://transactions.tuannguyenviet.site/api/public/v1/transactions?limit=1')" == 200 ]] || fail 'Public transactions API fixture not healthy after rollback'
   [[ "$(sed -n 's/^RELEASE_SHA=//p' "$root/state.env")" == "$base_sha" ]] || fail 'Rollback did not restore baseline'
   [[ "$(docker inspect --format '{{.Config.Image}}' acb-worker)" == "$WORKER_IMAGE_REF" ]] || fail 'Rollback did not restore worker digest'
-  [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'Legacy rollback left new controller running'
-  (
-    source "$target/simple-lib.sh"
-    load_recovery_flags "$root/releases/$base_sha"
-    [[ "$RECOVERY_SERVICE_SUPPORTED" == false && "$AUTH_RECOVERY_ENABLED" == false && "$AI_CAPTCHA_ENABLED" == false ]]
-    compose_release "$root/releases/$base_sha" "$root/releases/$base_sha/runtime.env" config --quiet
-  ) || fail 'Legacy rollback applied unsupported recovery profile/override'
+  [[ -z "$(docker ps -aq --filter name='^/acb-auth-browser$' --filter name='^/acb-recovery-controller$')" ]] || fail 'Compatible rollback created retired services'
   DEPLOY_PATH="$root" bash "$target/deploy.sh" --rollback
   log_test_pass "Deployment rollback and no-op rollback passed"
-  set_recovery_flags false false
 
   state_before="$(sha256sum "$root/state.env")"
   route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
   worker_before="$(docker inspect --format '{{.Id}}' acb-worker)"
 
-  log_test_start "Active authentication in-progress blocking check"
-  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
-import datetime,sqlite3
-db=sqlite3.connect("/data/gateway.db")
-now=datetime.datetime.now(datetime.timezone.utc)
-expiry=(now+datetime.timedelta(hours=2)).isoformat()
-db.execute("INSERT INTO connections(id,created_at,updated_at) VALUES(?,?,?)",("rehearsal-auth",now.isoformat(),now.isoformat()))
-db.execute("INSERT INTO auth_attempts(id,connection_id,generation,owner_subject,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",("rehearsal-attempt","rehearsal-auth",0,"deploy-smoke@example.invalid","IN_PROGRESS",expiry,now.isoformat()))
-db.commit()'
-  if bash "$target/deploy.sh" "$release_sha" >"$root/active-auth.log" 2>&1; then fail 'Active authentication did not block deployment'; fi
-  [[ "$(sha256sum "$root/state.env")" == "$state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$route_before" && "$(docker inspect --format '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Active-auth failure mutated runtime'
-  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine python -c '
-import sqlite3
-db=sqlite3.connect("/data/gateway.db")
-db.execute("DELETE FROM auth_attempts WHERE id=?",("rehearsal-attempt",))
-db.execute("DELETE FROM connections WHERE id=?",("rehearsal-auth",))
-db.commit()'
-  log_test_pass "Active authentication in-progress block passed"
+  log_test_start "Mutation gate admission blocks concurrent deployment"
+  blocker="$(docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data "$DBTOOL_IMAGE_REF" -path /data/gateway.db -gate-acquire -owner rehearsal-blocker -reason rehearsal -lease-duration 15m)"
+  blocker_token="$(printf '%s' "$blocker" | python3 -c 'import json,sys; print(json.load(sys.stdin)["leaseToken"])')"
+  if bash "$target/deploy.sh" "$release_sha" >"$root/blocked-gate.log" 2>&1; then fail 'Locked gate admitted deployment'; fi
+  [[ "$(sha256sum "$root/state.env")" == "$state_before" && "$(sha256sum "$root/edge/dynamic/acb.yml")" == "$route_before" && "$(docker inspect --format '{{.Id}}' acb-worker)" == "$worker_before" ]] || fail 'Rejected gate mutated runtime'
+  docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data "$DBTOOL_IMAGE_REF" -path /data/gateway.db -gate-release -owner rehearsal-blocker -lease-token "$blocker_token"
+  log_test_pass "Concurrent mutation gate preserves receiver and database"
 
   log_test_start "Schema migration failure and snapshot preservation check"
   backup_before_migration="$(find "$root/data/backups" -name receipt.json | wc -l)"
@@ -864,7 +702,8 @@ db.commit()' "$migration_checksum"
   unpullable_sha=ffffffffffffffffffffffffffffffffffffffff
   unpullable="$root/releases/$unpullable_sha"
   mkdir "$unpullable"
-  cp "$target/"{deploy.sh,simple-lib.sh,healthcheck.sh,render-route.sh,backup-db.sh,compose.prod.yaml,compose.auth-recovery-ai.yaml,seccomp-auth-browser.json,bark-entrypoint.sh,migrate-static-hosting.py,acb-route-publish.py,install-route-publisher.sh,setup-recovery.sh,setup-recovery.py} "$unpullable/"
+  cp -a "$target/." "$unpullable/"
+  rm "$unpullable/SHA256SUMS"
   python3 - "$target/images.env" "$unpullable/images.env" "$unpullable_sha" <<'PY'
 import sys
 src,dst,sha=sys.argv[1:]
@@ -872,6 +711,7 @@ text=open(src).read()
 text='\n'.join(('RELEASE_SHA='+sha if line.startswith('RELEASE_SHA=') else 'WORKER_IMAGE_REF=ghcr.io/thedemontuan/acb-transaction-webhook-worker@sha256:'+'f'*64 if line.startswith('WORKER_IMAGE_REF=') else line) for line in text.splitlines())+'\n'
 open(dst,'w').write(text)
 PY
+  (cd "$unpullable" && sha256sum deploy.sh simple-lib.sh healthcheck.sh render-route.sh backup-db.sh restore-db.sh backup-secrets.sh migrate-payos-runtime.sh migrate-payos-runtime.py workflow-runtime.py acb-route-publish.py install-route-publisher.sh verify-frontend.py compose.prod.yaml bark-entrypoint.sh images.env source-run.env > SHA256SUMS)
   pull_rc=0
   timeout 180 bash "$unpullable/deploy.sh" "$unpullable_sha" >"$root/image-pull.log" 2>&1 || pull_rc=$?
   [[ "$pull_rc" != 0 && "$pull_rc" != 124 ]] || fail "Missing image did not fail promptly (exit $pull_rc)"
@@ -928,7 +768,7 @@ init_fault_matrix_baseline() {
   fi
   state_before="$(sha256sum "$root/state.env")"
   route_before="$(sha256sum "$root/edge/dynamic/acb.yml")"
-  aux_before="$(docker inspect -f '{{.Id}}' acb-auth-browser acb-tts-gateway acb-bark)"
+  aux_before="$(docker inspect -f '{{.Id}}' acb-tts-gateway acb-bark)"
   worker_before="$(docker inspect --format '{{.Id}}' acb-worker)"
   log_step "Fault-matrix baseline established: $base_sha (blue slot active)."
 }
@@ -937,7 +777,7 @@ run_suite_fault_matrix() {
   log_step "Starting suite: fault-matrix"
   init_fault_matrix_baseline
 
-  for mode in corrupt-backup quiesce-timeout unhealthy-worker wrong-gateway wrong-gateway-slot stale-service; do
+  for mode in corrupt-backup quiesce-timeout legacy-worker-capabilities candidate-missing-payment-drain quiesce-active-payments quiesce-active-deliveries quiesce-dispatcher-active quiesce-invalid-journal quiesce-legacy quiesce-counter-boolean unhealthy-worker wrong-gateway wrong-gateway-slot stale-service; do
     log_test_start "Fault matrix test: $mode"
     if [[ "$mode" == quiesce-timeout ]]; then
       log_test_note "Executing quiesce-timeout test (sleep 50 in worker quiesce, outer timeout 480)"
@@ -948,6 +788,7 @@ run_suite_fault_matrix() {
     if [[ "$mode" == wrong-gateway-slot ]]; then
       printf 'services:\n  gateway-green:\n    environment:\n      PLATFORM_SLOT: blue\n' > "$root/wrong-gateway.yaml"
     fi
+    worker_before_fault="$(docker inspect --format '{{.Id}}' acb-worker)"
     fault_rc=0
     fault_started=$SECONDS
     DOCKER_FAULT_MODE="$mode" WRONG_GATEWAY_OVERRIDE="$root/wrong-gateway.yaml" IDENTITY_FAULT_MARKER="$root/$mode.injected" STALE_SERVICE_APPLIED="$root/stale-service-applied" \
@@ -963,9 +804,15 @@ PY
     fi
     [[ "$fault_rc" != 0 ]] || fail "$mode unexpectedly succeeded"
     if [[ "$mode" == wrong-gateway || "$mode" == wrong-gateway-slot ]]; then [[ -f "$root/$mode.injected" ]] || fail "$mode never reached candidate service"; fi
+    case "$mode" in
+      legacy-worker-capabilities|candidate-missing-payment-drain|quiesce-active-payments|quiesce-active-deliveries|quiesce-dispatcher-active|quiesce-invalid-journal|quiesce-legacy|quiesce-counter-boolean)
+        [[ -f "$root/$mode.injected" ]] || fail "$mode never reached the worker contract boundary"
+        [[ "$(docker inspect --format '{{.Id}}' acb-worker)" == "$worker_before_fault" ]] || fail "$mode replaced the worker despite an invalid drain contract"
+        ;;
+    esac
     if [[ "$mode" == stale-service ]]; then [[ -f "$root/stale-service-applied" ]] || fail 'Stale service fault never reached Traefik ACK'; fi
     if [[ "$mode" == corrupt-backup ]]; then
-      [[ "$(docker inspect -f '{{.Id}}' acb-auth-browser acb-tts-gateway acb-bark)" == "$aux_before" ]] || fail 'Backup corruption restarted auxiliaries'
+      [[ "$(docker inspect -f '{{.Id}}' acb-tts-gateway acb-bark)" == "$aux_before" ]] || fail 'Backup corruption restarted auxiliaries'
     fi
     [[ ! -d "$root/.deploy-pending" ]] || fail "$mode left recoverable deployment pending"
     [[ "$(sha256sum "$root/state.env")" == "$state_before" ]] || fail "$mode committed wrong state"
@@ -1068,7 +915,7 @@ case "$target_suite" in
     ;;
   fault-matrix)
     run_suite_fault_matrix
-    printf '[%s] [REHEARSAL] PASS: suite fault-matrix (corrupt-backup, quiesce-timeout, unhealthy-worker, wrong-gateway, wrong-gateway-slot, stale-service, TERM/KILL before-worker and recovery, KILL after-commit and recovery, rollback-ack-outage, unrelated routes)\n' "$(log_ts)"
+    printf '[%s] [REHEARSAL] PASS: suite fault-matrix (corrupt-backup, quiesce-timeout, incompatible drain capabilities/replies, unhealthy-worker, wrong-gateway, wrong-gateway-slot, stale-service, TERM/KILL before-worker and recovery, KILL after-commit and recovery, rollback-ack-outage, unrelated routes)\n' "$(log_ts)"
     ;;
   all)
     run_suite_lifecycle

@@ -17,14 +17,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/httpapi"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -84,36 +83,6 @@ func parseGatewayFlags(args []string, output io.Writer) (gatewayFlags, error) {
 		migrateOnly:    *migrateOnly,
 		backupTo:       *backupTo,
 	}, nil
-}
-
-func newGatewayPollNotifier(store *storage.Store, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return func(p storage.PollRun, insertedCount int) {
-		payload, err := storage.PollCompletedPayload(p, insertedCount)
-		if err != nil {
-			logger.Error("failed to build poll.completed payload", "error", err)
-			return
-		}
-		appendCtx, appendCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer appendCancel()
-		seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
-		if err != nil {
-			logger.Error("failed to append poll.completed journal event", "error", err)
-			return
-		}
-		if hub != nil {
-			hub.Publish(eventhub.Event{
-				Seq:         seq,
-				Epoch:       "ep1",
-				EventType:   "poll.completed",
-				AggregateID: p.ID,
-				Payload:     payload,
-				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
-			})
-		}
-	}
 }
 
 func main() {
@@ -318,7 +287,7 @@ func main() {
 	if cfg.MasterKeyFile != "" {
 		keyring, err = security.LoadKeyring(cfg.MasterKeyFile)
 		if err != nil {
-			logger.Error("load session encryption key", "error", err)
+			logger.Error("load notification encryption key", "error", err)
 			os.Exit(1)
 		}
 		store.WithKeyring(keyring)
@@ -327,20 +296,21 @@ func main() {
 	hub := eventhub.New()
 
 	var server *httpapi.Server
+	var monolithPayments *payments.Service
+	var monolithDispatcher *notification.Dispatcher
 	if cfg.RuntimeRole == config.RuntimeRoleGateway {
 		logger.Info("starting gateway in HTTP-only mode with worker RPC", "workerRPCURL", cfg.WorkerRPCURL)
 		workerClient := workerrpc.NewClient(cfg.WorkerRPCURL, cfg.WorkerInternalToken)
 		server = httpapi.New(cfg, store).
-			WithSyncRequester(workerClient).
-			WithPaymentBooster(workerClient).
-			WithHistoryEnsurer(workerClient).
-			WithHistoryJobManager(workerClient).
-			WithMonitorNotifier(workerClient).
 			WithEventHub(hub).
 			WithNotificationTester(workerClient).
 			WithProviderReader(workerClient).
 			WithWakeDispatcher(workerClient.WakeDispatcher).
 			WithWorkerProber(workerClient)
+		provider := paymentProvider(cfg, logger)
+		service := payments.NewService(cfg, store, provider, server.PaymentCommitNotifier()).
+			WithReconcileWake(workerClient.WakePaymentReconciler)
+		server.WithPayments(service)
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
 			server.WithRealtimeSubmit(coordinator.Submit)
@@ -411,45 +381,7 @@ func main() {
 		dispatcher := notification.NewDispatcher(store, notificationRegistry)
 		go dispatcher.Start(ctx)
 
-		acbClient, err := acb.NewClient("https://online.acb.com.vn", nil)
-		if err != nil {
-			logger.Error("create ACB client", "error", err)
-			os.Exit(1)
-		}
-		bankMonitor := monitor.New(store, acbClient, cfg.PollMinInterval, cfg.PollMaxInterval)
-		bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
-			for _, ev := range events {
-				hub.Publish(eventhub.Event{
-					Seq:         ev.JournalSeq,
-					Epoch:       ev.Epoch,
-					EventType:   ev.EventType,
-					AggregateID: ev.TransactionID,
-					Payload:     ev.Payload,
-					CreatedAt:   ev.CreatedAt,
-					CommittedAt: ev.CommittedAt,
-				})
-			}
-			dispatcher.Wake()
-		})
-		bankMonitor.WithPollNotifier(newGatewayPollNotifier(store, hub, logger))
-		var sessionLoader *monitor.SessionLoader
-		var historyRunner *monitor.HistoryJobRunner
-		if keyring != nil {
-			sessionLoader = monitor.NewSessionLoader(store, keyring, acbClient)
-			bankMonitor.WithSessionLoader(sessionLoader)
-			historyRunner = monitor.NewHistoryJobRunner(store, acbClient, bankMonitor.Scheduler(), sessionLoader)
-			go historyRunner.Run(ctx)
-		}
-		go bankMonitor.Run(ctx)
-
 		server = httpapi.New(cfg, store).
-			WithSyncRequester(bankMonitor).
-			WithPaymentBooster(&monolithPaymentBooster{bankMonitor: bankMonitor, store: store}).
-			WithHistoryJobManager(&monolithHistoryJobManager{store: store, runner: historyRunner}).
-			WithMonitorNotifier(httpapi.MonitorNotifierFunc(func(ctx context.Context) error {
-				bankMonitor.NotifySettingsChanged()
-				return nil
-			})).
 			WithEventHub(hub).
 			WithBarkSender(barkSender).
 			WithNotificationRegistry(notificationRegistry).
@@ -457,6 +389,12 @@ func main() {
 				dispatcher.Wake()
 				return nil
 			})
+		provider := paymentProvider(cfg, logger)
+		service := payments.NewService(cfg, store, provider, server.PaymentCommitNotifier())
+		server.WithPayments(service)
+		go service.Start(ctx)
+		monolithPayments = service
+		monolithDispatcher = dispatcher
 
 	}
 
@@ -506,6 +444,14 @@ func main() {
 		for _, srv := range servers {
 			_ = srv.Shutdown(shutdownCtx)
 		}
+		if monolithPayments != nil {
+			if err := monolithPayments.Quiesce(shutdownCtx); err != nil {
+				logger.Warn("payment drain did not complete", "error", err)
+			}
+			if err := monolithDispatcher.Drain(shutdownCtx); err != nil {
+				logger.Warn("notification drain did not complete", "error", err)
+			}
+		}
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server failed", "error", err)
@@ -514,73 +460,16 @@ func main() {
 	}
 }
 
-type monolithHistoryJobManager struct {
-	store  *storage.Store
-	runner *monitor.HistoryJobRunner
-}
-
-type monolithPaymentBooster struct {
-	bankMonitor *monitor.Monitor
-	store       *storage.Store
-}
-
-func (m *monolithPaymentBooster) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
-	if m.bankMonitor == nil {
-		return workerrpc.PaymentBoostStatus{}, errors.New("bank monitor not initialized")
+// Missing development credentials disable payments without preventing history
+// and administration from booting. Production configuration requires all keys.
+func paymentProvider(cfg config.Config, logger *slog.Logger) payments.Provider {
+	if cfg.PayOSClientID == "" || cfg.PayOSAPIKey == "" || cfg.PayOSChecksumKey == "" {
+		return nil
 	}
-	if m.store != nil {
-		conn, err := m.store.Connection(ctx)
-		if err != nil {
-			return workerrpc.PaymentBoostStatus{}, fmt.Errorf("lookup connection: %w", err)
-		}
-		if conn.State != "MONITORING" {
-			return workerrpc.PaymentBoostStatus{}, errors.New("bank connection is not in MONITORING state")
-		}
-	}
-	st := m.bankMonitor.StartPaymentBoost(amount)
-	return workerrpc.PaymentBoostStatus{
-		Active:     st.Active,
-		SessionID:  st.SessionID,
-		AmountVnd:  st.AmountVnd,
-		ExpiresIn:  st.ExpiresIn,
-		Phase:      st.Phase,
-		MinSeconds: st.MinSeconds,
-		MaxSeconds: st.MaxSeconds,
-	}, nil
-}
-
-func (m *monolithPaymentBooster) StopPaymentBoost(ctx context.Context, sessionID string) error {
-	if m.bankMonitor == nil {
-		return errors.New("bank monitor not initialized")
-	}
-	m.bankMonitor.StopPaymentBoost(sessionID)
-	return nil
-}
-
-func (m *monolithHistoryJobManager) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
-	conn, err := m.store.Connection(ctx)
+	provider, err := payments.NewPayOS(cfg.PayOSClientID, cfg.PayOSAPIKey, cfg.PayOSChecksumKey)
 	if err != nil {
-		return storage.HistorySyncJob{}, fmt.Errorf("failed to lookup connection: %w", err)
+		logger.Error("create payment provider failed")
+		os.Exit(1)
 	}
-	if conn.State != "MONITORING" {
-		return storage.HistorySyncJob{}, errors.New("bank connection is not in MONITORING state")
-	}
-	job, _, err := m.store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, fromDay, toDay)
-	if err != nil {
-		return storage.HistorySyncJob{}, err
-	}
-	if m.runner != nil {
-		m.runner.Wake()
-	}
-	return job, nil
-}
-
-func (m *monolithHistoryJobManager) CancelHistoryJob(ctx context.Context, jobID string) error {
-	if err := m.store.CancelHistorySyncJob(ctx, jobID); err != nil {
-		return err
-	}
-	if m.runner != nil {
-		m.runner.CancelJob(jobID)
-	}
-	return nil
+	return provider
 }

@@ -169,7 +169,7 @@ func TestVoiceStreamingAndTelemetry(t *testing.T) {
 		t.Fatalf("insert connection: %v", err)
 	}
 
-	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	rtRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{
 			Number:        "TXN_STREAM_1",
 			Credit:        500000,
@@ -178,7 +178,7 @@ func TestVoiceStreamingAndTelemetry(t *testing.T) {
 			EffectiveAt:   "12/09/2026",
 			Description:   "Payment 500k",
 		},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(rtRes.NewEvents) == 0 {
 		t.Fatalf("ingest realtime: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestSynthesizeTransactionAudioPolicies(t *testing.T) {
 	}
 
 	// Ingest 1 REALTIME credit transaction
-	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	rtRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{
 			Number:        "TXN_RT_1",
 			Credit:        500000,
@@ -265,14 +265,14 @@ func TestSynthesizeTransactionAudioPolicies(t *testing.T) {
 			EffectiveAt:   "12/09/2026",
 			Description:   "Payment 500k",
 		},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(rtRes.NewEvents) == 0 {
 		t.Fatalf("ingest realtime: %v", err)
 	}
 	rtTxnID := rtRes.NewEvents[0].TransactionID
 
 	// Ingest 1 CATCH_UP credit transaction
-	cuRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	cuRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{
 			Number:        "TXN_CU_1",
 			Credit:        300000,
@@ -281,7 +281,7 @@ func TestSynthesizeTransactionAudioPolicies(t *testing.T) {
 			EffectiveAt:   "12/09/2026",
 			Description:   "Catchup 300k",
 		},
-	}, false, "CATCH_UP")
+	}, "CATCH_UP")
 	if err != nil || len(cuRes.NewEvents) == 0 {
 		t.Fatalf("ingest catchup: %v", err)
 	}
@@ -356,10 +356,10 @@ func TestSynthesizeSummaryAudio(t *testing.T) {
 		t.Fatalf("insert connection: %v", err)
 	}
 
-	res, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	res, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_SUM_1", Credit: 100000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Desc 1"},
 		{Number: "TXN_SUM_2", Credit: 200000, Debit: 0, TransactionAt: "12/09/2026 10:00:01", EffectiveAt: "12/09/2026", Description: "Desc 2"},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(res.NewEvents) < 2 {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -456,9 +456,9 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
 	`, connID)
 
-	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	rtRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_RATE_1", Credit: 200000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Rate test"},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(rtRes.NewEvents) == 0 {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -576,9 +576,9 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
 	`, connID)
 
-	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	rtRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_TPL_1", Credit: 1000000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Shop Pay"},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(rtRes.NewEvents) == 0 {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -658,9 +658,9 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	`, connID)
 
 	// 1. Fresh REALTIME transaction
-	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	rtRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_PUB_1", Credit: 250000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Tip"},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(rtRes.NewEvents) == 0 {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -703,9 +703,9 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	}
 
 	// 3. Non-realtime source rejected with 422
-	cuRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	cuRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_PUB_CU", Credit: 500000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Historical"},
-	}, false, "CATCH_UP")
+	}, "CATCH_UP")
 	if err != nil || len(cuRes.NewEvents) == 0 {
 		t.Fatalf("ingest catchup: %v", err)
 	}
@@ -807,10 +807,10 @@ func TestVoiceSummaryStreamGETWithQueryParams(t *testing.T) {
 		VALUES(?, 'MONITORING', 1, '123456', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
 	`, connID)
 
-	rtRes, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123456", []storage.BatchTransactionItem{
+	rtRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_SUM_1", Credit: 100000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Order 1"},
 		{Number: "TXN_SUM_2", Credit: 200000, Debit: 0, TransactionAt: "12/09/2026 10:01:00", EffectiveAt: "12/09/2026", Description: "Order 2"},
-	}, false, "REALTIME")
+	}, "REALTIME")
 	if err != nil || len(rtRes.NewEvents) < 2 {
 		t.Fatalf("ingest: %v", err)
 	}

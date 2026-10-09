@@ -1,40 +1,38 @@
 import { expect, test } from '@playwright/test';
 
 test('activity page cursor pagination with next/prev, page size, and active tab', async ({ page }) => {
-  const pollCalls: string[] = [];
+  const deliveryCalls: string[] = [];
 
-  await page.route(/\/api\/v1\/poll-runs(?:\?.*)?$/, async (route) => {
+  await page.route(/\/api\/v1\/deliveries(?:\?.*)?$/, async (route) => {
     const url = new URL(route.request().url());
     const cursor = url.searchParams.get('cursor');
     const limit = url.searchParams.get('limit');
-    pollCalls.push(`cursor=${cursor}&limit=${limit}`);
+    deliveryCalls.push(`cursor=${cursor}&limit=${limit}`);
 
     if (!cursor) {
       // Page 1
       const items = Array.from({ length: 20 }, (_, i) => ({
-        id: `poll_${i + 1}`,
-        connectionId: 'conn_1',
-        generation: 1,
-        status: 'SUCCEEDED',
-        pages: 1,
-        rowsSeen: 10,
-        startedAt: `2026-09-14T10:${String(i).padStart(2, '0')}:00Z`,
+        id: `delivery_${i + 1}`,
+        eventId: `event_${i + 1}`,
+        endpointId: 'endpoint_1',
+        status: 'DELIVERED',
+        attempts: 1,
+        createdAt: `2026-09-14T10:${String(i).padStart(2, '0')}:00Z`,
       }));
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ items, nextCursor: 'poll_cursor_2' }),
+        body: JSON.stringify({ items, nextCursor: 'delivery_cursor_2' }),
       });
-    } else if (cursor === 'poll_cursor_2') {
+    } else if (cursor === 'delivery_cursor_2') {
       // Page 2
       const items = Array.from({ length: 5 }, (_, i) => ({
-        id: `poll_p2_${i + 1}`,
-        connectionId: 'conn_1',
-        generation: 1,
-        status: 'SUCCEEDED',
-        pages: 1,
-        rowsSeen: 5,
-        startedAt: `2026-09-14T09:${String(i).padStart(2, '0')}:00Z`,
+        id: `delivery_p2_${i + 1}`,
+        eventId: `event_p2_${i + 1}`,
+        endpointId: 'endpoint_1',
+        status: 'DELIVERED',
+        attempts: 1,
+        createdAt: `2026-09-14T09:${String(i).padStart(2, '0')}:00Z`,
       }));
       await route.fulfill({
         status: 200,
@@ -44,7 +42,7 @@ test('activity page cursor pagination with next/prev, page size, and active tab'
     }
   });
 
-  await page.goto('/admin/activity?tab=polling');
+  await page.goto('/admin/activity?tab=deliveries');
 
   // Page 1 assertions
   await expect(page.getByText('Trang 1 • 20 dòng')).toBeVisible();
@@ -67,17 +65,16 @@ test('activity page cursor pagination with next/prev, page size, and active tab'
 });
 
 test('switching tabs resets cursor pagination to page 1', async ({ page }) => {
-  await page.route(/\/api\/v1\/poll-runs(?:\?.*)?$/, async (route) => {
+  await page.route(/\/api\/v1\/audit(?:\?.*)?$/, async (route) => {
     const url = new URL(route.request().url());
     const cursor = url.searchParams.get('cursor');
     const items = Array.from({ length: cursor ? 5 : 20 }, (_, i) => ({
-      id: `poll_${i + 1}`,
-      connectionId: 'conn_1',
-      generation: 1,
-      status: 'SUCCEEDED',
-      pages: 1,
-      rowsSeen: 10,
-      startedAt: '2026-09-14T10:00:00Z',
+      id: `audit_${i + 1}`,
+      subject: 'operator@example.com',
+      role: 'OPERATOR',
+      action: 'PAYMENT_CANCEL',
+      target: `order_${i + 1}`,
+      createdAt: '2026-09-14T10:00:00Z',
     }));
     await route.fulfill({
       status: 200,
@@ -102,10 +99,10 @@ test('switching tabs resets cursor pagination to page 1', async ({ page }) => {
     });
   });
 
-  await page.goto('/admin/activity?tab=polling');
+  await page.goto('/admin/activity?tab=audit');
   await expect(page.getByText('Trang 1 • 20 dòng')).toBeVisible();
 
-  // Go to page 2 on polling
+  // Go to page 2 on audit
   await page.getByRole('button', { name: 'Sau' }).click({ force: true });
   await expect(page.getByText('Trang 2 • 5 dòng')).toBeVisible();
 
@@ -203,8 +200,8 @@ test('transactions page cursor pagination preserves summary stats and removes in
       const items = Array.from({ length: 20 }, (_, i) => ({
         id: `tx_${i + 1}`,
         semanticKey: `key_${i + 1}`,
-        accountNumber: '123456',
-        amount: 50000,
+        bank: i % 2 === 0 ? 'KienlongBank' : 'ACB',
+        ...(i % 2 === 0 ? { provider: 'PAYOS', orderCode: String(100000000000 + i) } : {}),
         credit: 50000,
         debit: 0,
         description: `Thanh toan don hang #${i + 1}`,
@@ -224,8 +221,9 @@ test('transactions page cursor pagination preserves summary stats and removes in
       const items = Array.from({ length: 15 }, (_, i) => ({
         id: `tx_p2_${i + 1}`,
         semanticKey: `key_p2_${i + 1}`,
-        accountNumber: '123456',
-        amount: 50000,
+        bank: 'KienlongBank',
+        provider: 'PAYOS',
+        orderCode: String(200000000000 + i),
         credit: 50000,
         debit: 0,
         description: `Thanh toan don hang p2 #${i + 1}`,
@@ -246,8 +244,10 @@ test('transactions page cursor pagination preserves summary stats and removes in
   await page.goto('/transactions');
 
   // Verify backend summary is preserved in stats cards
-  await expect(page.getByText('Tổng số giao dịch')).toBeVisible();
+  await expect(page.getByText('Giao dịch hôm nay')).toBeVisible();
   await expect(page.getByText('35', { exact: true })).toBeVisible();
+  await expect(page.getByText('KienlongBank', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('ACB', { exact: true }).first()).toBeVisible();
 
   // Verify pagination controls on page 1
   await expect(page.getByText('Trang 1 • 20 dòng')).toBeVisible();

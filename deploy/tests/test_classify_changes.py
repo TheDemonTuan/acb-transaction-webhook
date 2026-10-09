@@ -27,11 +27,9 @@ class ClassifyChangesTests(unittest.TestCase):
         self.assertEqual(classifier.classify_paths([]), (False, False))
 
     def test_dispatch_backend_forcing(self):
-        for inputs in [{'target': 'frontend', 'rehearse': True},
-                       {'target': 'frontend', 'import_account': '123'}]:
-            with self.subTest(inputs=inputs):
-                result = classifier.select('workflow_dispatch', inputs, lambda: self.fail('Unexpected auto'))
-                self.assertEqual((result['frontend'], result['backend']), ('true', 'true'))
+        result = classifier.select('workflow_dispatch', {'target': 'frontend', 'rehearse': True},
+                                   lambda: self.fail('Unexpected auto'))
+        self.assertEqual((result['frontend'], result['backend']), ('true', 'true'))
         result = classifier.select('workflow_dispatch', {'target': 'backend', 'deploy': False}, lambda: None)
         self.assertEqual((result['frontend'], result['backend']), ('false', 'true'))
 
@@ -44,10 +42,15 @@ class ClassifyChangesTests(unittest.TestCase):
                 self.assertEqual(set(result), {'frontend', 'backend', 'reason', 'base_sha'})
 
     def test_dispatch_input_validation(self):
-        for inputs in [{'target': 'unknown'}, {'deploy': 'true'}, {'rehearse': 'false'},
-                       {'import_account': 123}, {'import_account': 'not-an-account'}]:
+        for inputs in [{'target': 'unknown'}, {'deploy': 'true'}, {'rehearse': 'false'}]:
             with self.subTest(inputs=inputs), self.assertRaises(ValueError):
                 classifier.select('workflow_dispatch', inputs, lambda: self.fail('Unexpected auto'))
+
+    def test_initial_cutover_dispatch_builds_both_without_deploy_or_rehearsal(self):
+        result = classifier.select('workflow_dispatch',
+                                   {'target': 'all', 'deploy': False, 'rehearse': False},
+                                   lambda: self.fail('Unexpected auto'))
+        self.assertEqual((result['frontend'], result['backend']), ('true', 'true'))
 
     def test_auto_selected_on_push_and_dispatch(self):
         auto = lambda: (True, False, 'auto', SHA_A)

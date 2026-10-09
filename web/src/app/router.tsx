@@ -4,18 +4,32 @@ import { AdminLayout } from '../layouts/admin/AdminLayout';
 import { ViewerLayout } from '../layouts/viewer/ViewerLayout';
 import { OverviewPage } from '../pages/admin/OverviewPage';
 import { BankConnectionPage } from '../pages/admin/BankConnectionPage';
-import { ACBCredentialsPage } from '../pages/admin/ACBCredentialsPage';
 import { NotificationChannelsPage } from '../pages/admin/NotificationChannelsPage';
 import { ActivityPage } from '../pages/admin/ActivityPage';
 import { SystemPage } from '../pages/admin/SystemPage';
 import { TransactionsPage } from '../pages/viewer/TransactionsPage';
 import { TransactionDetailPage } from '../pages/viewer/TransactionDetailPage';
 import { isPublicViewerHost } from './runtime-mode';
+import { Outlet } from 'react-router-dom';
+import { AppProviders, PaymentPageProviders } from './providers';
+import { PayPage } from '../pages/public/PayPage';
+
+const paymentRoutes = [
+  {
+    path: '/pay',
+    element: <PaymentPageProviders><Outlet /></PaymentPageProviders>,
+    children: [
+      { index: true, element: <PayPage /> },
+      { path: ':id', element: <PayPage /> },
+    ],
+  },
+];
 
 export const publicRoutes = [
+  ...paymentRoutes,
   {
     path: '/',
-    element: <ViewerLayout />,
+    element: <AppProviders><ViewerLayout /></AppProviders>,
     children: [
       { index: true, element: <TransactionsPage /> },
       { path: 't/:id', element: <TransactionDetailPage /> },
@@ -28,13 +42,10 @@ export const publicRoutes = [
 ];
 
 export const adminRoutes = [
-  {
-    path: '/admin/acb-credentials',
-    element: <ACBCredentialsPage />,
-  },
+  ...paymentRoutes,
   {
     path: '/',
-    element: <AdminLayout />,
+    element: <AppProviders><AdminLayout /></AppProviders>,
     children: [
       { index: true, element: <OverviewPage /> },
       { path: 'admin', element: <OverviewPage /> },
@@ -47,7 +58,7 @@ export const adminRoutes = [
   },
   {
     path: '/transactions',
-    element: <ViewerLayout />,
+    element: <AppProviders><ViewerLayout /></AppProviders>,
     children: [
       { index: true, element: <TransactionsPage /> },
       { path: ':id', element: <TransactionDetailPage /> },

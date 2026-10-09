@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -18,25 +17,6 @@ type JournalEntry struct {
 	CreatedAt   string `json:"createdAt"`
 }
 
-// PollCompletedPayload builds the JSON payload for a poll.completed journal event.
-func PollCompletedPayload(p PollRun, insertedCount int) ([]byte, error) {
-	payload := map[string]any{
-		"pollId":        p.ID,
-		"status":        p.Status,
-		"classifier":    p.Classifier,
-		"httpStatus":    p.HTTPStatus,
-		"pages":         p.Pages,
-		"rowsSeen":      p.RowsSeen,
-		"insertedCount": insertedCount,
-		"error":         p.Error,
-		"startedAt":     p.StartedAt,
-		"finishedAt":    p.FinishedAt,
-	}
-	if p.RowsMatched != nil {
-		payload["rowsMatched"] = *p.RowsMatched
-	}
-	return json.Marshal(payload)
-}
 
 // AppendJournalEvent records a new event into the ordered event journal.
 func (s *Store) AppendJournalEvent(ctx context.Context, epoch, eventType, aggregateID string, payload []byte) (int64, error) {

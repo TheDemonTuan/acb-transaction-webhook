@@ -17,18 +17,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -38,154 +37,25 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
-type recoveryScheduler interface {
-	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
+type workerService struct {
+	payments             *payments.Service
+	dispatcher           *notification.Dispatcher
+	store                *storage.Store
+	notificationRegistry *notification.Registry
+	barkSender           *bark.Sender
+	barkPublicURL        string
+	coordinator          *workerstate.Coordinator
+	maintRunner          *maintenance.Runner
 }
 
-type workerRecoveryScheduler struct {
-	monitor *monitor.Monitor
-}
-
-func (s workerRecoveryScheduler) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
-	if s.monitor == nil {
-		return errors.New("bank monitor not initialized")
-	}
+func (w *workerService) WakePaymentReconciler(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.monitor.ScheduleRecovery(ctx, connectionID, generation, eventKey)
-}
-
-type workerService struct {
-	bankMonitor           *monitor.Monitor
-	recoveryScheduler     recoveryScheduler
-	historyRunner         *monitor.HistoryJobRunner
-	dispatcher            *notification.Dispatcher
-	verifierSessionLoader *monitor.SessionLoader
-	verifierClient        *acb.Client
-	store                 *storage.Store
-	notificationRegistry  *notification.Registry
-	barkSender            *bark.Sender
-	barkPublicURL         string
-	coordinator           *workerstate.Coordinator
-	maintRunner           *maintenance.Runner
-}
-
-func (w *workerService) RequestSync(ctx context.Context) error {
-	if w.bankMonitor == nil {
-		return fmt.Errorf("bank monitor not initialized")
+	if w.payments == nil {
+		return errors.New("payment service not initialized")
 	}
-	return w.bankMonitor.RequestSync(ctx)
-}
-
-func (w *workerService) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
-	if generation <= 0 || strings.TrimSpace(connectionID) == "" || strings.TrimSpace(eventKey) == "" {
-		return errors.New("invalid recovery parameters")
-	}
-	if w.store == nil {
-		return errors.New("storage not initialized")
-	}
-	conn, err := w.store.Connection(ctx)
-	if err != nil {
-		return fmt.Errorf("lookup connection: %w", err)
-	}
-	if conn.ID != connectionID || conn.Generation != generation || conn.State != "MONITORING" {
-		return fmt.Errorf("stale recovery request: connection is %s at generation %d in state %s", conn.ID, conn.Generation, conn.State)
-	}
-	if w.recoveryScheduler == nil {
-		return errors.New("recovery scheduler not configured")
-	}
-	return w.recoveryScheduler.ScheduleRecovery(ctx, connectionID, generation, eventKey)
-}
-
-func (w *workerService) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
-	if w.bankMonitor == nil {
-		return workerrpc.PaymentBoostStatus{}, fmt.Errorf("bank monitor not initialized")
-	}
-	if w.store != nil {
-		conn, err := w.store.Connection(ctx)
-		if err != nil {
-			return workerrpc.PaymentBoostStatus{}, fmt.Errorf("lookup connection: %w", err)
-		}
-		if conn.State != "MONITORING" {
-			return workerrpc.PaymentBoostStatus{}, errors.New("bank connection is not in MONITORING state")
-		}
-	}
-	st := w.bankMonitor.StartPaymentBoost(amount)
-	return workerrpc.PaymentBoostStatus{
-		Active:     st.Active,
-		SessionID:  st.SessionID,
-		AmountVnd:  st.AmountVnd,
-		ExpiresIn:  st.ExpiresIn,
-		Phase:      st.Phase,
-		MinSeconds: st.MinSeconds,
-		MaxSeconds: st.MaxSeconds,
-	}, nil
-}
-
-func (w *workerService) StopPaymentBoost(ctx context.Context, sessionID string) error {
-	if w.bankMonitor == nil {
-		return fmt.Errorf("bank monitor not initialized")
-	}
-	w.bankMonitor.StopPaymentBoost(sessionID)
-	return nil
-}
-
-func (w *workerService) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
-	if w.store == nil {
-		return storage.HistorySyncJob{}, errors.New("storage not initialized")
-	}
-	fromT, err := time.Parse("2006-01-02", fromDay)
-	if err != nil {
-		return storage.HistorySyncJob{}, fmt.Errorf("invalid fromDay: %w", err)
-	}
-	toT, err := time.Parse("2006-01-02", toDay)
-	if err != nil {
-		return storage.HistorySyncJob{}, fmt.Errorf("invalid toDay: %w", err)
-	}
-	if fromT.After(toT) {
-		return storage.HistorySyncJob{}, errors.New("fromDay must not be after toDay")
-	}
-	if toT.Sub(fromT) > 31*24*time.Hour {
-		return storage.HistorySyncJob{}, errors.New("range too large (max 31 days)")
-	}
-
-	conn, err := w.store.Connection(ctx)
-	if err != nil {
-		return storage.HistorySyncJob{}, fmt.Errorf("failed to lookup connection: %w", err)
-	}
-	if conn.State != "MONITORING" {
-		return storage.HistorySyncJob{}, errors.New("bank connection is not in MONITORING state")
-	}
-
-	job, _, err := w.store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, fromDay, toDay)
-	if err != nil {
-		return storage.HistorySyncJob{}, err
-	}
-	if w.historyRunner != nil {
-		w.historyRunner.Wake()
-	}
-	return job, nil
-}
-
-func (w *workerService) CancelHistoryJob(ctx context.Context, jobID string) error {
-	if w.store == nil {
-		return errors.New("storage not initialized")
-	}
-	if err := w.store.CancelHistorySyncJob(ctx, jobID); err != nil {
-		return err
-	}
-	if w.historyRunner != nil {
-		w.historyRunner.CancelJob(jobID)
-	}
-	return nil
-}
-
-func (w *workerService) NotifySettingsChanged(ctx context.Context) error {
-	if w.bankMonitor == nil {
-		return fmt.Errorf("bank monitor not initialized")
-	}
-	w.bankMonitor.NotifySettingsChanged()
+	w.payments.Wake()
 	return nil
 }
 
@@ -195,47 +65,6 @@ func (w *workerService) WakeDispatcher(ctx context.Context) error {
 	}
 	w.dispatcher.Wake()
 	return nil
-}
-
-func (w *workerService) VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error) {
-	reject := func(code string) error {
-		slog.Info("ACB session verification result", "generation", generation, "phase", "RESTORE", "code", code)
-		return &authsession.VerificationError{Code: code}
-	}
-	if generation <= 0 {
-		return nil, reject("VERIFICATION_UNAVAILABLE")
-	}
-	if w.store != nil {
-		conn, err := w.store.Connection(ctx)
-		if err != nil {
-			return nil, reject("VERIFICATION_UNAVAILABLE")
-		}
-		if conn.ID != account || conn.Generation != generation {
-			return nil, reject("VERIFICATION_SUPERSEDED")
-		}
-	}
-	if w.verifierSessionLoader == nil || w.verifierClient == nil {
-		return nil, reject("VERIFICATION_UNAVAILABLE")
-	}
-	var verifier *monitor.SessionVerifier
-	if w.bankMonitor != nil {
-		verifier = monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient, w.bankMonitor.Scheduler())
-	} else {
-		verifier = monitor.NewSessionVerifier(w.verifierSessionLoader, w.verifierClient)
-	}
-	return verifier.VerifySession(ctx, account, generation, password)
-}
-func (w *workerService) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
-	if w.store == nil || w.bankMonitor == nil || w.verifierSessionLoader == nil {
-		return errors.New("SESSION_INVALIDATION_UNAVAILABLE")
-	}
-	if err := w.store.CheckACBLogoutFence(ctx, connectionID, generation); err != nil {
-		return err
-	}
-	if err := w.bankMonitor.ClearSession(ctx, connectionID, generation); err != nil {
-		return err
-	}
-	return w.verifierSessionLoader.InvalidateSession(ctx, connectionID, generation)
 }
 
 func (w *workerService) TestNotificationChannel(ctx context.Context, channelID string) (workerrpc.TestNotificationResponse, error) {
@@ -316,7 +145,7 @@ func (w *workerService) TestNotificationChannel(ctx context.Context, channelID s
 				EventID:      "evt_test_ping",
 				EventType:    "bank.transaction.credit",
 				Target:       target,
-				EventPayload: []byte(`{"bank":"ACB","credit":"0","debit":"0","description":"Test Webhook Ping","source":"TEST"}`),
+				EventPayload: []byte(`{"bank":"KienlongBank","provider":"PAYOS","credit":"0","debit":"0","description":"Test Webhook Ping","source":"TEST"}`),
 			}
 			res := sender.Send(ctx, testReq)
 			if res.Outcome == notification.OutcomeSuccess {
@@ -371,164 +200,58 @@ func (w *workerService) NotificationProviderMetadata(ctx context.Context) (worke
 }
 
 func (w *workerService) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse, error) {
-	if w.coordinator == nil {
-		return workerrpc.QuiesceResponse{}, errors.New("coordinator not initialized")
+	if w.coordinator == nil || w.store == nil || w.payments == nil || w.dispatcher == nil {
+		return workerrpc.QuiesceResponse{}, errors.New("worker services not initialized")
 	}
-
-	// 1. Mark coordinator QUIESCING -> QUIESCED
 	if err := w.coordinator.Quiesce(ctx); err != nil {
-		return workerrpc.QuiesceResponse{}, fmt.Errorf("coordinator quiesce: %w", err)
+		return workerrpc.QuiesceResponse{}, err
 	}
-
-	// 2. Stop new ACB work and let the current stateful request finish.
-	if w.bankMonitor != nil && w.bankMonitor.Scheduler() != nil {
-		if err := w.bankMonitor.Scheduler().PauseAndDrain(ctx); err != nil {
-			_ = w.coordinator.Resume(context.Background())
-			return workerrpc.QuiesceResponse{}, fmt.Errorf("drain ACB scheduler: %w", err)
-		}
+	fail := func(err error) (workerrpc.QuiesceResponse, error) {
+		_ = w.Resume(context.Background())
+		return workerrpc.QuiesceResponse{}, err
 	}
-
-	// 3. Pause background history runner and requeue RUNNING jobs
-	if w.historyRunner != nil {
-		w.historyRunner.Pause()
+	// Stop financial producers first; their final commits may enqueue deliveries.
+	if err := w.payments.Quiesce(ctx); err != nil {
+		return fail(fmt.Errorf("drain payments: %w", err))
 	}
-	if w.store != nil {
-		requeueCtx, rCancel := context.WithTimeout(ctx, 3*time.Second)
-		_, requeueErr := w.store.RequeueRunningHistorySyncJobs(requeueCtx, "Worker quiesced for upgrade")
-		rCancel()
-		if requeueErr != nil {
-			_ = w.Resume(context.Background())
-			return workerrpc.QuiesceResponse{}, fmt.Errorf("checkpoint history jobs on quiesce: %w", requeueErr)
-		}
+	if err := w.dispatcher.Drain(ctx); err != nil {
+		return fail(fmt.Errorf("drain notification dispatcher: %w", err))
 	}
-
-	// 4. Stop new deliveries and wait for all in-flight sends to finish.
-	if w.dispatcher != nil {
-		if err := w.dispatcher.Drain(ctx); err != nil {
-			_ = w.Resume(context.Background())
-			return workerrpc.QuiesceResponse{}, fmt.Errorf("drain notification dispatcher: %w", err)
-		}
-	}
-
-	// 5. Pause maintenance runner
 	if w.maintRunner != nil {
 		w.maintRunner.Pause()
 	}
-
-	// 6. Persist freshest session snapshot before the singleton is stopped.
-	sessionCheckpointed := w.bankMonitor == nil
-	if w.bankMonitor != nil {
-		persistCtx, pCancel := context.WithTimeout(ctx, 3*time.Second)
-		persistErr := w.bankMonitor.PersistSession(persistCtx)
-		pCancel()
-		if persistErr != nil {
-			_ = w.Resume(context.Background())
-			return workerrpc.QuiesceResponse{}, fmt.Errorf("persist session snapshot on quiesce: %w", persistErr)
-		}
-		sessionCheckpointed = true
+	seq, err := w.store.GetMaxJournalSeq(ctx, "ep1")
+	if err != nil {
+		return fail(fmt.Errorf("read journal watermark: %w", err))
 	}
-
-	// 7. Report generation and latest durable checkpoints.
-	var gen, journalSeq int64
-	var checkpointStr, coverageTo, scanID string
-	if w.store != nil {
-		if conn, err := w.store.Connection(ctx); err == nil {
-			gen = conn.Generation
-			if cp, cpErr := w.store.GetCheckpoint(ctx, conn.ID); cpErr == nil && cp != nil {
-				checkpointStr = cp.UpdatedAt
-				coverageTo = cp.CoverageTo
-				scanID = cp.ScanID
-			}
-		}
-		var err error
-		journalSeq, err = w.store.GetMaxJournalSeq(ctx, "ep1")
-		if err != nil {
-			_ = w.Resume(context.Background())
-			return workerrpc.QuiesceResponse{}, fmt.Errorf("read journal checkpoint on quiesce: %w", err)
-		}
-	}
-
-	return workerrpc.QuiesceResponse{
-		Status:              "quiesced",
-		Quiesced:            true,
-		Generation:          gen,
-		Checkpoint:          checkpointStr,
-		CoverageTo:          coverageTo,
-		ScanID:              scanID,
-		Dispatcher:          "IDLE",
-		ActiveDeliveries:    0,
-		ActivePoll:          false,
-		JournalSeq:          journalSeq,
-		SessionCheckpointed: sessionCheckpointed,
-	}, nil
+	return workerrpc.QuiesceResponse{Status: "quiesced", Quiesced: true, Dispatcher: "IDLE", ActiveDeliveries: 0, ActivePaymentRequests: w.payments.ActiveRequests(), JournalSeq: seq}, nil
 }
 
 func (w *workerService) Resume(ctx context.Context) error {
-	// 1. Resume scheduler
-	if w.bankMonitor != nil && w.bankMonitor.Scheduler() != nil {
-		w.bankMonitor.Scheduler().Resume()
-	}
-
-	// 2. Resume history runner
-	if w.historyRunner != nil {
-		w.historyRunner.Resume()
-	}
-
-	// 3. Resume dispatcher
-	if w.dispatcher != nil {
-		w.dispatcher.Resume()
-	}
-
-	// 4. Resume maintenance runner
-	if w.maintRunner != nil {
-		w.maintRunner.Resume()
-	}
-
-	// 5. Unpause coordinator back to StateReady
 	if w.coordinator != nil {
 		if err := w.coordinator.Resume(ctx); err != nil {
 			return fmt.Errorf("coordinator resume: %w", err)
 		}
 	}
-
+	if w.dispatcher != nil {
+		w.dispatcher.Resume()
+	}
+	if w.maintRunner != nil {
+		w.maintRunner.Resume()
+	}
+	if w.payments != nil {
+		w.payments.Resume()
+	}
 	return nil
 }
 
-func newWorkerPollNotifier(store *storage.Store, waker interface{ Wake() }, hub *eventhub.Hub, logger *slog.Logger) func(storage.PollRun, int) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	var pollStatusMu sync.Mutex
-	var lastPollStatus string
-	return func(p storage.PollRun, insertedCount int) {
-		pollStatusMu.Lock()
-		statusChanged := p.Status != lastPollStatus
-		lastPollStatus = p.Status
-		pollStatusMu.Unlock()
-		if waker != nil && (insertedCount > 0 || statusChanged) {
-			waker.Wake()
-		}
-		payload, err := storage.PollCompletedPayload(p, insertedCount)
-		if err != nil {
-			logger.Error("failed to build poll.completed payload", "error", err)
-			return
-		}
-		appendCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer aCancel()
-		seq, err := store.AppendJournalEvent(appendCtx, "ep1", "poll.completed", p.ID, payload)
-		if err != nil {
-			logger.Error("failed to append poll.completed journal event", "error", err)
-			return
-		}
+func newWorkerPaymentNotifier(waker interface{ Wake() }, hub *eventhub.Hub) func(storage.EventNotification) {
+	return func(event storage.EventNotification) {
 		if hub != nil {
-			hub.Publish(eventhub.Event{
-				Seq:         seq,
-				Epoch:       "ep1",
-				EventType:   "poll.completed",
-				AggregateID: p.ID,
-				Payload:     payload,
-				CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
-			})
+			hub.Publish(eventhub.Event{Seq: event.JournalSeq, Epoch: event.Epoch, EventType: event.EventType, AggregateID: event.TransactionID, Payload: event.Payload, CreatedAt: event.CreatedAt, CommittedAt: event.CommittedAt})
+		}
+		if waker != nil {
+			waker.Wake()
 		}
 	}
 }
@@ -550,9 +273,9 @@ func main() {
 			Drain             bool `json:"drain"`
 			Resume            bool `json:"resume"`
 			NotificationDrain bool `json:"notificationDrain"`
-			SessionCheckpoint bool `json:"sessionCheckpoint"`
+			PaymentDrain      bool `json:"paymentDrain"`
 			JournalCheckpoint bool `json:"journalCheckpoint"`
-		}{2, true, true, true, true, true, true}
+		}{3, true, true, true, true, true, true}
 		if err := json.NewEncoder(os.Stdout).Encode(capabilities); err != nil {
 			fmt.Fprintf(os.Stderr, "encode deploy capabilities: %v\n", err)
 			os.Exit(1)
@@ -714,7 +437,7 @@ func main() {
 	if cfg.MasterKeyFile != "" {
 		keyring, err = security.LoadKeyring(cfg.MasterKeyFile)
 		if err != nil {
-			logger.Error("load session encryption key", "error", err)
+			logger.Error("load notification encryption key", "error", err)
 			os.Exit(1)
 		}
 		store.WithKeyring(keyring)
@@ -746,95 +469,60 @@ func main() {
 	}
 
 	var workerWg sync.WaitGroup
+	var dispatcherRunning, paymentsRunning, maintenanceRunning atomic.Bool
 
+	dispatcherRunning.Store(true)
 	dispatcher := notification.NewDispatcher(store, notificationRegistry)
 	workerWg.Add(1)
 	go func() {
 		defer workerWg.Done()
+		defer dispatcherRunning.Store(false)
 		dispatcher.Start(workerCtx)
 	}()
 
-	// 4. ACB Bank Monitor
-	acbClient, err := acb.NewClient("https://online.acb.com.vn", nil)
-	if err != nil {
-		logger.Error("create ACB client failed", "error", err)
-		os.Exit(1)
-	}
 	workerRealtimeHub := eventhub.New()
-	bankMonitor := monitor.New(store, acbClient, cfg.PollMinInterval, cfg.PollMaxInterval)
-	bankMonitor.WithEventNotifier(func(events []storage.EventNotification) {
-		for _, event := range events {
-			workerRealtimeHub.Publish(eventhub.Event{
-				Seq:         event.JournalSeq,
-				Epoch:       event.Epoch,
-				EventType:   event.EventType,
-				AggregateID: event.TransactionID,
-				Payload:     event.Payload,
-				CreatedAt:   event.CreatedAt,
-				CommittedAt: event.CommittedAt,
-			})
-		}
-		dispatcher.Wake()
-	})
-	bankMonitor.WithPollNotifier(newWorkerPollNotifier(store, dispatcher, workerRealtimeHub, logger))
-
-	var sessionLoader *monitor.SessionLoader
-	var verifierClient *acb.Client
-	var verifierSessionLoader *monitor.SessionLoader
-	if keyring != nil {
-		sessionLoader = monitor.NewSessionLoader(store, keyring, acbClient)
-		bankMonitor.WithSessionLoader(sessionLoader)
-
-		verifierClient, err = acb.NewClient("https://online.acb.com.vn", nil)
+	var provider payments.Provider
+	if cfg.PayOSClientID != "" && cfg.PayOSAPIKey != "" && cfg.PayOSChecksumKey != "" {
+		provider, err = payments.NewPayOS(cfg.PayOSClientID, cfg.PayOSAPIKey, cfg.PayOSChecksumKey)
 		if err != nil {
-			logger.Error("create ACB session verifier client failed", "error", err)
+			logger.Error("initialize payment provider", "error", err)
 			os.Exit(1)
 		}
-		verifierSessionLoader = monitor.NewSessionLoader(store, keyring, verifierClient)
 	}
+	paymentService := payments.NewService(cfg, store, provider, newWorkerPaymentNotifier(dispatcher, workerRealtimeHub))
+	paymentsRunning.Store(true)
 	workerWg.Add(1)
 	go func() {
 		defer workerWg.Done()
-		bankMonitor.Run(workerCtx)
+		defer paymentsRunning.Store(false)
+		paymentService.Run(workerCtx)
 	}()
-	logger.Info("ACB bank polling monitor started in worker")
+	logger.Info("payment reconciler started in singleton worker", "providerStatus", paymentService.Config().Status)
 
-	historyRunner := monitor.NewHistoryJobRunner(store, acbClient, bankMonitor.Scheduler(), sessionLoader).
-		WithMonitor(bankMonitor)
-	workerWg.Add(1)
-	go func() {
-		defer workerWg.Done()
-		historyRunner.Run(workerCtx)
-	}()
-	logger.Info("ACB durable history job runner started in worker")
-
-	// 5. Singleton Maintenance Runner (hourly retention and stale auth reap)
+	// Singleton maintenance retains durable delivery and journal housekeeping.
 	maintRunner := maintenance.NewRunner(store,
 		maintenance.WithRetentionPeriod(24*time.Hour),
 		maintenance.WithRetentionInterval(1*time.Hour),
-		maintenance.WithStaleAuthInterval(30*time.Second),
 	)
+	maintenanceRunning.Store(true)
 	workerWg.Add(1)
 	go func() {
 		defer workerWg.Done()
+		defer maintenanceRunning.Store(false)
 		maintRunner.Run(workerCtx)
 	}()
 	logger.Info("singleton maintenance runner started in worker")
 
 	// 6. Setup Private RPC Server
 	ws := &workerService{
-		bankMonitor:           bankMonitor,
-		recoveryScheduler:     workerRecoveryScheduler{monitor: bankMonitor},
-		historyRunner:         historyRunner,
-		dispatcher:            dispatcher,
-		verifierSessionLoader: verifierSessionLoader,
-		verifierClient:        verifierClient,
-		store:                 store,
-		notificationRegistry:  notificationRegistry,
-		barkSender:            barkSender,
-		barkPublicURL:         cfg.BarkPublicURL,
-		coordinator:           coordinator,
-		maintRunner:           maintRunner,
+		payments:             paymentService,
+		dispatcher:           dispatcher,
+		store:                store,
+		notificationRegistry: notificationRegistry,
+		barkSender:           barkSender,
+		barkPublicURL:        cfg.BarkPublicURL,
+		coordinator:          coordinator,
+		maintRunner:          maintRunner,
 	}
 
 	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken, workerrpc.WithServerTimeout(45*time.Second))
@@ -888,7 +576,7 @@ func main() {
 		if !coordinator.IsReady() {
 			return fmt.Errorf("worker state is %s", coordinator.State())
 		}
-		if bankMonitor == nil || dispatcher == nil || store == nil {
+		if paymentService == nil || dispatcher == nil || store == nil || maintRunner == nil {
 			return errors.New("worker services not fully initialized")
 		}
 		if err := store.Health(ctx); err != nil {
@@ -900,33 +588,9 @@ func main() {
 		if flock == nil {
 			return errors.New("singleton worker lock not held")
 		}
-		sched := bankMonitor.Scheduler()
-		if sched == nil || !sched.IsRunning() {
-			return errors.New("poll scheduler is not running")
+		if !paymentsRunning.Load() || !dispatcherRunning.Load() || !maintenanceRunning.Load() {
+			return errors.New("worker background loop stopped")
 		}
-		if kind := sched.CurrentTaskKind(); (kind == "REALTIME_POLL" || kind == "KEEPALIVE") && sched.CurrentTaskDuration() > 2*time.Minute {
-			return fmt.Errorf("poll scheduler task %s stalled for %s", kind, sched.CurrentTaskDuration().Round(time.Second))
-		}
-		return nil
-	})
-
-	coordinator.RegisterStopHook(func(stopCtx context.Context) error {
-		logger.Info("persisting session snapshot and checkpointing background jobs on shutdown")
-		// 1. Session snapshot persistence with fresh bounded context
-		persistCtx, pCancel := context.WithTimeout(stopCtx, 3*time.Second)
-		if err := bankMonitor.PersistSession(persistCtx); err != nil {
-			logger.Warn("persist session snapshot on shutdown", "error", err)
-		}
-		pCancel()
-
-		// 2. Requeue all RUNNING history sync jobs back to QUEUED
-		requeueCtx, rCancel := context.WithTimeout(stopCtx, 3*time.Second)
-		if n, err := store.RequeueRunningHistorySyncJobs(requeueCtx, "Graceful worker shutdown"); err != nil {
-			logger.Warn("requeue running history jobs on shutdown", "error", err)
-		} else if n > 0 {
-			logger.Info("requeued running history jobs on shutdown", "count", n)
-		}
-		rCancel()
 		return nil
 	})
 
@@ -995,11 +659,15 @@ func main() {
 
 	logger.Info("shutting down worker...")
 	// Drain if not already drained
-	drainCtx, dCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	drainCtx, dCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := ws.Quiesce(drainCtx); err != nil {
+		logger.Error("worker quiesce on shutdown failed", "error", err)
+		exitFailed = true
+	}
 	_ = coordinator.Drain(drainCtx)
 	dCancel()
 
-	// Stop coordinator (runs session persistence and job requeue)
+	// Stop coordinator after payment producers and notification sends are drained.
 	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = coordinator.Stop(shutdownCtx)
 	sCancel()

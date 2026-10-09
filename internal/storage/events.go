@@ -125,82 +125,96 @@ func (s *Store) EventPayload(ctx context.Context, eventID string) ([]byte, error
 
 // EmitTransactionEvent supports legacy callers and records the durable journal entry atomically.
 func (s *Store) EmitTransactionEvent(ctx context.Context, transactionID, eventType, namespace, semanticKey string, data any) (string, error) {
-	dataBytes, err := json.Marshal(data)
-	if err != nil {
-		return "", err
-	}
-
-	sum := sha256.Sum256([]byte(namespace + "\x00" + semanticKey + "\x00" + eventType))
-	eventID := "bevt_" + hex.EncodeToString(sum[:16])
-	payloadHash := hex.EncodeToString(sum[:])
-	createdAt := now()
-
-	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `
-			INSERT INTO events(id, transaction_id, event_type, payload, payload_hash, created_at)
-			VALUES(?, ?, ?, ?, ?, ?)
-			ON CONFLICT(transaction_id, event_type) DO NOTHING
-		`, eventID, transactionID, eventType, dataBytes, payloadHash, createdAt)
-		if err != nil {
-			return err
+	var eventID string
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		event, err := s.emitTransactionEventTx(ctx, tx, transactionID, eventType, namespace, semanticKey, data, now())
+		if event != nil {
+			eventID = event.EventID
+		} else {
+			sum := sha256.Sum256([]byte(namespace + "\x00" + semanticKey + "\x00" + eventType))
+			eventID = "bevt_" + hex.EncodeToString(sum[:16])
 		}
-		inserted, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if inserted == 0 {
-			return nil
-		}
-
-		// Queue delivery to all active endpoints
-		rows, err := tx.QueryContext(ctx, `
-			SELECT e.id, e.current_revision, COALESCE(e.provider, 'WEBHOOK'), COALESCE(s.key_id, 'k1')
-			FROM webhook_endpoints e
-			LEFT JOIN endpoint_secrets s ON s.endpoint_id = e.id AND s.status = 'ACTIVE'
-			WHERE e.status = 'ACTIVE'
-		`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-
-		type epInfo struct {
-			id       string
-			revision int
-			provider string
-			keyID    string
-		}
-		var endpoints []epInfo
-		for rows.Next() {
-			var ep epInfo
-			if err := rows.Scan(&ep.id, &ep.revision, &ep.provider, &ep.keyID); err != nil {
-				return err
-			}
-			endpoints = append(endpoints, ep)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-
-		for _, ep := range endpoints {
-			deliveryID := id("del")
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO deliveries(id, event_id, endpoint_id, endpoint_revision, key_id, status, attempts, next_attempt_at, created_at, updated_at)
-				VALUES(?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
-				ON CONFLICT(event_id, endpoint_id) DO NOTHING
-			`, deliveryID, eventID, ep.id, ep.revision, ep.keyID, createdAt, createdAt, createdAt)
-			if err != nil {
-				return err
-			}
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO event_journal(epoch,event_type,aggregate_id,payload_json,created_at) VALUES('ep1',?,?,?,?)`, eventType, transactionID, string(dataBytes), createdAt)
 		return err
 	})
-
 	if err != nil {
 		return "", fmt.Errorf("emit transaction event: %w", err)
 	}
 	return eventID, nil
+}
+
+// emitTransactionEventTx must run in the same transaction as financial writes.
+// A duplicate event produces neither deliveries nor a journal entry.
+func (s *Store) emitTransactionEventTx(ctx context.Context, tx *sql.Tx, transactionID, eventType, namespace, semanticKey string, data any, createdAt string) (*EventNotification, error) {
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(namespace + "\x00" + semanticKey + "\x00" + eventType))
+	eventID := "bevt_" + hex.EncodeToString(sum[:16])
+	payloadHash := hex.EncodeToString(sum[:])
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO events(id, transaction_id, event_type, payload, payload_hash, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(transaction_id, event_type) DO NOTHING
+	`, eventID, transactionID, eventType, dataBytes, payloadHash, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if inserted == 0 {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT e.id, e.current_revision, COALESCE(s.key_id, 'k1')
+		FROM webhook_endpoints e
+		LEFT JOIN endpoint_secrets s ON s.endpoint_id = e.id AND s.status = 'ACTIVE'
+		WHERE e.status = 'ACTIVE'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	type endpointRef struct {
+		id       string
+		revision int
+		keyID    string
+	}
+	var endpoints []endpointRef
+	for rows.Next() {
+		var ep endpointRef
+		if err := rows.Scan(&ep.id, &ep.revision, &ep.keyID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		endpoints = append(endpoints, ep)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, ep := range endpoints {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO deliveries(id, event_id, endpoint_id, endpoint_revision, key_id, status, attempts, next_attempt_at, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
+			ON CONFLICT(event_id, endpoint_id) DO NOTHING
+		`, id("del"), eventID, ep.id, ep.revision, ep.keyID, createdAt, createdAt, createdAt); err != nil {
+			return nil, err
+		}
+	}
+	journal, err := tx.ExecContext(ctx, `INSERT INTO event_journal(epoch,event_type,aggregate_id,payload_json,created_at) VALUES('ep1',?,?,?,?)`, eventType, transactionID, string(dataBytes), createdAt)
+	if err != nil {
+		return nil, err
+	}
+	seq, err := journal.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return &EventNotification{EventID: eventID, EventType: eventType, TransactionID: transactionID, Payload: dataBytes, CreatedAt: createdAt, JournalSeq: seq, Epoch: "ep1"}, nil
 }
 
 func (s *Store) FailDelivery(ctx context.Context, deliveryID, claimToken, reason string) error {

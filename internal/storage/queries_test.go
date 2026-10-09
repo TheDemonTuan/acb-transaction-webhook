@@ -8,29 +8,6 @@ import (
 	"time"
 )
 
-func TestCompleteAuthSessionRejectsStaleGeneration(t *testing.T) {
-	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	if _, err = store.ConfigureConnection(ctx, "***1234"); err != nil {
-		t.Fatal(err)
-	}
-	attempt, err := store.StartAuthAttempt(ctx, "owner", 5*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = store.DB().ExecContext(ctx, `UPDATE connections SET generation=generation+1 WHERE id=?`, attempt.ConnectionID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = store.CompleteAuthSession(ctx, attempt.ID, []byte("stale_session")); err == nil {
-		t.Fatal("expected stale generation to be rejected")
-	}
-}
-
 func TestTransactionCursorPaginationIsStable(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "pagination.db"))
@@ -38,7 +15,7 @@ func TestTransactionCursorPaginationIsStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	connection, _ := store.ConfigureConnection(ctx, "***1234")
+	connection := historicalConnectionFixture(t, store, ctx, "***1234")
 	for i := 0; i < 5; i++ {
 		_, err := store.IngestTransaction(ctx, TransactionInput{
 			ConnectionID: connection.ID, SemanticKey: fmt.Sprintf("ACB:%d", i), CanonicalHash: fmt.Sprintf("hash%d", i),
@@ -65,7 +42,7 @@ func TestTransactionCursorPaginationIsStable(t *testing.T) {
 	}
 }
 
-func TestCompleteAuthSessionAndListingQueries(t *testing.T) {
+func TestTransactionAndListingQueries(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
@@ -73,19 +50,10 @@ func TestCompleteAuthSessionAndListingQueries(t *testing.T) {
 	}
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***1234")
-	attempt, err := store.StartAuthAttempt(ctx, "owner", 5*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := historicalConnectionFixture(t, store, ctx, "***1234")
 
-	updatedConn, err := store.CompleteAuthSession(ctx, attempt.ID, []byte("session_cookies_data"))
-	if err != nil || updatedConn.State != "MONITORING" {
-		t.Fatalf("complete auth session failed: %+v %v", updatedConn, err)
-	}
-
-	// Ingest a transaction
-	_, _ = store.IngestTransaction(ctx, TransactionInput{
+	// Listing and payload reads must retain historical transaction/event rows.
+	txnID := historicalTransactionFixture(t, store, ctx, TransactionInput{
 		ConnectionID:  conn.ID,
 		SemanticKey:   "ACB:12345",
 		CanonicalHash: "hash12345",
@@ -94,7 +62,11 @@ func TestCompleteAuthSessionAndListingQueries(t *testing.T) {
 		Credit:        250000,
 		Description:   []byte("Test Listing"),
 		ParserVersion: "v1",
-	})
+	}, "REALTIME", "NONE")
+	eventID := historicalEventFixture(t, store, ctx, txnID, "bank.transaction.credit", []byte(`{"credit":"250000"}`))
+	if payload, err := store.EventPayload(ctx, eventID); err != nil || string(payload) != `{"credit":"250000"}` {
+		t.Fatalf("historical event payload=%s err=%v", payload, err)
+	}
 
 	txns, err := store.ListTransactions(ctx, 10)
 	if err != nil || len(txns) != 1 || txns[0].Credit != 250000 || txns[0].Description != "Test Listing" {

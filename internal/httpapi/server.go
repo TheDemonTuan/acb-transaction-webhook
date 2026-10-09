@@ -9,12 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,37 +20,14 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/ttsclient"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
-
-type SyncRequester interface {
-	RequestSync(context.Context) error
-}
-
-type HistoryEnsurer interface {
-	EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error)
-}
-
-type HistoryJobManager interface {
-	CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error)
-	CancelHistoryJob(ctx context.Context, jobID string) error
-}
-
-type MonitorNotifier interface {
-	NotifySettingsChanged(ctx context.Context) error
-}
-
-type MonitorNotifierFunc func(ctx context.Context) error
-
-func (f MonitorNotifierFunc) NotifySettingsChanged(ctx context.Context) error {
-	return f(ctx)
-}
 
 type WorkerProber interface {
 	Ready(ctx context.Context) error
@@ -67,11 +39,6 @@ type NotificationChannelTester interface {
 
 type NotificationProviderReader interface {
 	NotificationProviderMetadata(ctx context.Context) (workerrpc.NotificationProvidersResponse, error)
-}
-
-type PaymentBooster interface {
-	StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error)
-	StopPaymentBoost(ctx context.Context, sessionID string) error
 }
 
 type ipRateLimiter struct {
@@ -92,6 +59,13 @@ func (l *ipRateLimiter) allow(ip string, limit int, window time.Duration, now ti
 		l.history = make(map[string][]time.Time)
 	}
 	cutoff := now.Add(-window)
+	// Prune every idle client, not just the current IP, to bound the map across
+	// long-running public traffic. Each limiter instance uses one fixed window.
+	for key, entries := range l.history {
+		if len(entries) == 0 || !entries[len(entries)-1].After(cutoff) {
+			delete(l.history, key)
+		}
+	}
 	timestamps := l.history[ip]
 	valid := timestamps[:0]
 	for _, t := range timestamps {
@@ -110,39 +84,30 @@ func (l *ipRateLimiter) allow(ip string, limit int, window time.Duration, now ti
 type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
-	syncRequester          SyncRequester
-	paymentBooster         PaymentBooster
-	historyEnsurer         HistoryEnsurer
-	historyJobManager      HistoryJobManager
-	monitorNotifier        MonitorNotifier
-	workerProber           WorkerProber
-	channelTester          NotificationChannelTester
-	providerReader         NotificationProviderReader
-	cfg                    config.Config
-	store                  *storage.Store
-	auth                   *auth.Middleware
-	keyring                *security.Keyring
-	eventHub               *eventhub.Hub
-	realtimeSubmit         func(eventhub.Event) error
-	ttsClient              *ttsclient.Client
-	barkSender             *bark.Sender
-	notifRegistry          *notification.Registry
-	wakeFn                 WakeDispatcherFunc
-	instanceNonce          string
-	testCooldownMu         sync.Mutex
-	lastTestPerCh          map[string]time.Time
-	started                time.Time
-	handler                http.Handler
-	boostLimiter           *ipRateLimiter
-	credentialGrantLimiter *ipRateLimiter
-	vietQRClient           *http.Client
+	payments             *payments.Service
+	workerProber         WorkerProber
+	channelTester        NotificationChannelTester
+	providerReader       NotificationProviderReader
+	cfg                  config.Config
+	store                *storage.Store
+	auth                 *auth.Middleware
+	eventHub             *eventhub.Hub
+	realtimeSubmit       func(eventhub.Event) error
+	ttsClient            *ttsclient.Client
+	barkSender           *bark.Sender
+	notifRegistry        *notification.Registry
+	wakeFn               WakeDispatcherFunc
+	instanceNonce        string
+	testCooldownMu       sync.Mutex
+	lastTestPerCh        map[string]time.Time
+	started              time.Time
+	handler              http.Handler
+	paymentCreateLimiter *ipRateLimiter
+	paymentGetLimiter    *ipRateLimiter
+	paymentIntentLocks   [64]sync.Mutex
 }
 
 func New(cfg config.Config, store *storage.Store) *Server {
-	var keyring *security.Keyring
-	if cfg.MasterKeyFile != "" {
-		keyring, _ = security.LoadKeyring(cfg.MasterKeyFile)
-	}
 	var verifier auth.Verifier
 	if cfg.Production {
 		verifier = auth.NewCloudflareVerifier(cfg)
@@ -156,33 +121,30 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	instanceNonce := hex.EncodeToString(nonceBytes)
 
 	s := &Server{
-		cfg:                    cfg,
-		store:                  store,
-		auth:                   auth.New(cfg, verifier),
-		keyring:                keyring,
-		eventHub:               eventhub.New(),
-		ttsClient:              ttsClientInstance,
-		instanceNonce:          instanceNonce,
-		started:                time.Now().UTC(),
-		boostLimiter:           newIPRateLimiter(),
-		credentialGrantLimiter: newIPRateLimiter(),
+		cfg:                  cfg,
+		store:                store,
+		auth:                 auth.New(cfg, verifier),
+		eventHub:             eventhub.New(),
+		ttsClient:            ttsClientInstance,
+		instanceNonce:        instanceNonce,
+		started:              time.Now().UTC(),
+		paymentCreateLimiter: newIPRateLimiter(),
+		paymentGetLimiter:    newIPRateLimiter(),
 	}
 	r := chi.NewRouter()
-	r.Use(requestID, s.platformHeaders, securityHeaders, credentialResponseHeaders, recoverer)
+	r.Use(requestID, s.platformHeaders, securityHeaders, paymentResponseHeaders, recoverer)
 	r.Get("/healthz", s.health)
 	r.Get("/health", s.health)
 	r.Get("/readyz", s.ready)
 	r.Get("/ready", s.ready)
 	r.Get("/internal/deployz", s.deployReady)
+	r.Post("/api/integrations/payos/webhook", s.payOSWebhook)
 	r.Route("/api/public/v1", func(api chi.Router) {
+		api.Get("/payment-config", s.publicPaymentConfig)
+		api.Post("/payments", s.createPublicPayment)
+		api.Get("/payments/{id}", s.publicPayment)
 		api.Get("/transactions", s.publicTransactions)
 		api.Get("/transactions/{id}", s.publicTransactionDetail)
-		api.Get("/payment-qr", s.publicPaymentQR)
-		api.Get("/payment-qr/image", s.getPaymentQRImage)
-		api.Get("/payment-readiness", s.publicPaymentReadiness)
-		api.Post("/payment-activity", s.startPaymentActivity)
-		api.Delete("/payment-activity", s.stopPaymentActivity)
-		api.Post("/payment-activity/stop", s.stopPaymentActivity)
 		api.Get("/events", s.publicEventsStream)
 		api.Get("/events/stream", s.publicEventsStream)
 		api.Post("/voice/transactions/{id}", s.synthesizePublicTransactionAudio)
@@ -194,40 +156,24 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
-		api.Post("/payment-activity", s.startPaymentActivity)
-		api.Delete("/payment-activity", s.stopPaymentActivity)
-		api.Post("/payment-activity/stop", s.stopPaymentActivity)
+		api.Get("/payments", s.paymentOrders)
+		api.Get("/payments/{id}", s.payment)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requirePaymentMutationAllowed).Post("/payments", s.createAdminPayment)
+		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requirePaymentMutationAllowed).Post("/payments/{id}/cancel", s.cancelPayment)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Get("/payment-reviews", s.paymentReviews)
+		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Post("/payment-provider/confirm-webhook", s.confirmPaymentWebhook)
 		api.Get("/status", s.status)
 		api.Get("/csrf", auth.CSRF)
 		api.Get("/telemetry", s.telemetry)
 		api.Get("/ops/alerts", s.operationalAlerts)
-		api.Get("/connection", s.connection)
 		api.Get("/webhooks", s.endpoints)
 		api.Get("/transactions", s.transactions)
 		api.Get("/transactions/{id}", s.transactionDetail)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/transactions/ensure-history", s.ensureHistory)
-		api.Get("/transactions/history-sync-jobs/{id}", s.getHistoryJob)
-		api.Get("/history-sync-jobs/{id}", s.getHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/transactions/history-sync-jobs/{id}", s.cancelHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/history-sync-jobs/{id}", s.cancelHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/transactions/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/history-sync-jobs/{id}/cancel", s.cancelHistoryJob)
 		api.Get("/deliveries", s.deliveries)
-		api.Get("/poll-runs", s.pollRuns)
 		api.Get("/audit", s.auditLogs)
 		api.Get("/events", s.eventsStream)
 		api.Get("/events/stream", s.eventsStream)
 		api.Get("/realtime/status", s.realtimeStatus)
-		api.Get("/monitor/settings", s.getMonitorSettings)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/monitor/settings", s.updateMonitorSettings)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Put("/monitor/settings", s.updateMonitorSettings)
-		api.Get("/payment-qr", s.getPaymentQR)
-		api.Get("/payment-qr/image", s.getPaymentQRImage)
-		api.Get("/payment-readiness", s.publicPaymentReadiness)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr", s.savePaymentQR)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr/upload", s.uploadPaymentQR)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/payment-qr/generate", s.generatePaymentQR)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Delete("/payment-qr", s.deletePaymentQR)
 
 		api.Get("/voice/settings", s.getVoiceSettings)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Put("/voice/settings", s.updateVoiceSettings)
@@ -244,11 +190,6 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Post("/voice/transactions/summary", s.synthesizeSummaryAudio)
 		api.Get("/voice/transactions/summary/stream", s.synthesizeSummaryAudio)
 		api.Post("/voice/transactions/summary/stream", s.synthesizeSummaryAudio)
-
-		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/connection/configure", s.configure)
-		api.With(s.auth.Require(auth.Owner), s.requireCredentialOrigin, s.requireMutationAllowed).Post("/connection/credentials/grant", s.validateACBCredentialGrant)
-		api.With(s.auth.Require(auth.Owner), s.requireCredentialOrigin, s.requireMutationAllowed).Post("/connection/credentials", s.saveACBCredentials)
-		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Post("/connection/{action:pause|resume|sync}", s.connectionAction)
 
 		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/webhooks", s.createEndpoint)
 		api.With(s.auth.Require(auth.Owner), s.requireMutationAllowed).Post("/webhooks/{id}/{action:enable|disable}", s.endpointAction)
@@ -281,34 +222,6 @@ func (s *Server) EventHub() *eventhub.Hub {
 	return s.eventHub
 }
 
-func (s *Server) WithSyncRequester(requester SyncRequester) *Server {
-	s.syncRequester = requester
-	return s
-}
-
-func (s *Server) WithPaymentBooster(booster PaymentBooster) *Server {
-	s.paymentBooster = booster
-	return s
-}
-
-func (s *Server) WithVietQRClient(client *http.Client) *Server {
-	s.vietQRClient = client
-	return s
-}
-
-func (s *Server) WithHistoryJobManager(mgr HistoryJobManager) *Server {
-	s.historyJobManager = mgr
-	return s
-}
-
-func (s *Server) WithHistoryEnsurer(ensurer HistoryEnsurer) *Server {
-	s.historyEnsurer = ensurer
-	if ensurer != nil && s.historyJobManager == nil {
-		s.historyJobManager = &legacyHistoryEnsurerAdapter{ensurer: ensurer}
-	}
-	return s
-}
-
 func (s *Server) WithBarkSender(sender *bark.Sender) *Server {
 	s.barkSender = sender
 	return s
@@ -336,11 +249,6 @@ func (s *Server) WithWakeDispatcher(wake WakeDispatcherFunc) *Server {
 
 func (s *Server) WithWorkerProber(wp WorkerProber) *Server {
 	s.workerProber = wp
-	return s
-}
-
-func (s *Server) WithMonitorNotifier(notifier MonitorNotifier) *Server {
-	s.monitorNotifier = notifier
 	return s
 }
 
@@ -574,8 +482,8 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deployment readiness covers only critical request dependencies. Auxiliary
-	// realtime, auth-browser and TTS outages are reported below but do not evict
-	// a healthy gateway from the blue/green route.
+	// realtime and TTS outages are reported below but do not evict a healthy
+	// gateway from the blue/green route.
 	criticalStatus := status
 
 	if s.cfg.WorkerRealtimeEnabled {
@@ -588,21 +496,7 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 		resp["realtime"] = "disabled"
 	}
 
-	// 4. Auth-browser check (if configured)
-	if s.cfg.AuthBrowserURL != "" {
-		client := &http.Client{Timeout: 1500 * time.Millisecond}
-		res, err := client.Get(strings.TrimRight(s.cfg.AuthBrowserURL, "/") + "/healthz")
-		if err != nil || res.StatusCode != http.StatusOK {
-			resp["authBrowser"] = "unreachable"
-		} else {
-			resp["authBrowser"] = "ready"
-			_ = res.Body.Close()
-		}
-	} else {
-		resp["authBrowser"] = "disabled"
-	}
-
-	// 5. TTS gateway check (if configured)
+	// TTS gateway check (if configured)
 	if s.cfg.TTSGatewayURL != "" {
 		client := &http.Client{Timeout: 1500 * time.Millisecond}
 		res, err := client.Get(strings.TrimRight(s.cfg.TTSGatewayURL, "/") + "/health")
@@ -657,10 +551,6 @@ func (s *Server) requireMutationAllowed(next http.Handler) http.Handler {
 				})
 				return
 			}
-			if isCredentialAPIPath(r.URL.Path) {
-				writeCredentialError(w, err)
-				return
-			}
 			writeError(w, http.StatusInternalServerError, "failed to check mutation gate: "+err.Error())
 			return
 		}
@@ -668,26 +558,13 @@ func (s *Server) requireMutationAllowed(next http.Handler) http.Handler {
 	})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	connection, err := s.store.Connection(r.Context())
-	acb := map[string]any{"state": "UNCONFIGURED", "coverage": "NOT_STARTED", "lastSuccessfulPollAt": nil}
-	if err == nil {
-		acb["state"] = connection.State
-		acb["accountMasked"] = connection.AccountMasked
-		acb["generation"] = connection.Generation
-		acb["coverage"] = "PENDING_ACB_POC"
-		if poll, pollErr := s.store.LastSuccessfulPoll(r.Context(), connection.ID); pollErr == nil {
-			acb["lastSuccessfulPollAt"] = poll.FinishedAt
-		}
-
-		monSettings, errSettings := s.store.GetMonitorSettings(r.Context())
-		if errSettings == nil {
-			resolved := storage.ResolveSchedule(time.Now(), &monSettings)
-			acb["scheduleMode"] = resolved.Mode
-			acb["scheduleWindow"] = resolved.ActiveWindow
-			acb["scheduleMinSeconds"] = int(resolved.MinInterval.Seconds())
-			acb["scheduleMaxSeconds"] = int(resolved.MaxInterval.Seconds())
-		}
-	} else if !errors.Is(err, storage.ErrNotFound) {
+	w.Header().Set("Cache-Control", "no-store")
+	service := s.payments
+	if service == nil {
+		service = payments.NewService(s.cfg, s.store, nil, nil)
+	}
+	paymentStatus, err := service.Status(r.Context())
+	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage_error"})
 		return
 	}
@@ -700,7 +577,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"service":       "HEALTHY",
 		"version":       "2.0.0-dev",
 		"uptimeSeconds": int(time.Since(s.started).Seconds()),
-		"acb":           acb,
+		"payments":      paymentStatus,
 		"storage":       map[string]string{"status": "READY"},
 		"webhooks":      summary.ByProvider[notification.ProviderWebhook],
 		"notifications": summary,
@@ -730,25 +607,6 @@ func (s *Server) telemetry(w http.ResponseWriter, r *http.Request) {
 			}
 			isStuck := summary.Total.DeadLetter > 10 || summary.Total.Pending > 100
 			telemetry.Default.SetNotificationBacklog(summary.Total.Pending, summary.Total.DeadLetter, isStuck, byProv)
-		}
-		if histSummary, err := s.store.HistoryJobsSummary(ctx, 5*time.Minute); err == nil {
-			telemetry.Default.SetHistoryJobs(
-				histSummary.CountsByStatus,
-				time.Duration(histSummary.OldestQueuedAgeSeconds)*time.Second,
-				histSummary.StalledCount,
-				histSummary.TotalPagesDone,
-				histSummary.TotalRowsSeen,
-			)
-		}
-		if authSummary, err := s.store.AuthLifecycleSummary(ctx, 10*time.Minute); err == nil {
-			telemetry.Default.SetAuthLifecycle(
-				authSummary.HasActiveAttempt,
-				time.Duration(authSummary.ActiveAttemptAgeSeconds)*time.Second,
-				authSummary.ActiveAttemptStuck,
-				authSummary.SessionState,
-				authSummary.RecentAttemptsCount,
-				authSummary.AttemptsByStatus,
-			)
 		}
 		if gate, err := s.store.GetDeploymentGate(ctx); err == nil && gate != nil {
 			var expIn time.Duration
@@ -782,85 +640,6 @@ func (s *Server) operationalAlerts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"alerts": alerts,
 	})
-}
-func (s *Server) connection(w http.ResponseWriter, r *http.Request) {
-	c, err := s.store.Connection(r.Context())
-	if errors.Is(err, storage.ErrNotFound) {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": false, "authRecovery": nil})
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "storage_error")
-		return
-	}
-	var recovery any
-	episode, err := s.store.LatestAuthRecoveryEpisode(r.Context(), c.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "storage_error")
-		return
-	}
-	if err == nil {
-		recovery = map[string]string{
-			"state": episode.State, "reasonCode": episode.ReasonCode, "updatedAt": episode.UpdatedAt,
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "connection": c, "authRecovery": recovery})
-}
-func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		AccountMasked string `json:"accountMasked"`
-	}
-	if !decode(w, r, &in) {
-		return
-	}
-	c, err := s.store.ConfigureConnection(r.Context(), in.AccountMasked)
-	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	audit(s.store, r, "connection.configure", c.ID)
-	s.publishStateEvent("connection.changed", c.ID, c)
-	writeJSON(w, http.StatusCreated, c)
-}
-func (s *Server) connectionAction(w http.ResponseWriter, r *http.Request) {
-	if chi.URLParam(r, "action") == "sync" {
-		c, err := s.store.Connection(r.Context())
-		if err != nil {
-			writeError(w, http.StatusNotFound, "connection_not_found")
-			return
-		}
-		if c.State != "MONITORING" {
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "SYNC_UNAVAILABLE", "error": "Chỉ có thể đồng bộ khi ACB đang theo dõi giao dịch. Phiên hiện tại được giữ nguyên."})
-			return
-		}
-		if s.syncRequester == nil {
-			writeError(w, http.StatusServiceUnavailable, "Bộ đồng bộ ACB chưa sẵn sàng.")
-			return
-		}
-		if err := s.syncRequester.RequestSync(r.Context()); err != nil {
-			if errors.Is(err, monitor.ErrSyncUnavailable) {
-				writeJSON(w, http.StatusConflict, map[string]string{"code": "SYNC_UNAVAILABLE", "error": "Trạng thái ACB đã thay đổi. Vui lòng tải lại trước khi đồng bộ."})
-			} else {
-				writeError(w, http.StatusServiceUnavailable, "Không thể tiếp nhận yêu cầu đồng bộ ACB.")
-			}
-			return
-		}
-		audit(s.store, r, "connection.sync", c.ID)
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "ACCEPTED"})
-		return
-	}
-	c, err := s.store.TransitionConnection(r.Context(), chi.URLParam(r, "action"))
-	if errors.Is(err, storage.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "connection_not_found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	audit(s.store, r, "connection."+chi.URLParam(r, "action"), c.ID)
-	s.publishStateEvent("connection.changed", c.ID, c)
-	writeJSON(w, http.StatusAccepted, c)
 }
 func pageParams(r *http.Request) (int, string, error) {
 	limit := 50
@@ -945,664 +724,6 @@ func (s *Server) transactionDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, txn)
 }
 
-type ensureHistoryRequest struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-}
-
-func (s *Server) ensureHistory(w http.ResponseWriter, r *http.Request) {
-	var req ensureHistoryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Dữ liệu yêu cầu không hợp lệ.")
-		return
-	}
-	req.From = strings.TrimSpace(req.From)
-	req.To = strings.TrimSpace(req.To)
-	if req.From == "" || req.To == "" {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Ngày bắt đầu và kết thúc là bắt buộc (YYYY-MM-DD).")
-		return
-	}
-	fromT, err := time.Parse("2006-01-02", req.From)
-	if err != nil {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Định dạng ngày bắt đầu không hợp lệ (YYYY-MM-DD).")
-		return
-	}
-	toT, err := time.Parse("2006-01-02", req.To)
-	if err != nil {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Định dạng ngày kết thúc không hợp lệ (YYYY-MM-DD).")
-		return
-	}
-	if fromT.After(toT) {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Ngày bắt đầu không được sau ngày kết thúc.")
-		return
-	}
-	if toT.Sub(fromT) > 31*24*time.Hour {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_RANGE", "Khoảng thời gian vượt quá giới hạn tối đa 31 ngày.")
-		return
-	}
-
-	conn, err := s.store.Connection(r.Context())
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeStandardError(w, r, http.StatusBadRequest, "CONNECTION_NOT_READY", "Chưa cấu hình tài khoản ACB.")
-			return
-		}
-		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Không thể kiểm tra kết nối tài khoản ACB.")
-		return
-	}
-	if conn.State != "MONITORING" {
-		writeStandardError(w, r, http.StatusBadRequest, "CONNECTION_NOT_READY", "Tài khoản ACB chưa sẵn sàng hoặc chưa đăng nhập.")
-		return
-	}
-
-	// Check if the requested range is already complete in database
-	covered, err := s.store.CheckRangeCoverage(r.Context(), conn.ID, req.From, req.To)
-	if err == nil && covered {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":   "COMPLETED",
-			"coverage": "COMPLETE",
-			"synced":   false,
-			"job":      nil,
-		})
-		return
-	}
-
-	mgr := s.getHistoryJobManager()
-	if mgr == nil {
-		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Dịch vụ đồng bộ lịch sử tạm thời không khả dụng.")
-		return
-	}
-
-	job, err := mgr.CreateHistoryJob(r.Context(), req.From, req.To)
-	if err != nil {
-		slog.Warn("failed to create history job", "from", req.From, "to", req.To, "error", err)
-		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Không thể khởi tạo tiến trình đồng bộ: "+err.Error())
-		return
-	}
-
-	audit(s.store, r, "history_sync.create", job.ID)
-	s.publishStateEvent("history_sync.queued", job.ID, job)
-
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"id":       job.ID,
-		"status":   job.Status,
-		"coverage": "PENDING",
-		"synced":   false,
-		"job":      job,
-	})
-}
-
-func (s *Server) getHistoryJob(w http.ResponseWriter, r *http.Request) {
-	jobID := chi.URLParam(r, "id")
-	if jobID == "" {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Mã công việc không được để trống.")
-		return
-	}
-	if jobID == "latest" {
-		s.getLatestHistoryJob(w, r)
-		return
-	}
-
-	conn, err := s.store.Connection(r.Context())
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Lỗi kiểm tra kết nối.")
-		return
-	}
-
-	job, err := s.store.GetHistorySyncJob(r.Context(), jobID)
-	if err != nil {
-		if errors.Is(err, storage.ErrJobNotFound) {
-			writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
-			return
-		}
-		writeStandardError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Lỗi truy vấn tiến trình đồng bộ.")
-		return
-	}
-
-	// Validate ownership/context: singleton connection
-	if (conn.ID != "" && job.ConnectionID != "" && job.ConnectionID != conn.ID) || (conn.ID == "" && job.ConnectionID != "") {
-		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, job)
-}
-
-func (s *Server) getLatestHistoryJob(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.store.Connection(r.Context())
-	if err != nil || conn.ID == "" {
-		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Chưa có kết nối ACB.")
-		return
-	}
-
-	job, found, err := s.store.GetLatestHistorySyncJob(r.Context(), conn.ID)
-	if err != nil || !found {
-		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Chưa có tiến trình đồng bộ nào.")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, job)
-}
-
-func (s *Server) cancelHistoryJob(w http.ResponseWriter, r *http.Request) {
-	jobID := chi.URLParam(r, "id")
-	if jobID == "" {
-		writeStandardError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Mã công việc không được để trống.")
-		return
-	}
-
-	conn, err := s.store.Connection(r.Context())
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Lỗi kiểm tra kết nối.")
-		return
-	}
-
-	job, err := s.store.GetHistorySyncJob(r.Context(), jobID)
-	if err != nil {
-		if errors.Is(err, storage.ErrJobNotFound) {
-			writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
-			return
-		}
-		writeStandardError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Lỗi truy vấn tiến trình đồng bộ.")
-		return
-	}
-
-	if (conn.ID != "" && job.ConnectionID != "" && job.ConnectionID != conn.ID) || (conn.ID == "" && job.ConnectionID != "") {
-		writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
-		return
-	}
-
-	if job.Status == storage.HistoryJobStatusCompleted || job.Status == storage.HistoryJobStatusFailed {
-		writeStandardError(w, r, http.StatusConflict, "JOB_TERMINAL", "Tiến trình đồng bộ đã ở trạng thái kết thúc, không thể hủy.")
-		return
-	}
-
-	mgr := s.getHistoryJobManager()
-	if mgr == nil {
-		writeStandardError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Dịch vụ đồng bộ lịch sử tạm thời không khả dụng.")
-		return
-	}
-
-	if err := mgr.CancelHistoryJob(r.Context(), jobID); err != nil {
-		if errors.Is(err, storage.ErrJobNotFound) {
-			writeStandardError(w, r, http.StatusNotFound, "JOB_NOT_FOUND", "Không tìm thấy tiến trình đồng bộ.")
-			return
-		}
-		if errors.Is(err, storage.ErrJobTerminal) {
-			writeStandardError(w, r, http.StatusConflict, "JOB_TERMINAL", "Tiến trình đồng bộ đã ở trạng thái kết thúc, không thể hủy.")
-			return
-		}
-		writeStandardError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Không thể hủy tiến trình đồng bộ: "+err.Error())
-		return
-	}
-
-	audit(s.store, r, "history_sync.cancel", jobID)
-	s.publishStateEvent("history_sync.canceled", jobID, map[string]any{"id": jobID, "status": "CANCELED"})
-
-	job.Status = storage.HistoryJobStatusCanceled
-	writeJSON(w, http.StatusAccepted, job)
-}
-
-func (s *Server) getHistoryJobManager() HistoryJobManager {
-	if s.historyJobManager != nil {
-		return s.historyJobManager
-	}
-	if s.store != nil {
-		return &defaultStoreHistoryJobManager{store: s.store}
-	}
-	return nil
-}
-
-type defaultStoreHistoryJobManager struct {
-	store *storage.Store
-}
-
-func (m *defaultStoreHistoryJobManager) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
-	conn, err := m.store.Connection(ctx)
-	if err != nil {
-		return storage.HistorySyncJob{}, fmt.Errorf("lookup connection: %w", err)
-	}
-	if conn.State != "MONITORING" {
-		return storage.HistorySyncJob{}, errors.New("bank connection is not in MONITORING state")
-	}
-	job, _, err := m.store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, fromDay, toDay)
-	return job, err
-}
-
-func (m *defaultStoreHistoryJobManager) CancelHistoryJob(ctx context.Context, jobID string) error {
-	return m.store.CancelHistorySyncJob(ctx, jobID)
-}
-
-type legacyHistoryEnsurerAdapter struct {
-	ensurer HistoryEnsurer
-}
-
-func (a *legacyHistoryEnsurerAdapter) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
-	rowsSeen, err := a.ensurer.EnsureHistory(ctx, fromDay, toDay)
-	if err != nil {
-		return storage.HistorySyncJob{}, err
-	}
-	return storage.HistorySyncJob{
-		ID:        "syncjob_legacy",
-		Status:    storage.HistoryJobStatusCompleted,
-		RangeFrom: fromDay,
-		RangeTo:   toDay,
-		RowsSeen:  rowsSeen,
-		PagesDone: 1,
-	}, nil
-}
-
-func (a *legacyHistoryEnsurerAdapter) CancelHistoryJob(ctx context.Context, jobID string) error {
-	return nil
-}
-
-func (s *Server) getMonitorSettings(w http.ResponseWriter, r *http.Request) {
-	settings, err := s.store.GetMonitorSettings(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load monitor settings")
-		return
-	}
-	resolved := storage.ResolveSchedule(time.Now(), &settings)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"settings": settings,
-		"current": map[string]any{
-			"mode":             resolved.Mode,
-			"minSeconds":       int(resolved.MinInterval.Seconds()),
-			"maxSeconds":       int(resolved.MaxInterval.Seconds()),
-			"activeWindow":     resolved.ActiveWindow,
-			"nextTransitionAt": resolved.NextTransition.Format(time.RFC3339),
-			"nextMode":         resolved.NextMode,
-		},
-	})
-}
-
-func (s *Server) updateMonitorSettings(w http.ResponseWriter, r *http.Request) {
-	var input storage.MonitorSettings
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	saved, err := s.store.SaveMonitorSettings(r.Context(), input)
-	if err != nil {
-		if errors.Is(err, storage.ErrSettingsConflict) {
-			writeError(w, http.StatusConflict, "settings conflict: revision mismatch, please reload and retry")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid settings: "+err.Error())
-		return
-	}
-
-	audit(s.store, r, "monitor.settings.update", "singleton")
-
-	var wakeWarning string
-	if s.monitorNotifier != nil {
-		if err := s.monitorNotifier.NotifySettingsChanged(r.Context()); err != nil {
-			slog.Warn("monitor settings wake degraded", "error", err)
-			wakeWarning = "worker wake degraded; settings saved"
-		}
-	}
-
-	resolved := storage.ResolveSchedule(time.Now(), &saved)
-	respData := map[string]any{
-		"settings": saved,
-		"current": map[string]any{
-			"mode":             resolved.Mode,
-			"minSeconds":       int(resolved.MinInterval.Seconds()),
-			"maxSeconds":       int(resolved.MaxInterval.Seconds()),
-			"activeWindow":     resolved.ActiveWindow,
-			"nextTransitionAt": resolved.NextTransition.Format(time.RFC3339),
-			"nextMode":         resolved.NextMode,
-		},
-	}
-	if wakeWarning != "" {
-		respData["warning"] = wakeWarning
-	}
-	writeJSON(w, http.StatusOK, respData)
-}
-
-func (s *Server) getPaymentQR(w http.ResponseWriter, r *http.Request) {
-	qr, err := s.store.GetPaymentQR(r.Context(), "")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get payment qr")
-		return
-	}
-	if qr == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": false})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"configured": true,
-		"qr":         qr,
-		"hasImage":   qr.ImagePath != "",
-		"imageURL":   "/api/v1/payment-qr/image?v=" + strconv.FormatInt(qr.Revision, 10),
-	})
-}
-
-func (s *Server) getPaymentQRImage(w http.ResponseWriter, r *http.Request) {
-	amountStr := strings.TrimSpace(r.URL.Query().Get("amount"))
-	if amountStr != "" {
-		amount, err := strconv.ParseInt(amountStr, 10, 64)
-		if err != nil || amount <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid amount parameter")
-			return
-		}
-
-		qr, err := s.store.GetPaymentQR(r.Context(), "")
-		if err != nil || qr == nil || qr.AccountNumber == "" || qr.AccountName == "" {
-			writeError(w, http.StatusNotFound, "payment qr not configured")
-			return
-		}
-
-		vietQRURL := fmt.Sprintf("https://img.vietqr.io/image/970416-%s-compact.png?amount=%d&accountName=%s",
-			url.PathEscape(qr.AccountNumber), amount, url.QueryEscape(qr.AccountName))
-
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, vietQRURL, nil)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create upstream request")
-			return
-		}
-
-		client := s.vietQRClient
-		if client == nil {
-			client = &http.Client{Timeout: 10 * time.Second}
-		}
-		resp, err := client.Do(req)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			writeError(w, http.StatusBadGateway, "failed to fetch dynamic QR from VietQR provider")
-			return
-		}
-		defer resp.Body.Close()
-
-		imgBytes, err := io.ReadAll(http.MaxBytesReader(w, resp.Body, 2*1024*1024))
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to read generated QR data")
-			return
-		}
-
-		contentType := http.DetectContentType(imgBytes)
-		if !strings.HasPrefix(contentType, "image/png") &&
-			!strings.HasPrefix(contentType, "image/jpeg") &&
-			!strings.HasPrefix(contentType, "image/webp") {
-			writeError(w, http.StatusBadGateway, "invalid image received from VietQR provider")
-			return
-		}
-
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=300")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(imgBytes)
-		return
-	}
-
-	qr, err := s.store.GetPaymentQR(r.Context(), "")
-	if err != nil || qr == nil || qr.ImagePath == "" {
-		writeError(w, http.StatusNotFound, "payment qr image not found")
-		return
-	}
-
-	cleanedPath := filepath.Clean(qr.ImagePath)
-	dataDir := filepath.Dir(s.cfg.DatabasePath)
-	qrDir := filepath.Clean(filepath.Join(dataDir, "qr"))
-	rel, err := filepath.Rel(qrDir, cleanedPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		writeError(w, http.StatusForbidden, "invalid image path")
-		return
-	}
-
-	data, err := os.ReadFile(cleanedPath)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "qr image file missing")
-		return
-	}
-
-	contentType := qr.ImageContentType
-	if contentType == "" {
-		contentType = "image/png"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, qr.ImageHash))
-	w.Header().Set("Cache-Control", "private, max-age=3600")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
-}
-
-func (s *Server) savePaymentQR(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		AccountNumber string `json:"accountNumber"`
-		AccountName   string `json:"accountName"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	input.AccountNumber = strings.TrimSpace(input.AccountNumber)
-	input.AccountName = strings.TrimSpace(input.AccountName)
-	if input.AccountNumber == "" || input.AccountName == "" {
-		writeError(w, http.StatusBadRequest, "accountNumber and accountName are required")
-		return
-	}
-
-	existing, _ := s.store.GetPaymentQR(r.Context(), "")
-	qr := storage.PaymentQR{
-		AccountNumber: input.AccountNumber,
-		AccountName:   input.AccountName,
-		Provider:      "UPLOAD",
-	}
-	if existing != nil {
-		qr.ImagePath = existing.ImagePath
-		qr.ImageHash = existing.ImageHash
-		qr.ImageContentType = existing.ImageContentType
-		qr.Provider = existing.Provider
-		qr.Revision = existing.Revision
-	}
-	saved, err := s.store.SavePaymentQR(r.Context(), qr)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	audit(s.store, r, "payment_qr.save", saved.ID)
-	writeJSON(w, http.StatusOK, saved)
-}
-
-func (s *Server) uploadPaymentQR(w http.ResponseWriter, r *http.Request) {
-	// Limit upload size to 2MB
-	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
-	if err := r.ParseMultipartForm(2 * 1024 * 1024); err != nil {
-		writeError(w, http.StatusBadRequest, "image too large (max 2MB)")
-		return
-	}
-
-	file, header, err := r.FormFile("image")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "image file is required")
-		return
-	}
-	defer file.Close()
-
-	accountNumber := strings.TrimSpace(r.FormValue("accountNumber"))
-	accountName := strings.TrimSpace(r.FormValue("accountName"))
-
-	imgBytes, err := io.ReadAll(file)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read image file")
-		return
-	}
-
-	// Sniff MIME type - reject SVG/HTML/executable
-	contentType := http.DetectContentType(imgBytes)
-	if !strings.HasPrefix(contentType, "image/png") &&
-		!strings.HasPrefix(contentType, "image/jpeg") &&
-		!strings.HasPrefix(contentType, "image/webp") {
-		writeError(w, http.StatusBadRequest, "invalid image format: only PNG, JPEG and WebP allowed")
-		return
-	}
-
-	// Save image file
-	dataDir := filepath.Dir(s.cfg.DatabasePath)
-	qrDir := filepath.Join(dataDir, "qr")
-	_ = os.MkdirAll(qrDir, 0o750)
-
-	ext := ".png"
-	if strings.Contains(contentType, "jpeg") {
-		ext = ".jpg"
-	} else if strings.Contains(contentType, "webp") {
-		ext = ".webp"
-	}
-
-	imgHash := storage.HashBytes(imgBytes)
-	filePath := filepath.Join(qrDir, fmt.Sprintf("qr_%s%s", imgHash[:16], ext))
-	tempPath := filepath.Join(qrDir, fmt.Sprintf(".tmp_upload_%d", time.Now().UnixNano()))
-	if err := os.WriteFile(tempPath, imgBytes, 0o640); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to store image file")
-		return
-	}
-	if err := os.Rename(tempPath, filePath); err != nil {
-		_ = os.Remove(tempPath)
-		writeError(w, http.StatusInternalServerError, "failed to move image file")
-		return
-	}
-
-	existing, _ := s.store.GetPaymentQR(r.Context(), "")
-	qr := storage.PaymentQR{
-		AccountNumber:    accountNumber,
-		AccountName:      accountName,
-		ImagePath:        filePath,
-		ImageHash:        imgHash,
-		ImageContentType: contentType,
-		Provider:         "UPLOAD",
-	}
-	if existing != nil {
-		if qr.AccountNumber == "" {
-			qr.AccountNumber = existing.AccountNumber
-		}
-		if qr.AccountName == "" {
-			qr.AccountName = existing.AccountName
-		}
-	}
-	if qr.AccountNumber == "" || qr.AccountName == "" {
-		if existing == nil || existing.ImagePath != filePath {
-			_ = os.Remove(filePath)
-		}
-		writeError(w, http.StatusBadRequest, "accountNumber and accountName are required")
-		return
-	}
-
-	saved, err := s.store.SavePaymentQR(r.Context(), qr)
-	if err != nil {
-		if existing == nil || existing.ImagePath != filePath {
-			_ = os.Remove(filePath)
-		}
-		writeError(w, http.StatusInternalServerError, "failed to save payment qr: "+err.Error())
-		return
-	}
-
-	audit(s.store, r, "payment_qr.upload", saved.ID)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "OK",
-		"qr":       saved,
-		"imageURL": "/api/v1/payment-qr/image?v=" + strconv.FormatInt(saved.Revision, 10),
-	})
-	_ = header
-}
-
-func (s *Server) generatePaymentQR(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		AccountNumber string `json:"accountNumber"`
-		AccountName   string `json:"accountName"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	input.AccountNumber = strings.TrimSpace(input.AccountNumber)
-	input.AccountName = strings.TrimSpace(input.AccountName)
-	if input.AccountNumber == "" || input.AccountName == "" {
-		writeError(w, http.StatusBadRequest, "accountNumber and accountName are required")
-		return
-	}
-
-	// Generate VietQR using VietQR standard quick link (ACB BIN: 970416)
-	vietQRURL := fmt.Sprintf("https://img.vietqr.io/image/970416-%s-compact.png?accountName=%s",
-		url.PathEscape(input.AccountNumber), url.QueryEscape(input.AccountName))
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, vietQRURL, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create request")
-		return
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		writeError(w, http.StatusBadGateway, "failed to generate QR from VietQR provider")
-		return
-	}
-	defer resp.Body.Close()
-
-	imgBytes, err := io.ReadAll(http.MaxBytesReader(w, resp.Body, 2*1024*1024))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to read generated QR data")
-		return
-	}
-
-	// Validate content type
-	contentType := http.DetectContentType(imgBytes)
-	if !strings.HasPrefix(contentType, "image/png") &&
-		!strings.HasPrefix(contentType, "image/jpeg") &&
-		!strings.HasPrefix(contentType, "image/webp") {
-		writeError(w, http.StatusBadGateway, "invalid image received from VietQR provider")
-		return
-	}
-
-	dataDir := filepath.Dir(s.cfg.DatabasePath)
-	qrDir := filepath.Join(dataDir, "qr")
-	_ = os.MkdirAll(qrDir, 0o750)
-
-	imgHash := storage.HashBytes(imgBytes)
-	filePath := filepath.Join(qrDir, fmt.Sprintf("qr_gen_%s.png", imgHash[:16]))
-	tempPath := filepath.Join(qrDir, fmt.Sprintf(".tmp_gen_%d", time.Now().UnixNano()))
-	if err := os.WriteFile(tempPath, imgBytes, 0o640); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save generated QR image")
-		return
-	}
-	if err := os.Rename(tempPath, filePath); err != nil {
-		_ = os.Remove(tempPath)
-		writeError(w, http.StatusInternalServerError, "failed to move generated QR image")
-		return
-	}
-
-	qr := storage.PaymentQR{
-		AccountNumber:    input.AccountNumber,
-		AccountName:      input.AccountName,
-		ImagePath:        filePath,
-		ImageHash:        imgHash,
-		ImageContentType: contentType,
-		Provider:         "VIETQR",
-	}
-	saved, err := s.store.SavePaymentQR(r.Context(), qr)
-	if err != nil {
-		_ = os.Remove(filePath)
-		writeError(w, http.StatusInternalServerError, "failed to save qr: "+err.Error())
-		return
-	}
-
-	audit(s.store, r, "payment_qr.generate", saved.ID)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "OK",
-		"qr":       saved,
-		"imageURL": "/api/v1/payment-qr/image?v=" + strconv.FormatInt(saved.Revision, 10),
-	})
-}
-
-func (s *Server) deletePaymentQR(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeletePaymentQR(r.Context(), ""); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to delete payment qr")
-		return
-	}
-	audit(s.store, r, "payment_qr.delete", "singleton")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "DELETED"})
-}
 func (s *Server) deliveries(w http.ResponseWriter, r *http.Request) {
 	limit, cursor, err := pageParams(r)
 	if err != nil {
@@ -1610,23 +731,6 @@ func (s *Server) deliveries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, err := s.store.ListDeliveriesPage(r.Context(), limit, cursor)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if cursor != "" {
-			status = http.StatusBadRequest
-		}
-		writeError(w, status, "pagination request failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, page)
-}
-func (s *Server) pollRuns(w http.ResponseWriter, r *http.Request) {
-	limit, cursor, err := pageParams(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	page, err := s.store.ListPollRunsPage(r.Context(), limit, cursor)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if cursor != "" {

@@ -3,17 +3,15 @@ import { useQuery } from '@tanstack/react-query';
 import {
   Server,
   Database,
-  Cpu,
   RefreshCw,
   CheckCircle2,
-  AlertCircle,
   Activity,
 } from 'lucide-react';
 import { fetchStatus } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 
 export const SystemPage: React.FC = () => {
-  const { data: status, isLoading, refetch } = useQuery({
+  const { data: status, isLoading, isError, refetch } = useQuery({
     queryKey: queryKeys.status,
     queryFn: fetchStatus,
   });
@@ -40,6 +38,7 @@ export const SystemPage: React.FC = () => {
           <span>Làm mới</span>
         </button>
       </div>
+      {isError && <p role="alert" className="text-rose-700">Không thể tải trạng thái hệ thống.</p>}
 
       {/* Health Overview */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -55,12 +54,12 @@ export const SystemPage: React.FC = () => {
           <div className="mt-3">
             <div className="flex items-center gap-2">
               <span className="text-xl font-bold text-stone-900">
-                {status?.service || 'HEALTHY'}
+                {status?.service || 'Chưa có dữ liệu'}
               </span>
-              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+              {status?.service === 'HEALTHY' && <CheckCircle2 className="w-4 h-4 text-emerald-600" />}
             </div>
             <span className="text-xs text-stone-500 block mt-1">
-              Phiên bản hệ thống: v{status?.version || '2.0.0'}
+              Phiên bản hệ thống: {status?.version || 'Chưa có dữ liệu'}
             </span>
           </div>
         </div>
@@ -95,7 +94,7 @@ export const SystemPage: React.FC = () => {
           </div>
           <div className="mt-3">
             <span className="text-xl font-bold text-stone-900">
-              Sẵn sàng hoạt động
+              {status?.storage?.status || 'Chưa có dữ liệu'}
             </span>
             <span className="text-xs text-stone-500 block mt-1">
               Chế độ an toàn cao &middot; Giao dịch chuẩn ACID
@@ -108,27 +107,31 @@ export const SystemPage: React.FC = () => {
       <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-2xs space-y-4">
         <h3 className="font-bold text-stone-900 text-base">Thông số vận hành chi tiết</h3>
         <p className="text-sm text-stone-600">
-          Phiên ACB được quản lý qua menu Telegram. Chẩn đoán tại đây không bắt đầu đăng nhập hay thay đổi phiên ngân hàng.
+          Trạng thái payOS/KienlongBank dựa trên cấu hình và xử lý giao dịch, không phụ thuộc nhịp polling ngân hàng.
         </p>
 
         <div className="divide-y divide-stone-100 text-xs font-mono">
           <div className="py-2.5 flex items-center justify-between">
-            <span className="text-stone-500">Thế hệ phiên kết nối:</span>
-            <span className="font-bold text-stone-900">{status?.acb?.generation ?? 1}</span>
-          </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-stone-500">Mức độ bao phủ giao dịch:</span>
+            <span className="text-stone-500">Kênh thanh toán:</span>
             <span className="font-bold text-stone-900">
-              {status?.acb?.coverage === 'FULL'
-                ? 'Đầy đủ (FULL)'
-                : status?.acb?.coverage === 'PARTIAL'
-                ? 'Một phần (PARTIAL)'
-                : 'Chưa bắt đầu'}
+              {status?.payments ? `${status.payments.provider} / ${status.payments.bank}` : 'Đang tải'}
             </span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
-            <span className="text-stone-500">Số tài khoản đang theo dõi:</span>
-            <span className="font-bold text-stone-900">{status?.acb?.accountMasked || 'Chưa cấu hình'}</span>
+            <span className="text-stone-500">Trạng thái nhận đơn:</span>
+            <span className="font-bold text-stone-900">{status?.payments?.status ?? 'Đang tải'}</span>
+          </div>
+          <div className="py-2.5 flex items-center justify-between">
+            <span className="text-stone-500">Đơn đang chờ xử lý:</span>
+            <span className="font-bold text-stone-900">{status?.payments?.pendingOrders ?? 'Đang tải'}</span>
+          </div>
+          <div className="py-2.5 flex items-center justify-between">
+            <span className="text-stone-500">Mục cần kiểm tra:</span>
+            <span className="font-bold text-stone-900">{status?.payments?.reviewCount ?? 'Đang tải'}</span>
+          </div>
+          <div className="py-2.5 flex items-center justify-between">
+            <span className="text-stone-500">Webhook / đối soát gần nhất:</span>
+            <span className="font-bold text-stone-900">{status?.payments?.lastWebhookAt || 'Chưa ghi nhận'} / {status?.payments?.lastReconciledAt || 'Chưa ghi nhận'}</span>
           </div>
           <div className="py-2.5 flex items-center justify-between">
             <span className="text-stone-500">Thông báo đang xếp hàng gửi:</span>

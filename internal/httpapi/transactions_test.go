@@ -43,7 +43,7 @@ func TestTransactionsFilteredAndSummaryAndDetail(t *testing.T) {
 		} else {
 			debit = 5000
 		}
-		item := []storage.BatchTransactionItem{
+		item := []historicalTransactionFixture{
 			{
 				Number:        fmt.Sprintf("TXN_TODAY_%03d", i),
 				Credit:        credit,
@@ -53,7 +53,7 @@ func TestTransactionsFilteredAndSummaryAndDetail(t *testing.T) {
 				Description:   fmt.Sprintf("Payment order %d for coffee", i),
 			},
 		}
-		res, err := store.IngestTransactionsBatch(ctx, connID, 1, "123***789", item, false)
+		res, err := seedHistoricalTransactions(ctx, store, connID, "123***789", item, "REALTIME")
 		if err != nil {
 			t.Fatalf("ingest item %d: %v", i, err)
 		}
@@ -64,7 +64,7 @@ func TestTransactionsFilteredAndSummaryAndDetail(t *testing.T) {
 
 	// Ingest 10 yesterday transactions
 	for i := 1; i <= 10; i++ {
-		item := []storage.BatchTransactionItem{
+		item := []historicalTransactionFixture{
 			{
 				Number:        fmt.Sprintf("TXN_YEST_%03d", i),
 				Credit:        20000,
@@ -74,7 +74,7 @@ func TestTransactionsFilteredAndSummaryAndDetail(t *testing.T) {
 				Description:   fmt.Sprintf("Yesterday transaction %d", i),
 			},
 		}
-		if _, err := store.IngestTransactionsBatch(ctx, connID, 1, "123***789", item, false); err != nil {
+		if _, err := seedHistoricalTransactions(ctx, store, connID, "123***789", item, "REALTIME"); err != nil {
 			t.Fatalf("ingest yesterday item %d: %v", i, err)
 		}
 	}

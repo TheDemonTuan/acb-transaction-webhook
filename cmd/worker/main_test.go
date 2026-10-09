@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -52,14 +51,14 @@ func TestWorkerDeployCapabilities(t *testing.T) {
 		Drain             bool `json:"drain"`
 		Resume            bool `json:"resume"`
 		NotificationDrain bool `json:"notificationDrain"`
-		SessionCheckpoint bool `json:"sessionCheckpoint"`
+		PaymentDrain      bool `json:"paymentDrain"`
 		JournalCheckpoint bool `json:"journalCheckpoint"`
 	}
 	if err := json.Unmarshal(out, &capabilities); err != nil {
 		t.Fatalf("decode capabilities: %v", err)
 	}
-	if capabilities.Protocol < 2 || !capabilities.Quiesce || !capabilities.Drain || !capabilities.Resume ||
-		!capabilities.NotificationDrain || !capabilities.SessionCheckpoint || !capabilities.JournalCheckpoint {
+	if capabilities.Protocol < 3 || !capabilities.Quiesce || !capabilities.Drain || !capabilities.Resume ||
+		!capabilities.NotificationDrain || !capabilities.PaymentDrain || !capabilities.JournalCheckpoint {
 		t.Fatalf("incomplete deploy capabilities: %+v", capabilities)
 	}
 }
@@ -261,97 +260,23 @@ func (m *mockWaker) Wake() {
 	m.wakeCount++
 }
 
-func TestWorkerPollNotifier_RepeatSuccessfulEmptyPolls(t *testing.T) {
-	ctx := context.Background()
-	dbDir := t.TempDir()
-	dbPath := filepath.Join(dbDir, "worker_poll_test.db")
-
-	store, err := storage.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open storage: %v", err)
-	}
-	defer store.Close()
-
+func TestWorkerPaymentNotifierPublishesCommittedEventAndWakesDispatcher(t *testing.T) {
 	waker := &mockWaker{}
 	hub := eventhub.New()
-	_, published, cancelPublished := hub.Subscribe()
-	defer cancelPublished()
-	notifier := newWorkerPollNotifier(store, waker, hub, nil)
-
-	// Poll 1: Initial SUCCEEDED with 0 items (status changed "" -> "SUCCEEDED")
-	poll1 := storage.PollRun{
-		ID:        "poll_001",
-		Status:    "SUCCEEDED",
-		StartedAt: time.Now().UTC().Add(-5 * time.Second).Format(time.RFC3339Nano),
-		RowsSeen:  0,
-	}
-	notifier(poll1, 0)
+	_, published, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	notifier := newWorkerPaymentNotifier(waker, hub)
+	event := storage.EventNotification{JournalSeq: 42, Epoch: "ep1", EventType: "bank.transaction.credit", TransactionID: "txn_paid", Payload: []byte(`{"provider":"PAYOS","orderCode":"123456789012"}`), CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	notifier(event)
 	select {
-	case event := <-published:
-		if event.EventType != "poll.completed" || event.AggregateID != poll1.ID || event.Seq <= 0 {
-			t.Fatalf("unexpected published poll event: %+v", event)
+	case got := <-published:
+		if got.Seq != event.JournalSeq || got.AggregateID != event.TransactionID || got.EventType != event.EventType || !bytes.Equal(got.Payload, event.Payload) {
+			t.Fatalf("published wrong event: %+v", got)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expected poll.completed to be published to realtime hub")
+		t.Fatal("committed event not published")
 	}
-
 	if waker.wakeCount != 1 {
-		t.Fatalf("expected waker count 1 after initial poll, got %d", waker.wakeCount)
-	}
-
-	// Poll 2: Repeat SUCCEEDED with 0 items (status unchanged, 0 inserted) -> no wake
-	poll2 := storage.PollRun{
-		ID:        "poll_002",
-		Status:    "SUCCEEDED",
-		StartedAt: time.Now().UTC().Add(-2 * time.Second).Format(time.RFC3339Nano),
-		RowsSeen:  0,
-	}
-	notifier(poll2, 0)
-
-	if waker.wakeCount != 1 {
-		t.Fatalf("expected waker count still 1 after repeat empty poll, got %d", waker.wakeCount)
-	}
-
-	// Poll 3: Another repeat SUCCEEDED with 0 items -> no wake
-	poll3 := storage.PollRun{
-		ID:        "poll_003",
-		Status:    "SUCCEEDED",
-		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		RowsSeen:  0,
-	}
-	notifier(poll3, 0)
-
-	if waker.wakeCount != 1 {
-		t.Fatalf("expected waker count still 1 after third empty poll, got %d", waker.wakeCount)
-	}
-
-	// Poll 4: SUCCEEDED with items inserted -> should wake
-	poll4 := storage.PollRun{
-		ID:        "poll_004",
-		Status:    "SUCCEEDED",
-		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		RowsSeen:  2,
-	}
-	notifier(poll4, 2)
-
-	if waker.wakeCount != 2 {
-		t.Fatalf("expected waker count 2 after poll with items, got %d", waker.wakeCount)
-	}
-
-	// Verify all 4 poll.completed events were appended to journal
-	events, err := store.ReadJournalEvents(ctx, "ep1", 0, 10)
-	if err != nil {
-		t.Fatalf("ReadJournalEvents: %v", err)
-	}
-	if len(events) != 4 {
-		t.Fatalf("expected 4 journal events, got %d", len(events))
-	}
-	for i, expectedID := range []string{"poll_001", "poll_002", "poll_003", "poll_004"} {
-		if events[i].EventType != "poll.completed" {
-			t.Errorf("event %d: expected event type 'poll.completed', got %q", i, events[i].EventType)
-		}
-		if events[i].AggregateID != expectedID {
-			t.Errorf("event %d: expected aggregateID %q, got %q", i, expectedID, events[i].AggregateID)
-		}
+		t.Fatalf("dispatcher wake count: %d", waker.wakeCount)
 	}
 }

@@ -18,10 +18,7 @@ func TestEmitTransactionEventAndDeliveries(t *testing.T) {
 	}
 	defer store.Close()
 
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := historicalConnectionFixture(t, store, ctx, "***1234")
 
 	ep, err := store.CreateEndpointWithSecret(ctx, "Test Hook", "https://example.com/webhook")
 	if err != nil || ep.Secret == "" {

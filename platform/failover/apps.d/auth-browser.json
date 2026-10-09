@@ -1,7 +1,0 @@
-{
-  "app": "auth-browser",
-  "workload_class": "singleton",
-  "container_name": "acb-auth-browser",
-  "max_restarts": 3,
-  "cooldown_seconds": 60
-}

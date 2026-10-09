@@ -286,8 +286,7 @@ func TestMixedProviderFanOut(t *testing.T) {
 	store, _ := setupTestStoreWithKeyring(t)
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***9999")
-	_, _ = store.DB().ExecContext(ctx, `UPDATE connections SET state = 'MONITORING' WHERE id = ?`, conn.ID)
+	conn := historicalConnectionFixture(t, store, ctx, "***9999")
 
 	// 1 webhook channel, 2 Bark channels
 	wh, err := store.CreateEndpointWithSecret(ctx, "Webhook 1", "https://hook.example.com")
@@ -308,21 +307,17 @@ func TestMixedProviderFanOut(t *testing.T) {
 	}
 	_ = store.SetEndpointStatus(ctx, bark2.ID, "ACTIVE")
 
-	// Ingest a credit transaction
-	res, err := store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, "***9999", []BatchTransactionItem{
-		{
-			Number:        "TXN_MIX_1",
-			TransactionAt: "2026-09-13T10:00:00Z",
-			Credit:        750000,
-			Debit:         0,
-			Description:   "Chuyen khoan mua hang",
-		},
-	}, false)
-	if err != nil {
-		t.Fatalf("IngestTransactionsBatch failed: %v", err)
+	// Exercise the retained transaction and event APIs against historical ACB data.
+	res, err := store.IngestTransaction(ctx, TransactionInput{
+		ConnectionID: conn.ID, SemanticKey: "ACB:TXN_MIX_1", CanonicalHash: "mix-hash-1",
+		TransactionAt: "2026-09-13T10:00:00Z", EffectiveAt: "2026-09-13", Credit: 750000,
+		Description: []byte("Chuyen khoan mua hang"), ParserVersion: "v1",
+	})
+	if err != nil || !res.Inserted {
+		t.Fatalf("ingest transaction: result=%+v err=%v", res, err)
 	}
-	if res.InsertedCount != 1 {
-		t.Fatalf("expected 1 inserted txn, got: %d", res.InsertedCount)
+	if _, err := store.EmitTransactionEvent(ctx, res.TransactionID, "bank.transaction.credit", "acb", "ACB:TXN_MIX_1", map[string]any{"credit": "750000", "description": "Chuyen khoan mua hang"}); err != nil {
+		t.Fatalf("emit transaction event: %v", err)
 	}
 
 	// Verify exactly 3 deliveries created (1 webhook + 2 bark) for 1 credit event

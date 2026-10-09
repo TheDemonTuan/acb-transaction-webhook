@@ -1,11 +1,11 @@
 import { ApiError } from '../api';
 
 export const ERROR_MESSAGES_MAP: Record<string, string> = {
-  SESSION_EXPIRED: 'Phiên ACB đã hết hạn. Mở menu Telegram để đăng nhập lại.',
-  ACB_RATE_LIMITED: 'ACB đang giới hạn tần suất truy cập. Hệ thống sẽ tự động thử lại sau ít phút.',
+  PAYMENT_UNAVAILABLE: 'Thanh toán tạm thời không sẵn sàng. Vui lòng thử lại sau.',
+  PAYMENTS_DISABLED: 'Đang tạm dừng tạo đơn mới; đơn đã tạo vẫn được xác nhận.',
   ORIGIN_MISMATCH: 'Xác thực bảo mật Origin không khớp với cấu hình máy chủ. Vui lòng kiểm tra PUBLIC_ORIGIN.',
   CSRF_TOKEN_INVALID: 'Phiên bảo mật (CSRF) không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.',
-  SYNC_UNAVAILABLE: 'Tính năng đồng bộ tức thời chưa sẵn sàng hoặc kết nối ACB chưa kích hoạt.',
+  WEBHOOK_UNCONFIRMED: 'Webhook payOS chưa được xác nhận; chưa thể tạo đơn mới.',
 };
 
 export function formatErrorMessage(error: unknown): string {

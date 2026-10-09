@@ -2,7 +2,6 @@ package maintenance
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -12,7 +11,6 @@ import (
 // Store defines the storage methods required for singleton maintenance.
 type Store interface {
 	DeleteJournalBefore(ctx context.Context, cutoff time.Time) (int64, error)
-	ExpireStaleAuthAttempts(ctx context.Context) (int64, error)
 }
 
 // RunnerOption configures a Runner.
@@ -36,15 +34,6 @@ func WithRetentionInterval(d time.Duration) RunnerOption {
 	}
 }
 
-// WithStaleAuthInterval sets how often stale auth attempt expiration runs. Default: 30s.
-func WithStaleAuthInterval(d time.Duration) RunnerOption {
-	return func(r *Runner) {
-		if d > 0 {
-			r.staleAuthInterval = d
-		}
-	}
-}
-
 // WithNowFunc overrides the clock for testing.
 func WithNowFunc(fn func() time.Time) RunnerOption {
 	return func(r *Runner) {
@@ -58,13 +47,6 @@ func WithNowFunc(fn func() time.Time) RunnerOption {
 func WithRetentionTrigger(ch <-chan time.Time) RunnerOption {
 	return func(r *Runner) {
 		r.retentionTrigger = ch
-	}
-}
-
-// WithStaleAuthTrigger injects an external channel to trigger stale-auth reap runs.
-func WithStaleAuthTrigger(ch <-chan time.Time) RunnerOption {
-	return func(r *Runner) {
-		r.staleAuthTrigger = ch
 	}
 }
 
@@ -82,22 +64,20 @@ type Runner struct {
 	store             Store
 	retentionPeriod   time.Duration
 	retentionInterval time.Duration
-	staleAuthInterval time.Duration
 	now               func() time.Time
 	retentionTrigger  <-chan time.Time
-	staleAuthTrigger  <-chan time.Time
 	logger            *slog.Logger
 	mu                sync.Mutex
 	running           bool
 	paused            atomic.Bool
 }
 
-// Pause temporarily halts retention and stale auth reap cycles.
+// Pause temporarily halts retention cycles.
 func (r *Runner) Pause() {
 	r.paused.Store(true)
 }
 
-// Resume unpauses retention and stale auth reap cycles.
+// Resume unpauses retention cycles.
 func (r *Runner) Resume() {
 	r.paused.Store(false)
 }
@@ -113,7 +93,6 @@ func NewRunner(store Store, opts ...RunnerOption) *Runner {
 		store:             store,
 		retentionPeriod:   24 * time.Hour,
 		retentionInterval: 1 * time.Hour,
-		staleAuthInterval: 30 * time.Second,
 		now:               time.Now,
 		logger:            slog.Default().With("component", "maintenance"),
 	}
@@ -147,18 +126,9 @@ func (r *Runner) Run(ctx context.Context) {
 		retentionCh = retentionTicker.C
 	}
 
-	var staleAuthTicker *time.Ticker
-	staleAuthCh := r.staleAuthTrigger
-	if staleAuthCh == nil {
-		staleAuthTicker = time.NewTicker(r.staleAuthInterval)
-		defer staleAuthTicker.Stop()
-		staleAuthCh = staleAuthTicker.C
-	}
-
 	r.logger.Info("singleton maintenance runner started",
 		"retention_period", r.retentionPeriod,
 		"retention_interval", r.retentionInterval,
-		"stale_auth_interval", r.staleAuthInterval,
 	)
 
 	for {
@@ -170,24 +140,13 @@ func (r *Runner) Run(ctx context.Context) {
 			if !r.paused.Load() {
 				r.runRetention(ctx, t)
 			}
-		case <-staleAuthCh:
-			if !r.paused.Load() {
-				r.runStaleAuthReap(ctx)
-			}
 		}
 	}
 }
 
-// RunOnce executes one pass of both retention and stale-auth expiration immediately.
+// RunOnce executes one retention pass immediately.
 func (r *Runner) RunOnce(ctx context.Context) error {
-	var errs []error
-	if err := r.runRetention(ctx, r.now()); err != nil {
-		errs = append(errs, err)
-	}
-	if err := r.runStaleAuthReap(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return r.runRetention(ctx, r.now())
 }
 
 func (r *Runner) runRetention(ctx context.Context, t time.Time) error {
@@ -205,21 +164,6 @@ func (r *Runner) runRetention(ctx context.Context, t time.Time) error {
 	}
 	if deleted > 0 {
 		r.logger.Info("journal retention purged expired entries", "deleted", deleted, "cutoff", cutoff)
-	}
-	return nil
-}
-
-func (r *Runner) runStaleAuthReap(ctx context.Context) error {
-	if r.store == nil {
-		return nil
-	}
-	reaped, err := r.store.ExpireStaleAuthAttempts(ctx)
-	if err != nil {
-		r.logger.Warn("stale auth attempts maintenance failed", "error", err)
-		return err
-	}
-	if reaped > 0 {
-		r.logger.Info("stale auth maintenance reaped expired attempts", "reaped", reaped)
 	}
 	return nil
 }

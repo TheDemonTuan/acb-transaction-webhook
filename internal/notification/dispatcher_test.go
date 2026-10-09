@@ -66,13 +66,46 @@ func setupTestStoreWithKeyring(t *testing.T) *storage.Store {
 	return store
 }
 
+// settleDispatcherPayment exercises the real payment/receipt/event/outbox commit.
+func settleDispatcherPayment(t *testing.T, store *storage.Store, reference string, amount int64, transactionAt, description string) {
+	t.Helper()
+	ctx := context.Background()
+	paidAt, err := time.Parse(time.RFC3339, transactionAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, created, err := store.ReservePaymentOrder(ctx, storage.PaymentOrderIntent{
+		ChannelID: "dispatcher-test-channel", IdempotencyKey: reference, RequestHash: reference,
+		AmountVnd: amount, Origin: "OPERATOR_DYNAMIC",
+	})
+	if err != nil || !created {
+		t.Fatalf("reserve payment: created=%v err=%v", created, err)
+	}
+	linkID, account := "link-"+reference, "va-"+reference
+	if _, err := store.CompletePaymentOrderOperation(ctx, order.ID, order.OperationToken, storage.PaymentOrderUpdate{
+		Status: "PENDING", PaymentLinkID: linkID, AccountNumber: account,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.SettlePayment(ctx, storage.SettlementInput{
+		ChannelID: order.ChannelID, OrderCode: order.OrderCode, PaymentLinkID: linkID,
+		Reference: reference, AmountVnd: amount, TransactionAt: paidAt, Description: description,
+		VirtualAccountNumber: account, Source: "REALTIME",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Order.Status != "PAID" || result.Order.TransactionID == "" || result.Event == nil || result.Duplicate || result.ReviewReason != "" {
+		t.Fatalf("payment did not commit a new credit event: %+v", result)
+	}
+}
+
 func TestDispatcherMixedProviders(t *testing.T) {
 	ctx := context.Background()
 	store := setupTestStoreWithKeyring(t)
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***1234")
-	_, _ = store.DB().ExecContext(ctx, `UPDATE connections SET state = 'MONITORING' WHERE id = ?`, conn.ID)
+	// Each active provider receives an outbox delivery from the same settlement.
 
 	wh, _ := store.CreateEndpointWithSecret(ctx, "Test Hook", "https://example.com/webhook")
 	_ = store.SetEndpointStatus(ctx, wh.ID, "ACTIVE")
@@ -80,14 +113,7 @@ func TestDispatcherMixedProviders(t *testing.T) {
 	barkCh, _ := store.CreateBarkChannel(ctx, "Test iPhone", "device_key_123", nil)
 	_ = store.SetEndpointStatus(ctx, barkCh.ID, "ACTIVE")
 
-	_, _ = store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, "***1234", []storage.BatchTransactionItem{
-		{
-			Number:        "MIX_001",
-			TransactionAt: "2026-09-13T12:00:00Z",
-			Credit:        100000,
-			Description:   "Test mixed dispatch",
-		},
-	}, false)
+	settleDispatcherPayment(t, store, "MIX_001", 100000, "2026-09-13T12:00:00Z", "Test mixed dispatch")
 
 	registry := NewRegistry()
 	whSender := &mockSender{outcome: OutcomeSuccess, statusCode: 200}
@@ -130,20 +156,10 @@ func TestDispatcherRetryExhaustionAndReplay(t *testing.T) {
 	store := setupTestStoreWithKeyring(t)
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***1234")
-	_, _ = store.DB().ExecContext(ctx, `UPDATE connections SET state = 'MONITORING' WHERE id = ?`, conn.ID)
-
 	barkCh, _ := store.CreateBarkChannel(ctx, "Failing iPhone", "key_fail", nil)
 	_ = store.SetEndpointStatus(ctx, barkCh.ID, "ACTIVE")
 
-	_, _ = store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, "***1234", []storage.BatchTransactionItem{
-		{
-			Number:        "FAIL_001",
-			TransactionAt: "2026-09-13T12:00:00Z",
-			Credit:        200000,
-			Description:   "Test fail dispatch",
-		},
-	}, false)
+	settleDispatcherPayment(t, store, "FAIL_001", 200000, "2026-09-13T12:00:00Z", "Test fail dispatch")
 
 	registry := NewRegistry()
 	failingSender := &mockSender{outcome: OutcomeRetry, statusCode: 502, providerErrorCode: "HTTP_502"}
@@ -200,13 +216,6 @@ func TestDispatcherDrainWaitsForInFlightSend(t *testing.T) {
 	ctx := context.Background()
 	store := setupTestStoreWithKeyring(t)
 	defer store.Close()
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING' WHERE id=?`, conn.ID); err != nil {
-		t.Fatal(err)
-	}
 	endpoint, err := store.CreateEndpointWithSecret(ctx, "Drain Hook", "https://example.com/webhook")
 	if err != nil {
 		t.Fatal(err)
@@ -214,11 +223,7 @@ func TestDispatcherDrainWaitsForInFlightSend(t *testing.T) {
 	if err := store.SetEndpointStatus(ctx, endpoint.ID, "ACTIVE"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, "***1234", []storage.BatchTransactionItem{{
-		Number: "DRAIN_001", TransactionAt: "2026-09-15T00:00:00Z", EffectiveAt: "2026-09-15T00:00:00Z", Credit: 100,
-	}}, false); err != nil {
-		t.Fatal(err)
-	}
+	settleDispatcherPayment(t, store, "DRAIN_001", 100, "2026-09-15T00:00:00Z", "Test drain dispatch")
 
 	sender := &blockingSender{started: make(chan struct{}), release: make(chan struct{})}
 	registry := NewRegistry()

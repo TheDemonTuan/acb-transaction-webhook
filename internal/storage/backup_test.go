@@ -16,9 +16,7 @@ func TestBackupCreatesConsistentSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
-		t.Fatal(err)
-	}
+	connection := historicalConnectionFixture(t, store, ctx, "***1234")
 
 	destination := filepath.Join(t.TempDir(), "backups", "gateway.db")
 	if err := store.Backup(ctx, destination); err != nil {
@@ -29,12 +27,12 @@ func TestBackupCreatesConsistentSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer backup.Close()
-	var count int
-	if err := backup.QueryRowContext(ctx, `SELECT count(*) FROM connections`).Scan(&count); err != nil {
+	var masked, bank string
+	if err := backup.QueryRowContext(ctx, `SELECT account_masked,bank_code FROM connections WHERE id=?`, connection.ID).Scan(&masked, &bank); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("expected one connection in backup, got %d", count)
+	if masked != connection.AccountMasked || bank != "ACB" {
+		t.Fatalf("backup changed historical connection: masked=%q bank=%q", masked, bank)
 	}
 	if err := store.Backup(ctx, destination); err == nil {
 		t.Fatal("expected existing destination to be rejected")

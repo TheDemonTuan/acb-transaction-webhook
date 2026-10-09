@@ -37,9 +37,6 @@ func TestAdminLifecycle(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w
 	}
-	if w := post("/api/v1/connection/configure", `{"accountMasked":"***1234"}`); w.Code != http.StatusCreated {
-		t.Fatalf("configure %d %s", w.Code, w.Body.String())
-	}
 	if w := post("/api/v1/webhooks", `{"name":"receiver","url":"https://events.example.com/bank"}`); w.Code != http.StatusCreated {
 		t.Fatalf("endpoint %d %s", w.Code, w.Body.String())
 	}

@@ -11,10 +11,9 @@ import (
 )
 
 var (
-	ErrMutationGateLocked   = errors.New("deployment mutation gate is locked")
-	ErrActiveAuthInProgress = errors.New("active authentication session in progress")
-	ErrInvalidLeaseToken    = errors.New("invalid or expired lease token")
-	ErrMutationGateHeld     = errors.New("mutation gate held by another active lease")
+	ErrMutationGateLocked = errors.New("deployment mutation gate is locked")
+	ErrInvalidLeaseToken  = errors.New("invalid or expired lease token")
+	ErrMutationGateHeld   = errors.New("mutation gate held by another active lease")
 )
 
 type DeploymentGate struct {
@@ -26,7 +25,6 @@ type DeploymentGate struct {
 	Reason          string `json:"reason,omitempty"`
 	FenceGeneration int64  `json:"fenceGeneration"`
 	MetadataJSON    string `json:"metadataJson,omitempty"`
-	ActiveAuthCount int    `json:"activeAuthCount"`
 	TableExists     bool   `json:"tableExists"`
 	Bootstrap       bool   `json:"bootstrap,omitempty"`
 	IsStale         bool   `json:"isStale,omitempty"`
@@ -48,37 +46,18 @@ func (s *Store) deploymentControlTableExists(ctx context.Context, q interface {
 	return err == nil && count > 0
 }
 
-func (s *Store) countActiveAuthAttempts(ctx context.Context, q interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}) int {
-	var tableExists int
-	_ = q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='auth_attempts'`).Scan(&tableExists)
-	if tableExists == 0 {
-		return 0
-	}
-	var count int
-	_ = q.QueryRowContext(ctx, `
-		SELECT count(*) FROM auth_attempts
-		WHERE status IN ('STARTING', 'IN_PROGRESS', 'EXPORTING', 'VERIFYING')
-	`).Scan(&count)
-	return count
-}
-
 func (s *Store) GetDeploymentGate(ctx context.Context) (*DeploymentGate, error) {
-	activeCount := s.countActiveAuthAttempts(ctx, s.db)
 	if !s.deploymentControlTableExists(ctx, s.db) {
 		return &DeploymentGate{
-			ID:              "singleton",
-			GateState:       "OPEN",
-			ActiveAuthCount: activeCount,
-			TableExists:     false,
-			Bootstrap:       true,
+			ID:          "singleton",
+			GateState:   "OPEN",
+			TableExists: false,
+			Bootstrap:   true,
 		}, nil
 	}
 
 	gate := DeploymentGate{
-		ActiveAuthCount: activeCount,
-		TableExists:     true,
+		TableExists: true,
 	}
 
 	err := s.db.QueryRowContext(ctx, `
@@ -90,10 +69,9 @@ func (s *Store) GetDeploymentGate(ctx context.Context) (*DeploymentGate, error) 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return &DeploymentGate{
-				ID:              "singleton",
-				GateState:       "OPEN",
-				ActiveAuthCount: activeCount,
-				TableExists:     true,
+				ID:          "singleton",
+				GateState:   "OPEN",
+				TableExists: true,
 			}, nil
 		}
 		return nil, fmt.Errorf("query deployment_control: %w", err)
@@ -128,29 +106,22 @@ func (s *Store) AcquireMutationGate(ctx context.Context, owner string, leaseDura
 	}
 	defer tx.Rollback()
 
-	// 1. Atomic active-auth check
-	activeCount := s.countActiveAuthAttempts(ctx, tx)
-	if activeCount > 0 {
-		return nil, fmt.Errorf("%w: %d active attempt(s) in progress", ErrActiveAuthInProgress, activeCount)
-	}
-
-	// 2. Bootstrap transition check
+	// Bootstrap transition check
 	if !s.deploymentControlTableExists(ctx, tx) {
 		_ = tx.Commit()
 		return &DeploymentGate{
-			ID:              "singleton",
-			GateState:       "OPEN",
-			Owner:           owner,
-			LeaseToken:      newToken,
-			LeaseExpiresAt:  expiresAtStr,
-			Reason:          reason,
-			ActiveAuthCount: 0,
-			TableExists:     false,
-			Bootstrap:       true,
+			ID:             "singleton",
+			GateState:      "OPEN",
+			Owner:          owner,
+			LeaseToken:     newToken,
+			LeaseExpiresAt: expiresAtStr,
+			Reason:         reason,
+			TableExists:    false,
+			Bootstrap:      true,
 		}, nil
 	}
 
-	// 3. Inspect current gate lease
+	// Inspect current gate lease
 	var gate DeploymentGate
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, gate_state, COALESCE(owner, ''), COALESCE(lease_token, ''), COALESCE(lease_expires_at, ''),
@@ -198,7 +169,6 @@ func (s *Store) AcquireMutationGate(ctx context.Context, owner string, leaseDura
 		LeaseExpiresAt:  expiresAtStr,
 		Reason:          reason,
 		FenceGeneration: newFence,
-		ActiveAuthCount: 0,
 		TableExists:     true,
 		CreatedAt:       nowStr,
 		UpdatedAt:       nowStr,
@@ -373,4 +343,45 @@ func (s *Store) checkMutationAllowedTx(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// PayOSCutover retires legacy ACB runtime state under an active deployment lease.
+// Historical sessions, transactions, events and delivery outboxes are retained.
+func (s *Store) PayOSCutover(ctx context.Context, leaseToken string) error {
+	if leaseToken == "" {
+		return ErrInvalidLeaseToken
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if !s.deploymentControlTableExists(ctx, tx) {
+			return fmt.Errorf("%w: deployment gate table is required", ErrInvalidLeaseToken)
+		}
+		var state, token, expiresAt, owner string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT gate_state, COALESCE(lease_token, ''), COALESCE(lease_expires_at, ''), COALESCE(owner, '')
+			FROM deployment_control WHERE id='singleton'
+		`).Scan(&state, &token, &expiresAt, &owner); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: deployment gate singleton is required", ErrInvalidLeaseToken)
+			}
+			return fmt.Errorf("query payOS cutover gate: %w", err)
+		}
+		expiry, err := time.Parse(time.RFC3339, expiresAt)
+		if state != "LOCKED" || token != leaseToken || err != nil || !time.Now().Before(expiry) {
+			return ErrInvalidLeaseToken
+		}
+		finishedAt := now()
+		if _, err := tx.ExecContext(ctx, `UPDATE auth_attempts SET status='CANCELLED', finished_at=?
+			WHERE status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING')`, finishedAt); err != nil {
+			return fmt.Errorf("cancel legacy auth attempts: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE connections SET state='PAUSED', updated_at=? WHERE bank_code='ACB'`, finishedAt); err != nil {
+			return fmt.Errorf("pause legacy ACB connections: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_logs
+			(id,actor_subject,actor_role,action,target,request_id,details_json,created_at)
+			VALUES(?,?, 'deployer','PAYOS_CUTOVER','singleton',?, '{}',?)`, id("audit"), owner, id("cutover"), finishedAt); err != nil {
+			return fmt.Errorf("audit payOS cutover: %w", err)
+		}
+		return nil
+	})
 }

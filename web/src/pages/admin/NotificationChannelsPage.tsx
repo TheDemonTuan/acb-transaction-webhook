@@ -30,7 +30,7 @@ import { queryKeys } from '../../shared/api/query-keys';
 import { formatErrorMessage } from '../../content/error-copy';
 import type { BarkConfig, NotificationChannel } from '../../realtime-types';
 
-const DEFAULT_BARK_ICON = 'https://api.vietqr.io/img/ACB.png';
+const DEFAULT_BARK_ICON = '';
 const BLOCKED_URL_SCHEME = /^\s*(?:javascript|data|vbscript)\s*:/i;
 
 const sanitizeBarkIcon = (value: string | null | undefined): string => {
@@ -54,7 +54,7 @@ export const NotificationChannelsPage: React.FC = () => {
   const [showDeviceKey, setShowDeviceKey] = useState(false);
 
   // Bark config form
-  const [barkGroup, setBarkGroup] = useState('ACB');
+  const [barkGroup, setBarkGroup] = useState('PAYOS');
   const [barkLevel, setBarkLevel] = useState<'passive' | 'active' | 'timeSensitive'>('timeSensitive');
   const [barkSound, setBarkSound] = useState('shake');
   const [barkIcon, setBarkIcon] = useState(DEFAULT_BARK_ICON);
@@ -83,7 +83,7 @@ export const NotificationChannelsPage: React.FC = () => {
   const [editName, setEditName] = useState('');
   const [editUrl, setEditUrl] = useState('');
   const [editBarkConfig, setEditBarkConfig] = useState<BarkConfig>({
-    group: 'ACB',
+    group: 'PAYOS',
     level: 'timeSensitive',
     sound: 'shake',
     icon: DEFAULT_BARK_ICON,
@@ -185,7 +185,7 @@ export const NotificationChannelsPage: React.FC = () => {
           name: name.trim(),
           deviceKey: deviceKey.trim(),
           barkConfig: {
-            group: barkGroup.trim() || 'ACB',
+            group: barkGroup.trim() || 'PAYOS',
             level: barkLevel,
             sound: barkSound.trim() || 'shake',
             icon: sanitizeBarkIcon(barkIcon),
@@ -248,7 +248,7 @@ export const NotificationChannelsPage: React.FC = () => {
       setEditBarkConfig({ ...ch.barkConfig });
     } else {
       setEditBarkConfig({
-        group: 'ACB',
+        group: 'PAYOS',
         level: 'timeSensitive',
         sound: 'shake',
         icon: DEFAULT_BARK_ICON,
@@ -334,7 +334,7 @@ export const NotificationChannelsPage: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-stone-900">Kênh thông báo</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Quản lý các đích nhận thông báo giao dịch ACB (Bark cho iPhone & Webhook tùy chỉnh)
+            Quản lý các đích nhận thông báo giao dịch payOS / KienlongBank và lịch sử (Bark cho iPhone & Webhook tùy chỉnh)
           </p>
         </div>
         <button
@@ -546,7 +546,7 @@ export const NotificationChannelsPage: React.FC = () => {
                   type="url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://api.yourdomain.com/webhooks/acb"
+                  placeholder="https://api.yourdomain.com/webhooks/payments"
                   required
                   className="w-full px-3.5 py-2.5 rounded-xl border border-stone-200 text-sm bg-stone-50/30 focus:bg-white focus:outline-none focus:ring-2 focus:ring-stone-900/10 focus:border-stone-900 transition font-mono"
                 />
@@ -599,7 +599,7 @@ export const NotificationChannelsPage: React.FC = () => {
                       type="text"
                       value={barkGroup}
                       onChange={(e) => setBarkGroup(e.target.value)}
-                      placeholder="ACB"
+                      placeholder="PAYOS"
                       className="w-full px-3 py-2 rounded-lg border border-stone-200 text-xs bg-white focus:outline-none"
                     />
                   </div>
@@ -645,10 +645,10 @@ export const NotificationChannelsPage: React.FC = () => {
                       Icon thông báo (URL ảnh hiển thị trên iPhone)
                     </label>
                     <div className="flex items-center gap-2.5">
-                      {failedBarkIcon === sanitizeBarkIcon(barkIcon) ? (
+                      {!sanitizeBarkIcon(barkIcon) || failedBarkIcon === sanitizeBarkIcon(barkIcon) ? (
                         <div
                           role="img"
-                          aria-label="Không tải được icon preview"
+                          aria-label={sanitizeBarkIcon(barkIcon) ? 'Không tải được icon preview' : 'Chưa đặt icon thông báo'}
                           className="w-8 h-8 rounded-lg border border-stone-200 bg-stone-100 shrink-0 flex items-center justify-center text-stone-400"
                         >
                           <Smartphone className="w-4 h-4" />

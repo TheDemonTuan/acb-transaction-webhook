@@ -16,7 +16,7 @@ export const AdminSidebar: React.FC = () => {
 
   const navItems = [
     { to: '/admin/overview', label: 'Tổng quan', icon: LayoutDashboard },
-    { to: '/admin/connection', label: 'Kết nối ACB', icon: Landmark },
+    { to: '/admin/connection', label: 'Kết nối payOS', icon: Landmark },
     { to: '/admin/notifications', label: 'Kênh thông báo', icon: Bell },
     { to: '/admin/activity', label: 'Hoạt động', icon: Activity },
     { to: '/admin/system', label: 'Hệ thống', icon: Server },
@@ -107,14 +107,6 @@ export const AdminSidebar: React.FC = () => {
           <button
             type="button"
             role="button"
-            onClick={() => navigate('/admin/activity?tab=polling')}
-            className="w-full text-left px-3.5 py-1.5 rounded-lg text-xs text-stone-500 hover:bg-stone-100 transition"
-          >
-            Polling
-          </button>
-          <button
-            type="button"
-            role="button"
             onClick={() => navigate('/admin/system')}
             className="w-full text-left px-3.5 py-1.5 rounded-lg text-xs text-stone-500 hover:bg-stone-100 transition"
           >
@@ -133,7 +125,7 @@ export const AdminSidebar: React.FC = () => {
 
       {/* Footer */}
       <div className="p-4 border-t border-stone-100 text-[11px] text-stone-400 text-center">
-        v2.0.0 &middot; ACB Gateway
+        payOS / KienlongBank
       </div>
     </aside>
   );

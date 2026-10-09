@@ -10,16 +10,12 @@ import (
 )
 
 type mockStore struct {
-	mu             sync.Mutex
-	deleteCalls    int
-	lastCutoff     time.Time
-	deleteErr      error
-	deleteCount    int64
-	expireCalls    int
-	expireErr      error
-	expireCount    int64
-	onDeleteHook   func(cutoff time.Time)
-	onExpireHook   func()
+	mu           sync.Mutex
+	deleteCalls  int
+	lastCutoff   time.Time
+	deleteErr    error
+	deleteCount  int64
+	onDeleteHook func(cutoff time.Time)
 }
 
 func (m *mockStore) DeleteJournalBefore(ctx context.Context, cutoff time.Time) (int64, error) {
@@ -33,19 +29,9 @@ func (m *mockStore) DeleteJournalBefore(ctx context.Context, cutoff time.Time) (
 	return m.deleteCount, m.deleteErr
 }
 
-func (m *mockStore) ExpireStaleAuthAttempts(ctx context.Context) (int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.expireCalls++
-	if m.onExpireHook != nil {
-		m.onExpireHook()
-	}
-	return m.expireCount, m.expireErr
-}
-
 func TestMaintenanceRunnerRunOnce(t *testing.T) {
 	fixedNow := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	store := &mockStore{deleteCount: 15, expireCount: 3}
+	store := &mockStore{deleteCount: 15}
 	runner := NewRunner(store,
 		WithRetentionPeriod(48*time.Hour),
 		WithNowFunc(func() time.Time { return fixedNow }),
@@ -67,23 +53,18 @@ func TestMaintenanceRunnerRunOnce(t *testing.T) {
 	if !store.lastCutoff.Equal(expectedCutoff) {
 		t.Errorf("expected cutoff %v, got %v", expectedCutoff, store.lastCutoff)
 	}
-	if store.expireCalls != 1 {
-		t.Errorf("expected 1 expire call, got %d", store.expireCalls)
-	}
 }
 
 func TestMaintenanceRunnerControllableTriggers(t *testing.T) {
 	fixedNow := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	store := &mockStore{deleteCount: 5, expireCount: 1}
+	store := &mockStore{deleteCount: 5}
 
 	retentionCh := make(chan time.Time, 10)
-	staleAuthCh := make(chan time.Time, 10)
 
 	runner := NewRunner(store,
 		WithRetentionPeriod(24*time.Hour),
 		WithNowFunc(func() time.Time { return fixedNow }),
 		WithRetentionTrigger(retentionCh),
-		WithStaleAuthTrigger(staleAuthCh),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,11 +79,6 @@ func TestMaintenanceRunnerControllableTriggers(t *testing.T) {
 	// Trigger retention twice
 	retentionCh <- fixedNow
 	retentionCh <- fixedNow.Add(1 * time.Hour)
-
-	// Trigger stale-auth reap three times
-	staleAuthCh <- fixedNow
-	staleAuthCh <- fixedNow
-	staleAuthCh <- fixedNow
 
 	// Wait briefly for triggers to be consumed
 	time.Sleep(50 * time.Millisecond)
@@ -120,23 +96,17 @@ func TestMaintenanceRunnerControllableTriggers(t *testing.T) {
 	if store.deleteCalls != 2 {
 		t.Errorf("expected 2 delete calls, got %d", store.deleteCalls)
 	}
-	if store.expireCalls != 3 {
-		t.Errorf("expected 3 expire calls, got %d", store.expireCalls)
-	}
 }
 
 func TestMaintenanceRunnerErrorResilience(t *testing.T) {
 	store := &mockStore{
 		deleteErr: errors.New("db disk I/O error"),
-		expireErr: errors.New("db lock timeout"),
 	}
 
 	retentionCh := make(chan time.Time, 1)
-	staleAuthCh := make(chan time.Time, 1)
 
 	runner := NewRunner(store,
 		WithRetentionTrigger(retentionCh),
-		WithStaleAuthTrigger(staleAuthCh),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,7 +119,6 @@ func TestMaintenanceRunnerErrorResilience(t *testing.T) {
 	}()
 
 	retentionCh <- time.Now()
-	staleAuthCh <- time.Now()
 
 	time.Sleep(50 * time.Millisecond)
 	cancel()
@@ -162,9 +131,8 @@ func TestMaintenanceRunnerErrorResilience(t *testing.T) {
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.deleteCalls != 1 || store.expireCalls != 1 {
-		t.Errorf("expected 1 call each despite errors, got delete=%d, expire=%d",
-			store.deleteCalls, store.expireCalls)
+	if store.deleteCalls != 1 {
+		t.Errorf("expected 1 call despite errors, got delete=%d", store.deleteCalls)
 	}
 }
 

@@ -83,7 +83,7 @@ fi
 
 # Go race detector (if CGO enabled / gcc installed)
 if command -v gcc >/dev/null 2>&1; then
-  if go test -race -count=1 ./internal/scheduler ./internal/monitor ./tests/integration; then
+  if go test -race -count=1 ./internal/payments ./internal/storage ./internal/httpapi ./tests/integration; then
     record_pass "go test -race passed on concurrency packages"
   else
     record_fail "go test -race failed"
@@ -147,6 +147,24 @@ fi
 
 # 7. Current deployment and security behavior tests
 log_header "Gate 7: Deployment and Security Tests"
+DEPLOY_PYTHON="$PYTHON_BIN"
+if [[ -z "$DEPLOY_PYTHON" ]]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      DEPLOY_PYTHON="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -n "$DEPLOY_PYTHON" ]]; then
+  if "$DEPLOY_PYTHON" -m unittest discover -s deploy/tests -p 'test_*.py' -v; then
+    record_pass "deployment, ingress, workflow and cutover behavior tests passed"
+  else
+    record_fail "deployment behavior tests failed"
+  fi
+else
+  record_skip "Python unavailable for deployment behavior tests"
+fi
 DEPLOY_DRILL_TESTS=(
   "deploy/tests/test_restore_drill.sh"
   "deploy/test-supply-chain.sh"

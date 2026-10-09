@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,60 +133,24 @@ func TestDeploymentControl_StaleOwnerRecovery(t *testing.T) {
 	_ = store.ReleaseMutationGate(ctx, "owner-recovery-B", gateB.LeaseToken)
 }
 
-func TestDeploymentControl_ConcurrentAuthStartVsDeploy(t *testing.T) {
+func TestDeploymentControl_ActiveAuthDoesNotBlockGate(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test_gate_concurrent.db")
-	store, err := storage.Open(ctx, dbPath)
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "active_auth.db"))
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatal(err)
 	}
 	defer store.Close()
-
-	_, err = store.ConfigureConnection(ctx, "***1234")
+	seedPayOSCutoverLegacyState(t, store)
+	gate, err := store.AcquireMutationGate(ctx, "deployer", time.Minute, "payos-cutover")
 	if err != nil {
-		t.Fatalf("configure connection: %v", err)
+		t.Fatalf("legacy active auth must not block acquisition: %v", err)
 	}
-
-	const iterations = 50
-	for i := 0; i < iterations; i++ {
-		// Ensure clean state
-		_ = store.ForceUnlockMutationGate(ctx, "reset")
-		_, _ = store.DB().ExecContext(ctx, "DELETE FROM auth_attempts")
-		_, _ = store.DB().ExecContext(ctx, "UPDATE connections SET state='AUTH_REQUIRED'")
-
-		var wg sync.WaitGroup
-		var authSuccess, deploySuccess atomic.Int32
-		var authErrCount, deployErrCount atomic.Int32
-
-		wg.Add(2)
-		// Goroutine 1: Tries to start auth
-		go func(iter int) {
-			defer wg.Done()
-			_, err := store.StartAuthAttempt(ctx, fmt.Sprintf("user-%d", iter), 2*time.Minute)
-			if err == nil {
-				authSuccess.Add(1)
-			} else {
-				authErrCount.Add(1)
-			}
-		}(i)
-
-		// Goroutine 2: Tries to acquire mutation gate
-		go func(iter int) {
-			defer wg.Done()
-			_, err := store.AcquireMutationGate(ctx, fmt.Sprintf("deployer-%d", iter), 2*time.Minute, "upgrade")
-			if err == nil {
-				deploySuccess.Add(1)
-			} else {
-				deployErrCount.Add(1)
-			}
-		}(i)
-
-		wg.Wait()
-
-		// Invariant: Both CANNOT succeed simultaneously!
-		if authSuccess.Load() > 0 && deploySuccess.Load() > 0 {
-			t.Fatalf("RACE CONDITION: Both StartAuthAttempt and AcquireMutationGate succeeded in iteration %d!", i)
-		}
+	if gate.GateState != "LOCKED" || gate.LeaseToken == "" || gate.FenceGeneration == 0 {
+		t.Fatalf("invalid lease: %+v", gate)
+	}
+	var count int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM auth_attempts WHERE status IN ('STARTING','IN_PROGRESS','EXPORTING','VERIFYING')`).Scan(&count); err != nil || count != 4 {
+		t.Fatalf("acquisition must not mutate legacy auth: count=%d err=%v", count, err)
 	}
 }
 
@@ -199,63 +163,28 @@ func TestDeploymentControl_MutationGuards(t *testing.T) {
 	}
 	defer store.Close()
 
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatalf("configure connection: %v", err)
-	}
-
 	// Acquire gate to lock mutations
 	gate, err := store.AcquireMutationGate(ctx, "deploy-worker", 5*time.Minute, "upgrade")
 	if err != nil {
 		t.Fatalf("acquire gate: %v", err)
 	}
 
-	// 1. StartAuthAttempt must fail
-	_, err = store.StartAuthAttempt(ctx, "owner", time.Minute)
-	if !errors.Is(err, storage.ErrMutationGateLocked) {
-		t.Errorf("StartAuthAttempt: expected ErrMutationGateLocked, got %v", err)
-	}
-
-	// 2. TransitionConnection must fail
-	_, err = store.TransitionConnection(ctx, "pause")
-	if !errors.Is(err, storage.ErrMutationGateLocked) {
-		t.Errorf("TransitionConnection: expected ErrMutationGateLocked, got %v", err)
-	}
-
-	// 3. CreateEndpoint must fail
+	// CreateEndpoint must fail while locked.
 	_, err = store.CreateEndpoint(ctx, "webhook", "https://example.com/wh")
 	if !errors.Is(err, storage.ErrMutationGateLocked) {
 		t.Errorf("CreateEndpoint: expected ErrMutationGateLocked, got %v", err)
 	}
 
-	// 4. SavePaymentQR must fail
-	_, err = store.SavePaymentQR(ctx, storage.PaymentQR{ConnectionID: conn.ID, AccountNumber: "123", AccountName: "Test"})
-	if !errors.Is(err, storage.ErrMutationGateLocked) {
-		t.Errorf("SavePaymentQR: expected ErrMutationGateLocked, got %v", err)
-	}
-
-	// 5. SaveVoiceSettings must fail
+	// SaveVoiceSettings must fail while locked.
 	_, err = store.SaveVoiceSettings(ctx, storage.VoiceSettings{ProviderMode: "ONLINE_AUTO", EdgeVoice: "vi-VN-HoaiMyNeural"})
 	if !errors.Is(err, storage.ErrMutationGateLocked) {
 		t.Errorf("SaveVoiceSettings: expected ErrMutationGateLocked, got %v", err)
 	}
 
-	// 6. SaveMonitorSettings must fail
-	_, err = store.SaveMonitorSettings(ctx, storage.DefaultMonitorSettings)
-	if !errors.Is(err, storage.ErrMutationGateLocked) {
-		t.Errorf("SaveMonitorSettings: expected ErrMutationGateLocked, got %v", err)
-	}
-
-	// 7. CreateBarkChannel must fail
+	// CreateBarkChannel must fail while locked.
 	_, err = store.CreateBarkChannel(ctx, "bark-chan", "device-key-1", nil)
 	if !errors.Is(err, storage.ErrMutationGateLocked) {
 		t.Errorf("CreateBarkChannel: expected ErrMutationGateLocked, got %v", err)
-	}
-
-	// 8. CreateHistorySyncJob must fail
-	_, err = store.CreateHistorySyncJob(ctx, conn.ID, "2026-09-01", "2026-09-02")
-	if !errors.Is(err, storage.ErrMutationGateLocked) {
-		t.Errorf("CreateHistorySyncJob: expected ErrMutationGateLocked, got %v", err)
 	}
 
 	// Release gate
@@ -263,19 +192,8 @@ func TestDeploymentControl_MutationGuards(t *testing.T) {
 		t.Fatalf("release gate: %v", err)
 	}
 
-	// Now StartAuthAttempt must succeed
-	attempt, err := store.StartAuthAttempt(ctx, "owner", time.Minute)
-	if err != nil {
-		t.Fatalf("StartAuthAttempt after release failed: %v", err)
-	}
-	if attempt.Status != "STARTING" {
-		t.Fatalf("expected attempt STARTING, got %s", attempt.Status)
-	}
-
-	// While auth is active, AcquireMutationGate must be rejected!
-	_, err = store.AcquireMutationGate(ctx, "deployer", time.Minute, "upgrade")
-	if !errors.Is(err, storage.ErrActiveAuthInProgress) {
-		t.Fatalf("expected ErrActiveAuthInProgress, got %v", err)
+	if _, err := store.CreateEndpoint(ctx, "webhook", "https://example.com/wh"); err != nil {
+		t.Fatalf("CreateEndpoint after release failed: %v", err)
 	}
 }
 
@@ -304,7 +222,7 @@ func TestDeploymentControl_BootstrapTransition(t *testing.T) {
 		t.Fatalf("mutation allowed in bootstrap: %v", err)
 	}
 
-	// Acquire gate in bootstrap mode should succeed when 0 active auth
+	// Gate acquisition also succeeds in bootstrap mode.
 	acq, err := rawStore.AcquireMutationGate(ctx, "bootstrapper", time.Minute, "init")
 	if err != nil {
 		t.Fatalf("acquire in bootstrap: %v", err)
@@ -341,10 +259,6 @@ func TestDeploymentControl_ConcurrentWriteMuSerialization(t *testing.T) {
 	}
 	defer store.Close()
 
-	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
-		t.Fatalf("configure connection: %v", err)
-	}
-
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
@@ -373,4 +287,203 @@ func TestDeploymentControl_ConcurrentWriteMuSerialization(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func seedPayOSCutoverLegacyState(t *testing.T, store *storage.Store) {
+	t.Helper()
+	stamp := "2026-01-01T00:00:00Z"
+	for i, status := range []string{"STARTING", "IN_PROGRESS", "EXPORTING", "VERIFYING"} {
+		connectionID := fmt.Sprintf("legacy-%d", i)
+		if _, err := store.DB().Exec(`INSERT INTO connections(id,bank_code,state,generation,config_revision,account_envelope,created_at,updated_at)
+			VALUES(?, 'ACB','AUTH_STARTING',7,3,X'010203',?,?)`, connectionID, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`INSERT INTO auth_attempts(id,connection_id,generation,status,expires_at,created_at)
+			VALUES(?,?,7,?,?,?)`, "attempt-"+status, connectionID, status, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statements := []string{
+		`INSERT INTO auth_attempts(id,connection_id,generation,status,expires_at,created_at,finished_at) VALUES('terminal-verified','legacy-0',6,'VERIFIED','2026-01-01','2026-01-01','2026-01-02'),('terminal-cancelled','legacy-0',5,'CANCELLED','2026-01-01','2026-01-01','2026-01-02')`,
+		`INSERT INTO sessions(connection_id,generation,envelope,key_id,updated_at) VALUES('legacy-0',7,X'030405','master-key','2026-01-01')`,
+		`INSERT INTO acb_credentials(connection_id,revision,envelope,key_id,updated_at) VALUES('legacy-0',3,X'060708','master-key','2026-01-01')`,
+		`INSERT INTO transactions(id,connection_id,semantic_key,canonical_hash,transaction_date,effective_date,credit,description_envelope,parser_version,first_seen_at) VALUES('old-transaction','legacy-0','semantic-key','canonical-hash','2026-01-01','2026-01-01',12345,X'040506','historic','2026-01-01')`,
+		`INSERT INTO events(id,transaction_id,event_type,payload,payload_hash,created_at) VALUES('old-event','old-transaction','transaction.created',X'070809','payload-hash','2026-01-01')`,
+		`INSERT INTO dedupe_keys(semantic_key,canonical_hash,event_id,created_at) VALUES('semantic-key','canonical-hash','old-event','2026-01-01')`,
+		`INSERT INTO transaction_quarantine(id,connection_id,semantic_key,candidate_envelope,reason,created_at) VALUES('old-quarantine','legacy-0','conflict-key',X'010203','conflict','2026-01-01')`,
+		`INSERT INTO webhook_endpoints(id,name,status,current_revision,created_at,updated_at) VALUES('old-endpoint','retained','ACTIVE',1,'2026-01-01','2026-01-01')`,
+		`INSERT INTO endpoint_versions(endpoint_id,revision,url,filters_json,created_at) VALUES('old-endpoint',1,'https://example.com','{}','2026-01-01')`,
+		`INSERT INTO endpoint_secrets(endpoint_id,key_id,envelope,status,created_at) VALUES('old-endpoint','master-key',X'0A0B0C','ACTIVE','2026-01-01')`,
+		`INSERT INTO deliveries(id,event_id,endpoint_id,endpoint_revision,key_id,status,next_attempt_at,created_at,updated_at) VALUES('old-delivery','old-event','old-endpoint',1,'master-key','PENDING','2026-01-01','2026-01-01','2026-01-01')`,
+		`INSERT INTO delivery_attempts(id,delivery_id,attempt_number,outcome,created_at) VALUES('old-delivery-attempt','old-delivery',1,'RETRY','2026-01-01')`,
+		`INSERT INTO history_sync_jobs(id,connection_id,range_from,range_to,status,generation,created_at,updated_at) VALUES('old-history-job','legacy-0','2026-01-01','2026-01-02','QUEUED',7,'2026-01-01','2026-01-01')`,
+		`INSERT INTO history_coverage(id,connection_id,day,status,last_sync_at,rows_seen) VALUES('old-coverage','legacy-0','2026-01-01','COMPLETE','2026-01-01',1)`,
+		`INSERT INTO audit_logs(id,action,target,request_id,details_json,created_at) VALUES('old-audit','HISTORIC','legacy-0','old-request','{}','2026-01-01')`,
+	}
+	for _, statement := range statements {
+		if _, err := store.DB().Exec(statement); err != nil {
+			t.Fatalf("seed legacy fixture: %v", err)
+		}
+	}
+}
+
+func snapshotCutoverTables(t *testing.T, store *storage.Store) map[string][][]any {
+	t.Helper()
+	rows, err := store.DB().Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	snapshot := make(map[string][][]any, len(tables))
+	for _, table := range tables {
+		rows, err := store.DB().Query(`SELECT * FROM "` + table + `" ORDER BY rowid`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot[table] = nil
+		for rows.Next() {
+			values := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for i := range values {
+				pointers[i] = &values[i]
+			}
+			if err := rows.Scan(pointers...); err != nil {
+				t.Fatal(err)
+			}
+			for i, value := range values {
+				if bytes, ok := value.([]byte); ok {
+					values[i] = string(bytes)
+				}
+			}
+			snapshot[table] = append(snapshot[table], values)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+	}
+	return snapshot
+}
+
+func TestPayOSCutover_RejectsInvalidGateWithoutMutation(t *testing.T) {
+	cases := []struct {
+		name  string
+		token string
+		sql   string
+	}{
+		{"missing-table", "valid-token", `DROP TABLE deployment_control`},
+		{"missing-singleton", "valid-token", `DELETE FROM deployment_control`},
+		{"open-gate", "valid-token", `UPDATE deployment_control SET gate_state='OPEN'`},
+		{"missing-token", "", ""},
+		{"wrong-token", "wrong-token", ""},
+		{"empty-stored-token", "valid-token", `UPDATE deployment_control SET lease_token=''`},
+		{"expired-lease", "valid-token", `UPDATE deployment_control SET lease_expires_at='2000-01-01T00:00:00Z'`},
+		{"invalid-expiry", "valid-token", `UPDATE deployment_control SET lease_expires_at='invalid'`},
+		{"missing-expiry", "valid-token", `UPDATE deployment_control SET lease_expires_at=NULL`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cutover.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			seedPayOSCutoverLegacyState(t, store)
+			if _, err := store.DB().Exec(`UPDATE deployment_control SET gate_state='LOCKED', lease_token='valid-token', lease_expires_at=?`, time.Now().Add(time.Minute).Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.sql != "" {
+				if _, err := store.DB().Exec(tc.sql); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := snapshotCutoverTables(t, store)
+			if err := store.PayOSCutover(ctx, tc.token); !errors.Is(err, storage.ErrInvalidLeaseToken) {
+				t.Fatalf("expected invalid lease rejection, got %v", err)
+			}
+			if after := snapshotCutoverTables(t, store); !reflect.DeepEqual(before, after) {
+				t.Fatal("rejected cutover mutated database rows")
+			}
+		})
+	}
+}
+
+func TestPayOSCutover_PreservesHistoryAndOutbox(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "cutover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedPayOSCutoverLegacyState(t, store)
+	gate, err := store.AcquireMutationGate(ctx, "cutover-owner", time.Minute, "payos-cutover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotCutoverTables(t, store)
+	if err := store.PayOSCutover(ctx, gate.LeaseToken); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshotCutoverTables(t, store)
+	for table, rows := range before {
+		if table == "connections" || table == "auth_attempts" || table == "audit_logs" {
+			continue
+		}
+		if !reflect.DeepEqual(rows, after[table]) {
+			t.Errorf("cutover changed preserved table %s", table)
+		}
+	}
+	var count int
+	assertCount := func(query string, want int) {
+		t.Helper()
+		if err := store.DB().QueryRow(query).Scan(&count); err != nil || count != want {
+			t.Fatalf("query %s: count=%d want=%d err=%v", query, count, want, err)
+		}
+	}
+	assertCount(`SELECT count(*) FROM auth_attempts WHERE id LIKE 'attempt-%' AND status='CANCELLED' AND finished_at IS NOT NULL`, 4)
+	assertCount(`SELECT count(*) FROM auth_attempts WHERE id LIKE 'terminal-%' AND finished_at='2026-01-02' AND status IN ('VERIFIED','CANCELLED')`, 2)
+	assertCount(`SELECT count(*) FROM connections WHERE bank_code='ACB' AND state='PAUSED' AND generation=7 AND config_revision=3 AND account_envelope=X'010203'`, 4)
+	assertCount(`SELECT count(*) FROM connections WHERE id='payos-klb' AND bank_code='KienlongBank' AND state='WEBHOOK' AND generation=0`, 1)
+	assertCount(`SELECT count(*) FROM audit_logs WHERE action='PAYOS_CUTOVER' AND actor_subject='cutover-owner' AND target='singleton'`, 1)
+	assertCount(`SELECT count(*) FROM audit_logs WHERE id='old-audit' AND action='HISTORIC' AND request_id='old-request'`, 1)
+}
+
+func TestPayOSCutover_AuditFailureRollsBackState(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedPayOSCutoverLegacyState(t, store)
+	gate, err := store.AcquireMutationGate(ctx, "deployer", time.Minute, "cutover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`CREATE TRIGGER fail_cutover_audit BEFORE INSERT ON audit_logs WHEN NEW.action='PAYOS_CUTOVER' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotCutoverTables(t, store)
+	if err := store.PayOSCutover(ctx, gate.LeaseToken); err == nil {
+		t.Fatal("expected audit failure")
+	}
+	if after := snapshotCutoverTables(t, store); !reflect.DeepEqual(before, after) {
+		t.Fatal("audit failure did not roll back cutover")
+	}
 }

@@ -13,6 +13,7 @@ func setProductionEnv(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("32byteslongkeyforproductiontest!"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
 	t.Setenv("OWNER_SUBJECTS", "owner@example.com")

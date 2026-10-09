@@ -63,15 +63,15 @@ describe('RealtimeClient lifecycle', () => {
     const first = FakeEventSource.instances[0];
     client.disconnect();
     client.connect();
-    client.subscribe('poll.completed', listener);
+    client.subscribe('bank.transaction.credit', listener);
     const second = FakeEventSource.instances[1];
 
     expect(first.closed).toBe(true);
     expect(second.closed).toBe(false);
     expect(FakeEventSource.instances).toHaveLength(2);
 
-    first.emit('poll.completed', { status: 'SUCCEEDED' });
-    second.emit('poll.completed', { status: 'SUCCEEDED' });
+    first.emit('bank.transaction.credit', { transactionId: 'tx_lifecycle' });
+    second.emit('bank.transaction.credit', { transactionId: 'tx_lifecycle' });
 
     expect(listener).toHaveBeenCalledTimes(1);
     client.disconnect();

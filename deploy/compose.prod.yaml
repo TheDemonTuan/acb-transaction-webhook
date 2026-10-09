@@ -22,8 +22,13 @@ services:
       WORKER_REALTIME_ADDR: 0.0.0.0:8191
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
-      POLL_MIN_INTERVAL_SEC: ${POLL_MIN_INTERVAL_SEC:-3}
-      POLL_MAX_INTERVAL_SEC: ${POLL_MAX_INTERVAL_SEC:-10}
+      PAYOS_CLIENT_ID_FILE: /run/secrets/payos_client_id
+      PAYOS_API_KEY_FILE: /run/secrets/payos_api_key
+      PAYOS_CHECKSUM_KEY_FILE: /run/secrets/payos_checksum_key
+      PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-https://transactions.tuannguyenviet.site}
+      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
+      PAYOS_WEBHOOK_CONFIRMED: ${PAYOS_WEBHOOK_CONFIRMED:-false}
+      PAYMENT_MAX_AMOUNT_VND: ${PAYMENT_MAX_AMOUNT_VND:-500000000}
       BARK_SERVER_URL: http://bark:8080
       BARK_PUBLIC_URL: ${BARK_PUBLIC_URL:-https://bark.tuannguyenviet.site}
       BARK_BASIC_AUTH_USER_FILE: /run/secrets/bark_basic_auth_user
@@ -43,6 +48,9 @@ services:
     secrets:
       - app_master_key
       - worker_internal_token
+      - payos_client_id
+      - payos_api_key
+      - payos_checksum_key
       - bark_basic_auth_user
       - bark_basic_auth_password
     stop_grace_period: 30s
@@ -68,127 +76,6 @@ services:
           cpus: "0.75"
           memory: 512M
           pids: 100
-
-  recovery-controller:
-    image: ${WORKER_IMAGE_REF:?WORKER_IMAGE_REF is required}
-    entrypoint: ["/recovery-controller"]
-    container_name: acb-recovery-controller
-    profiles: [auth-recovery]
-    restart: unless-stopped
-    init: true
-    read_only: true
-    user: "1000:1000"
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    env_file:
-      - ${ENV_FILE:?ENV_FILE is required}
-    environment:
-      APP_ENV: production
-      APP_MASTER_KEY: ""
-      AUTH_RECOVERY_ENABLED: ${AUTH_RECOVERY_ENABLED:-false}
-      AI_CAPTCHA_ENABLED: ${AI_CAPTCHA_ENABLED:-false}
-      RELEASE_COMMIT: ${WORKER_RELEASE_COMMIT:?WORKER_RELEASE_COMMIT is required}
-      DATABASE_PATH: /data/gateway.db
-      AUTH_BROWSER_URL: http://auth-browser:8181
-      WORKER_RPC_URL: http://worker:8190
-      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
-      WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
-      APP_MASTER_KEY_FILE: /run/secrets/app_master_key
-      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://bank.tuannguyenviet.site}
-      TZ: Asia/Ho_Chi_Minh
-    expose:
-      - "8182"
-    networks:
-      acb-core:
-      acb-egress:
-    volumes:
-      - gateway_data:/data
-    secrets:
-      - app_master_key
-      - worker_internal_token
-      - auth_browser_internal_token
-      - telegram_bot_token
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=16m
-    stop_grace_period: 30s
-    labels:
-      - "platform.workload.class=singleton"
-      - "platform.auth-control.schema=13"
-    healthcheck:
-      test: ["CMD", "/recovery-controller", "--readiness-check"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 15s
-    cpus: "0.25"
-    mem_limit: 128M
-    pids_limit: 50
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 128M
-          pids: 50
-
-  auth-browser:
-    image: ${BROWSER_IMAGE_REF:?BROWSER_IMAGE_REF is required}
-    container_name: acb-auth-browser
-    restart: unless-stopped
-    init: true
-    read_only: false
-    user: "1000:1000"
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-      - seccomp:./seccomp-auth-browser.json
-    environment:
-      APP_ENV: production
-      PORT: 8181
-      DISPLAY: :99
-      SCREEN_WIDTH: 1280
-      SCREEN_HEIGHT: 800
-      SCREEN_DEPTH: 24
-      TZ: Asia/Ho_Chi_Minh
-      AUTH_BROWSER_INTERNAL_TOKEN_FILE: /run/secrets/auth_browser_internal_token
-    expose:
-      - "8181"
-    secrets:
-      - auth_browser_internal_token
-    networks:
-      acb-core:
-        aliases:
-          - auth-browser
-      acb-egress:
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=256m
-      - /home/gateway/.config:rw,noexec,nosuid,size=64m
-      - /home/appuser/.config:rw,noexec,nosuid,size=64m
-    healthcheck:
-      test: ["CMD", "/auth-browser", "--healthcheck"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 15s
-    cpus: "1.50"
-    mem_limit: 1536M
-    pids_limit: 300
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "1.50"
-          memory: 1536M
-          pids: 300
 
   tts-gateway:
     image: ${TTS_IMAGE_REF:?TTS_IMAGE_REF is required}
@@ -316,7 +203,13 @@ services:
       WORKER_REALTIME_URL: http://acb-worker:8191
       WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
-      AUTH_BROWSER_URL: http://auth-browser:8181
+      PAYOS_CLIENT_ID_FILE: /run/secrets/payos_client_id
+      PAYOS_API_KEY_FILE: /run/secrets/payos_api_key
+      PAYOS_CHECKSUM_KEY_FILE: /run/secrets/payos_checksum_key
+      PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-https://transactions.tuannguyenviet.site}
+      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
+      PAYOS_WEBHOOK_CONFIRMED: ${PAYOS_WEBHOOK_CONFIRMED:-false}
+      PAYMENT_MAX_AMOUNT_VND: ${PAYMENT_MAX_AMOUNT_VND:-500000000}
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -333,6 +226,9 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - payos_client_id
+      - payos_api_key
+      - payos_checksum_key
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -383,7 +279,13 @@ services:
       WORKER_REALTIME_URL: http://acb-worker:8191
       WORKER_REALTIME_ENABLED: "true"
       WORKER_INTERNAL_TOKEN_FILE: /run/secrets/worker_internal_token
-      AUTH_BROWSER_URL: http://auth-browser:8181
+      PAYOS_CLIENT_ID_FILE: /run/secrets/payos_client_id
+      PAYOS_API_KEY_FILE: /run/secrets/payos_api_key
+      PAYOS_CHECKSUM_KEY_FILE: /run/secrets/payos_checksum_key
+      PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-https://transactions.tuannguyenviet.site}
+      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
+      PAYOS_WEBHOOK_CONFIRMED: ${PAYOS_WEBHOOK_CONFIRMED:-false}
+      PAYMENT_MAX_AMOUNT_VND: ${PAYMENT_MAX_AMOUNT_VND:-500000000}
       TTS_GATEWAY_URL: http://tts-gateway:8081
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
     expose:
@@ -400,6 +302,9 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - payos_client_id
+      - payos_api_key
+      - payos_checksum_key
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -481,11 +386,13 @@ secrets:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/tts_internal_token
   worker_internal_token:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/worker_internal_token
-  auth_browser_internal_token:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/auth_browser_internal_token
+  payos_client_id:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/payos_client_id
+  payos_api_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/payos_api_key
+  payos_checksum_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/payos_checksum_key
   bark_basic_auth_user:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/bark_basic_auth_user
   bark_basic_auth_password:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/bark_basic_auth_password
-  telegram_bot_token:
-    file: ${SECRETS_DIR:?SECRETS_DIR is required}/telegram_bot_token

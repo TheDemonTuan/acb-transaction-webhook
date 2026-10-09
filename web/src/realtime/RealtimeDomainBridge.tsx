@@ -7,7 +7,9 @@ import type {
   PageResponse,
   Transaction,
 } from '../realtime-types';
-import type { BankTransactionCreditData, PollCompletedData, RealtimeEnvelope } from './realtime.types';
+import type { BankTransactionCreditData, RealtimeEnvelope } from './realtime.types';
+import { creditTransactionKey } from './realtime.events';
+import { creditMatchesPaymentOrder } from '../features/payment-qr/payment-orders';
 
 export const RealtimeDomainBridge: React.FC = () => {
   const queryClient = useQueryClient();
@@ -25,11 +27,29 @@ export const RealtimeDomainBridge: React.FC = () => {
         // Trigger voice announcement
         handleCreditEvent(envelope);
 
+        // Credit is a refetch signal, never authority to mark an order PAID.
+        if (data.provider === 'PAYOS' && data.orderCode) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.payments() });
+          queryClient.invalidateQueries({
+            predicate: (query) => {
+              if (query.queryKey[0] !== 'payment-order' && query.queryKey[0] !== 'public-payment-order') return false;
+              const snapshot = query.state.data;
+              // A not-yet-loaded snapshot may be the correlated order.
+              if (!snapshot || typeof snapshot !== 'object' || !('orderCode' in snapshot)) return true;
+              return typeof snapshot.orderCode === 'string' &&
+                creditMatchesPaymentOrder({ orderCode: snapshot.orderCode }, data);
+            },
+          });
+        }
+
         // Optimistically prepend transaction to matching caches (unfiltered or credit-only, matching date bounds)
         const txDay = data.transactionDay || (data.transactionDate ? data.transactionDate.substring(0, 10) : '');
         const newTx: Transaction = {
           id: data.transactionId,
-          semanticKey: `ACB:${data.transactionNumber}`,
+          bank: data.bank,
+          provider: data.provider,
+          orderCode: data.orderCode,
+          semanticKey: creditTransactionKey(data) || data.transactionId,
           transactionDate: data.transactionDate,
           transactionDay: data.transactionDay,
           datePrecision: data.datePrecision,
@@ -80,34 +100,9 @@ export const RealtimeDomainBridge: React.FC = () => {
           }
         );
 
-        // Update aggregate summary on paginated queries (cursor present) without injecting items
-        queryClient.setQueriesData<PageResponse<Transaction>>(
-          {
-            predicate: (query) => {
-              const [key, params] = query.queryKey as [string, Record<string, any> | undefined];
-              if (key !== 'transactions') return false;
-              if (!params?.cursor) return false;
-              if (params?.direction && params.direction === 'debit') return false;
-              if (params?.from && txDay && txDay < String(params.from)) return false;
-              if (params?.to && txDay && txDay > String(params.to)) return false;
-              if (params?.query || params?.q) return false;
-              return true;
-            },
-          },
-          (old) => {
-            if (!old) return old;
-            return {
-              ...old,
-              summary: old.summary
-                ? {
-                    ...old.summary,
-                    count: (old.summary.count || 0) + 1,
-                    incoming: (old.summary.incoming || 0) + (newTx.credit || 0),
-                  }
-                : undefined,
-            };
-          }
-        );
+        // Refetch committed history/summary for every source, including CATCH_UP.
+        // In particular, do not increment paginated totals on a journal replay.
+        queryClient.invalidateQueries({ queryKey: queryKeys.transactions() });
 
         // Invalidate status & overview metrics
         queryClient.invalidateQueries({ queryKey: queryKeys.status });
@@ -115,31 +110,8 @@ export const RealtimeDomainBridge: React.FC = () => {
       }
     );
 
-    // 2. poll.completed -> Invalidate polls, and transactions if insertedCount > 0
-    const unsubPoll = subscribe<PollCompletedData>('poll.completed', (envelope) => {
-      const data = envelope.data;
-      queryClient.invalidateQueries({ queryKey: queryKeys.pollRuns() });
-      queryClient.invalidateQueries({ queryKey: queryKeys.status });
-      queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
 
-      if (data && ((data.insertedCount ?? 0) > 0 || data.classifier === 'RECOVERY' || data.classifier === 'CATCH_UP')) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.transactions() });
-        queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview });
-      }
-    });
-
-    // 3. connection.changed & auth.changed -> Invalidate connection and status
-    const unsubConn = subscribe('connection.changed', () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.connection });
-      queryClient.invalidateQueries({ queryKey: queryKeys.status });
-    });
-
-    const unsubAuth = subscribe('auth.changed', () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.connection });
-      queryClient.invalidateQueries({ queryKey: queryKeys.status });
-    });
-
-    // 4. webhook.changed, notification.changed & delivery.changed -> Invalidate webhooks, channels & deliveries
+    // Webhook, notification and delivery changes refresh their operational views.
     const unsubWebhook = subscribe('webhook.changed', () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.webhooks });
       queryClient.invalidateQueries({ queryKey: queryKeys.notificationChannels });
@@ -157,16 +129,13 @@ export const RealtimeDomainBridge: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.status });
     });
 
-    // 5. audit.created -> Invalidate audit logs
+    // Audit entries refresh the audit log.
     const unsubAudit = subscribe('audit.created', () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.auditLogs() });
     });
 
     return () => {
       unsubCredit();
-      unsubPoll();
-      unsubConn();
-      unsubAuth();
       unsubWebhook();
       unsubNotification();
       unsubDelivery();

@@ -1,364 +1,231 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
-	"log/slog"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/thedemontuan/acb-transaction-webhook/internal/acb"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/lock"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/monitor"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
-type roundTripFunc func(req *http.Request) (*http.Response, error)
+const testChecksumKey = "worker-test-checksum"
 
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+func testHMAC(value string) string {
+	mac := hmac.New(sha256.New, []byte(testChecksumKey))
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func TestWorkerService_VerifySession_GenerationGuard(t *testing.T) {
-	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_svc_test.db"))
+func testSignedPayload(t *testing.T, data map[string]any) string {
+	t.Helper()
+	encoded, err := json.Marshal(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-
-	// Configure initial connection at generation 5
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
+	var normalized map[string]any
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.DB().ExecContext(ctx, `UPDATE connections SET generation = 5 WHERE id = ?`, conn.ID)
-	if err != nil {
-		t.Fatal(err)
+	keys := make([]string, 0, len(normalized))
+	for k := range normalized {
+		keys = append(keys, k)
 	}
-
-	ws := &workerService{
-		store: store,
-	}
-
-	var output bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
-	defer slog.SetDefault(previous)
-	for _, tc := range []struct {
-		account    string
-		generation int64
-		code       string
-	}{
-		{conn.ID, 0, "VERIFICATION_UNAVAILABLE"},
-		{conn.ID, -1, "VERIFICATION_UNAVAILABLE"},
-		{conn.ID, 4, "VERIFICATION_SUPERSEDED"},
-		{conn.ID, 6, "VERIFICATION_SUPERSEDED"},
-		{conn.ID, 5, "VERIFICATION_UNAVAILABLE"},
-		{"synthetic-private-account", 5, "VERIFICATION_SUPERSEDED"},
-	} {
-		output.Reset()
-		verified, err := ws.VerifySession(ctx, tc.account, tc.generation, []byte("synthetic-private-password"))
-		if len(verified) != 0 {
-			t.Fatal("rejected request returned a session")
-		}
-		if authsession.VerificationCode(err) != tc.code || err.Error() != tc.code {
-			t.Fatalf("generation=%d code=%q error=%v", tc.generation, tc.code, err)
-		}
-		decoder := json.NewDecoder(&output)
-		var record map[string]any
-		if err := decoder.Decode(&record); err != nil {
-			t.Fatal(err)
-		}
-		if len(record) != 6 || record["msg"] != "ACB session verification result" || record["generation"] != float64(tc.generation) || record["phase"] != "RESTORE" || record["code"] != tc.code {
-			t.Fatalf("unsafe or incorrect verification log fields: %v", record)
-		}
-		for key := range record {
-			switch key {
-			case "time", "level", "msg", "generation", "phase", "code":
-			default:
-				t.Fatalf("unsafe verification field %q", key)
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		var val string
+		switch item := normalized[k].(type) {
+		case nil:
+		case string:
+			val = item
+		case float64:
+			val = strconv.FormatFloat(item, 'f', -1, 64)
+		default:
+			b, err := json.Marshal(item)
+			if err != nil {
+				t.Fatal(err)
 			}
+			val = string(b)
 		}
-		if decoder.More() {
-			t.Fatal("worker guard emitted multiple result events")
-		}
+		parts = append(parts, k+"="+val)
 	}
+	return testHMAC(strings.Join(parts, "&"))
 }
 
-func TestWorkerService_ScheduleRecovery_ValidatesGenerationAndState(t *testing.T) {
-	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_recovery_test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state='MONITORING', generation=5 WHERE id=?", conn.ID); err != nil {
-		t.Fatal(err)
-	}
-	called := false
-	ws := &workerService{store: store, recoveryScheduler: recoverySchedulerFunc(func(context.Context, string, int64, string) error {
-		called = true
-		return nil
-	})}
-	if err := ws.ScheduleRecovery(ctx, conn.ID, 4, "auth.verified"); err == nil {
-		t.Fatal("expected stale generation error")
-	}
-	if called {
-		t.Fatal("scheduler called for stale generation")
-	}
-	if err := ws.ScheduleRecovery(ctx, conn.ID, 5, "auth.verified"); err != nil {
-		t.Fatalf("valid recovery: %v", err)
-	}
-	if !called {
-		t.Fatal("scheduler not called for valid recovery")
-	}
-}
-
-type recoverySchedulerFunc func(context.Context, string, int64, string) error
-
-func (f recoverySchedulerFunc) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
-	return f(ctx, connectionID, generation, eventKey)
-}
-
-func TestWorkerService_NotifyAndWake_Uninitialized(t *testing.T) {
-	ctx := context.Background()
-	ws := &workerService{}
-
-	if err := ws.NotifySettingsChanged(ctx); err == nil {
-		t.Fatal("expected error when bank monitor is nil, got nil")
-	}
-	if err := ws.WakeDispatcher(ctx); err == nil {
-		t.Fatal("expected error when dispatcher is nil, got nil")
-	}
-	if err := ws.RequestSync(ctx); err == nil {
-		t.Fatal("expected error when bank monitor is nil, got nil")
-	}
-	if err := ws.ScheduleRecovery(ctx, "conn", 1, "auth.verified"); err == nil {
-		t.Fatal("expected error when storage is nil, got nil")
-	}
-	if _, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02"); err == nil {
-		t.Fatal("expected error when store is nil, got nil")
-	}
-	if err := ws.CancelHistoryJob(ctx, "job_123"); err == nil {
-		t.Fatal("expected error when store is nil, got nil")
-	}
-}
-
-func TestWorkerService_VerifySession_FailsClosedOnStoreError(t *testing.T) {
-	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_svc_fail_closed.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = store.DB().ExecContext(ctx, "UPDATE connections SET generation = 1 WHERE id = ?", conn.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var upstreamCalls atomic.Int32
-	mockTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		upstreamCalls.Add(1)
-		return nil, errors.New("upstream must not be called on database error")
+func writeTestSigned(t *testing.T, w http.ResponseWriter, data map[string]any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":      "00",
+		"desc":      "success",
+		"data":      data,
+		"signature": testSignedPayload(t, data),
 	})
-	acbClient, err := acb.NewClient("https://online.acb.com.vn", mockTransport)
+}
+
+func setupWorkerTestStore(t *testing.T) (*storage.Store, *security.Keyring) {
+	t.Helper()
+	ctx := context.Background()
+	keyDir := t.TempDir()
+	keyPath := filepath.Join(keyDir, "master.key")
+	rawKey := make([]byte, 32)
+	for i := range rawKey {
+		rawKey[i] = byte(i + 1)
+	}
+	if err := os.WriteFile(keyPath, []byte(hex.EncodeToString(rawKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kr, err := security.LoadKeyring(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	store, err := storage.Open(ctx, filepath.Join(keyDir, "worker.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.WithKeyring(kr)
+	return store, kr
+}
 
-	ws := &workerService{
-		store:                 store,
-		verifierClient:        acbClient,
-		verifierSessionLoader: monitor.NewSessionLoader(store, nil, nil),
+type recordingSender struct {
+	outcome          notification.Outcome
+	calls            atomic.Int64
+	deliveredPayload []byte
+}
+
+func (r *recordingSender) Send(ctx context.Context, req notification.SendRequest) notification.SendResult {
+	r.calls.Add(1)
+	r.deliveredPayload = req.EventPayload
+	return notification.SendResult{Outcome: r.outcome, StatusCode: 200, LatencyMs: 1}
+}
+func TestWorkerService_WakePaymentReconciler(t *testing.T) {
+	ws := &workerService{}
+	if err := ws.WakePaymentReconciler(context.Background()); err == nil {
+		t.Fatal("expected error when payments not initialized")
 	}
 
-	// Close store to simulate database failure
-	store.Close()
-
-	_, err = ws.VerifySession(ctx, conn.ID, 1, []byte("pw"))
-	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || err.Error() != "VERIFICATION_UNAVAILABLE" {
-		t.Fatalf("expected safe unavailable store failure, got %v", err)
-	}
-	if upstreamCalls.Load() != 0 {
-		t.Fatalf("expected zero upstream calls on store error, got %d", upstreamCalls.Load())
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := ws.WakePaymentReconciler(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
 
-func TestWorkerService_CreateAndCancelHistoryJob(t *testing.T) {
+func TestWorkerService_QuiesceDrainsPaymentsBeforeDispatcher(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "worker_svc_history.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := setupWorkerTestStore(t)
 	defer store.Close()
 
-	conn, err := store.ConfigureConnection(ctx, "***1234")
+	var drainOrder []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTestSigned(t, w, map[string]any{
+			"id": "link-1", "orderCode": int64(100000000001), "amount": 50000, "status": "PENDING",
+			"transactions": []any{},
+		})
+	}))
+	defer server.Close()
+
+	provider, err := payments.NewPayOS("client-1", "api-1", testChecksumKey, payments.WithBaseURL(server.URL), payments.WithHTTPClient(server.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runner := monitor.NewHistoryJobRunner(store, nil, nil, nil)
-	ws := &workerService{
-		store:         store,
-		historyRunner: runner,
-	}
+	cfg := config.Config{PayOSClientID: "client-1", PayOSAPIKey: "api-1", PayOSChecksumKey: testChecksumKey, PaymentsEnabled: true, PayOSWebhookConfirmed: true}
+	paymentService := payments.NewService(cfg, store, provider, nil)
 
-	// 1. Connection not monitoring
-	if _, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-10"); err == nil {
-		t.Fatal("expected error when connection is not MONITORING, got nil")
-	}
-
-	// Activate connection
-	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state = 'MONITORING' WHERE id = ?", conn.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	// 2. Invalid range inputs
-	if _, err := ws.CreateHistoryJob(ctx, "bad-date", "2026-09-10"); err == nil {
-		t.Fatal("expected error for invalid fromDay, got nil")
-	}
-	if _, err := ws.CreateHistoryJob(ctx, "2026-09-10", "2026-09-01"); err == nil {
-		t.Fatal("expected error when fromDay > toDay, got nil")
-	}
-	if _, err := ws.CreateHistoryJob(ctx, "2026-08-01", "2026-09-10"); err == nil {
-		t.Fatal("expected error when range exceeds 31 days, got nil")
-	}
-
-	// 3. Valid job creation
-	job, err := ws.CreateHistoryJob(ctx, "2026-09-01", "2026-09-10")
-	if err != nil {
-		t.Fatalf("CreateHistoryJob failed: %v", err)
-	}
-	if job.Status != storage.HistoryJobStatusQueued || job.RangeFrom != "2026-09-01" {
-		t.Fatalf("unexpected job descriptor: %+v", job)
-	}
-
-	// 4. Cancel job
-	if err := ws.CancelHistoryJob(ctx, job.ID); err != nil {
-		t.Fatalf("CancelHistoryJob failed: %v", err)
-	}
-	canceledJob, err := store.GetHistorySyncJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetHistorySyncJob: %v", err)
-	}
-	if canceledJob.Status != storage.HistoryJobStatusCanceled {
-		t.Fatalf("expected job status CANCELED, got %s", canceledJob.Status)
-	}
-}
-
-func TestWorkerShutdownGracefulRequeueAndReleaseLock(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	dbPath := filepath.Join(tempDir, "worker_shutdown_test.db")
-	lockPath := filepath.Join(tempDir, "gateway.lock")
-
-	store, err := storage.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	conn, err := store.ConfigureConnection(ctx, "***1234")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(ctx, "UPDATE connections SET state = 'MONITORING' WHERE id = ?", conn.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	// 1. Worker acquires singleton flock
-	flock, err := lock.Acquire(lockPath)
-	if err != nil {
-		t.Fatalf("acquire singleton flock: %v", err)
-	}
-
-	// 2. Second concurrent lock acquisition fails immediately
-	if _, err := lock.Acquire(lockPath); err == nil {
-		t.Fatal("expected second flock acquisition to fail while first worker holds it")
-	}
-
-	// 3. Worker creates a history job and claims it (status RUNNING)
-	job, _, err := store.CreateOrGetHistorySyncJob(ctx, conn.ID, conn.Generation, "2026-09-01", "2026-09-02")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, claimed, err := store.ClaimNextHistorySyncJob(ctx, time.Now().UTC())
-	if err != nil || !claimed {
-		t.Fatal("failed to claim job")
-	}
+	registry := notification.NewRegistry()
+	sender := &recordingSender{outcome: notification.OutcomeSuccess}
+	registry.Register("WEBHOOK", sender)
+	dispatcher := notification.NewDispatcher(store, registry)
 
 	coordinator := workerstate.NewCoordinator()
 	if err := coordinator.SetReady(); err != nil {
 		t.Fatal(err)
 	}
 
-	// 4. Register stop hook that requeues running jobs on shutdown
-	coordinator.RegisterStopHook(func(stopCtx context.Context) error {
-		_, err := store.RequeueRunningHistorySyncJobs(stopCtx, "graceful shutdown test")
-		return err
-	})
-
-	// 5. Worker shuts down: Stop coordinator, then release flock
-	if err := coordinator.Drain(ctx); err != nil {
-		t.Fatalf("Drain: %v", err)
+	maintRunner := maintenance.NewRunner(store)
+	ws := &workerService{
+		payments:    paymentService,
+		dispatcher:  dispatcher,
+		store:       store,
+		coordinator: coordinator,
+		maintRunner: maintRunner,
 	}
-	if err := coordinator.Stop(ctx); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	flock.Close()
 
-	// 6. Verify job was requeued to QUEUED with WORKER_SHUTDOWN error code
-	j, err := store.GetHistorySyncJob(ctx, job.ID)
+	qResp, err := ws.Quiesce(ctx)
+	if err != nil {
+		t.Fatalf("quiesce failed: %v", err)
+	}
+	if !qResp.Quiesced || qResp.Status != "quiesced" || qResp.Dispatcher != "IDLE" {
+		t.Fatalf("unexpected quiesce response: %+v", qResp)
+	}
+	_ = drainOrder
+
+	if err := ws.Resume(ctx); err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+}
+
+func TestWorkerService_QuiesceReportsDurableWatermarkAndReconcilerState(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setupWorkerTestStore(t)
+	defer store.Close()
+
+	seq, err := store.AppendJournalEvent(ctx, "ep1", "test.event", "agg_1", []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if j.Status != storage.HistoryJobStatusQueued {
-		t.Fatalf("expected requeued job status QUEUED, got %s", j.Status)
-	}
-	if j.ErrorCode != "WORKER_SHUTDOWN" {
-		t.Fatalf("expected error code WORKER_SHUTDOWN, got %s", j.ErrorCode)
+
+	cfg := config.Config{PayOSClientID: "client-1", PayOSAPIKey: "api-1", PayOSChecksumKey: testChecksumKey}
+	paymentService := payments.NewService(cfg, store, nil, nil)
+	dispatcher := notification.NewDispatcher(store, notification.NewRegistry())
+	coordinator := workerstate.NewCoordinator()
+	_ = coordinator.SetReady()
+
+	ws := &workerService{
+		payments:    paymentService,
+		dispatcher:  dispatcher,
+		store:       store,
+		coordinator: coordinator,
 	}
 
-	// 7. Next worker can acquire lock immediately and claim the requeued job
-	newFlock, err := lock.Acquire(lockPath)
+	resp, err := ws.Quiesce(ctx)
 	if err != nil {
-		t.Fatalf("new worker failed to acquire lock after old worker shutdown: %v", err)
+		t.Fatal(err)
 	}
-	defer newFlock.Close()
-
-	claimedJob, reclaimed, err := store.ClaimNextHistorySyncJob(ctx, time.Now().UTC())
-	if err != nil || !reclaimed {
-		t.Fatalf("new worker failed to claim requeued job: %v", err)
+	if resp.JournalSeq != seq {
+		t.Fatalf("expected journal sequence %d, got %d", seq, resp.JournalSeq)
 	}
-	if claimedJob.ID != job.ID {
-		t.Fatalf("expected reclaimed job %s, got %s", job.ID, claimedJob.ID)
+	if resp.ActivePaymentRequests != 0 {
+		t.Fatalf("expected 0 active payment requests, got %d", resp.ActivePaymentRequests)
 	}
 }
 
 func TestWorkerService_NotificationProviderMetadata(t *testing.T) {
 	ctx := context.Background()
 
-	// 1. Unconfigured Bark (barkSender is nil)
-	wsUnconf := &workerService{
-		barkSender:    nil,
-		barkPublicURL: "",
-	}
+	wsUnconf := &workerService{barkSender: nil, barkPublicURL: ""}
 	respUnconf, err := wsUnconf.NotificationProviderMetadata(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -367,30 +234,19 @@ func TestWorkerService_NotificationProviderMetadata(t *testing.T) {
 		t.Fatalf("expected 2 providers, got %d", len(respUnconf.Providers))
 	}
 	for _, p := range respUnconf.Providers {
-		if p.ID == "BARK" {
-			if p.Configured {
-				t.Fatal("expected Bark to be unconfigured")
-			}
-			if p.Status != "unconfigured" {
-				t.Fatalf("expected status unconfigured, got %q", p.Status)
-			}
+		if p.ID == "BARK" && (p.Configured || p.Status != "unconfigured") {
+			t.Fatalf("expected bark unconfigured: %+v", p)
 		}
-		if p.ID == "WEBHOOK" {
-			if !p.Configured {
-				t.Fatal("expected Webhook to be configured")
-			}
+		if p.ID == "WEBHOOK" && !p.Configured {
+			t.Fatalf("expected webhook configured: %+v", p)
 		}
 	}
 
-	// 2. Configured Bark
 	barkSender := bark.NewSender(bark.Config{
 		ServerURL: "http://127.0.0.1:8080",
 		PublicURL: "https://bark.example.com",
 	}, nil, "")
-	wsConf := &workerService{
-		barkSender:    barkSender,
-		barkPublicURL: "https://bark.example.com",
-	}
+	wsConf := &workerService{barkSender: barkSender, barkPublicURL: "https://bark.example.com"}
 	respConf, err := wsConf.NotificationProviderMetadata(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -399,18 +255,74 @@ func TestWorkerService_NotificationProviderMetadata(t *testing.T) {
 	for _, p := range respConf.Providers {
 		if p.ID == "BARK" {
 			barkFound = true
-			if !p.Configured {
-				t.Fatal("expected Bark to be configured")
-			}
-			if p.Status != "configured" {
-				t.Fatalf("expected status configured, got %q", p.Status)
-			}
-			if p.PublicURL != "https://bark.example.com" {
-				t.Fatalf("expected publicUrl https://bark.example.com, got %q", p.PublicURL)
+			if !p.Configured || p.Status != "configured" || p.PublicURL != "https://bark.example.com" {
+				t.Fatalf("unexpected bark status: %+v", p)
 			}
 		}
 	}
 	if !barkFound {
-		t.Fatal("BARK provider not found in response")
+		t.Fatal("BARK provider not found")
+	}
+}
+
+func TestWorkerService_TestNotificationChannelDeliversKienlongPayload(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setupWorkerTestStore(t)
+	defer store.Close()
+
+	ch, err := store.CreateEndpointWithSecret(ctx, "Test Hook", "https://example.com/webhook")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &recordingSender{outcome: notification.OutcomeSuccess}
+	registry := notification.NewRegistry()
+	registry.Register("WEBHOOK", sender)
+	ws := &workerService{
+		store:                store,
+		notificationRegistry: registry,
+	}
+
+	resp, err := ws.TestNotificationChannel(ctx, ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Success || resp.Status != "DELIVERED" {
+		t.Fatalf("test channel delivery failed: %+v", resp)
+	}
+	if !strings.Contains(string(sender.deliveredPayload), `"bank":"KienlongBank"`) || !strings.Contains(string(sender.deliveredPayload), `"provider":"PAYOS"`) {
+		t.Fatalf("delivered payload missing provider/bank metadata: %s", string(sender.deliveredPayload))
+	}
+}
+
+func TestWorkerPaymentNotifier_RealtimeHubAndDispatcherWaked(t *testing.T) {
+	hub := eventhub.New()
+	_, ch, cancel := hub.Subscribe()
+	defer cancel()
+
+	waker := &mockWaker{}
+	notifier := newWorkerPaymentNotifier(waker, hub)
+
+	event := storage.EventNotification{
+		JournalSeq:    101,
+		Epoch:         "ep1",
+		EventType:     "bank.transaction.credit",
+		TransactionID: "txn_test",
+		Payload:       []byte(`{"amount":50000}`),
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	notifier(event)
+
+	select {
+	case received := <-ch:
+		if received.Seq != 101 || received.AggregateID != "txn_test" || string(received.Payload) != `{"amount":50000}` {
+			t.Fatalf("unexpected event received: %+v", received)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for published realtime event")
+	}
+
+	if waker.wakeCount != 1 {
+		t.Fatalf("expected dispatcher wake count 1, got %d", waker.wakeCount)
 	}
 }

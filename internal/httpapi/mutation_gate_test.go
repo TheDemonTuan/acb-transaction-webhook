@@ -53,10 +53,10 @@ func TestMutationGate_GuardsAllGatewayWrites(t *testing.T) {
 		return w
 	}
 
-	// 1. Initially when gate is OPEN, configure connection succeeds
-	wConf := doReq(http.MethodPost, "/api/v1/connection/configure", `{"accountMasked":"***1234"}`)
-	if wConf.Code != http.StatusCreated && wConf.Code != http.StatusOK {
-		t.Fatalf("expected 200/201 for configure when gate is OPEN, got %d %s", wConf.Code, wConf.Body.String())
+	// A notification endpoint remains a real gateway mutation after cutover.
+	wConf := doReq(http.MethodPost, "/api/v1/webhooks", `{"name":"before","url":"https://events.example.com/bank"}`)
+	if wConf.Code != http.StatusCreated {
+		t.Fatalf("expected 201 with open gate, got %d %s", wConf.Code, wConf.Body.String())
 	}
 
 	// 2. Lock mutation gate (simulate deployment transaction)
@@ -71,12 +71,8 @@ func TestMutationGate_GuardsAllGatewayWrites(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodPost, "/api/v1/connection/pause", `{}`},
 		{http.MethodPost, "/api/v1/webhooks", `{"name":"test","url":"https://example.com"}`},
-		{http.MethodPost, "/api/v1/payment-qr", `{"accountNumber":"123","accountName":"Test"}`},
 		{http.MethodPut, "/api/v1/voice/settings", `{"providerMode":"ONLINE_AUTO","edgeVoice":"vi-VN-HoaiMyNeural"}`},
-		{http.MethodPost, "/api/v1/monitor/settings", `{"enabled":true}`},
-		{http.MethodPost, "/api/v1/transactions/ensure-history", `{"days":7}`},
 	}
 
 	for _, ep := range writeEndpoints {
@@ -100,10 +96,8 @@ func TestMutationGate_GuardsAllGatewayWrites(t *testing.T) {
 	// 4. Verify READ endpoints continue serving 200 OK while gate is locked!
 	readEndpoints := []string{
 		"/api/v1/status",
-		"/api/v1/connection",
 		"/api/v1/transactions",
 		"/api/v1/deliveries",
-		"/api/v1/poll-runs",
 		"/api/v1/realtime/status",
 		"/api/v1/csrf",
 	}
@@ -121,8 +115,8 @@ func TestMutationGate_GuardsAllGatewayWrites(t *testing.T) {
 	}
 
 	// 6. After release: writes succeed again
-	wPostRelease := doReq(http.MethodPost, "/api/v1/payment-qr", `{"accountNumber":"123","accountName":"Test"}`)
-	if wPostRelease.Code != http.StatusOK {
-		t.Fatalf("expected 200 for write after gate release, got %d %s", wPostRelease.Code, wPostRelease.Body.String())
+	wPostRelease := doReq(http.MethodPost, "/api/v1/webhooks", `{"name":"after","url":"https://events.example.com/after"}`)
+	if wPostRelease.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for write after gate release, got %d %s", wPostRelease.Code, wPostRelease.Body.String())
 	}
 }

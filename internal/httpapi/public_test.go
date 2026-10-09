@@ -37,7 +37,7 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 
 	// Insert transaction with sensitive balance
 	bal := int64(987654321)
-	items := []storage.BatchTransactionItem{
+	items := []historicalTransactionFixture{
 		{
 			Number:        "TXN_PUBLIC_001",
 			Credit:        50000,
@@ -48,7 +48,7 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 			Description:   "Public donation test",
 		},
 	}
-	res, err := store.IngestTransactionsBatch(ctx, connID, 1, "123***789", items, false)
+	res, err := seedHistoricalTransactions(ctx, store, connID, "123***789", items, "REALTIME")
 	if err != nil {
 		t.Fatalf("ingest transaction: %v", err)
 	}
@@ -56,20 +56,6 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		t.Fatalf("expected emitted event with transaction ID")
 	}
 	seededTxID := res.NewEvents[0].TransactionID
-
-	// Insert payment QR with internal metadata
-	if _, err := store.SavePaymentQR(ctx, storage.PaymentQR{
-		ConnectionID:     connID,
-		AccountNumber:    "1234567890",
-		AccountName:      "NGUYEN VIET TUAN",
-		Bin:              "970416",
-		BankName:         "ACB",
-		ImagePath:        "internal/secret/path.png",
-		ImageHash:        "secret_hash_123",
-		ImageContentType: "image/png",
-	}); err != nil {
-		t.Fatalf("save payment qr: %v", err)
-	}
 
 	// Create server with production-like CF auth required
 	cfg := config.Config{
@@ -136,7 +122,7 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 
 	t.Run("GET /api/public/v1/transactions returns only credit and blocks debit transactions", func(t *testing.T) {
 		// Seed a debit transaction
-		debitItem := []storage.BatchTransactionItem{
+		debitItem := []historicalTransactionFixture{
 			{
 				Number:        "TXN_PUBLIC_DEBIT_001",
 				Credit:        0,
@@ -146,7 +132,7 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 				Description:   "Public withdrawal test",
 			},
 		}
-		debitRes, err := store.IngestTransactionsBatch(ctx, connID, 1, "123***789", debitItem, false)
+		debitRes, err := seedHistoricalTransactions(ctx, store, connID, "123***789", debitItem, "REALTIME")
 		if err != nil {
 			t.Fatalf("ingest debit transaction: %v", err)
 		}
@@ -209,44 +195,6 @@ func TestPublicAPI_SecurityAndDataIsolation(t *testing.T) {
 		rawJSON, _ := json.Marshal(detail)
 		if strings.Contains(string(rawJSON), "987654321") {
 			t.Errorf("SECURITY LEAK: balance raw value 987654321 leaked in JSON: %s", string(rawJSON))
-		}
-	})
-
-	t.Run("GET /api/public/v1/payment-qr leaks NO internal metadata", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/public/v1/payment-qr", nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("request failed: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
-		}
-
-		var qrResp map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&qrResp); err != nil {
-			t.Fatalf("json decode: %v", err)
-		}
-		if qrResp["configured"] != true || qrResp["hasImage"] != true {
-			t.Errorf("expected configured=true, hasImage=true, got %v", qrResp)
-		}
-		rawJSON, _ := json.Marshal(qrResp)
-		rawStr := string(rawJSON)
-		if strings.Contains(rawStr, "internal/secret/path.png") || strings.Contains(rawStr, "imagePath") {
-			t.Errorf("SECURITY LEAK: imagePath leaked in public QR: %s", rawStr)
-		}
-		if strings.Contains(rawStr, "secret_hash_123") || strings.Contains(rawStr, "imageHash") {
-			t.Errorf("SECURITY LEAK: imageHash leaked in public QR: %s", rawStr)
-		}
-		if strings.Contains(rawStr, "conn_public_test") || strings.Contains(rawStr, "connectionId") {
-			t.Errorf("SECURITY LEAK: connectionId leaked in public QR: %s", rawStr)
-		}
-		qrObj, ok := qrResp["qr"].(map[string]any)
-		if !ok {
-			t.Fatalf("expected qr object, got %v", qrResp["qr"])
-		}
-		if qrObj["accountName"] != "NGUYEN VIET TUAN" || qrObj["accountNumber"] != "1234567890" || qrObj["bankName"] != "ACB" {
-			t.Errorf("unexpected qr object content: %v", qrObj)
 		}
 	})
 

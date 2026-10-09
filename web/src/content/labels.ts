@@ -1,6 +1,6 @@
 export const LABELS = {
-  appTitle: 'ACB Transaction Webhook — Monitor & Gateway',
-  brandName: 'ACB Transaction Webhook',
+  appTitle: 'payOS Transaction Webhook — KienlongBank',
+  brandName: 'payOS Transaction Webhook',
   viewerTitle: 'Giao dịch',
   adminTitle: 'Quản trị hệ thống',
   searchPlaceholder: 'Tìm kiếm giao dịch (nội dung, số tiền)...',

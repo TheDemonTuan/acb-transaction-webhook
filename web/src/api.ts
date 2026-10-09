@@ -84,12 +84,13 @@ export const getCsrfToken = async (forceRefresh = false): Promise<string> => {
 export const api = async <T,>(
   path: string,
   init?: RequestInit,
-  options?: { retryCsrf?: boolean },
+  options?: { retryCsrf?: boolean; public?: boolean },
 ): Promise<T> => {
   const method = init?.method?.toUpperCase() ?? 'GET';
   const mutating = isMutation(method);
+  const isPublic = options?.public ?? isPublicViewerHost();
 
-  if (isPublicViewerHost() && mutating && path !== '/payment-activity') {
+  if (isPublic && mutating && !(method === 'POST' && path === '/payments')) {
     throw new ApiError(
       'Trang xem giao dịch chỉ hỗ trợ đọc dữ liệu.',
       405,
@@ -97,10 +98,10 @@ export const api = async <T,>(
     );
   }
 
-  const basePath = isPublicViewerHost() ? '/api/public/v1' : '/api/v1';
+  const basePath = isPublic ? '/api/public/v1' : '/api/v1';
   const headers = new Headers(init?.headers);
 
-  if (mutating && !isPublicViewerHost()) {
+  if (mutating && !isPublic) {
     const token = await getCsrfToken();
     if (!headers.has('X-CSRF-Token')) {
       headers.set('X-CSRF-Token', token);
@@ -119,7 +120,7 @@ export const api = async <T,>(
 
   if (!response.ok) {
     const error = await parseApiError(response);
-    if (mutating && !isPublicViewerHost() && error.code === CSRF_CODE_TOKEN_INVALID && options?.retryCsrf !== false) {
+    if (mutating && !isPublic && error.code === CSRF_CODE_TOKEN_INVALID && options?.retryCsrf !== false) {
       const newToken = await getCsrfToken(true);
       headers.set('X-CSRF-Token', newToken);
       try {
@@ -144,6 +145,10 @@ export const api = async <T,>(
     throw new Error('Máy chủ trả về dữ liệu không hợp lệ. Vui lòng thử lại.');
   }
 };
+
+// Customer payment pages use this client even on the development/admin host.
+export const publicApi = <T,>(path: string, init?: RequestInit): Promise<T> =>
+  api<T>(path, { ...init, cache: 'no-store' }, { public: true });
 
 export interface AudioResponseResult {
   data: ArrayBuffer;

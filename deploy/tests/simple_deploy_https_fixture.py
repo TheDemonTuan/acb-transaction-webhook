@@ -8,6 +8,12 @@ import sys
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        self.proxy('GET')
+
+    def do_POST(self):
+        self.proxy('POST')
+
+    def proxy(self, method):
         if self.headers.get('Host') == 'bank.tuannguyenviet.site':
             self.send_response(302)
             self.send_header('Location', 'https://thedemontuan.cloudflareaccess.com/cdn-cgi/access/login/bank.tuannguyenviet.site')
@@ -16,14 +22,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get('Host') != 'transactions.tuannguyenviet.site':
             self.send_error(404)
             return
+        length = int(self.headers.get('Content-Length', '0'))
+        if length < 0 or length > 65536:
+            self.send_error(413)
+            return
+        request_body = self.rfile.read(length)
+        payload_args = ['-X', method]
+        if method == 'POST':
+            payload_args += ['-H', 'Content-Type: application/json', '--data-binary', '@-']
         try:
             response = subprocess.run([
-                'docker', 'run', '--rm', '--network', 'container:edge-traefik',
+                'docker', 'run', '--rm', '-i', '--network', 'container:edge-traefik',
                 'curlimages/curl:8.12.1', '--silent', '--show-error', '--include',
                 '--max-time', '5', '-H', 'Host: transactions.tuannguyenviet.site',
-                '-H', 'Accept-Encoding: identity',
+                '-H', 'Accept-Encoding: identity', *payload_args,
                 'http://127.0.0.1:8080' + self.path,
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            ], input=request_body, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
             if response.returncode:
                 raise ValueError('origin request failed')
             head, body = response.stdout.split(b'\r\n\r\n', 1)

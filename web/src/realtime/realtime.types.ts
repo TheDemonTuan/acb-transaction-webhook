@@ -8,7 +8,10 @@ export interface RealtimeEnvelope<T = unknown> {
 }
 
 export interface BankTransactionCreditData {
-  bank: 'ACB';
+  bank: 'ACB' | 'KienlongBank';
+  provider?: 'PAYOS';
+  orderCode?: string;
+  paymentOrigin?: 'STATIC_URL' | 'OPERATOR_DYNAMIC';
   accountMasked?: string;
   transactionId: string;
   transactionNumber: string;
@@ -23,19 +26,6 @@ export interface BankTransactionCreditData {
   detectedAt: string;
 }
 
-export interface ConnectionChangedData {
-  id?: string;
-  state: string;
-  accountMasked?: string;
-  generation?: number;
-  updatedAt?: string;
-}
-
-export interface AuthChangedData {
-  attemptId: string;
-  status: string;
-  error?: string;
-}
 
 export interface WebhookChangedData {
   id?: string;
@@ -57,21 +47,7 @@ export interface DeliveryChangedData {
   attempts: number;
 }
 
-export interface PollCompletedData {
-  id?: string;
-  pollId?: string;
-  status: string;
-  classifier?: string;
-  httpStatus?: number;
-  pages?: number;
-  rowsSeen?: number;
-  rowsMatched?: number;
-  insertedCount?: number;
-  durationMs?: number;
-  error?: string;
-  startedAt?: string;
-  finishedAt?: string;
-}
+
 
 export interface AuditCreatedData {
   id: string;
@@ -108,12 +84,9 @@ export interface RealtimeDiagnostics {
 
 export interface RealtimeEventMap {
   'bank.transaction.credit': BankTransactionCreditData;
-  'connection.changed': ConnectionChangedData;
-  'auth.changed': AuthChangedData;
   'webhook.changed': WebhookChangedData;
   'notification.changed': NotificationChangedData;
   'delivery.changed': DeliveryChangedData;
-  'poll.completed': PollCompletedData;
   'audit.created': AuditCreatedData;
   'stream.heartbeat': StreamHeartbeatData;
   'stream_error': StreamErrorData;

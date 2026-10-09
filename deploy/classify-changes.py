@@ -109,19 +109,14 @@ def select(event_name, inputs, auto):
     for name, value in [('deploy', deploy), ('rehearse', rehearse)]:
         if type(value) is not bool:
             raise ValueError(f'{name} must be a boolean')
-    account = inputs.get('import_account', '')
-    if not isinstance(account, str):
-        raise ValueError('Invalid dispatch string input')
-    if account and not re.fullmatch(r'[0-9]{1,32}', account):
-        raise ValueError('INVALID_IMPORT_ACCOUNT')
     if target == 'auto':
         frontend, backend, reason, base = auto()
     else:
         frontend, backend = target in {'all', 'frontend'}, target in {'all', 'backend'}
         reason, base = f'Explicit dispatch target: {target}', None
-    if account or rehearse:
+    if rehearse:
         backend = True
-        reason += '; backend forced by import_account or rehearse'
+        reason += '; backend forced by rehearsal'
     return {'frontend': str(frontend).lower(), 'backend': str(backend).lower(),
             'reason': reason, 'base_sha': base}
 
@@ -144,11 +139,6 @@ def main():
                 raise ValueError(f'Invalid boolean input: {name}')
             value = value == 'true'
         inputs[name] = value
-    account = inputs.get('import_account', '')
-    if account:
-        if not isinstance(account, str) or not re.fullmatch(r'[0-9]{1,32}', account):
-            raise ValueError('INVALID_IMPORT_ACCOUNT')
-        print('::add-mask::' + account)
 
     def auto():
         api = ActionsAPI(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN', ''),

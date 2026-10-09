@@ -15,22 +15,14 @@ func TestBackfillCanonicalDatesAndSourcePolicy(t *testing.T) {
 	}
 	defer store.Close()
 
-	connID := "conn_backfill_test"
-	if _, err := store.db.ExecContext(ctx, `
-		INSERT INTO connections(id, state, generation, created_at, updated_at) 
-		VALUES(?, 'MONITORING', 1, '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')
-	`, connID); err != nil {
-		t.Fatalf("insert connection: %v", err)
-	}
-
-	// Insert legacy row missing canonical day/iso
-	legacyTxnID := "txn_legacy_1"
-	if _, err := store.db.ExecContext(ctx, `
-		INSERT INTO transactions(id, connection_id, semantic_key, canonical_hash, transaction_date, effective_date, debit, credit, balance, parser_version, first_seen_at)
-		VALUES(?, ?, 'ACB:1111', 'hash1', '12/09/2026 10:32:15', '12/09/2026', 0, 100000, 500000, 'v1', '2026-09-12T10:33:00Z')
-	`, legacyTxnID, connID); err != nil {
-		t.Fatalf("insert legacy txn: %v", err)
-	}
+	conn := historicalConnectionFixture(t, store, ctx, "***1234")
+	connID := conn.ID
+	// Insert a legacy row without canonical day/ISO.
+	legacyTxnID := historicalTransactionFixture(t, store, ctx, TransactionInput{
+		ConnectionID: connID, SemanticKey: "ACB:1111", CanonicalHash: "hash1",
+		TransactionAt: "12/09/2026 10:32:15", EffectiveAt: "12/09/2026", Credit: 100000,
+		ParserVersion: "v1",
+	}, "REALTIME", "NONE")
 
 	// Run backfill
 	updated, err := store.BackfillCanonicalDates(ctx)
@@ -65,27 +57,20 @@ func TestBackfillCanonicalDatesAndSourcePolicy(t *testing.T) {
 		t.Errorf("expected 0 rows updated on rerun, got %d", updated2)
 	}
 
-	// Test IngestTransactionsBatchWithSource FILTER_SYNC
-	filterSyncItems := []BatchTransactionItem{
-		{
-			Number:        "2222",
-			Credit:        50000,
-			Debit:         0,
-			TransactionAt: "01/02/2026",
-			EffectiveAt:   "01/02/2026",
-			Description:   "Old history sync",
-		},
+	filterTxnID := historicalTransactionFixture(t, store, ctx, TransactionInput{
+		ConnectionID: connID, SemanticKey: "ACB:2222", CanonicalHash: "hash2",
+		TransactionAt: "01/02/2026", EffectiveAt: "01/02/2026", Credit: 50000,
+		Description: []byte("Old history sync"), ParserVersion: "v1",
+	}, "FILTER_SYNC", "NONE")
+	if updated, err := store.BackfillCanonicalDates(ctx); err != nil || updated != 1 {
+		t.Fatalf("backfill historical filter row: updated=%d err=%v", updated, err)
 	}
-	res, err := store.IngestTransactionsBatchWithSource(ctx, connID, 1, "123***789", filterSyncItems, false, "FILTER_SYNC")
-	if err != nil {
-		t.Fatalf("IngestTransactionsBatchWithSource FILTER_SYNC: %v", err)
+	var eventCount, deliveryCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM events WHERE transaction_id=?`, filterTxnID).Scan(&eventCount); err != nil || eventCount != 0 {
+		t.Fatalf("historical FILTER_SYNC events=%d err=%v", eventCount, err)
 	}
-	if res.InsertedCount != 1 {
-		t.Errorf("expected 1 inserted, got %d", res.InsertedCount)
-	}
-	// For FILTER_SYNC, NewEvents should be empty (no voice announcements!)
-	if len(res.NewEvents) != 0 {
-		t.Errorf("expected 0 NewEvents for FILTER_SYNC, got %d", len(res.NewEvents))
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM deliveries`).Scan(&deliveryCount); err != nil || deliveryCount != 0 {
+		t.Fatalf("historical FILTER_SYNC deliveries=%d err=%v", deliveryCount, err)
 	}
 
 	var filterDay, filterSource string

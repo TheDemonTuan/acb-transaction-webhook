@@ -20,7 +20,7 @@ export const AdminMobileNav: React.FC<{ isOpen: boolean; onClose: () => void }> 
 
   const navItems = [
     { to: '/admin/overview', label: 'Tổng quan', icon: LayoutDashboard },
-    { to: '/admin/connection', label: 'Kết nối ACB', icon: Landmark },
+    { to: '/admin/connection', label: 'Kết nối payOS', icon: Landmark },
     { to: '/admin/notifications', label: 'Kênh thông báo', icon: Bell },
     { to: '/admin/activity', label: 'Hoạt động', icon: Activity },
     { to: '/admin/system', label: 'Hệ thống', icon: Server },

@@ -171,6 +171,11 @@ export const TransactionDetailPage: React.FC = () => {
           {/* Grid attributes */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="p-4 rounded-2xl bg-stone-50/50 border border-stone-200/60 space-y-1">
+              <span className="text-xs font-semibold text-stone-500">Ngân hàng</span>
+              <p className="text-sm font-semibold text-stone-800">{transaction.bank || 'Chưa rõ ngân hàng'}</p>
+              {transaction.orderCode && <p className="font-mono text-xs">Đơn payOS: {transaction.orderCode}</p>}
+            </div>
+            <div className="p-4 rounded-2xl bg-stone-50/50 border border-stone-200/60 space-y-1">
               <span className="text-xs font-semibold text-stone-500 flex items-center gap-1.5">
                 <Hash className="w-3.5 h-3.5" />
                 Mã tham chiếu ngân hàng

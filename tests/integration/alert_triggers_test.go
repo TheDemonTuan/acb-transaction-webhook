@@ -7,93 +7,107 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
-// TestAlertThresholdTriggers verifies telemetry alert evaluation:
-// 1. Stale realtime poll (>120s WARNING, >300s CRITICAL)
-// 2. Auth stuck (>600s active attempt or AUTH_REQUIRED)
-// 3. Queue saturation (depth > 20, oldest > 300s)
-// 4. History job stall
-// 5. Overdue backup / restore drill
+// TestAlertThresholdTriggers covers the operational alerts retained by the payOS runtime.
+// An idle payment channel is healthy: lack of incoming webhooks is not a stale poll.
 func TestAlertThresholdTriggers(t *testing.T) {
-	// Baseline snapshot: all normal
-	sNormal := telemetry.TelemetrySnapshot{
-		CapturedAt: time.Now(),
+	now := time.Now().UTC()
+	normal := telemetry.TelemetrySnapshot{
+		CapturedAt: now,
 		Realtime: telemetry.RealtimeTelemetry{
-			LastACBPollAt:         time.Now().Add(-30 * time.Second).Format(time.RFC3339),
-			LastACBPollAgeSeconds: 30,
+			StreamEnabled: true,
+			StreamState:   "connected",
 		},
-		AuthLifecycle: telemetry.AuthLifecycleTelemetry{
-			SessionState: "MONITORING",
+		Singleton: telemetry.SingletonTelemetry{
+			WorkerState:         "READY",
+			HeartbeatAt:         now.Format(time.RFC3339),
+			HeartbeatAgeSeconds: 30,
 		},
-		Scheduler: telemetry.SchedulerTelemetry{
-			TotalQueueDepth: 3,
+		Deployment: telemetry.DeploymentTelemetry{RuntimeRole: "gateway"},
+		BackupAndRestore: telemetry.BackupAndDrillTelemetry{
+			LastBackupAt:            now.Format(time.RFC3339),
+			LastRestoreDrillAt:      now.Format(time.RFC3339),
+			LastRestoreDrillSuccess: true,
 		},
 	}
-	alertsNormal := telemetry.EvaluateAlerts(sNormal)
-	for _, a := range alertsNormal {
-		if a.Active {
-			t.Fatalf("expected alert %s to be inactive on normal snapshot, got active", a.Name)
+	for _, alert := range telemetry.EvaluateAlerts(normal) {
+		if alert.Active {
+			t.Fatalf("unexpected active alert on idle healthy channel: %+v", alert)
 		}
 	}
 
-	// 1. Stale poll warning & critical
-	sWarnPoll := sNormal
-	sWarnPoll.Realtime.LastACBPollAgeSeconds = 150
-	alertsWarn := telemetry.EvaluateAlerts(sWarnPoll)
-	var staleFound bool
-	for _, a := range alertsWarn {
-		if a.Name == telemetry.AlertStaleRealtimePoll {
-			staleFound = true
-			if !a.Active || a.Level != telemetry.AlertWarning {
-				t.Fatalf("expected active WARNING for stale poll at 150s, got %v level=%s", a.Active, a.Level)
+	for _, test := range []struct {
+		name   string
+		alert  string
+		level  telemetry.AlertLevel
+		mutate func(*telemetry.TelemetrySnapshot)
+	}{
+		{"worker heartbeat stale", telemetry.AlertStaleWorker, telemetry.AlertCritical, func(s *telemetry.TelemetrySnapshot) {
+			s.Singleton.HeartbeatAgeSeconds = 61
+		}},
+		{"worker unhealthy", telemetry.AlertStaleWorker, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.Singleton.WorkerState = "FAILED"
+		}},
+		{"pending notification backlog", telemetry.AlertNotificationBacklogStuck, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.Notifications.TotalPending = 51
+		}},
+		{"notification dead letters", telemetry.AlertNotificationBacklogStuck, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.Notifications.TotalDeadLetter = 11
+		}},
+		{"backup overdue", telemetry.AlertBackupOverdue, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.BackupAndRestore.BackupAgeSeconds = 86401
+		}},
+		{"restore drill overdue", telemetry.AlertRestoreDrillOverdue, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.BackupAndRestore.RestoreDrillAgeDays = 31
+		}},
+		{"restore drill failed", telemetry.AlertRestoreDrillOverdue, telemetry.AlertCritical, func(s *telemetry.TelemetrySnapshot) {
+			s.BackupAndRestore.LastRestoreDrillSuccess = false
+		}},
+		{"deployment gate locked", telemetry.AlertMutationGateLocked, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.MutationGate.IsLocked = true
+			s.MutationGate.GateState = "LOCKED"
+		}},
+		{"runtime role drift", telemetry.AlertWrongRoleReleaseSchema, telemetry.AlertCritical, func(s *telemetry.TelemetrySnapshot) {
+			s.Deployment.RuntimeRole = "unexpected-role"
+		}},
+		{"realtime disconnected warning", telemetry.AlertRealtimeStreamDegraded, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.Realtime.StreamState = "reconnecting"
+			s.Realtime.StreamDisconnectedAgeSeconds = 31
+		}},
+		{"realtime disconnected critical", telemetry.AlertRealtimeStreamDegraded, telemetry.AlertCritical, func(s *telemetry.TelemetrySnapshot) {
+			s.Realtime.StreamState = "reconnecting"
+			s.Realtime.StreamDisconnectedAgeSeconds = 121
+		}},
+		{"realtime stopped", telemetry.AlertRealtimeStreamDegraded, telemetry.AlertCritical, func(s *telemetry.TelemetrySnapshot) {
+			s.Realtime.StreamState = "stopped"
+		}},
+		{"journal fallback elevated", telemetry.AlertRealtimeFallbackRecovery, telemetry.AlertWarning, func(s *telemetry.TelemetrySnapshot) {
+			s.Realtime.RecentFallbackRecoveryReconciles = 2
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := normal
+			test.mutate(&snapshot)
+			for _, alert := range telemetry.EvaluateAlerts(snapshot) {
+				if alert.Name == test.alert {
+					if !alert.Active || alert.Level != test.level {
+						t.Fatalf("expected active %s alert, got %+v", test.level, alert)
+					}
+					return
+				}
 			}
-		}
-	}
-	if !staleFound {
-		t.Fatal("AlertStaleRealtimePoll not found")
+			t.Fatalf("expected alert %s not found", test.alert)
+		})
 	}
 
-	sCritPoll := sNormal
-	sCritPoll.Realtime.LastACBPollAgeSeconds = 350
-	alertsCrit := telemetry.EvaluateAlerts(sCritPoll)
-	for _, a := range alertsCrit {
-		if a.Name == telemetry.AlertStaleRealtimePoll {
-			if !a.Active || a.Level != telemetry.AlertCritical {
-				t.Fatalf("expected active CRITICAL for stale poll at 350s, got %v level=%s", a.Active, a.Level)
+	for _, role := range []string{"gateway", "worker", "monolith-dev"} {
+		t.Run("recognized role "+role, func(t *testing.T) {
+			snapshot := normal
+			snapshot.Deployment.RuntimeRole = role
+			for _, alert := range telemetry.EvaluateAlerts(snapshot) {
+				if alert.Name == telemetry.AlertWrongRoleReleaseSchema && alert.Active {
+					t.Fatalf("supported runtime role produced drift alert: %+v", alert)
+				}
 			}
-		}
-	}
-
-	// 2. Auth stuck trigger
-	sAuthStuck := sNormal
-	sAuthStuck.AuthLifecycle.SessionState = "AUTH_REQUIRED"
-	alertsAuth := telemetry.EvaluateAlerts(sAuthStuck)
-	var authFound bool
-	for _, a := range alertsAuth {
-		if a.Name == telemetry.AlertAuthStuck {
-			authFound = true
-			if !a.Active {
-				t.Fatalf("expected AlertAuthStuck active when session=AUTH_REQUIRED")
-			}
-		}
-	}
-	if !authFound {
-		t.Fatal("AlertAuthStuck not found")
-	}
-
-	// 3. Queue saturation trigger
-	sQueueSat := sNormal
-	sQueueSat.Scheduler.TotalQueueDepth = 25
-	alertsQueue := telemetry.EvaluateAlerts(sQueueSat)
-	var queueFound bool
-	for _, a := range alertsQueue {
-		if a.Name == telemetry.AlertQueueSaturation {
-			queueFound = true
-			if !a.Active {
-				t.Fatalf("expected AlertQueueSaturation active when queue depth=25")
-			}
-		}
-	}
-	if !queueFound {
-		t.Fatal("AlertQueueSaturation not found")
+		})
 	}
 }

@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
-  RotateCcw,
   Send,
   ShieldAlert,
   RefreshCw,
@@ -14,11 +13,10 @@ import {
 import {
   fetchAuditLogs,
   fetchDeliveries,
-  fetchPollRuns,
   replayDelivery,
 } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
-import { getDeliveryStatus, getPollStatus } from '../../content/status-copy';
+import { getDeliveryStatus } from '../../content/status-copy';
 import { useCursorPagination, PaginationControls } from '../../shared/ui/PaginationControls';
 
 export const ActivityPage: React.FC = () => {
@@ -27,8 +25,7 @@ export const ActivityPage: React.FC = () => {
   const [replayingId, setReplayingId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const tabParam = searchParams.get('tab');
-  const activeTab: 'polling' | 'deliveries' | 'audit' =
-    tabParam === 'deliveries' ? 'deliveries' : tabParam === 'audit' ? 'audit' : 'polling';
+  const activeTab: 'deliveries' | 'audit' = tabParam === 'audit' ? 'audit' : 'deliveries';
 
   const pagination = useCursorPagination(20);
   const resetPagination = pagination.reset;
@@ -42,22 +39,9 @@ export const ActivityPage: React.FC = () => {
     }
   }, [activeTab, resetPagination]);
 
-  const switchTab = (tab: 'polling' | 'deliveries' | 'audit') => {
+  const switchTab = (tab: 'deliveries' | 'audit') => {
     setSearchParams({ tab });
   };
-
-  const {
-    data: pollData,
-    isLoading: loadingPolls,
-    isFetching: fetchingPolls,
-    isError: isErrorPolls,
-    error: pollError,
-    refetch: refetchPolls,
-  } = useQuery({
-    queryKey: queryKeys.pollRuns({ limit: pagination.pageSize, cursor: pagination.cursor }),
-    queryFn: () => fetchPollRuns({ limit: pagination.pageSize, cursor: pagination.cursor }),
-    enabled: activeTab === 'polling',
-  });
 
   const {
     data: deliveryData,
@@ -100,7 +84,6 @@ export const ActivityPage: React.FC = () => {
     }
   };
 
-  const polls = pollData?.items || [];
   const deliveries = deliveryData?.items || [];
   const audits = auditData?.items || [];
 
@@ -111,14 +94,13 @@ export const ActivityPage: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-stone-900">Hoạt động</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Lịch sử chu kỳ cập nhật, phân phối webhook và nhật ký hệ thống
+            Phân phối thông báo giao dịch và nhật ký hệ thống
           </p>
         </div>
         <button
           type="button"
           onClick={() => {
-            if (activeTab === 'polling') refetchPolls();
-            else if (activeTab === 'deliveries') refetchDeliveries();
+            if (activeTab === 'deliveries') refetchDeliveries();
             else if (activeTab === 'audit') refetchAudit();
           }}
           className="inline-flex items-center self-start sm:self-auto gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 transition shadow-2xs cursor-pointer"
@@ -130,19 +112,6 @@ export const ActivityPage: React.FC = () => {
 
       {/* Navigation Sub-tabs */}
       <div className="flex items-center gap-2 border-b border-stone-200 pb-2">
-        <button
-          type="button"
-          onClick={() => switchTab('polling')}
-          className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-            activeTab === 'polling'
-              ? 'bg-stone-900 text-white shadow-xs'
-              : 'bg-white text-stone-600 hover:bg-stone-100 border border-stone-200/80'
-          }`}
-        >
-          <RotateCcw className="w-3.5 h-3.5" />
-          <span>Chu kỳ cập nhật</span>
-        </button>
-
         <button
           type="button"
           onClick={() => switchTab('deliveries')}
@@ -170,107 +139,6 @@ export const ActivityPage: React.FC = () => {
         </button>
       </div>
 
-      {/* TAB 1: Polling Runs */}
-      {activeTab === 'polling' && (
-        <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
-          <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between">
-            <h3 className="font-bold text-stone-900 text-base">Chu kỳ Polling</h3>
-            <span className="text-xs text-stone-500">{polls.length} lượt chạy trang này</span>
-          </div>
-
-          {loadingPolls ? (
-            <div className="p-12 text-center text-xs text-stone-500">
-              <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-stone-400" />
-              Đang tải dữ liệu...
-            </div>
-          ) : isErrorPolls ? (
-            <div className="p-12 text-center text-xs text-rose-600 space-y-2">
-              <p>Không thể tải dữ liệu: {pollError instanceof Error ? pollError.message : 'Lỗi kết nối'}</p>
-              <button
-                type="button"
-                onClick={() => refetchPolls()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white border border-rose-200 text-rose-700 hover:bg-rose-50 transition cursor-pointer shadow-2xs"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Thử lại</span>
-              </button>
-            </div>
-          ) : polls.length === 0 ? (
-            <div className="p-12 text-center text-xs text-stone-500">
-              Chưa có chu kỳ polling nào được ghi nhận.
-            </div>
-          ) : (
-            <div className="divide-y divide-stone-100">
-              {polls.map((p) => {
-                const pollStatus = getPollStatus(p.status);
-                return (
-                  <div
-                    key={p.id}
-                    className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-stone-50/50 transition"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${
-                            pollStatus.tone === 'success'
-                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                              : pollStatus.tone === 'warning'
-                              ? 'bg-amber-50 text-amber-700 border-amber-200'
-                              : 'bg-rose-50 text-rose-700 border-rose-200'
-                          }`}
-                        >
-                          {pollStatus.label}
-                        </span>
-                        {p.classifier && (
-                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 border border-stone-200 uppercase tracking-wider">
-                            {p.classifier}
-                          </span>
-                        )}
-                        <span className="text-xs text-stone-500 flex items-center gap-1 font-mono">
-                          <Clock className="w-3 h-3" />
-                          {new Date(p.startedAt).toLocaleString('vi-VN')}
-                        </span>
-                      </div>
-                      {p.error && (
-                        <p className="text-xs text-rose-600 font-mono mt-0.5">{p.error}</p>
-                      )}
-                      {p.status === 'SUCCEEDED' && p.pages === 0 && p.rowsSeen === 0 && (
-                        <div className="mt-1 text-xs text-stone-500">
-                          <p className="font-medium">Chưa quét lịch sử giao dịch</p>
-                          <p>Lượt này không quét lịch sử; giữ phiên thành công không có nghĩa là đã đồng bộ giao dịch.</p>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-stone-600 font-mono">
-                      <span>Trang: {p.pages}</span>
-                      <span>Dòng đọc từ ACB: <strong data-testid="poll-rows-scanned">{p.rowsSeen}</strong></span>
-                      {p.rowsMatched != null && (
-                        <span>Giao dịch đúng ngày: <strong data-testid="poll-rows-matched">{p.rowsMatched}</strong></span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {(polls.length > 0 || pagination.hasPrev) && (
-            <PaginationControls
-              pageNumber={pagination.pageNumber}
-              itemCount={polls.length}
-              pageSize={pagination.pageSize}
-              hasNext={Boolean(pollData?.nextCursor)}
-              hasPrev={pagination.hasPrev}
-              isLoading={loadingPolls || fetchingPolls}
-              onNext={() => pagination.handleNext(pollData?.nextCursor)}
-              onPrev={pagination.handlePrev}
-              onFirst={pagination.handleFirst}
-              onPageSizeChange={pagination.setPageSize}
-            />
-          )}
-        </div>
-      )}
 
       {/* TAB 2: Deliveries */}
       {activeTab === 'deliveries' && (

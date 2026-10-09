@@ -8,7 +8,7 @@ import (
 )
 
 // TestSingletonWorkerLockExclusivity proves Gate 7:
-// The production ACB worker uses strict non-blocking file locking on gateway.lock.
+// The production payment worker uses strict non-blocking file locking on gateway.lock.
 // Two active workers can never hold the lock concurrently.
 // During upgrade, Worker 1 yields/releases before Worker 2 can acquire.
 func TestSingletonWorkerLockExclusivity(t *testing.T) {

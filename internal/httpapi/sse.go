@@ -229,6 +229,7 @@ func writeJournalEntry(rc *http.ResponseController, w http.ResponseWriter, flush
 			"bank": {}, "accountMasked": {}, "transactionId": {}, "transactionNumber": {},
 			"credit": {}, "debit": {}, "currency": {}, "transactionDate": {}, "transactionDay": {},
 			"datePrecision": {}, "source": {}, "description": {}, "detectedAt": {},
+			"provider": {}, "orderCode": {}, "paymentOrigin": {},
 		}
 		for key := range raw {
 			if _, ok := allowed[key]; !ok {

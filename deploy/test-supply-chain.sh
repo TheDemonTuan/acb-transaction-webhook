@@ -160,15 +160,15 @@ cat <<'EOF' > "$test_tmp/cve-components.json"
     },
     {
       "cve": "CVE-2026-22222",
-      "components": ["auth-browser"],
-      "reason": "Browser only risk accepted",
+      "components": ["worker"],
+      "reason": "Worker only risk accepted",
       "owner": "security@tuannguyenviet.site",
       "expiry": "2027-12-31"
     }
   ]
 }
 EOF
-assert_success "Component-specific ignorefile for gateway includes gateway CVE and excludes auth-browser CVE" \
+assert_success "Component-specific ignorefile for gateway includes gateway CVE and excludes worker CVE" \
   bash -c "bash '$script_dir/validate-cve-allowlist.sh' --file '$test_tmp/cve-components.json' --component gateway --reference-date '2026-09-13' --output-ignorefile '$test_tmp/.trivyignore-gw' && grep -q 'CVE-2026-11111' '$test_tmp/.trivyignore-gw' && ! grep -q 'CVE-2026-22222' '$test_tmp/.trivyignore-gw'"
 
 printf "\n"

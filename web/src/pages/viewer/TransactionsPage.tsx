@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Search,
   ArrowDownLeft,
@@ -15,42 +15,14 @@ import {
   X,
   Calendar,
 } from 'lucide-react';
-import {
-  fetchTransactions,
-  ensureHistory,
-  fetchHistorySyncJob,
-  fetchLatestHistorySyncJob,
-  cancelHistorySyncJob,
-} from '../../shared/api/queries';
+import { fetchTransactions } from '../../shared/api/queries';
 import { isPublicViewerHost } from '../../app/runtime-mode';
 import { ROUTES } from '../../app/routes';
 import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { formatDateTimeVN } from '../../shared/formatters/datetime';
-import type { Transaction, HistorySyncJob } from '../../realtime-types';
+import type { Transaction } from '../../realtime-types';
 import { useCursorPagination, PaginationControls } from '../../shared/ui/PaginationControls';
-
-const formatFriendlyError = (code?: string | null, message?: string | null): string => {
-  if (code === 'SESSION_EXPIRED') {
-    return 'Phiên làm việc ACB đã hết hạn. Vui lòng cập nhật thông tin đăng nhập.';
-  }
-  if (code === 'RATE_LIMITED') {
-    return 'Hệ thống ACB đang giới hạn tần suất yêu cầu. Vui lòng chờ ít phút.';
-  }
-  if (code === 'INVALID_RANGE') {
-    return 'Khoảng thời gian không hợp lệ hoặc vượt quá giới hạn tối đa 31 ngày.';
-  }
-  if (code === 'JOB_NOT_FOUND') {
-    return 'Không tìm thấy tiến trình đồng bộ.';
-  }
-  if (code === 'UPSTREAM_ERROR' || code === 'SERVICE_UNAVAILABLE') {
-    return 'Không thể kết nối đến máy chủ ngân hàng ACB. Vui lòng thử lại sau.';
-  }
-  if (message && !message.includes('<') && !message.includes('http')) {
-    return message;
-  }
-  return 'Đồng bộ giao dịch không thành công. Vui lòng kiểm tra lại kết nối.';
-};
 
 const getTodayISO = () => {
   const d = new Date();
@@ -70,7 +42,6 @@ const getDaysAgoISO = (days: number) => {
 };
 
 export const TransactionsPage: React.FC = () => {
-  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const isPublic = isPublicViewerHost();
@@ -81,7 +52,6 @@ export const TransactionsPage: React.FC = () => {
   const [customTo, setCustomTo] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedId, setCopiedId] = useState(false);
-  const [syncNotice, setSyncNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const pagination = useCursorPagination(20);
   const resetPagination = pagination.reset;
   const appliedSearchRef = useRef('');
@@ -157,150 +127,6 @@ export const TransactionsPage: React.FC = () => {
     }
   };
 
-  // Active durable history sync job tracking (persisted across tab reloads)
-  const [activeJobId, setActiveJobId] = useState<string | null>(() => {
-    if (isPublic) return null;
-    try {
-      return localStorage.getItem('acb_active_history_sync_job_id') || null;
-    } catch {
-      return null;
-    }
-  });
-  const [submittingSync, setSubmittingSync] = useState(false);
-  const [cancelingSync, setCancelingSync] = useState(false);
-
-  // Restore latest running job on mount if local storage is empty
-  useEffect(() => {
-    if (isPublic) return;
-    if (!activeJobId) {
-      fetchLatestHistorySyncJob().then((latest) => {
-        if (latest && (latest.status === 'QUEUED' || latest.status === 'RUNNING')) {
-          setActiveJobId(latest.id);
-          try {
-            localStorage.setItem('acb_active_history_sync_job_id', latest.id);
-          } catch {}
-        }
-      });
-    }
-  }, [activeJobId, isPublic]);
-
-  // Polling via TanStack Query: only while status is QUEUED or RUNNING
-  const { data: activeJob } = useQuery({
-    queryKey: queryKeys.historySyncJob(activeJobId ?? ''),
-    queryFn: () => fetchHistorySyncJob(activeJobId!),
-    enabled: !isPublic && Boolean(activeJobId),
-    refetchInterval: (query) => {
-      const job = query.state.data;
-      if (!job) return 1000;
-      if (job.status === 'QUEUED' || job.status === 'RUNNING') {
-        return (job.pagesDone ?? 0) > 10 ? 2000 : 1000;
-      }
-      return false; // Stop polling immediately on terminal state
-    },
-    refetchIntervalInBackground: false,
-  });
-
-  const isJobActive = Boolean(
-    !isPublic && (submittingSync || (activeJob && (activeJob.status === 'QUEUED' || activeJob.status === 'RUNNING')))
-  );
-
-  const terminalJobNotifiedRef = React.useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!activeJob) return;
-
-    if (activeJob.status === 'COMPLETED') {
-      try {
-        localStorage.removeItem('acb_active_history_sync_job_id');
-      } catch {}
-      if (terminalJobNotifiedRef.current !== activeJob.id) {
-        terminalJobNotifiedRef.current = activeJob.id;
-        // Refetch transaction data exactly once when the job reaches COMPLETED
-        refetch();
-        setSyncNotice({
-          kind: 'ok',
-          text: activeJob.rowsSeen
-            ? `Đã đồng bộ thành công ${activeJob.rowsSeen} giao dịch từ ACB (${activeJob.pagesDone} trang).`
-            : 'Đã hoàn tất kiểm tra ACB. Không phát hiện giao dịch trong khoảng ngày đã chọn.',
-        });
-      }
-    } else if (activeJob.status === 'FAILED') {
-      try {
-        localStorage.removeItem('acb_active_history_sync_job_id');
-      } catch {}
-      if (terminalJobNotifiedRef.current !== activeJob.id) {
-        terminalJobNotifiedRef.current = activeJob.id;
-        setSyncNotice({
-          kind: 'error',
-          text: formatFriendlyError(activeJob.errorCode, activeJob.errorMessage),
-        });
-      }
-    } else if (activeJob.status === 'CANCELED') {
-      try {
-        localStorage.removeItem('acb_active_history_sync_job_id');
-      } catch {}
-      if (terminalJobNotifiedRef.current !== activeJob.id) {
-        terminalJobNotifiedRef.current = activeJob.id;
-        setSyncNotice({
-          kind: 'ok',
-          text: 'Đã hủy quá trình đồng bộ lịch sử ACB.',
-        });
-      }
-    }
-  }, [activeJob, refetch]);
-
-  const handleSyncHistory = async () => {
-    if (!queryParams.from || !queryParams.to) return;
-
-    setSubmittingSync(true);
-    setSyncNotice(null);
-    try {
-      const result = await ensureHistory({ from: queryParams.from, to: queryParams.to });
-      if (result.job) {
-        setActiveJobId(result.job.id);
-        queryClient.setQueryData(queryKeys.historySyncJob(result.job.id), result.job);
-        terminalJobNotifiedRef.current = null;
-        try {
-          localStorage.setItem('acb_active_history_sync_job_id', result.job.id);
-        } catch {}
-      } else if (result.status === 'COMPLETED') {
-        await refetch();
-        setSyncNotice({
-          kind: 'ok',
-          text: 'Dữ liệu giao dịch trong khoảng ngày đã được cập nhật đầy đủ.',
-        });
-      }
-    } catch (err: any) {
-      setSyncNotice({
-        kind: 'error',
-        text: err instanceof Error ? err.message : 'Không thể đồng bộ giao dịch từ ACB.',
-      });
-    } finally {
-      setSubmittingSync(false);
-    }
-  };
-
-  const handleCancelSync = async () => {
-    if (!activeJobId) return;
-    setCancelingSync(true);
-    try {
-      await cancelHistorySyncJob(activeJobId);
-      queryClient.setQueryData(queryKeys.historySyncJob(activeJobId), (old: any) =>
-        old ? { ...old, status: 'CANCELED' } : old
-      );
-      try {
-        localStorage.removeItem('acb_active_history_sync_job_id');
-      } catch {}
-    } catch (err: any) {
-      setSyncNotice({
-        kind: 'error',
-        text: err instanceof Error ? err.message : 'Không thể hủy tiến trình đồng bộ.',
-      });
-    } finally {
-      setCancelingSync(false);
-    }
-  };
-
   return (
     <div className="space-y-6">
       {/* Top section with heading & quick actions */}
@@ -308,22 +134,10 @@ export const TransactionsPage: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-stone-900">Giao dịch</h2>
           <p className="text-sm text-stone-600 mt-0.5">
-            Danh sách giao dịch ngân hàng ACB được đồng bộ và thống kê trực tiếp từ máy chủ
+            Thanh toán payOS/KienlongBank và lịch sử ACB đã lưu trên máy chủ
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {!isPublic && (
-            <button
-              type="button"
-              onClick={handleSyncHistory}
-              disabled={isJobActive || isLoading || isRefetching || !queryParams.from || !queryParams.to}
-              title={dateRange === 'all' ? 'Chọn Hôm nay, 7 ngày hoặc một khoảng ngày để đồng bộ từ ACB' : undefined}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white shadow-2xs hover:bg-stone-800 transition disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isJobActive ? 'animate-spin' : ''}`} />
-              {isJobActive ? 'Đang đồng bộ ACB...' : 'Đồng bộ từ ACB'}
-            </button>
-          )}
           <button
             type="button"
             onClick={() => refetch()}
@@ -336,58 +150,6 @@ export const TransactionsPage: React.FC = () => {
           </button>
         </div>
       </div>
-
-      {isJobActive && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sky-900 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            <RefreshCw className="w-5 h-5 text-sky-600 animate-spin shrink-0" />
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-sky-900">
-                {activeJob?.status === 'QUEUED'
-                  ? 'Đang chờ hàng đợi xử lý...'
-                  : activeJob?.status === 'RUNNING'
-                  ? 'Đang đồng bộ dữ liệu từ ngân hàng ACB...'
-                  : 'Đang chuẩn bị phiên đồng bộ ACB...'}
-              </p>
-              {activeJob && (
-                <div className="text-xs text-sky-700 mt-1 flex flex-wrap gap-x-4 gap-y-1">
-                  <span>Khoảng ngày: <strong>{activeJob.rangeFrom} → {activeJob.rangeTo}</strong></span>
-                  {activeJob.currentDay && (
-                    <span>Đang xử lý ngày: <strong className="text-sky-950">{activeJob.currentDay}</strong></span>
-                  )}
-                  <span>Số trang: <strong className="text-sky-950">{activeJob.pagesDone}</strong></span>
-                  <span>Giao dịch đã nhận: <strong className="text-sky-950">{activeJob.rowsSeen}</strong></span>
-                </div>
-              )}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={handleCancelSync}
-            disabled={cancelingSync || !activeJobId}
-            className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white border border-sky-300 text-sky-800 hover:bg-sky-100 transition shadow-2xs cursor-pointer disabled:opacity-50"
-          >
-            {cancelingSync ? 'Đang hủy...' : 'Hủy đồng bộ'}
-          </button>
-        </div>
-      )}
-
-      {syncNotice && (
-        <div
-          role={syncNotice.kind === 'error' ? 'alert' : 'status'}
-          className={`rounded-xl border px-4 py-3 text-sm ${
-            syncNotice.kind === 'error'
-              ? 'border-red-200 bg-red-50 text-red-700'
-              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
-          }`}
-        >
-          {syncNotice.text}
-        </div>
-      )}
 
       {/* KPI Stats Grid - Server Aggregate */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -621,6 +383,7 @@ export const TransactionsPage: React.FC = () => {
                         >
                           {isCredit ? 'Tiền vào' : 'Tiền ra'}
                         </span>
+                        <span className="text-xs font-medium text-stone-700">{tx.bank || 'Chưa rõ ngân hàng'}</span>
                         <span className="text-xs text-stone-600 flex items-center gap-1">
                           <Clock className="w-3 h-3" />
                           {displayDate}
@@ -711,6 +474,11 @@ export const TransactionsPage: React.FC = () => {
               </div>
 
               <div className="bg-stone-50 rounded-xl p-3 space-y-2 border border-stone-100">
+                <div className="flex justify-between py-1 border-b border-stone-200/50">
+                  <span className="text-stone-600 font-medium">Ngân hàng</span>
+                  <span className="font-semibold text-stone-800">{selectedTx.bank || 'Chưa rõ ngân hàng'}</span>
+                </div>
+                {selectedTx.orderCode && <div className="flex justify-between py-1"><span>Mã đơn payOS</span><span className="font-mono">{selectedTx.orderCode}</span></div>}
                 <div className="flex justify-between py-1 border-b border-stone-200/50">
                   <span className="text-stone-600 font-medium">Mã giao dịch</span>
                   <div className="flex items-center gap-1.5">

@@ -1,32 +1,18 @@
+import type { PaymentProviderState } from './features/payment-qr/payment-orders';
+
 export type RealtimeStatus = 'CONNECTING' | 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED';
 
 export type Status = {
   service: string;
   version: string;
   uptimeSeconds: number;
-  acb: {
-    state: string;
-    coverage: string;
-    accountMasked?: string;
-    generation?: number;
-    lastSuccessfulPollAt?: string | null;
-    scheduleMode?: PollMode;
-    scheduleWindow?: string;
-    scheduleMinSeconds?: number;
-    scheduleMaxSeconds?: number;
-  };
+  payments: PaymentProviderState;
   storage: { status: string };
   webhooks: { pending: number; deadLetter: number };
   notifications?: {
     total: { pending: number; deadLetter: number };
     byProvider: Record<string, { pending: number; deadLetter: number }>;
   };
-};
-
-export type Connection = {
-  configured: boolean;
-  connection?: { id: string; state: string; accountMasked: string; generation: number; updatedAt: string };
-  authRecovery?: { state: string; reasonCode: string; updatedAt: string } | null;
 };
 
 export type BarkConfig = {
@@ -66,6 +52,9 @@ export type Endpoint = NotificationChannel;
 
 export type Transaction = {
   id: string;
+  bank: 'ACB' | 'KienlongBank';
+  provider?: 'PAYOS';
+  orderCode?: string;
   semanticKey: string;
   transactionDate: string;
   transactionDay?: string;
@@ -77,43 +66,6 @@ export type Transaction = {
   description: string;
   firstSeenAt: string;
   source?: string;
-};
-
-export type PollMode = 'REALTIME' | 'KEEPALIVE_ONLY' | 'PAUSED';
-
-export type Profile = {
-  mode: PollMode;
-  minSeconds: number;
-  maxSeconds: number;
-};
-
-export type Window = {
-  name: string;
-  daysOfWeek: number[];
-  startTime: string;
-  endTime: string;
-  profile: Profile;
-};
-
-export type MonitorSettings = {
-  revision: number;
-  enabled: boolean;
-  timezone: string;
-  defaultProfile: Profile;
-  windows: Window[];
-  updatedAt?: string;
-};
-
-export type MonitorSettingsResponse = {
-  settings: MonitorSettings;
-  current: {
-    mode: PollMode;
-    minSeconds: number;
-    maxSeconds: number;
-    activeWindow?: string;
-    nextTransitionAt: string;
-    nextMode: PollMode;
-  };
 };
 
 export type Delivery = {
@@ -129,20 +81,6 @@ export type Delivery = {
   updatedAt: string;
 };
 
-export type PollRun = {
-  id: string;
-  connectionId: string;
-  generation: number;
-  status: string;
-  classifier?: string;
-  httpStatus?: number;
-  pages: number;
-  rowsSeen: number;
-  rowsMatched?: number;
-  error?: string;
-  startedAt: string;
-  finishedAt?: string;
-};
 
 export type AuditLog = {
   id: string;
@@ -169,36 +107,5 @@ export type RealtimeEvent = {
   id?: string;
   type: string;
   data: unknown;
-};
-
-export type HistoryJobStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELED';
-
-export type HistorySyncJob = {
-  id: string;
-  connectionId?: string;
-  generation?: number;
-  rangeFrom: string;
-  rangeTo: string;
-  status: HistoryJobStatus;
-  currentDay?: string | null;
-  pagesDone: number;
-  rowsSeen: number;
-  attempts?: number;
-  errorCode?: string | null;
-  errorMessage?: string | null;
-  createdAt?: string;
-  startedAt?: string | null;
-  heartbeatAt?: string | null;
-  finishedAt?: string | null;
-  updatedAt?: string;
-};
-
-export type EnsureHistoryResponse = {
-  id?: string;
-  status: string;
-  coverage?: string;
-  synced: boolean;
-  job?: HistorySyncJob | null;
-  rowsSeen?: number;
 };
 

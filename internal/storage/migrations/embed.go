@@ -36,3 +36,8 @@ var TelegramSessionControlSQL string
 //
 //go:embed 014_poll_rows_matched.sql
 var PollRowsMatchedSQL string
+
+// PayOSPaymentOrdersSQL embeds schema version 15 durable payOS payment orders.
+//
+//go:embed 015_payos_payment_orders.sql
+var PayOSPaymentOrdersSQL string

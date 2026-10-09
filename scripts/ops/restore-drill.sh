@@ -76,7 +76,7 @@ log "Starting disaster recovery restore drill in isolated directory: ${abs_drill
 # Locate age, age-keygen, and dbtool
 AGE_BIN="age"
 AGE_KEYGEN_BIN="age-keygen"
-DBTOOL_BIN="dbtool"
+DBTOOL_BIN="${DBTOOL_BIN:-dbtool}"
 if ! command -v "$AGE_BIN" >/dev/null 2>&1; then
   if [[ -x "${HOME}/go/bin/age" ]]; then
     AGE_BIN="${HOME}/go/bin/age"
@@ -127,39 +127,37 @@ chmod 700 "$fixture_dir" "$fixture_dir/secrets" "$fixture_dir/backups" 2>/dev/nu
 
 fixture_db="$fixture_dir/data/gateway.db"
 
-# Create fixture SQLite database with schema and data
-log "Creating test fixture database with schema and sample transactions..."
-if command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "$fixture_db" <<'SQL'
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
-);
-INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-09-01T00:00:00Z');
-INSERT INTO schema_migrations (version, applied_at) VALUES (2, '2026-09-02T00:00:00Z');
-INSERT INTO schema_migrations (version, applied_at) VALUES (3, '2026-09-03T00:00:00Z');
-
-CREATE TABLE bank_transactions (
-    id TEXT PRIMARY KEY,
-    amount INTEGER NOT NULL,
-    description TEXT NOT NULL
-);
-INSERT INTO bank_transactions VALUES ('tx_001', 150000, 'Test credit 1');
-INSERT INTO bank_transactions VALUES ('tx_002', 300000, 'Test credit 2');
-INSERT INTO bank_transactions VALUES ('tx_003', 450000, 'Test credit 3');
-SQL
-elif command -v "$DBTOOL_BIN" >/dev/null 2>&1 || [[ -x "$DBTOOL_BIN" ]]; then
-  "$DBTOOL_BIN" -path "$fixture_db" -migrate >/dev/null 2>&1
-else
-  # Minimal fallback fixture format
-  printf 'SQLite format 3\n' > "$fixture_db"
+# Use the real candidate schema, not a reduced substitute for financial tables.
+command -v sqlite3 >/dev/null || { printf 'ERROR: sqlite3 required for financial restore drill\n' >&2; exit 1; }
+if ! command -v "$DBTOOL_BIN" >/dev/null 2>&1 && [[ ! -x "$DBTOOL_BIN" ]]; then
+  printf 'ERROR: candidate dbtool required; set DBTOOL_BIN to the compiled binary\n' >&2
+  exit 1
 fi
+"$DBTOOL_BIN" -path "$fixture_db" -migrate >/dev/null
+sqlite3 "$fixture_db" <<'SQL'
+PRAGMA foreign_keys=ON;
+BEGIN;
+INSERT INTO connections(id,bank_code,state,created_at,updated_at) VALUES('restore-acb','ACB','PAUSED','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z');
+INSERT INTO transactions(id,connection_id,semantic_key,canonical_hash,transaction_date,effective_date,credit,parser_version,first_seen_at)
+VALUES('tx_001','restore-acb','restore:1','hash:1','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',150000,'v1','2026-10-09T00:00:00Z'),
+('tx_002','restore-acb','restore:2','hash:2','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',300000,'v1','2026-10-09T00:00:00Z'),
+('tx_003','restore-acb','restore:3','hash:3','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',450000,'v1','2026-10-09T00:00:00Z'),
+('tx_payos','payos-klb','PAYOS:restore:ref','payos:hash','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',2000,'payos-v1','2026-10-09T00:00:00Z');
+INSERT INTO payment_orders(id,order_code,channel_id,idempotency_key,request_hash,amount_vnd,description,origin,status,payment_link_id,transaction_id,created_at,updated_at,expires_at,paid_at)
+VALUES('restore-order',100000000001,'restore-channel','00000000-0000-4000-8000-000000000001','restore-hash',2000,'DH100000000001','STATIC_URL','PAID','restore-link','tx_payos','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z','2026-10-09T00:30:00Z','2026-10-09T00:00:00Z');
+INSERT INTO payment_receipts(channel_id,reference,order_id,payment_link_id,amount_vnd,transaction_at,canonical_hash,transaction_id,received_at)
+VALUES('restore-channel','restore-reference','restore-order','restore-link',2000,'2026-10-09T00:00:00Z','payos:hash','tx_payos','2026-10-09T00:00:00Z');
+COMMIT;
+SQL
+fixture_schema="$(sqlite3 "$fixture_db" 'SELECT count(*) FROM schema_migrations;')"
 chmod 600 "$fixture_db" 2>/dev/null || true
 
 # Create fixture secrets
 printf 'test_master_key_32_bytes_len_01234567890123456789012345678912\n' > "$fixture_dir/secrets/app_master_key"
 printf 'test_worker_token_canary_0123456789\n' > "$fixture_dir/secrets/worker_internal_token"
-printf 'test_auth_browser_token_canary_0123456789\n' > "$fixture_dir/secrets/auth_browser_internal_token"
+printf 'test_payos_client_canary_0123456789\n' > "$fixture_dir/secrets/payos_client_id"
+printf 'test_payos_api_canary_0123456789\n' > "$fixture_dir/secrets/payos_api_key"
+printf 'test_payos_checksum_canary_0123456789\n' > "$fixture_dir/secrets/payos_checksum_key"
 printf 'test_tts_token_canary_0123456789\n' > "$fixture_dir/secrets/tts_internal_token"
 printf 'test_bark_admin\n' > "$fixture_dir/secrets/bark_basic_auth_user"
 printf 'test_bark_pass_canary_0123456789\n' > "$fixture_dir/secrets/bark_basic_auth_password"
@@ -203,29 +201,15 @@ fi
 
 # 7. Verify restored database integrity and row counts
 log "Verifying restored database integrity and row counts..."
-integrity_status="ok"
-migrations_count="0"
-tx_count="0"
-
-if command -v sqlite3 >/dev/null 2>&1; then
-  integrity_status="$(sqlite3 "$restored_db_out" "PRAGMA integrity_check;")"
-  if [[ "$integrity_status" != "ok" ]]; then
-    printf 'FAIL: Restored DB integrity check failed: %s\n' "$integrity_status" >&2
-    exit 1
-  fi
-  migrations_count="$(sqlite3 "$restored_db_out" "SELECT count(*) FROM schema_migrations;")"
-  tx_count="$(sqlite3 "$restored_db_out" "SELECT count(*) FROM bank_transactions;")"
-  if [[ "$migrations_count" -ne 3 || "$tx_count" -ne 3 ]]; then
-    printf 'FAIL: Restored DB record counts mismatch (migrations: %s, txs: %s, expected 3)\n' "$migrations_count" "$tx_count" >&2
-    exit 1
-  fi
-elif command -v "$DBTOOL_BIN" >/dev/null 2>&1 || [[ -x "$DBTOOL_BIN" ]]; then
-  if ! "$DBTOOL_BIN" -path "$restored_db_out" -check >/dev/null 2>&1; then
-    printf 'FAIL: dbtool integrity check failed on restored database\n' >&2
-    exit 1
-  fi
-  migrations_count="8"
-fi
+integrity_status="$(sqlite3 "$restored_db_out" 'PRAGMA integrity_check;')"
+[[ "$integrity_status" == ok ]] || { printf 'FAIL: Restored database integrity\n' >&2; exit 1; }
+migrations_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM schema_migrations;')"
+tx_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM transactions;')"
+order_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM payment_orders;')"
+receipt_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM payment_receipts;')"
+[[ "$migrations_count" == "$fixture_schema" && "$tx_count" == 4 && "$order_count" == 1 && "$receipt_count" == 1 ]] || { printf 'FAIL: Restored financial row counts mismatch\n' >&2; exit 1; }
+cmp -s <(sqlite3 "$fixture_db" .dump) <(sqlite3 "$restored_db_out" .dump) || { printf 'FAIL: Restored financial database rows differ\n' >&2; exit 1; }
+[[ "$(sqlite3 "$restored_db_out" 'SELECT amount_vnd FROM payment_receipts WHERE reference="restore-reference";')" == 2000 ]] || { printf 'FAIL: payOS receipt amount changed\n' >&2; exit 1; }
 log "Integrity: ${integrity_status} (migrations: ${migrations_count}, transactions: ${tx_count})"
 
 # 8. Restore and verify secret bundle
@@ -236,7 +220,7 @@ chmod 700 "$restored_secrets_dir" 2>/dev/null || true
 log "Decrypting secret recovery bundle into isolated directory..."
 "$AGE_BIN" -d -i "$identity_file" "$secret_artifact" | tar -C "$restored_secrets_dir" -xf -
 
-for s in app_master_key worker_internal_token auth_browser_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key worker_internal_token payos_client_id payos_api_key payos_checksum_key tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
   if [[ ! -s "$restored_secrets_dir/$s" ]]; then
     printf 'FAIL: Restored secret is missing: %s\n' "$s" >&2
     exit 1
@@ -248,7 +232,7 @@ for s in app_master_key worker_internal_token auth_browser_internal_token tts_in
     exit 1
   fi
 done
-log "All 6 required production secrets restored and verified with exact checksum match."
+log "All 8 required production secrets restored and verified with exact checksum match."
 
 # 9. Record Evidence JSON (No secret values!)
 release_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"
@@ -277,7 +261,9 @@ cat <<EOF > "$EVIDENCE_FILE"
   "integrity_check": "${integrity_status}",
   "table_counts": {
     "schema_migrations": ${migrations_count},
-    "bank_transactions": ${tx_count}
+    "transactions": ${tx_count},
+    "payment_orders": ${order_count},
+    "payment_receipts": ${receipt_count}
   },
   "recipient_fingerprint": "$(printf '%s' "$recipient" | sha256sum | cut -d' ' -f1)",
   "drill_status": "SUCCESS"

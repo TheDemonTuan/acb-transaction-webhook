@@ -15,9 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
 
@@ -27,8 +24,6 @@ const (
 	HeaderRequestID     = "X-Request-Id"
 	HeaderIdempotency   = "Idempotency-Key"
 )
-
-const maxVerificationResponseBytes = 128 << 10
 
 type ctxKey string
 
@@ -75,62 +70,6 @@ type ErrorResponse struct {
 	RequestID string `json:"requestId,omitempty"`
 }
 
-// CreateHistoryJobRequest payload for enqueuing a durable historical backfill job
-type CreateHistoryJobRequest struct {
-	FromDay string `json:"fromDay"`
-	ToDay   string `json:"toDay"`
-}
-
-// VerifySessionRequest payload for verifying credentials with bank
-type VerifySessionRequest struct {
-	Account    string `json:"account"`
-	Generation int64  `json:"generation"`
-	Password   []byte `json:"password"`
-}
-
-type verifySessionResponse struct {
-	Envelope []byte `json:"envelope"`
-}
-
-func validVerificationEnvelope(data []byte) bool {
-	var envelope security.Envelope
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return false
-	}
-	return envelope.Version == security.EnvelopeVersion && envelope.KeyID != "" &&
-		envelope.Nonce != "" && envelope.Ciphertext != ""
-}
-
-type ScheduleRecoveryRequest struct {
-	ConnectionID string `json:"connectionId"`
-	Generation   int64  `json:"generation"`
-	EventKey     string `json:"eventKey"`
-}
-type InvalidateSessionRequest struct {
-	ConnectionID string `json:"connectionId"`
-	Generation   int64  `json:"generation"`
-}
-
-type PaymentBoostRequest struct {
-	AmountVnd int64 `json:"amountVnd"`
-}
-
-type PaymentBoostStopRequest struct {
-	SessionID string `json:"sessionId,omitempty"`
-}
-
-type PaymentBoostStatus struct {
-	Active     bool   `json:"active"`
-	SessionID  string `json:"sessionId,omitempty"`
-	AmountVnd  int64  `json:"amountVnd"`
-	ExpiresIn  int    `json:"expiresIn"`
-	Phase      int    `json:"phase"`
-	MinSeconds int    `json:"minSeconds"`
-	MaxSeconds int    `json:"maxSeconds"`
-}
-
 type TestNotificationRequest struct {
 	ChannelID string `json:"channelId"`
 }
@@ -145,18 +84,12 @@ type TestNotificationResponse struct {
 }
 
 type QuiesceResponse struct {
-	Status              string `json:"status"`
-	Quiesced            bool   `json:"quiesced"`
-	Generation          int64  `json:"generation"`
-	Checkpoint          string `json:"checkpoint,omitempty"`
-	CoverageTo          string `json:"coverageTo,omitempty"`
-	ScanID              string `json:"scanId,omitempty"`
-	WorkerID            string `json:"workerId,omitempty"`
-	Dispatcher          string `json:"dispatcher"`
-	ActiveDeliveries    int64  `json:"activeDeliveries"`
-	ActivePoll          bool   `json:"activePoll"`
-	JournalSeq          int64  `json:"journalSeq"`
-	SessionCheckpointed bool   `json:"sessionCheckpointed"`
+	Status                string `json:"status"`
+	Quiesced              bool   `json:"quiesced"`
+	Dispatcher            string `json:"dispatcher"`
+	ActiveDeliveries      int    `json:"activeDeliveries"`
+	ActivePaymentRequests int    `json:"activePaymentRequests"`
+	JournalSeq            int64  `json:"journalSeq"`
 }
 
 type ResumeResponse struct {
@@ -183,19 +116,11 @@ type NotificationProviderReader interface {
 
 // Handler interface implemented by worker
 type WorkerHandler interface {
-	RequestSync(ctx context.Context) error
-	CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error)
-	CancelHistoryJob(ctx context.Context, jobID string) error
-	NotifySettingsChanged(ctx context.Context) error
 	WakeDispatcher(ctx context.Context) error
-	ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error
-	VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error)
-	InvalidateSession(ctx context.Context, connectionID string, generation int64) error
+	WakePaymentReconciler(ctx context.Context) error
 	TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error)
 	Quiesce(ctx context.Context) (QuiesceResponse, error)
 	Resume(ctx context.Context) error
-	StartPaymentBoost(ctx context.Context, amount int64) (PaymentBoostStatus, error)
-	StopPaymentBoost(ctx context.Context, sessionID string) error
 }
 
 type ServerOption func(*Server)
@@ -557,7 +482,7 @@ func (s *Server) routes() {
 			"role":             role,
 			"release":          rel,
 			"schemaVersion":    schema,
-			"workerRpcVersion": "v2",
+			"workerRpcVersion": "v3",
 			"state":            stateStr,
 			"singletonLock":    true,
 			"stale":            false,
@@ -587,7 +512,7 @@ func (s *Server) routes() {
 			"release":          rel,
 			"slot":             slot,
 			"schemaVersion":    schema,
-			"workerRpcVersion": "v2",
+			"workerRpcVersion": "v3",
 			"singletonLock":    true,
 			"requestId":        reqID,
 		}
@@ -663,6 +588,10 @@ func (s *Server) routes() {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
 			return
 		}
+		if _, err := s.handler.Quiesce(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
+			return
+		}
 		s.mu.Lock()
 		drainer := s.drainHandler
 		s.mu.Unlock()
@@ -702,157 +631,17 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, ResumeResponse{Status: "ok", Resumed: true})
 	}))
 
-	s.mux.HandleFunc("/rpc/request-sync", s.auth(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("/rpc/payments/wake", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get(HeaderRequestID)
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
 			return
 		}
 		if err := s.checkWorkAllowed(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"error":     err.Error(),
-				"code":      "WORKER_DRAINING",
-				"requestId": reqID,
-			})
+			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: err.Error(), Code: "WORKER_DRAINING", RequestID: reqID})
 			return
 		}
-		if err := s.handler.RequestSync(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
-	}))
-
-	s.mux.HandleFunc("/rpc/payment-boost", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		if err := s.checkWorkAllowed(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"error":     err.Error(),
-				"code":      "WORKER_DRAINING",
-				"requestId": reqID,
-			})
-			return
-		}
-		var req PaymentBoostRequest
-		if r.Body != nil && r.ContentLength != 0 {
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-				writeError(w, http.StatusBadRequest, "bad request", reqID)
-				return
-			}
-		}
-		status, err := s.handler.StartPaymentBoost(r.Context(), req.AmountVnd)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
-			return
-		}
-		writeJSON(w, http.StatusOK, status)
-	}))
-
-	s.mux.HandleFunc("/rpc/payment-boost/stop", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		var req PaymentBoostStopRequest
-		if r.Body != nil && r.ContentLength != 0 {
-			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req)
-		}
-		if err := s.handler.StopPaymentBoost(r.Context(), req.SessionID); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	}))
-
-	s.mux.HandleFunc("/rpc/history-jobs", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		if err := s.checkWorkAllowed(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"error":     err.Error(),
-				"code":      "WORKER_DRAINING",
-				"requestId": reqID,
-			})
-			return
-		}
-		var req CreateHistoryJobRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "bad request", reqID)
-			return
-		}
-		fromT, err := time.Parse("2006-01-02", req.FromDay)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid fromDay: "+err.Error(), reqID)
-			return
-		}
-		toT, err := time.Parse("2006-01-02", req.ToDay)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid toDay: "+err.Error(), reqID)
-			return
-		}
-		if fromT.After(toT) {
-			writeError(w, http.StatusBadRequest, "fromDay must not be after toDay", reqID)
-			return
-		}
-		if toT.Sub(fromT) > 31*24*time.Hour {
-			writeError(w, http.StatusBadRequest, "range too large (max 31 days)", reqID)
-			return
-		}
-		job, err := s.handler.CreateHistoryJob(r.Context(), req.FromDay, req.ToDay)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
-			return
-		}
-		writeJSON(w, http.StatusOK, job)
-	}))
-
-	cancelHistoryJobHandler := s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		jobID := r.PathValue("jobID")
-		if jobID == "" {
-			path := strings.TrimPrefix(r.URL.Path, "/rpc/history-jobs/")
-			jobID = strings.TrimSuffix(path, "/cancel")
-		}
-		if jobID == "" {
-			writeError(w, http.StatusBadRequest, "job ID is required", reqID)
-			return
-		}
-		if err := s.handler.CancelHistoryJob(r.Context(), jobID); err != nil {
-			if errors.Is(err, storage.ErrJobNotFound) {
-				writeError(w, http.StatusNotFound, err.Error(), reqID)
-				return
-			}
-			if errors.Is(err, storage.ErrJobTerminal) {
-				writeError(w, http.StatusConflict, err.Error(), reqID)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
-	})
-	s.mux.HandleFunc("/rpc/history-jobs/{jobID}/cancel", cancelHistoryJobHandler)
-	s.mux.HandleFunc("/rpc/history-jobs/cancel", cancelHistoryJobHandler)
-
-	s.mux.HandleFunc("/rpc/notify-settings-changed", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		if err := s.handler.NotifySettingsChanged(r.Context()); err != nil {
+		if err := s.handler.WakePaymentReconciler(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), reqID)
 			return
 		}
@@ -870,109 +659,6 @@ func (s *Server) routes() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
-	}))
-
-	s.mux.HandleFunc("/rpc/schedule-recovery", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		var req ScheduleRecoveryRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "bad request", reqID)
-			return
-		}
-		if strings.TrimSpace(req.ConnectionID) == "" || req.Generation <= 0 || strings.TrimSpace(req.EventKey) == "" {
-			writeError(w, http.StatusBadRequest, "invalid recovery parameters", reqID)
-			return
-		}
-		if err := s.handler.ScheduleRecovery(r.Context(), req.ConnectionID, req.Generation, req.EventKey); err != nil {
-			writeError(w, http.StatusConflict, err.Error(), reqID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
-	}))
-	s.mux.HandleFunc("/rpc/session/invalidate", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		var req InvalidateSessionRequest
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_SESSION_INVALIDATION", reqID)
-			return
-		}
-		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF || strings.TrimSpace(req.ConnectionID) == "" || req.Generation <= 0 {
-			writeError(w, http.StatusBadRequest, "INVALID_SESSION_INVALIDATION", reqID)
-			return
-		}
-		if err := s.handler.InvalidateSession(r.Context(), req.ConnectionID, req.Generation); err != nil {
-			if errors.Is(err, storage.ErrGenerationFenceMismatch) || errors.Is(err, storage.ErrRecoverySuperseded) || errors.Is(err, storage.ErrRecoveryNotReady) {
-				writeError(w, http.StatusConflict, "SESSION_INVALIDATION_CONFLICT", reqID)
-			} else {
-				writeError(w, http.StatusServiceUnavailable, "SESSION_INVALIDATION_UNAVAILABLE", reqID)
-			}
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requestId": reqID})
-	}))
-
-	s.mux.HandleFunc("/rpc/verify-session", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(HeaderRequestID)
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", reqID)
-			return
-		}
-		if err := s.checkWorkAllowed(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
-				Error:     "VERIFICATION_UNAVAILABLE",
-				Code:      "VERIFICATION_UNAVAILABLE",
-				RequestID: reqID,
-			})
-			return
-		}
-		var req VerifySessionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "bad request", reqID)
-			return
-		}
-		if req.Generation <= 0 || req.Account == "" || len(req.Password) == 0 {
-			writeError(w, http.StatusBadRequest, "invalid session verification parameters", reqID)
-			return
-		}
-		envelope, err := s.handler.VerifySession(r.Context(), req.Account, req.Generation, req.Password)
-		if err != nil {
-			code := authsession.VerificationCode(err)
-			status := http.StatusUnprocessableEntity
-			switch code {
-			case "VERIFICATION_SUPERSEDED":
-				status = http.StatusConflict
-			case "VERIFICATION_MAINTENANCE", "VERIFICATION_UNAVAILABLE":
-				status = http.StatusServiceUnavailable
-			case "":
-				code = "VERIFICATION_UNAVAILABLE"
-				status = http.StatusServiceUnavailable
-			}
-			writeJSON(w, status, ErrorResponse{Error: code, Code: code, RequestID: reqID})
-			return
-		}
-		if !validVerificationEnvelope(envelope) {
-			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "VERIFICATION_UNAVAILABLE", Code: "VERIFICATION_UNAVAILABLE", RequestID: reqID})
-			return
-		}
-		response, err := json.Marshal(verifySessionResponse{Envelope: envelope})
-		if err != nil || len(response) > maxVerificationResponseBytes {
-			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "VERIFICATION_UNAVAILABLE", Code: "VERIFICATION_UNAVAILABLE", RequestID: reqID})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(response)
 	}))
 
 	s.mux.HandleFunc("/rpc/notification-channels/test", s.auth(func(w http.ResponseWriter, r *http.Request) {
@@ -1071,9 +757,6 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bodyReader)
 	if err != nil {
-		if path == "/rpc/verify-session" {
-			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
-		}
 		return err
 	}
 	if body != nil {
@@ -1090,25 +773,11 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		if path == "/rpc/verify-session" {
-			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
-		}
 		return fmt.Errorf("worker rpc %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if path == "/rpc/verify-session" {
-			errBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 4097))
-			var errResp ErrorResponse
-			if readErr == nil && len(errBytes) <= 4096 && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && json.Unmarshal(errBytes, &errResp) == nil {
-				verificationErr := &authsession.VerificationError{Code: errResp.Code}
-				if authsession.VerificationCode(verificationErr) != "" {
-					return verificationErr
-				}
-			}
-			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
-		}
 		errBytes, _ := io.ReadAll(resp.Body)
 		var errResp ErrorResponse
 		if err := json.Unmarshal(errBytes, &errResp); err == nil && errResp.Error != "" {
@@ -1116,41 +785,10 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 		}
 		return fmt.Errorf("worker rpc %s returned %d: %s", path, resp.StatusCode, string(errBytes))
 	}
-	if path == "/rpc/verify-session" {
-		data, err := io.ReadAll(io.LimitReader(resp.Body, maxVerificationResponseBytes+1))
-		if err != nil || len(data) > maxVerificationResponseBytes || json.Unmarshal(data, out) != nil {
-			return &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
-		}
-		return nil
-	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
-}
-
-func (c *Client) RequestSync(ctx context.Context) error {
-	callCtx, cancel := c.withTimeout(ctx, 15*time.Second)
-	defer cancel()
-	return c.post(callCtx, "/rpc/request-sync", nil, nil)
-}
-
-func (c *Client) StartPaymentBoost(ctx context.Context, amount int64) (PaymentBoostStatus, error) {
-	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var resp PaymentBoostStatus
-	err := c.post(callCtx, "/rpc/payment-boost", PaymentBoostRequest{AmountVnd: amount}, &resp)
-	return resp, err
-}
-
-func (c *Client) StopPaymentBoost(ctx context.Context, sessionID string) error {
-	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var body any
-	if sessionID != "" {
-		body = PaymentBoostStopRequest{SessionID: sessionID}
-	}
-	return c.post(callCtx, "/rpc/payment-boost/stop", body, nil)
 }
 
 func (c *Client) Drain(ctx context.Context) error {
@@ -1173,78 +811,16 @@ func (c *Client) Resume(ctx context.Context) error {
 	return c.post(callCtx, "/rpc/resume", nil, nil)
 }
 
-func (c *Client) CreateHistoryJob(ctx context.Context, fromDay, toDay string) (storage.HistorySyncJob, error) {
-	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var job storage.HistorySyncJob
-	err := c.post(callCtx, "/rpc/history-jobs", CreateHistoryJobRequest{FromDay: fromDay, ToDay: toDay}, &job)
-	if err != nil {
-		return storage.HistorySyncJob{}, err
-	}
-	return job, nil
-}
-
-func (c *Client) CancelHistoryJob(ctx context.Context, jobID string) error {
-	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return c.post(callCtx, fmt.Sprintf("/rpc/history-jobs/%s/cancel", jobID), nil, nil)
-}
-
-// EnsureHistory is a transition compatibility helper for callers requiring the HistoryEnsurer interface before PR07.
-func (c *Client) EnsureHistory(ctx context.Context, fromDay, toDay string) (int, error) {
-	job, err := c.CreateHistoryJob(ctx, fromDay, toDay)
-	if err != nil {
-		return 0, err
-	}
-	return job.RowsSeen, nil
-}
-
-func (c *Client) NotifySettingsChanged(ctx context.Context) error {
-	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return c.post(callCtx, "/rpc/notify-settings-changed", nil, nil)
-}
-
 func (c *Client) WakeDispatcher(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return c.post(callCtx, "/rpc/wake-dispatcher", nil, nil)
 }
 
-func (c *Client) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
+func (c *Client) WakePaymentReconciler(ctx context.Context) error {
 	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return c.post(callCtx, "/rpc/schedule-recovery", ScheduleRecoveryRequest{
-		ConnectionID: connectionID,
-		Generation:   generation,
-		EventKey:     eventKey,
-	}, nil)
-}
-
-func (c *Client) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
-	callCtx, cancel := c.withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return c.post(callCtx, "/rpc/session/invalidate", InvalidateSessionRequest{ConnectionID: connectionID, Generation: generation}, nil)
-}
-
-func (c *Client) VerifySession(ctx context.Context, account string, generation int64, password []byte) ([]byte, error) {
-	if len(password) == 0 {
-		return nil, &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
-	}
-	callCtx, cancel := c.withTimeout(ctx, 20*time.Second)
-	defer cancel()
-	var response verifySessionResponse
-	if err := c.post(callCtx, "/rpc/verify-session", VerifySessionRequest{
-		Account:    account,
-		Generation: generation,
-		Password:   password,
-	}, &response); err != nil {
-		return nil, err
-	}
-	if !validVerificationEnvelope(response.Envelope) {
-		return nil, &authsession.VerificationError{Code: "VERIFICATION_UNAVAILABLE"}
-	}
-	return response.Envelope, nil
+	return c.post(callCtx, "/rpc/payments/wake", nil, nil)
 }
 
 func (c *Client) TestNotificationChannel(ctx context.Context, channelID string) (TestNotificationResponse, error) {

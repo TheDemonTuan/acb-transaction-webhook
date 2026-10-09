@@ -21,7 +21,11 @@ func TestDispatcherHappyPath(t *testing.T) {
 	}
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***1234")
+	// Retained ACB history must remain dispatchable after the payOS runtime cutover.
+	const connectionID = "historical-acb"
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO connections(id,bank_code,state,account_masked,generation,created_at,updated_at) VALUES(?,'ACB','PAUSED','***1234',1,'2026-09-10T00:00:00Z','2026-09-10T00:00:00Z')`, connectionID); err != nil {
+		t.Fatalf("seed historical connection: %v", err)
+	}
 
 	var receivedBody []byte
 	var receivedSig, receivedTS, receivedNonce string
@@ -43,8 +47,8 @@ func TestDispatcherHappyPath(t *testing.T) {
 	_ = store.SetEndpointStatus(ctx, ep.ID, "ACTIVE")
 	serverSecret = ep.Secret
 
-	txn, _ := store.IngestTransaction(ctx, storage.TransactionInput{
-		ConnectionID:  conn.ID,
+	txn, err := store.IngestTransaction(ctx, storage.TransactionInput{
+		ConnectionID:  connectionID,
 		SemanticKey:   "ACB:100",
 		CanonicalHash: "hash100",
 		TransactionAt: "2026-09-10",
@@ -52,6 +56,9 @@ func TestDispatcherHappyPath(t *testing.T) {
 		Credit:        50000,
 		ParserVersion: "v1",
 	})
+	if err != nil {
+		t.Fatalf("seed historical transaction: %v", err)
+	}
 
 	_, err = store.EmitTransactionEvent(ctx, txn.TransactionID, "bank.transaction.credit", "acb", "ACB:100", map[string]any{
 		"credit": 50000,
@@ -94,7 +101,10 @@ func TestDispatcherRetryAndDeadLetter(t *testing.T) {
 	}
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***1234")
+	const connectionID = "historical-acb"
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO connections(id,bank_code,state,account_masked,generation,created_at,updated_at) VALUES(?,'ACB','PAUSED','***1234',1,'2026-09-10T00:00:00Z','2026-09-10T00:00:00Z')`, connectionID); err != nil {
+		t.Fatalf("seed historical connection: %v", err)
+	}
 
 	var attempts atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,8 +119,8 @@ func TestDispatcherRetryAndDeadLetter(t *testing.T) {
 	}
 	_ = store.SetEndpointStatus(ctx, ep.ID, "ACTIVE")
 
-	txn, _ := store.IngestTransaction(ctx, storage.TransactionInput{
-		ConnectionID:  conn.ID,
+	txn, err := store.IngestTransaction(ctx, storage.TransactionInput{
+		ConnectionID:  connectionID,
 		SemanticKey:   "ACB:101",
 		CanonicalHash: "hash101",
 		TransactionAt: "2026-09-10",
@@ -118,8 +128,13 @@ func TestDispatcherRetryAndDeadLetter(t *testing.T) {
 		Credit:        50000,
 		ParserVersion: "v1",
 	})
+	if err != nil {
+		t.Fatalf("seed historical transaction: %v", err)
+	}
 
-	_, _ = store.EmitTransactionEvent(ctx, txn.TransactionID, "bank.transaction.credit", "acb", "ACB:101", map[string]any{"credit": 50000})
+	if _, err := store.EmitTransactionEvent(ctx, txn.TransactionID, "bank.transaction.credit", "acb", "ACB:101", map[string]any{"credit": 50000}); err != nil {
+		t.Fatal(err)
+	}
 
 	dispatcher := NewDispatcher(store, ts.Client()).SetSkipURLValidation(true)
 	dispatcher.maxRetries = 2
@@ -150,8 +165,8 @@ func TestDispatcherRetryAndDeadLetter(t *testing.T) {
 	}
 	defer rows.Close()
 	type attRec struct {
-		num    int
-		code   int
+		num     int
+		code    int
 		outcome string
 	}
 	var recorded []attRec
@@ -177,7 +192,10 @@ func TestDispatcherEventDrivenWakeImmediate(t *testing.T) {
 	}
 	defer store.Close()
 
-	conn, _ := store.ConfigureConnection(ctx, "***1234")
+	const connectionID = "historical-acb"
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO connections(id,bank_code,state,account_masked,generation,created_at,updated_at) VALUES(?,'ACB','PAUSED','***1234',1,'2026-09-12T00:00:00Z','2026-09-12T00:00:00Z')`, connectionID); err != nil {
+		t.Fatalf("seed historical connection: %v", err)
+	}
 
 	deliveredCh := make(chan struct{}, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -199,8 +217,8 @@ func TestDispatcherEventDrivenWakeImmediate(t *testing.T) {
 	go dispatcher.Run(ctx)
 
 	// Create transaction and event/delivery
-	txn, _ := store.IngestTransaction(ctx, storage.TransactionInput{
-		ConnectionID:  conn.ID,
+	txn, err := store.IngestTransaction(ctx, storage.TransactionInput{
+		ConnectionID:  connectionID,
 		SemanticKey:   "ACB:9999",
 		CanonicalHash: "hash9999",
 		TransactionAt: "2026-09-12",
@@ -208,6 +226,9 @@ func TestDispatcherEventDrivenWakeImmediate(t *testing.T) {
 		Credit:        100000,
 		ParserVersion: "v1",
 	})
+	if err != nil {
+		t.Fatalf("seed historical transaction: %v", err)
+	}
 	_, err = store.EmitTransactionEvent(ctx, txn.TransactionID, "bank.transaction.credit", "acb", "ACB:9999", map[string]any{"credit": 100000})
 	if err != nil {
 		t.Fatal(err)

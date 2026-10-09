@@ -14,6 +14,7 @@ import {
   selectAnnouncementTemplate,
 } from './voice-copy';
 import type { BankTransactionCreditData, RealtimeEnvelope } from '../../realtime/realtime.types';
+import { creditTransactionKey } from '../../realtime/realtime.events';
 
 export interface VoiceAnnouncementContextValue {
   settings: VoiceSettings;
@@ -141,7 +142,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     const dedupeOpts = {
       eventId: envelope.id,
       transactionId: data.transactionId,
-      semanticKey: data.transactionNumber ? `ACB:${data.transactionNumber}` : undefined,
+      semanticKey: creditTransactionKey(data),
     };
 
     if (dedupe.has(dedupeOpts) || dedupe.isReserved(dedupeOpts)) {

@@ -1,16 +1,21 @@
-import { api } from '../../api';
+import { api, ApiError, publicApi } from '../../api';
+import {
+  isValidIdempotencyKey,
+  isValidPaymentAmount,
+  type PaymentConfig,
+  type PaymentOrder,
+  type PaymentOrderStatus,
+  type PaymentOrigin,
+  type PaymentReview,
+} from '../../features/payment-qr/payment-orders';
 import type {
   AuditLog,
   BarkConfig,
-  Connection,
   Delivery,
   Endpoint,
-  EnsureHistoryResponse,
-  HistorySyncJob,
   NotificationChannel,
   NotificationProvider,
   PageResponse,
-  PollRun,
   Status,
   Transaction,
 } from '../../realtime-types';
@@ -19,9 +24,69 @@ export const fetchStatus = async (): Promise<Status> => {
   return api<Status>('/status');
 };
 
-export const fetchConnection = async (): Promise<Connection> => {
-  return api<Connection>('/connection');
+export const fetchPaymentConfig = async (): Promise<PaymentConfig> =>
+  publicApi<PaymentConfig>('/payment-config');
+
+const paymentCreateInit = (amountVnd: number, idempotencyKey: string, origin?: PaymentOrigin): RequestInit => {
+  if (!isValidPaymentAmount(amountVnd, Number.MAX_SAFE_INTEGER)) {
+    throw new ApiError('Số tiền phải là số nguyên VND dương.', 400, 'INVALID_AMOUNT');
+  }
+  if (!isValidIdempotencyKey(idempotencyKey)) {
+    throw new ApiError('Khóa tạo đơn không hợp lệ.', 400, 'INVALID_IDEMPOTENCY_KEY');
+  }
+  return {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ amountVnd, ...(origin === undefined ? {} : { origin }) }),
+  };
 };
+
+export const createPublicPaymentOrder = async (
+  amountVnd: number,
+  origin: PaymentOrigin,
+  idempotencyKey: string,
+): Promise<PaymentOrder> =>
+  publicApi<PaymentOrder>('/payments', paymentCreateInit(amountVnd, idempotencyKey, origin));
+
+export const fetchPublicPaymentOrder = async (id: string): Promise<PaymentOrder> =>
+  publicApi<PaymentOrder>(`/payments/${encodeURIComponent(id)}`);
+
+export const createPaymentOrder = async (amountVnd: number, idempotencyKey: string): Promise<PaymentOrder> =>
+  api<PaymentOrder>('/payments', paymentCreateInit(amountVnd, idempotencyKey));
+
+export const fetchPaymentOrder = async (id: string): Promise<PaymentOrder> =>
+  api<PaymentOrder>(`/payments/${encodeURIComponent(id)}`, { cache: 'no-store' });
+
+export const fetchPaymentOrders = async (params?: {
+  status?: PaymentOrderStatus;
+  cursor?: string;
+  limit?: number;
+}): Promise<PageResponse<PaymentOrder>> => {
+  const query = new URLSearchParams();
+  if (params?.status) query.set('status', params.status);
+  if (params?.cursor) query.set('cursor', params.cursor);
+  if (params?.limit !== undefined) query.set('limit', String(params.limit));
+  const qStr = query.toString();
+  return api<PageResponse<PaymentOrder>>(`/payments${qStr ? `?${qStr}` : ''}`, { cache: 'no-store' });
+};
+
+export const cancelPaymentOrder = async (id: string): Promise<PaymentOrder> =>
+  api<PaymentOrder>(`/payments/${encodeURIComponent(id)}/cancel`, { method: 'POST', cache: 'no-store' });
+
+export const fetchPaymentReviews = async (params?: {
+  cursor?: string;
+  limit?: number;
+}): Promise<PageResponse<PaymentReview>> => {
+  const query = new URLSearchParams();
+  if (params?.cursor) query.set('cursor', params.cursor);
+  if (params?.limit !== undefined) query.set('limit', String(params.limit));
+  const qStr = query.toString();
+  return api<PageResponse<PaymentReview>>(`/payment-reviews${qStr ? `?${qStr}` : ''}`, { cache: 'no-store' });
+};
+
+export const confirmPaymentWebhook = async (): Promise<{ confirmed: true }> =>
+  api<{ confirmed: true }>('/payment-provider/confirm-webhook', { method: 'POST', cache: 'no-store' });
 
 export const fetchTransactions = async (params?: {
   from?: string;
@@ -46,35 +111,6 @@ export const fetchTransactionDetail = async (id: string): Promise<Transaction> =
   return api<Transaction>(`/transactions/${encodeURIComponent(id)}`);
 };
 
-export const ensureHistory = async (params: {
-  from: string;
-  to: string;
-}): Promise<EnsureHistoryResponse> => {
-  return api<EnsureHistoryResponse>('/transactions/ensure-history', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-};
-
-export const fetchHistorySyncJob = async (id: string): Promise<HistorySyncJob> => {
-  return api<HistorySyncJob>(`/transactions/history-sync-jobs/${encodeURIComponent(id)}`);
-};
-
-export const fetchLatestHistorySyncJob = async (): Promise<HistorySyncJob | null> => {
-  try {
-    return await api<HistorySyncJob>('/transactions/history-sync-jobs/latest');
-  } catch {
-    return null;
-  }
-};
-
-export const cancelHistorySyncJob = async (id: string): Promise<HistorySyncJob> => {
-  return api<HistorySyncJob>(`/transactions/history-sync-jobs/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
-};
-
 export const fetchWebhooks = async (): Promise<{ items: Endpoint[] }> => {
   return api<{ items: Endpoint[] }>('/webhooks');
 };
@@ -90,17 +126,6 @@ export const fetchDeliveries = async (params?: {
   return api<PageResponse<Delivery>>(`/deliveries${qStr ? `?${qStr}` : ''}`);
 };
 
-export const fetchPollRuns = async (params?: {
-  limit?: number;
-  cursor?: string;
-}): Promise<PageResponse<PollRun>> => {
-  const query = new URLSearchParams();
-  if (params?.limit) query.set('limit', String(params.limit));
-  if (params?.cursor) query.set('cursor', params.cursor);
-  const qStr = query.toString();
-  return api<PageResponse<PollRun>>(`/poll-runs${qStr ? `?${qStr}` : ''}`);
-};
-
 export const fetchAuditLogs = async (params?: {
   limit?: number;
   cursor?: string;
@@ -110,123 +135,6 @@ export const fetchAuditLogs = async (params?: {
   if (params?.cursor) query.set('cursor', params.cursor);
   const qStr = query.toString();
   return api<PageResponse<AuditLog>>(`/audit${qStr ? `?${qStr}` : ''}`);
-};
-
-export const configureConnection = async (accountMasked: string): Promise<Connection> => {
-  return api<Connection>('/connection/configure', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ accountMasked }),
-  });
-};
-
-export const sendConnectionAction = async (action: 'pause' | 'resume' | 'sync'): Promise<{ status: string }> => {
-  return api<{ status: string }>(`/connection/${action}`, {
-    method: 'POST',
-  });
-};
-
-export const fetchMonitorSettings = async (): Promise<any> => {
-  return api('/monitor/settings');
-};
-
-export const updateMonitorSettings = async (settings: any): Promise<any> => {
-  return api('/monitor/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings),
-  });
-};
-
-export const fetchPaymentQR = async (): Promise<any> => {
-  return api('/payment-qr');
-};
-
-export const uploadPaymentQR = async (formData: FormData): Promise<any> => {
-  return api('/payment-qr/upload', {
-    method: 'POST',
-    body: formData,
-  });
-};
-
-export const generatePaymentQR = async (params: {
-  accountNumber: string;
-  accountName: string;
-}): Promise<any> => {
-  return api('/payment-qr/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-};
-
-export const deletePaymentQR = async (): Promise<any> => {
-  return api('/payment-qr', {
-    method: 'DELETE',
-  });
-};
-
-export interface PaymentBoostStatus {
-  active: boolean;
-  sessionId?: string;
-  amountVnd: number;
-  expiresIn: number;
-  phase: number;
-  minSeconds: number;
-  maxSeconds: number;
-}
-
-export interface PaymentReadiness {
-  ready: boolean;
-  status: string;
-}
-
-export const fetchPaymentReadiness = async (): Promise<PaymentReadiness> => {
-  const res = await fetch('/api/public/v1/payment-readiness');
-  if (!res.ok) {
-    throw new Error(`HTTP error ${res.status}`);
-  }
-  return res.json();
-};
-
-export const startPaymentActivity = async (payload: { amountVnd: number }): Promise<PaymentBoostStatus> => {
-  const res = await fetch('/api/public/v1/payment-activity', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    let msg = `HTTP error ${res.status}`;
-    let code: string | undefined;
-    try {
-      const data = await res.json();
-      if (data?.error) msg = data.error;
-      if (data?.code) code = data.code;
-    } catch {}
-    const err = new Error(msg) as Error & { status?: number; code?: string };
-    err.status = res.status;
-    err.code = code;
-    throw err;
-  }
-  return res.json();
-};
-
-export const stopPaymentActivity = async (sessionId?: string): Promise<void> => {
-  try {
-    const url = sessionId
-      ? `/api/public/v1/payment-activity?sessionId=${encodeURIComponent(sessionId)}`
-      : '/api/public/v1/payment-activity';
-    await fetch(url, {
-      method: 'DELETE',
-    });
-  } catch {}
-};
-
-export const getDynamicPaymentQRURL = (amountVnd?: number): string => {
-  if (amountVnd && amountVnd > 0) {
-    return `/api/public/v1/payment-qr/image?amount=${amountVnd}`;
-  }
-  return '/api/public/v1/payment-qr/image';
 };
 
 export const createWebhookEndpoint = async (name: string, url: string): Promise<Endpoint> => {

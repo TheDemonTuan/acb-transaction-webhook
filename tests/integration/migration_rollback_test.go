@@ -10,108 +10,86 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestSQLiteMigrationRollbackOnFailure proves the transactional migration invariant:
-// If a migration fails mid-way, SQLite rolls back the entire transaction, leaving
-// schema version unchanged, no orphaned tables or columns, and data intact.
+// Run the actual migration runner, failing its final connection insert after
+// tables have been created. A retry must preserve every historical money row.
 func TestSQLiteMigrationRollbackOnFailure(t *testing.T) {
 	ctx := context.Background()
-	dbDir := t.TempDir()
-	dbPath := filepath.Join(dbDir, "gateway.db")
-
-	// 1. Initialize store with canonical schema migrations
-	store, err := storage.Open(ctx, dbPath)
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := storage.Open(ctx, path)
 	if err != nil {
-		t.Fatalf("open storage: %v", err)
+		t.Fatal(err)
 	}
-
-	// Insert baseline data
-	conn, err := store.ConfigureConnection(ctx, "***7777")
+	defer store.Close()
+	seedLegacyHistory(t, store)
+	// Construct the retained v13 schema without editing historical migrations.
+	if _, err := store.DB().ExecContext(ctx, `
+DROP TABLE payment_receipts;
+DROP TABLE payos_webhook_inbox;
+DROP TABLE payment_orders;
+DELETE FROM connections WHERE id='payos-klb';
+DELETE FROM schema_migrations WHERE version=15;
+CREATE TRIGGER reject_payos_migration BEFORE INSERT ON connections
+WHEN NEW.id='payos-klb' BEGIN SELECT RAISE(ABORT,'migration fixture failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.SchemaVersion(ctx)
+	if err != nil || before.Version != 13 {
+		t.Fatalf("v13 fixture: schema=%+v err=%v", before, err)
+	}
+	if err := store.Migrate(ctx); err == nil {
+		t.Fatal("expected actual payOS migration to fail")
+	}
+	after, err := store.SchemaVersion(ctx)
+	if err != nil || after.Version != before.Version || after.AppliedCount != before.AppliedCount {
+		t.Fatalf("failed migration changed version: before=%+v after=%+v err=%v", before, after, err)
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name IN ('payment_orders','payment_receipts','payos_webhook_inbox','idx_payment_orders_reconcile','idx_payment_orders_page')`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("partial payOS schema survived rollback: count=%d err=%v", count, err)
+	}
+	assertLegacyHistory(t, store.DB())
+	if _, err := store.DB().ExecContext(ctx, `DROP TRIGGER reject_payos_migration`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration: %v", err)
+	}
+	assertLegacyHistory(t, store.DB())
+	var bank, state string
+	if err := store.DB().QueryRowContext(ctx, `SELECT bank_code,state FROM connections WHERE id='payos-klb'`).Scan(&bank, &state); err != nil || bank != "KienlongBank" || state != "WEBHOOK" {
+		t.Fatalf("payOS source: bank=%s state=%s err=%v", bank, state, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT bank_code FROM connections WHERE id='legacy-acb'`).Scan(&bank); err != nil || bank != "ACB" {
+		t.Fatalf("historical bank label changed: bank=%s err=%v", bank, err)
+	}
+	// A pre-issuance snapshot is no longer financially authoritative once an
+	// order/receipt exists: restoring it would lose this reference and credit.
+	beforePayments := filepath.Join(t.TempDir(), "before-payments.db")
+	if err := store.Backup(ctx, beforePayments); err != nil {
+		t.Fatal(err)
+	}
+	f := newPaymentFixture(t, store, nil)
+	order := createPayment(t, f, 50000, 1)
+	settlePayment(t, f, order)
+	var transactionID string
+	if err := store.DB().QueryRowContext(ctx, `SELECT transaction_id FROM payment_receipts WHERE order_id=? AND amount_vnd=50000`, order.ID).Scan(&transactionID); err != nil || transactionID == "" {
+		t.Fatalf("live payment receipt missing: transaction=%s err=%v", transactionID, err)
+	}
+	oldSnapshot, err := sql.Open("sqlite", "file:"+filepath.ToSlash(beforePayments)+"?mode=ro")
 	if err != nil {
-		t.Fatalf("configure connection: %v", err)
+		t.Fatal(err)
 	}
-	_ = conn
-
-	// Get initial schema version
-	repBefore, err := store.SchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("schema version before: %v", err)
+	defer oldSnapshot.Close()
+	assertLegacyHistory(t, oldSnapshot)
+	if err := oldSnapshot.QueryRowContext(ctx, `SELECT count(*) FROM payment_orders`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("pre-issuance snapshot unexpectedly contains order: count=%d err=%v", count, err)
 	}
-	versionBefore := repBefore.Version
-	countBefore := repBefore.AppliedCount
-
-	store.Close()
-
-	// 2. Re-open direct DB connection to simulate a failing migration step
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
-	if err != nil {
-		t.Fatalf("open raw sqlite: %v", err)
+	if err := oldSnapshot.QueryRowContext(ctx, `SELECT count(*) FROM payment_receipts WHERE transaction_id=?`, transactionID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rollback boundary fixture invalid: count=%d err=%v", count, err)
 	}
-	defer db.Close()
-
-	// Execute a simulated transactional migration with a deliberate error in statement 2
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin tx: %v", err)
-	}
-
-	// Statement 1: valid table creation
-	_, err = tx.ExecContext(ctx, `CREATE TABLE test_rollback_table (id TEXT PRIMARY KEY, value TEXT)`)
-	if err != nil {
-		t.Fatalf("statement 1 failed: %v", err)
-	}
-
-	// Statement 2: DELIBERATE syntax error / invalid constraint
-	_, err = tx.ExecContext(ctx, `CREATE TABLE invalid syntax (this is not valid sql)`)
-	if err == nil {
-		tx.Rollback()
-		t.Fatal("expected syntax error in statement 2")
-	}
-
-	// On error, the migration runner rolls back
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("tx rollback failed: %v", err)
-	}
-
-	// 3. Verify rollback: test_rollback_table MUST NOT exist
-	var tableCount int
-	err = db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='test_rollback_table'`).Scan(&tableCount)
-	if err != nil {
-		t.Fatalf("check table existence: %v", err)
-	}
-	if tableCount != 0 {
-		t.Fatalf("table test_rollback_table exists despite transaction rollback: atomicity violated!")
-	}
-
-	// 4. Verify schema_migrations version was NOT bumped
-	var versionAfter int
-	var countAfter int
-	err = db.QueryRowContext(ctx, `SELECT count(*), max(version) FROM schema_migrations`).Scan(&countAfter, &versionAfter)
-	if err != nil {
-		t.Fatalf("query schema_migrations: %v", err)
-	}
-	if countAfter != countBefore || versionAfter != versionBefore {
-		t.Fatalf("schema_migrations changed on failed migration: before=(ver:%d, cnt:%d), after=(ver:%d, cnt:%d)",
-			versionBefore, countBefore, versionAfter, countAfter)
-	}
-
-	// 5. Verify database integrity check
+	assertLegacyHistory(t, store.DB())
 	var integrity string
-	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
-		t.Fatalf("database integrity check failed: %v, result: %s", err, integrity)
-	}
-
-	// 6. Verify existing data preserved
-	reopenedStore, err := storage.OpenRuntime(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("reopen storage after rollback: %v", err)
-	}
-	defer reopenedStore.Close()
-
-	connAfter, err := reopenedStore.Connection(ctx)
-	if err != nil {
-		t.Fatalf("fetch connection: %v", err)
-	}
-	if connAfter.AccountMasked != "***7777" {
-		t.Fatalf("connection corrupted after rollback: got %s", connAfter.AccountMasked)
+	if err := store.DB().QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+		t.Fatalf("integrity=%s err=%v", integrity, err)
 	}
 }

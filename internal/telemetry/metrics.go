@@ -7,15 +7,11 @@ import (
 )
 
 type RealtimeMetricsReport struct {
-	ConnectedClients   int64                         `json:"connectedClients"`
-	CircuitBreakerOpen bool                          `json:"circuitBreakerOpen"`
-	LastACBPollAt      string                        `json:"lastAcbPollAt,omitempty"`
-	P95IngestMs        float64                       `json:"p95IngestMs"`
-	P95SSEMs           float64                       `json:"p95SseMs"`
-	P95WebhookMs       float64                       `json:"p95WebhookMs"`
-	TotalIngested      int                           `json:"totalIngested"`
-	TotalWebhooksSent  int                           `json:"totalWebhooksSent"`
-	Notifications      map[string]NotificationMetric `json:"notifications"`
+	ConnectedClients  int64                         `json:"connectedClients"`
+	P95SSEMs          float64                       `json:"p95SseMs"`
+	P95WebhookMs      float64                       `json:"p95WebhookMs"`
+	TotalWebhooksSent int                           `json:"totalWebhooksSent"`
+	Notifications     map[string]NotificationMetric `json:"notifications"`
 }
 
 type NotificationMetric struct {
@@ -28,18 +24,11 @@ type Registry struct {
 	mu sync.RWMutex
 
 	// Realtime & HTTP samples
-	ingestSamples        []float64
 	sseSamples           []float64
 	webhookSamples       []float64
 	notificationSamples  map[string][]float64
 	notificationTotals   map[string]map[string]int
 	connectedClients     int64
-	circuitBreakerOpen   bool
-	lastACBPollAt        time.Time
-	lastPollDuration     time.Duration
-	lastPollStatus       string
-	catchUpDay           string
-	totalIngested        int
 	totalWebhooksSent    int
 	streamEnabled        bool
 	streamState          string
@@ -53,36 +42,6 @@ type Registry struct {
 	fallbackTimes        []time.Time
 	commitGatewaySamples []float64
 	commitBrowserSamples []float64
-
-	// Scheduler telemetry
-	schedQueueDepth      map[string]int
-	schedTotalDepth      int
-	schedCurrentTask     string
-	schedCurrentDuration time.Duration
-	schedBusy            bool
-	schedEnqueued        map[string]int64
-	schedStarted         map[string]int64
-	schedCompleted       map[string]int64
-	schedYielded         map[string]int64
-	schedFailed          map[string]int64
-	schedOverloaded      int64
-	schedSamples         map[string][]float64
-
-	// History jobs telemetry
-	historyCounts          map[string]int
-	historyTotal           int
-	historyOldestQueuedAge time.Duration
-	historyStalled         int
-	historyPages           int
-	historyRows            int
-
-	// Auth lifecycle telemetry
-	authHasActive    bool
-	authActiveAge    time.Duration
-	authActiveStuck  bool
-	authSessionState string
-	authRecentCount  int
-	authCounts       map[string]int
 
 	// Notification backlog telemetry
 	notifTotalPending      int
@@ -128,20 +87,10 @@ var Default = NewRegistry()
 
 func NewRegistry() *Registry {
 	return &Registry{
-		ingestSamples:          make([]float64, 0, 1000),
 		sseSamples:             make([]float64, 0, 1000),
 		webhookSamples:         make([]float64, 0, 1000),
 		notificationSamples:    make(map[string][]float64),
 		notificationTotals:     make(map[string]map[string]int),
-		schedQueueDepth:        make(map[string]int),
-		schedEnqueued:          make(map[string]int64),
-		schedStarted:           make(map[string]int64),
-		schedCompleted:         make(map[string]int64),
-		schedYielded:           make(map[string]int64),
-		schedFailed:            make(map[string]int64),
-		schedSamples:           make(map[string][]float64),
-		historyCounts:          make(map[string]int),
-		authCounts:             make(map[string]int),
 		notifBacklogByProvider: make(map[string]ProviderSnapshot),
 		workerState:            "READY",
 		workerStaleThreshold:   60 * time.Second,
@@ -151,17 +100,6 @@ func NewRegistry() *Registry {
 		commitBrowserSamples:   make([]float64, 0, 1000),
 		fallbackTimes:          make([]time.Time, 0, 64),
 	}
-}
-
-func (r *Registry) RecordIngest(d time.Duration) {
-	ms := float64(d.Microseconds()) / 1000.0
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.totalIngested++
-	if len(r.ingestSamples) >= 1000 {
-		r.ingestSamples = r.ingestSamples[1:]
-	}
-	r.ingestSamples = append(r.ingestSamples, ms)
 }
 
 func (r *Registry) RecordSSE(d time.Duration) {
@@ -210,12 +148,6 @@ func (r *Registry) SetConnectedClients(count int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.connectedClients = count
-}
-
-func (r *Registry) SetCircuitBreaker(open bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.circuitBreakerOpen = open
 }
 
 func (r *Registry) SetRealtimeStreamState(enabled bool, state, reason string) {
@@ -290,119 +222,6 @@ func (r *Registry) RecordCommitToBrowserSSE(d time.Duration) {
 		r.commitBrowserSamples = r.commitBrowserSamples[1:]
 	}
 	r.commitBrowserSamples = append(r.commitBrowserSamples, float64(d.Microseconds())/1000.0)
-}
-
-func (r *Registry) SetLastACBPollAt(t time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastACBPollAt = t.UTC()
-}
-
-func (r *Registry) SetLastPollDetails(status string, duration time.Duration, catchUpDay string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastPollStatus = status
-	r.lastPollDuration = duration
-	r.catchUpDay = catchUpDay
-}
-
-// Scheduler telemetry methods
-
-func (r *Registry) SetSchedulerQueue(depths map[string]int, total int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.schedQueueDepth = make(map[string]int, len(depths))
-	for k, v := range depths {
-		r.schedQueueDepth[k] = v
-	}
-	r.schedTotalDepth = total
-}
-
-func (r *Registry) SetSchedulerCurrentTask(kind string, d time.Duration, busy bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.schedCurrentTask = kind
-	r.schedCurrentDuration = d
-	r.schedBusy = busy
-}
-
-func (r *Registry) RecordTaskEnqueued(kind, priority string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.schedEnqueued[kind]++
-}
-
-func (r *Registry) RecordTaskStarted(kind, priority string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.schedStarted[kind]++
-	r.schedBusy = true
-	r.schedCurrentTask = kind
-}
-
-func (r *Registry) RecordTaskCompleted(kind, priority string, d time.Duration, outcome string, err error) {
-	ms := float64(d.Microseconds()) / 1000.0
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err != nil || outcome == "FATAL" {
-		r.schedFailed[kind]++
-	} else {
-		r.schedCompleted[kind]++
-	}
-	samples := r.schedSamples[kind]
-	if len(samples) >= 500 {
-		samples = samples[1:]
-	}
-	r.schedSamples[kind] = append(samples, ms)
-	r.schedBusy = false
-	r.schedCurrentTask = "IDLE"
-}
-
-func (r *Registry) RecordTaskYielded(kind, priority string, d time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.schedYielded[kind]++
-	r.schedBusy = false
-}
-
-func (r *Registry) RecordQueueOverloaded(kind, priority string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.schedOverloaded++
-}
-
-// History jobs telemetry
-
-func (r *Registry) SetHistoryJobs(counts map[string]int, oldestQueuedAge time.Duration, stalled int, pages, rows int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.historyCounts = make(map[string]int, len(counts))
-	total := 0
-	for k, v := range counts {
-		r.historyCounts[k] = v
-		total += v
-	}
-	r.historyTotal = total
-	r.historyOldestQueuedAge = oldestQueuedAge
-	r.historyStalled = stalled
-	r.historyPages = pages
-	r.historyRows = rows
-}
-
-// Auth lifecycle telemetry
-
-func (r *Registry) SetAuthLifecycle(hasActive bool, activeAge time.Duration, stuck bool, sessionState string, recentCount int, counts map[string]int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.authHasActive = hasActive
-	r.authActiveAge = activeAge
-	r.authActiveStuck = stuck
-	r.authSessionState = sessionState
-	r.authRecentCount = recentCount
-	r.authCounts = make(map[string]int, len(counts))
-	for k, v := range counts {
-		r.authCounts[k] = v
-	}
 }
 
 // Notification backlog telemetry
@@ -502,20 +321,12 @@ func (r *Registry) Report() RealtimeMetricsReport {
 			P95Ms:   calcP95(r.notificationSamples[provider]),
 		}
 	}
-	var pollAtStr string
-	if !r.lastACBPollAt.IsZero() {
-		pollAtStr = r.lastACBPollAt.UTC().Format(time.RFC3339)
-	}
 	return RealtimeMetricsReport{
-		ConnectedClients:   r.connectedClients,
-		CircuitBreakerOpen: r.circuitBreakerOpen,
-		LastACBPollAt:      pollAtStr,
-		P95IngestMs:        calcP95(r.ingestSamples),
-		P95SSEMs:           calcP95(r.sseSamples),
-		P95WebhookMs:       calcP95(r.webhookSamples),
-		TotalIngested:      r.totalIngested,
-		TotalWebhooksSent:  r.totalWebhooksSent,
-		Notifications:      notifications,
+		ConnectedClients:  r.connectedClients,
+		P95SSEMs:          calcP95(r.sseSamples),
+		P95WebhookMs:      calcP95(r.webhookSamples),
+		TotalWebhooksSent: r.totalWebhooksSent,
+		Notifications:     notifications,
 	}
 }
 
@@ -525,36 +336,6 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 
 	now := time.Now().UTC()
 
-	// 1. Scheduler snapshot
-	schedP95 := make(map[string]float64, len(r.schedSamples))
-	for k, samples := range r.schedSamples {
-		schedP95[k] = calcP95(samples)
-	}
-	schedTele := SchedulerTelemetry{
-		QueueDepthByPriority:  copyIntMap(r.schedQueueDepth),
-		TotalQueueDepth:       r.schedTotalDepth,
-		CurrentTaskKind:       r.schedCurrentTask,
-		CurrentTaskDurationMs: float64(r.schedCurrentDuration.Microseconds()) / 1000.0,
-		IsBusy:                r.schedBusy,
-		Enqueued:              copyInt64Map(r.schedEnqueued),
-		Started:               copyInt64Map(r.schedStarted),
-		Completed:             copyInt64Map(r.schedCompleted),
-		Yielded:               copyInt64Map(r.schedYielded),
-		Failed:                copyInt64Map(r.schedFailed),
-		Overloaded:            r.schedOverloaded,
-		P95LatencyMs:          schedP95,
-	}
-
-	// 2. Realtime snapshot
-	var lastPollAtStr string
-	var pollAgeSec float64
-	if !r.lastACBPollAt.IsZero() {
-		lastPollAtStr = r.lastACBPollAt.UTC().Format(time.RFC3339)
-		pollAgeSec = time.Since(r.lastACBPollAt).Seconds()
-		if pollAgeSec < 0 {
-			pollAgeSec = 0
-		}
-	}
 	stateSince := ""
 	if !r.streamStateSince.IsZero() {
 		stateSince = r.streamStateSince.UTC().Format(time.RFC3339Nano)
@@ -591,41 +372,13 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		P95CommitToBrowserSSEMs:          calcP95(r.commitBrowserSamples),
 		RecentFallbackRecoveryReconciles: recentFallback,
 		StreamDisconnectedAgeSeconds:     disconnectedAge,
-		LastACBPollAt:                    lastPollAtStr,
-		LastACBPollAgeSeconds:            pollAgeSec,
-		LastACBPollDurationMs:            float64(r.lastPollDuration.Microseconds()) / 1000.0,
-		LastACBPollStatus:                r.lastPollStatus,
-		CatchUpDay:                       r.catchUpDay,
-		CircuitBreakerOpen:               r.circuitBreakerOpen,
 		ConnectedClients:                 r.connectedClients,
-		P95IngestMs:                      calcP95(r.ingestSamples),
 		P95SSEMs:                         calcP95(r.sseSamples),
 		P95WebhookMs:                     calcP95(r.webhookSamples),
-		TotalIngested:                    r.totalIngested,
 		TotalWebhooksSent:                r.totalWebhooksSent,
 	}
 
-	// 3. History jobs snapshot
-	histTele := HistoryJobsTelemetry{
-		CountsByStatus:         copyIntMap(r.historyCounts),
-		TotalJobs:              r.historyTotal,
-		OldestQueuedAgeSeconds: r.historyOldestQueuedAge.Seconds(),
-		StalledCount:           r.historyStalled,
-		TotalPagesDone:         r.historyPages,
-		TotalRowsSeen:          r.historyRows,
-	}
-
-	// 4. Auth snapshot
-	authTele := AuthLifecycleTelemetry{
-		HasActiveAttempt:        r.authHasActive,
-		ActiveAttemptAgeSeconds: r.authActiveAge.Seconds(),
-		ActiveAttemptStuck:      r.authActiveStuck,
-		SessionState:            r.authSessionState,
-		RecentAttemptsCount:     r.authRecentCount,
-		AttemptsByStatus:        copyIntMap(r.authCounts),
-	}
-
-	// 5. Notifications snapshot
+	// Notifications snapshot
 	notifP95 := make(map[string]float64, len(r.notificationSamples))
 	totalDelivered := 0
 	totalFailed := 0
@@ -652,7 +405,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		IsBacklogStuck:  r.notifBacklogStuck,
 	}
 
-	// 6. Mutation gate snapshot
+	// Mutation gate snapshot
 	gateTele := MutationGateTelemetry{
 		GateState:        r.gateState,
 		Owner:            r.gateOwner,
@@ -661,7 +414,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		IsLocked:         r.gateIsLocked,
 	}
 
-	// 7. Singleton snapshot
+	// Singleton snapshot
 	var hbStr string
 	var hbAgeSec float64
 	var isStale bool
@@ -690,7 +443,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		IsStale:             isStale,
 	}
 
-	// 8. Deployment snapshot
+	// Deployment snapshot
 	var promoAtStr string
 	if !r.lastPromotionAt.IsZero() {
 		promoAtStr = r.lastPromotionAt.UTC().Format(time.RFC3339)
@@ -705,7 +458,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		FailoverState:       r.failoverState,
 	}
 
-	// 9. Backup & drill snapshot
+	// Backup & drill snapshot
 	var backupAtStr string
 	var backupAgeSec float64
 	var backupOverdue bool
@@ -732,10 +485,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 
 	return TelemetrySnapshot{
 		CapturedAt:       now,
-		Scheduler:        schedTele,
 		Realtime:         rtTele,
-		HistoryJobs:      histTele,
-		AuthLifecycle:    authTele,
 		Notifications:    notifTele,
 		MutationGate:     gateTele,
 		Singleton:        singleTele,
@@ -753,20 +503,4 @@ func calcP95(samples []float64) float64 {
 	sort.Float64s(cp)
 	idx := int(float64(len(cp)-1) * 0.95)
 	return cp[idx]
-}
-
-func copyIntMap(m map[string]int) map[string]int {
-	cp := make(map[string]int, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
-	return cp
-}
-
-func copyInt64Map(m map[string]int64) map[string]int64 {
-	cp := make(map[string]int64, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
-	return cp
 }

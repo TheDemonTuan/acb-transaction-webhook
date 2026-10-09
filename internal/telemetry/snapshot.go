@@ -5,30 +5,12 @@ import "time"
 // TelemetrySnapshot represents a bounded, cardinality-controlled operational snapshot.
 type TelemetrySnapshot struct {
 	CapturedAt       time.Time               `json:"capturedAt"`
-	Scheduler        SchedulerTelemetry      `json:"scheduler"`
 	Realtime         RealtimeTelemetry       `json:"realtime"`
-	HistoryJobs      HistoryJobsTelemetry    `json:"historyJobs"`
-	AuthLifecycle    AuthLifecycleTelemetry  `json:"authLifecycle"`
 	Notifications    NotificationTelemetry   `json:"notifications"`
 	MutationGate     MutationGateTelemetry   `json:"mutationGate"`
 	Singleton        SingletonTelemetry      `json:"singleton"`
 	Deployment       DeploymentTelemetry     `json:"deployment"`
 	BackupAndRestore BackupAndDrillTelemetry `json:"backupAndRestore"`
-}
-
-type SchedulerTelemetry struct {
-	QueueDepthByPriority  map[string]int     `json:"queueDepthByPriority"`
-	TotalQueueDepth       int                `json:"totalQueueDepth"`
-	CurrentTaskKind       string             `json:"currentTaskKind"`
-	CurrentTaskDurationMs float64            `json:"currentTaskDurationMs"`
-	IsBusy                bool               `json:"isBusy"`
-	Enqueued              map[string]int64   `json:"enqueued"`
-	Started               map[string]int64   `json:"started"`
-	Completed             map[string]int64   `json:"completed"`
-	Yielded               map[string]int64   `json:"yielded"`
-	Failed                map[string]int64   `json:"failed"`
-	Overloaded            int64              `json:"overloaded"`
-	P95LatencyMs          map[string]float64 `json:"p95LatencyMs"`
 }
 
 type RealtimeTelemetry struct {
@@ -46,36 +28,10 @@ type RealtimeTelemetry struct {
 	P95CommitToBrowserSSEMs          float64 `json:"p95CommitToBrowserSseMs"`
 	RecentFallbackRecoveryReconciles int     `json:"recentFallbackRecoveryReconciles"`
 	StreamDisconnectedAgeSeconds     float64 `json:"streamDisconnectedAgeSeconds"`
-	LastACBPollAt                    string  `json:"lastAcbPollAt,omitempty"`
-	LastACBPollAgeSeconds            float64 `json:"lastAcbPollAgeSeconds"`
-	LastACBPollDurationMs            float64 `json:"lastAcbPollDurationMs"`
-	LastACBPollStatus                string  `json:"lastAcbPollStatus"`
-	CatchUpDay                       string  `json:"catchUpDay,omitempty"`
-	CircuitBreakerOpen               bool    `json:"circuitBreakerOpen"`
 	ConnectedClients                 int64   `json:"connectedClients"`
-	P95IngestMs                      float64 `json:"p95IngestMs"`
 	P95SSEMs                         float64 `json:"p95SseMs"`
 	P95WebhookMs                     float64 `json:"p95WebhookMs"`
-	TotalIngested                    int     `json:"totalIngested"`
 	TotalWebhooksSent                int     `json:"totalWebhooksSent"`
-}
-
-type HistoryJobsTelemetry struct {
-	CountsByStatus         map[string]int `json:"countsByStatus"`
-	TotalJobs              int            `json:"totalJobs"`
-	OldestQueuedAgeSeconds float64        `json:"oldestQueuedAgeSeconds"`
-	StalledCount           int            `json:"stalledCount"`
-	TotalPagesDone         int            `json:"totalPagesDone"`
-	TotalRowsSeen          int            `json:"totalRowsSeen"`
-}
-
-type AuthLifecycleTelemetry struct {
-	HasActiveAttempt        bool           `json:"hasActiveAttempt"`
-	ActiveAttemptAgeSeconds float64        `json:"activeAttemptAgeSeconds"`
-	ActiveAttemptStuck      bool           `json:"activeAttemptStuck"`
-	SessionState            string         `json:"sessionState"`
-	RecentAttemptsCount     int            `json:"recentAttemptsCount"`
-	AttemptsByStatus        map[string]int `json:"attemptsByStatus"`
 }
 
 type NotificationTelemetry struct {

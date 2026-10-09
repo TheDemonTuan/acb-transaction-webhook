@@ -448,40 +448,40 @@ def test_singleton_bounded_restart(env):
     """Singleton workload bounded restarts up to limit, never duplicates instance."""
     create_app_registry(
         env["reg_dir"],
-        "auth-browser",
+        "worker",
         workload_class="singleton",
-        container_name="auth-browser",
+        container_name="acb-worker",
         max_restarts=2,
     )
-    env["docker"].add_container("auth-browser", "cid-auth-1", status="exited", health="")
+    env["docker"].add_container("acb-worker", "cid-worker-1", status="exited", health="")
 
-    st = ctrl.load_state("auth-browser", env["st_dir"])
-    ctrl.save_state_atomic("auth-browser", st, env["st_dir"])
+    st = ctrl.load_state("worker", env["st_dir"])
+    ctrl.save_state_atomic("worker", st, env["st_dir"])
 
-    event = {"Action": "die", "Actor": {"ID": "cid-auth-1", "Attributes": {"name": "auth-browser"}}}
+    event = {"Action": "die", "Actor": {"ID": "cid-worker-1", "Attributes": {"name": "acb-worker"}}}
 
     # Restart 1
     env["engine"].ingest_docker_event(event)
     env["engine"].process_event_batch()
-    st = ctrl.load_state("auth-browser", env["st_dir"])
+    st = ctrl.load_state("worker", env["st_dir"])
     assert st["restarts_count"] == 1
-    assert "auth-browser" in env["docker"].restarted
+    assert "acb-worker" in env["docker"].restarted
 
     # Restart 2
     env["clock"].advance(5)
-    env["docker"].containers["auth-browser"]["State"]["Status"] = "exited"
-    env["docker"].containers["auth-browser"]["State"]["Health"] = {}
+    env["docker"].containers["acb-worker"]["State"]["Status"] = "exited"
+    env["docker"].containers["acb-worker"]["State"]["Health"] = {}
     env["engine"].ingest_docker_event(event)
     env["engine"].process_event_batch()
-    st = ctrl.load_state("auth-browser", env["st_dir"])
+    st = ctrl.load_state("worker", env["st_dir"])
     assert st["restarts_count"] == 2
 
     # Restart 3 -> exceeds max_restarts (2) -> marked degraded, no new restart
-    env["docker"].containers["auth-browser"]["State"]["Status"] = "exited"
+    env["docker"].containers["acb-worker"]["State"]["Status"] = "exited"
     restart_count_before = len(env["docker"].restarted)
     env["engine"].ingest_docker_event(event)
     env["engine"].process_event_batch()
-    st = ctrl.load_state("auth-browser", env["st_dir"])
+    st = ctrl.load_state("worker", env["st_dir"])
     assert st["degraded"] is True
     assert len(env["docker"].restarted) == restart_count_before  # no new restart
 

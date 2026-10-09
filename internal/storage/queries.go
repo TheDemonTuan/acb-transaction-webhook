@@ -2,11 +2,9 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"errors"
 	"strings"
-	"time"
 )
 
 type TransactionView struct {
@@ -22,6 +20,9 @@ type TransactionView struct {
 	Description    string `json:"description"`
 	FirstSeenAt    string `json:"firstSeenAt"`
 	Source         string `json:"source,omitempty"`
+	Bank           string `json:"bank"`
+	Provider       string `json:"provider,omitempty"`
+	OrderCode      string `json:"orderCode,omitempty"`
 }
 
 type TransactionSummary struct {
@@ -121,21 +122,21 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 	var filterArgs []any
 
 	if filter.From != "" {
-		conditions = append(conditions, "(transaction_day >= ? OR (transaction_day = '' AND substr(first_seen_at, 1, 10) >= ?))")
+		conditions = append(conditions, "(t.transaction_day >= ? OR (t.transaction_day = '' AND substr(t.first_seen_at, 1, 10) >= ?))")
 		filterArgs = append(filterArgs, filter.From, filter.From)
 	}
 	if filter.To != "" {
-		conditions = append(conditions, "(transaction_day <= ? OR (transaction_day = '' AND substr(first_seen_at, 1, 10) <= ?))")
+		conditions = append(conditions, "(t.transaction_day <= ? OR (t.transaction_day = '' AND substr(t.first_seen_at, 1, 10) <= ?))")
 		filterArgs = append(filterArgs, filter.To, filter.To)
 	}
 	if filter.Direction == "credit" {
-		conditions = append(conditions, "credit > 0")
+		conditions = append(conditions, "t.credit > 0")
 	} else if filter.Direction == "debit" {
-		conditions = append(conditions, "debit > 0")
+		conditions = append(conditions, "t.debit > 0")
 	}
 	if filter.Query != "" {
 		escaped := "%" + escapeLike(filter.Query) + "%"
-		conditions = append(conditions, "(CAST(description_envelope AS TEXT) LIKE ? ESCAPE '\\' OR semantic_key LIKE ? ESCAPE '\\')")
+		conditions = append(conditions, "(CAST(t.description_envelope AS TEXT) LIKE ? ESCAPE '\\' OR t.semantic_key LIKE ? ESCAPE '\\')")
 		filterArgs = append(filterArgs, escaped, escaped)
 	}
 
@@ -150,7 +151,7 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN credit > 0 THEN credit ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN debit > 0 THEN debit ELSE 0 END), 0)
-		FROM transactions` + whereClause
+		FROM transactions t` + whereClause
 
 	var summary TransactionSummary
 	if err := s.db.QueryRowContext(ctx, summaryQuery, filterArgs...).Scan(&summary.TotalCount, &summary.Incoming, &summary.Outgoing); err != nil {
@@ -170,7 +171,7 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 	copy(itemArgs, filterArgs)
 
 	if sortValue != "" {
-		itemConditions = append(itemConditions, "(first_seen_at < ? OR (first_seen_at = ? AND id < ?))")
+		itemConditions = append(itemConditions, "(t.first_seen_at < ? OR (t.first_seen_at = ? AND t.id < ?))")
 		itemArgs = append(itemArgs, sortValue, sortValue, cursorID)
 	}
 
@@ -181,19 +182,24 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 
 	query := `
 		SELECT
-			id,
-			semantic_key,
-			COALESCE(NULLIF(transaction_at_iso, ''), transaction_date),
-			COALESCE(transaction_day, ''),
-			COALESCE(date_precision, 'unknown'),
-			effective_date,
-			debit,
-			credit,
-			balance,
-			COALESCE(CAST(description_envelope AS TEXT), ''),
-			first_seen_at,
-			COALESCE(ingest_source, 'REALTIME')
-		FROM transactions` + itemWhere + ` ORDER BY first_seen_at DESC, id DESC LIMIT ?`
+			t.id,
+			t.semantic_key,
+			COALESCE(NULLIF(t.transaction_at_iso, ''), t.transaction_date),
+			COALESCE(t.transaction_day, ''),
+			COALESCE(t.date_precision, 'unknown'),
+			t.effective_date,
+			t.debit,
+			t.credit,
+			t.balance,
+			COALESCE(CAST(t.description_envelope AS TEXT), ''),
+			t.first_seen_at,
+			COALESCE(t.ingest_source, 'REALTIME'),
+			c.bank_code,
+			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' ELSE '' END,
+			COALESCE(CAST(po.order_code AS TEXT), '')
+		FROM transactions t
+		JOIN connections c ON c.id = t.connection_id
+		LEFT JOIN payment_orders po ON po.transaction_id = t.id` + itemWhere + ` ORDER BY t.first_seen_at DESC, t.id DESC LIMIT ?`
 	itemArgs = append(itemArgs, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, query, itemArgs...)
@@ -219,6 +225,9 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 			&description,
 			&item.FirstSeenAt,
 			&item.Source,
+			&item.Bank,
+			&item.Provider,
+			&item.OrderCode,
 		); err != nil {
 			return TransactionsPage{}, err
 		}
@@ -255,20 +264,25 @@ func (s *Store) ListTransactionsPage(ctx context.Context, limit int, cursor stri
 func (s *Store) GetTransactionByID(ctx context.Context, id string) (*TransactionView, error) {
 	query := `
 		SELECT
-			id,
-			semantic_key,
-			COALESCE(NULLIF(transaction_at_iso, ''), transaction_date),
-			COALESCE(transaction_day, ''),
-			COALESCE(date_precision, 'unknown'),
-			effective_date,
-			debit,
-			credit,
-			balance,
-			COALESCE(CAST(description_envelope AS TEXT), ''),
-			first_seen_at,
-			COALESCE(ingest_source, 'REALTIME')
-		FROM transactions
-		WHERE id = ?`
+			t.id,
+			t.semantic_key,
+			COALESCE(NULLIF(t.transaction_at_iso, ''), t.transaction_date),
+			COALESCE(t.transaction_day, ''),
+			COALESCE(t.date_precision, 'unknown'),
+			t.effective_date,
+			t.debit,
+			t.credit,
+			t.balance,
+			COALESCE(CAST(t.description_envelope AS TEXT), ''),
+			t.first_seen_at,
+			COALESCE(t.ingest_source, 'REALTIME'),
+			c.bank_code,
+			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' ELSE '' END,
+			COALESCE(CAST(po.order_code AS TEXT), '')
+		FROM transactions t
+		JOIN connections c ON c.id = t.connection_id
+		LEFT JOIN payment_orders po ON po.transaction_id = t.id
+		WHERE t.id = ?`
 
 	var item TransactionView
 	var description string
@@ -285,6 +299,9 @@ func (s *Store) GetTransactionByID(ctx context.Context, id string) (*Transaction
 		&description,
 		&item.FirstSeenAt,
 		&item.Source,
+		&item.Bank,
+		&item.Provider,
+		&item.OrderCode,
 	)
 	if err != nil {
 		return nil, err
@@ -334,44 +351,6 @@ func (s *Store) ListDeliveriesPage(ctx context.Context, limit int, cursor string
 	return page, nil
 }
 
-func (s *Store) ListPollRunsPage(ctx context.Context, limit int, cursor string) (Page[PollRun], error) {
-	limit = normalizePageSize(limit)
-	sortValue, cursorID, err := decodeCursor(cursor)
-	if err != nil {
-		return Page[PollRun]{}, err
-	}
-	query := `SELECT id,connection_id,generation,status,COALESCE(classifier,''),COALESCE(http_status,0),pages,rows_seen,rows_matched,COALESCE(sanitized_error,''),started_at,COALESCE(finished_at,'') FROM poll_runs`
-	args := []any{}
-	if sortValue != "" {
-		query += ` WHERE started_at < ? OR (started_at = ? AND id < ?)`
-		args = append(args, sortValue, sortValue, cursorID)
-	}
-	query += ` ORDER BY started_at DESC, id DESC LIMIT ?`
-	args = append(args, limit+1)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return Page[PollRun]{}, err
-	}
-	defer rows.Close()
-	items := make([]PollRun, 0, limit)
-	for rows.Next() {
-		var item PollRun
-		if err := rows.Scan(&item.ID, &item.ConnectionID, &item.Generation, &item.Status, &item.Classifier, &item.HTTPStatus, &item.Pages, &item.RowsSeen, &item.RowsMatched, &item.Error, &item.StartedAt, &item.FinishedAt); err != nil {
-			return Page[PollRun]{}, err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return Page[PollRun]{}, err
-	}
-	page := Page[PollRun]{Items: items}
-	if len(items) > limit {
-		last := items[limit-1]
-		page.Items = items[:limit]
-		page.NextCursor = encodeCursor(last.StartedAt, last.ID)
-	}
-	return page, nil
-}
 
 func (s *Store) ListAuditLogsPage(ctx context.Context, limit int, cursor string) (Page[AuditLogView], error) {
 	limit = normalizePageSize(limit)
@@ -422,90 +401,7 @@ func (s *Store) ListDeliveries(ctx context.Context, limit int) ([]DeliveryView, 
 	return page.Items, err
 }
 
-func (s *Store) ListPollRuns(ctx context.Context, limit int) ([]PollRun, error) {
-	page, err := s.ListPollRunsPage(ctx, limit, "")
-	return page.Items, err
-}
-
 func (s *Store) ListAuditLogs(ctx context.Context, limit int) ([]AuditLogView, error) {
 	page, err := s.ListAuditLogsPage(ctx, limit, "")
 	return page.Items, err
-}
-
-// CompleteAuthSession saves the verified session and transitions the connection to MONITORING.
-func (s *Store) CompleteAuthSession(ctx context.Context, attemptID string, sessionEnvelope []byte) (Connection, error) {
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
-			return err
-		}
-		var connectionID string
-		var generation int64
-		if err := tx.QueryRowContext(ctx, `SELECT connection_id,generation FROM auth_attempts WHERE id=? AND status IN ('STARTING','IN_PROGRESS')`, attemptID).Scan(&connectionID, &generation); err != nil {
-			return err
-		}
-		var owner string
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(owner_subject,'') FROM auth_attempts WHERE id=?`, attemptID).Scan(&owner); err != nil {
-			return err
-		}
-		if owner == RecoveryOwner {
-			e, err := scanEpisode(tx.QueryRowContext(ctx, `SELECT `+episodeColumns+` FROM auth_recovery_episodes WHERE attempt_id=? AND finished_at IS NULL`, attemptID))
-			if errors.Is(err, sql.ErrNoRows) {
-				return ErrRecoveryConsentRequired
-			}
-			if err != nil {
-				return err
-			}
-			if err := checkRecoveryAttemptTx(ctx, tx, e); err != nil {
-				return err
-			}
-		}
-		nowString := now()
-		if _, err := tx.ExecContext(ctx, `UPDATE auth_attempts SET status='VERIFIED',finished_at=? WHERE id=?`, nowString, attemptID); err != nil {
-			return err
-		}
-		var hasBaseline bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM transactions WHERE connection_id = ?
-				UNION ALL
-				SELECT 1 FROM poll_runs WHERE connection_id = ? AND status = 'SUCCEEDED'
-				UNION ALL
-				SELECT 1 FROM recovery_runs WHERE connection_id = ? AND status = 'COMPLETED'
-				UNION ALL
-				SELECT 1 FROM history_coverage WHERE connection_id = ? AND status = 'COMPLETE'
-			)
-		`, connectionID, connectionID, connectionID, connectionID).Scan(&hasBaseline); err != nil {
-			return err
-		}
-		recoveryReason := RecoveryReasonInitialAuth
-		if hasBaseline {
-			recoveryReason = RecoveryReasonReauth
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO recovery_runs(id, connection_id, generation, event_key, reason, status, progress_json, created_at, updated_at)
-			VALUES(?,?,?,?, ?, 'PENDING', '{}', ?, ?)
-			ON CONFLICT(connection_id, generation, event_key) DO NOTHING
-		`, id("recovery"), connectionID, generation, attemptID, recoveryReason, nowString, nowString); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(connection_id,generation,envelope,key_id,verified_at,updated_at) VALUES(?,?,?,'k1',?,?) ON CONFLICT(connection_id) DO UPDATE SET generation=excluded.generation,envelope=excluded.envelope,verified_at=excluded.verified_at,updated_at=excluded.updated_at`, connectionID, generation, sessionEnvelope, nowString, nowString); err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE connections SET state='MONITORING',updated_at=? WHERE id=? AND generation=? AND state='AUTH_STARTING'`, nowString, connectionID, generation)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return ErrGenerationFenceMismatch
-		}
-		return completeAutomaticSessionTx(ctx, tx, attemptID, connectionID, generation, time.Now())
-	})
-	if err != nil {
-		return Connection{}, err
-	}
-	return s.Connection(ctx)
 }

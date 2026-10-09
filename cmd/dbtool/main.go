@@ -19,20 +19,18 @@ func main() {
 	checkFlag := flag.Bool("check", false, "run read-only integrity check")
 	backupToFlag := flag.String("backup-to", "", "destination path for SQLite backup")
 	schemaVersionFlag := flag.Bool("schema-version", false, "print schema compatibility information as JSON")
-	activeAuthCountFlag := flag.Bool("active-auth-count", false, "print active authentication attempt count as JSON")
 	gateStatusFlag := flag.Bool("gate-status", false, "print deployment mutation gate status as JSON")
 	gateAcquireFlag := flag.Bool("gate-acquire", false, "acquire deployment mutation gate lease")
 	gateReleaseFlag := flag.Bool("gate-release", false, "release deployment mutation gate lease")
 	gateRenewFlag := flag.Bool("gate-renew", false, "renew deployment mutation gate lease")
-	gateCheckFlag := flag.Bool("gate-check", false, "check mutation gate is open and active auth count is 0")
+	gateCheckFlag := flag.Bool("gate-check", false, "check deployment mutation gate is open")
 	schemaCompatFlag := flag.Bool("schema-compat", false, "verify schema compatibility with minimum version")
-	sessionCheckFlag := flag.Bool("session-check", false, "verify valid durable session exists in database")
+	payOSCutoverFlag := flag.Bool("payos-cutover", false, "retire legacy ACB runtime state under a deployment lease")
+	paymentCountsFlag := flag.Bool("payment-counts", false, "print read-only payment issuance counts and journal watermark as JSON")
 	readonlyFlag := flag.Bool("readonly", false, "open SQLite database in read-only mode")
 
-	connectionIDFlag := flag.String("connection-id", "", "connection ID for session check")
-	generationFlag := flag.Int64("generation", 0, "generation for session check")
 	ownerFlag := flag.String("owner", "", "lease owner identifier")
-	leaseTokenFlag := flag.String("lease-token", "", "lease token for release or renewal")
+	leaseTokenFlag := flag.String("lease-token", "", "lease token for release, renewal or payOS cutover")
 	leaseDurationFlag := flag.Duration("lease-duration", 2*time.Minute, "duration of lease")
 	reasonFlag := flag.String("reason", "deploy", "reason for mutation gate lease")
 	minVersionFlag := flag.Int("min-version", 10, "minimum required schema version for schema-compat check")
@@ -61,8 +59,8 @@ func main() {
 	actionCount := 0
 	for _, selected := range []bool{
 		*migrateFlag, *checkFlag, *backupToFlag != "", *schemaVersionFlag,
-		*activeAuthCountFlag, *gateStatusFlag, *gateAcquireFlag, *gateReleaseFlag,
-		*gateRenewFlag, *gateCheckFlag, *schemaCompatFlag, *sessionCheckFlag,
+		*gateStatusFlag, *gateAcquireFlag, *gateReleaseFlag,
+		*gateRenewFlag, *gateCheckFlag, *schemaCompatFlag, *payOSCutoverFlag, *paymentCountsFlag,
 	} {
 		if selected {
 			actionCount++
@@ -70,6 +68,10 @@ func main() {
 	}
 	if actionCount > 1 {
 		logger.Error("select exactly one dbtool action")
+		os.Exit(2)
+	}
+	if *payOSCutoverFlag && *leaseTokenFlag == "" {
+		logger.Error("lease-token is required for payOS cutover")
 		os.Exit(2)
 	}
 
@@ -86,8 +88,8 @@ func main() {
 		return
 	}
 
-	// For check or backup, open runtime without auto-migration
-	isReadOnly := *readonlyFlag || *checkFlag || *schemaVersionFlag || *activeAuthCountFlag || *gateStatusFlag || *gateCheckFlag || *schemaCompatFlag || *sessionCheckFlag
+	// Actions open the existing database without auto-migration.
+	isReadOnly := *readonlyFlag || *checkFlag || *schemaVersionFlag || *gateStatusFlag || *gateCheckFlag || *schemaCompatFlag || *paymentCountsFlag
 	store, err := storage.OpenWithOptions(ctx, dbPath, storage.OpenOptions{
 		RunMigrations: false,
 		ReadOnly:      isReadOnly,
@@ -109,6 +111,18 @@ func main() {
 	}
 
 	encoder := json.NewEncoder(os.Stdout)
+	if *paymentCountsFlag {
+		report, err := store.ReadPaymentCounts(ctx)
+		if err != nil {
+			logger.Error("payment counts failed", "error", err)
+			os.Exit(1)
+		}
+		if err := encoder.Encode(report); err != nil {
+			logger.Error("encode payment counts", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *schemaVersionFlag {
 		report, err := store.SchemaVersion(ctx)
 		if err != nil {
@@ -117,19 +131,6 @@ func main() {
 		}
 		if err := encoder.Encode(report); err != nil {
 			logger.Error("encode schema report", "error", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if *activeAuthCountFlag {
-		report, err := store.ActiveAuthAttempts(ctx)
-		if err != nil {
-			logger.Error("active auth attempt count failed", "error", err)
-			os.Exit(1)
-		}
-		if err := encoder.Encode(report); err != nil {
-			logger.Error("encode active auth count", "error", err)
 			os.Exit(1)
 		}
 		return
@@ -225,10 +226,6 @@ func main() {
 			logger.Error("encode gate check", "error", err)
 			os.Exit(1)
 		}
-		if gate.ActiveAuthCount > 0 {
-			logger.Error("active auth session in progress", "count", gate.ActiveAuthCount)
-			os.Exit(1)
-		}
 		if gate.GateState == "LOCKED" && !gate.IsStale && (*ownerFlag == "" || gate.Owner != *ownerFlag) {
 			logger.Error("mutation gate is locked", "owner", gate.Owner, "expiresAt", gate.LeaseExpiresAt)
 			os.Exit(1)
@@ -264,47 +261,13 @@ func main() {
 		return
 	}
 
-	if *sessionCheckFlag {
-		connID := *connectionIDFlag
-		gen := *generationFlag
-		var session storage.StoredSession
-		var err error
-		if connID != "" && gen > 0 {
-			session, err = store.Session(ctx, connID, gen)
-		} else {
-			session, err = store.CurrentMonitoringSession(ctx)
-		}
-		if err != nil {
-			if conn, cErr := store.Connection(ctx); cErr == nil && (conn.State == "AUTH_REQUIRED" || conn.State == "UNCONFIGURED" || conn.State == "DISCONNECTED") {
-				report := map[string]any{
-					"status":          "ok",
-					"connection_id":   conn.ID,
-					"generation":      conn.Generation,
-					"state":           conn.State,
-					"unauthenticated": true,
-					"has_envelope":    false,
-				}
-				if err := encoder.Encode(report); err != nil {
-					logger.Error("encode session check report", "error", err)
-					os.Exit(1)
-				}
-				return
-			}
-			logger.Error("durable session not found for monitoring connection", "connection_id", connID, "generation", gen, "error", err)
+	if *payOSCutoverFlag {
+		if err := store.PayOSCutover(ctx, *leaseTokenFlag); err != nil {
+			logger.Error("payOS cutover failed", "error", err)
 			os.Exit(1)
 		}
-		if len(session.Envelope) == 0 {
-			logger.Error("durable session envelope is empty", "connection_id", session.ConnectionID, "generation", session.Generation)
-			os.Exit(1)
-		}
-		report := map[string]any{
-			"status":        "ok",
-			"connection_id": session.ConnectionID,
-			"generation":    session.Generation,
-			"has_envelope":  true,
-		}
-		if err := encoder.Encode(report); err != nil {
-			logger.Error("encode session check report", "error", err)
+		if err := encoder.Encode(map[string]any{"status": "completed", "action": "PAYOS_CUTOVER"}); err != nil {
+			logger.Error("encode payOS cutover", "error", err)
 			os.Exit(1)
 		}
 		return

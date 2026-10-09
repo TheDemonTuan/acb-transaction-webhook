@@ -48,62 +48,8 @@ func id(prefix string) string {
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func (s *Store) Connection(ctx context.Context) (Connection, error) {
 	var c Connection
-	err := s.db.QueryRowContext(ctx, `SELECT id,state,COALESCE(account_masked,''),generation,COALESCE(started_at,''),updated_at FROM connections ORDER BY created_at LIMIT 1`).Scan(&c.ID, &c.State, &c.AccountMasked, &c.Generation, &c.StartedAt, &c.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,state,COALESCE(account_masked,''),generation,COALESCE(started_at,''),updated_at FROM connections WHERE bank_code='ACB' ORDER BY created_at LIMIT 1`).Scan(&c.ID, &c.State, &c.AccountMasked, &c.Generation, &c.StartedAt, &c.UpdatedAt)
 	return c, err
-}
-func (s *Store) ConfigureConnection(ctx context.Context, masked string) (Connection, error) {
-	if err := s.CheckMutationAllowed(ctx); err != nil {
-		return Connection{}, err
-	}
-	masked = strings.TrimSpace(masked)
-	if masked == "" {
-		return Connection{}, errors.New("account masked is required")
-	}
-	t := now()
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM connections`).Scan(&count); err != nil {
-			return err
-		}
-		if count > 0 {
-			return errors.New("only one connection is supported")
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO connections(id,account_masked,state,started_at,created_at,updated_at)VALUES(?,?, 'AUTH_REQUIRED',?,?,?)`, id("conn"), masked, t, t, t)
-		return err
-	})
-	if err != nil {
-		return Connection{}, err
-	}
-	return s.Connection(ctx)
-}
-func (s *Store) TransitionConnection(ctx context.Context, action string) (Connection, error) {
-	if err := s.CheckMutationAllowed(ctx); err != nil {
-		return Connection{}, err
-	}
-	var next string
-	switch action {
-	case "pause":
-		next = "PAUSED"
-	case "resume":
-		next = "AUTH_REQUIRED"
-	default:
-		return Connection{}, errors.New("unsupported action")
-	}
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE connections SET state=?, generation=generation+1, updated_at=?`, next, now())
-		if err != nil {
-			return err
-		}
-		n, _ := result.RowsAffected()
-		if n != 1 {
-			return sql.ErrNoRows
-		}
-		return nil
-	})
-	if err != nil {
-		return Connection{}, err
-	}
-	return s.Connection(ctx)
 }
 func (s *Store) Endpoints(ctx context.Context) ([]Endpoint, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.name,v.url,e.status,e.current_revision,e.created_at,e.updated_at FROM webhook_endpoints e JOIN endpoint_versions v ON v.endpoint_id=e.id AND v.revision=e.current_revision ORDER BY e.created_at DESC`)

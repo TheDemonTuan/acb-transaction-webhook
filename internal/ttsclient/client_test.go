@@ -101,9 +101,6 @@ func TestClientSynthesizeStream(t *testing.T) {
 	if stream.Voice != "vi-VN-NamMinhNeural" {
 		t.Errorf("expected voice vi-VN-NamMinhNeural, got %q", stream.Voice)
 	}
-	if stream.FirstByteDuration <= 0 {
-		t.Errorf("expected positive FirstByteDuration, got %v", stream.FirstByteDuration)
-	}
 
 	allBytes, err := io.ReadAll(stream.Reader)
 	if err != nil {

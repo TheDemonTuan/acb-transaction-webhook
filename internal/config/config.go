@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,8 +31,6 @@ type Config struct {
 	DatabasePath          string
 	MasterKeyFile         string
 	Timezone              *time.Location
-	PollMinInterval       time.Duration
-	PollMaxInterval       time.Duration
 	CloudflareIssuer      string
 	CloudflareAudience    string
 	CloudflareJWKSURL     string
@@ -39,7 +38,13 @@ type Config struct {
 	DevelopmentSubject    string
 	Production            bool
 	PublicOrigin          string
-	AuthBrowserURL        string
+	PayOSClientID         string
+	PayOSAPIKey           string
+	PayOSChecksumKey      string
+	PaymentPublicOrigin   string
+	PaymentsEnabled       bool
+	PayOSWebhookConfirmed bool
+	PaymentMaxAmountVND   int64
 	TTSGatewayURL         string
 	TTSInternalToken      string
 	BarkServerURL         string
@@ -62,17 +67,6 @@ func Load() (Config, error) {
 	loc, err := time.LoadLocation(value("TZ", "Asia/Ho_Chi_Minh"))
 	if err != nil {
 		return Config{}, fmt.Errorf("load timezone: %w", err)
-	}
-	pollMin, err := seconds("POLL_MIN_INTERVAL_SEC", 3, 2, 300)
-	if err != nil {
-		return Config{}, err
-	}
-	pollMax, err := seconds("POLL_MAX_INTERVAL_SEC", 10, 2, 300)
-	if err != nil {
-		return Config{}, err
-	}
-	if pollMin > pollMax {
-		return Config{}, fmt.Errorf("POLL_MIN_INTERVAL_SEC must be less than or equal to POLL_MAX_INTERVAL_SEC")
 	}
 	dataDir := value("DATA_DIR", "data")
 	production := value("APP_ENV", "development") == "production"
@@ -161,6 +155,39 @@ func Load() (Config, error) {
 		if u, err := url.Parse(publicOrigin); err == nil && u.Scheme != "" && u.Host != "" {
 			publicOrigin = strings.TrimSuffix(fmt.Sprintf("%s://%s", strings.ToLower(u.Scheme), u.Host), "/")
 		}
+	}
+
+	payOSClientID, err := ReadSecret("PAYOS_CLIENT_ID", "PAYOS_CLIENT_ID_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+	payOSAPIKey, err := ReadSecret("PAYOS_API_KEY", "PAYOS_API_KEY_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+	payOSChecksumKey, err := ReadSecret("PAYOS_CHECKSUM_KEY", "PAYOS_CHECKSUM_KEY_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+	paymentOriginDefault := "http://localhost:5173"
+	if production {
+		paymentOriginDefault = "https://transactions.tuannguyenviet.site"
+	}
+	paymentPublicOrigin, err := paymentOrigin(value("PAYMENT_PUBLIC_ORIGIN", paymentOriginDefault), production)
+	if err != nil {
+		return Config{}, err
+	}
+	paymentsEnabled, err := boolean("PAYMENTS_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	payOSWebhookConfirmed, err := boolean("PAYOS_WEBHOOK_CONFIRMED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	paymentMaxAmountVND, err := strconv.ParseInt(value("PAYMENT_MAX_AMOUNT_VND", "500000000"), 10, 64)
+	if err != nil || paymentMaxAmountVND < 1 || paymentMaxAmountVND > 9007199254740991 {
+		return Config{}, fmt.Errorf("PAYMENT_MAX_AMOUNT_VND must be an integer from 1 to 9007199254740991")
 	}
 
 	ttsToken, err := ReadSecret("TTS_INTERNAL_TOKEN", "TTS_INTERNAL_TOKEN_FILE")
@@ -255,8 +282,6 @@ func Load() (Config, error) {
 		DatabasePath:       value("DATABASE_PATH", filepath.Join(dataDir, "gateway.db")),
 		MasterKeyFile:      masterKeyFile,
 		Timezone:           loc,
-		PollMinInterval:    pollMin,
-		PollMaxInterval:    pollMax,
 		CloudflareIssuer:   cfIssuer,
 		CloudflareAudience: cfAud,
 		CloudflareJWKSURL:  cfJWKS,
@@ -265,11 +290,17 @@ func Load() (Config, error) {
 			Operators: set("OPERATOR_SUBJECTS"),
 			Viewers:   set("VIEWER_SUBJECTS"),
 		},
-		DevelopmentSubject: value("DEVELOPMENT_SUBJECT", "local-owner"),
-		Production:         production,
-		PublicOrigin:       publicOrigin,
-		AuthBrowserURL:     value("AUTH_BROWSER_URL", "http://auth-browser:8181"),
-		TTSGatewayURL:      ttsGatewayURL,
+		DevelopmentSubject:    value("DEVELOPMENT_SUBJECT", "local-owner"),
+		Production:            production,
+		PublicOrigin:          publicOrigin,
+		PayOSClientID:         payOSClientID,
+		PayOSAPIKey:           payOSAPIKey,
+		PayOSChecksumKey:      payOSChecksumKey,
+		PaymentPublicOrigin:   paymentPublicOrigin,
+		PaymentsEnabled:       paymentsEnabled,
+		PayOSWebhookConfirmed: payOSWebhookConfirmed,
+		PaymentMaxAmountVND:   paymentMaxAmountVND,
+		TTSGatewayURL:         ttsGatewayURL,
 
 		TTSInternalToken:      ttsToken,
 		BarkServerURL:         barkServerURL,
@@ -317,12 +348,72 @@ func Load() (Config, error) {
 				return Config{}, fmt.Errorf("WORKER_INTERNAL_TOKEN or WORKER_INTERNAL_TOKEN_FILE is required for worker in production")
 			}
 		}
+		if cfg.PayOSClientID == "" {
+			return Config{}, fmt.Errorf("PAYOS_CLIENT_ID or PAYOS_CLIENT_ID_FILE is required in production")
+		}
+		if cfg.PayOSAPIKey == "" {
+			return Config{}, fmt.Errorf("PAYOS_API_KEY or PAYOS_API_KEY_FILE is required in production")
+		}
+		if cfg.PayOSChecksumKey == "" {
+			return Config{}, fmt.Errorf("PAYOS_CHECKSUM_KEY or PAYOS_CHECKSUM_KEY_FILE is required in production")
+		}
 	}
 	if cfg.MasterKeyFile != "" && !filepath.IsAbs(cfg.MasterKeyFile) {
 		return Config{}, fmt.Errorf("APP_MASTER_KEY_FILE must be an absolute path")
 	}
 	return cfg, nil
 }
+
+// PaymentStaticURL is the fixed customer-facing URL, never derived from request headers.
+func (c Config) PaymentStaticURL() string {
+	return c.PaymentPublicOrigin + "/pay"
+}
+
+// PayOSWebhookURL is the callback registered on the application's dedicated payOS channel.
+func (c Config) PayOSWebhookURL() string {
+	return c.PaymentPublicOrigin + "/api/integrations/payos/webhook"
+}
+
+func paymentOrigin(raw string, production bool) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" || u.Opaque != "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return "", fmt.Errorf("PAYMENT_PUBLIC_ORIGIN must be an absolute HTTPS origin (localhost HTTP is allowed in development)")
+	}
+	if u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") {
+		return "", fmt.Errorf("PAYMENT_PUBLIC_ORIGIN must not contain userinfo, path, query, or fragment")
+	}
+	host := strings.ToLower(u.Hostname())
+	ip := net.ParseIP(host)
+	if (strings.Contains(host, ":") || strings.HasPrefix(u.Host, "[")) && ip == nil {
+		return "", fmt.Errorf("PAYMENT_PUBLIC_ORIGIN must contain a valid hostname or IP address")
+	}
+	if u.Scheme == "http" {
+		if production || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+			return "", fmt.Errorf("PAYMENT_PUBLIC_ORIGIN must use HTTPS except for localhost in development")
+		}
+	}
+	port := u.Port()
+	if strings.HasSuffix(u.Host, ":") {
+		return "", fmt.Errorf("PAYMENT_PUBLIC_ORIGIN must contain a valid port")
+	}
+	if port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("PAYMENT_PUBLIC_ORIGIN must contain a valid port")
+		}
+		port = strconv.Itoa(n)
+		if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
+			port = ""
+		}
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return u.Scheme + "://" + host, nil
+}
+
 func value(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -348,14 +439,6 @@ func boolean(key string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("%s must be a boolean", key)
 	}
 	return value, nil
-}
-
-func seconds(key string, fallback, minimum, maximum int) (time.Duration, error) {
-	v, err := strconv.Atoi(value(key, strconv.Itoa(fallback)))
-	if err != nil || v < minimum || v > maximum {
-		return 0, fmt.Errorf("%s must be an integer from %d to %d", key, minimum, maximum)
-	}
-	return time.Duration(v) * time.Second, nil
 }
 
 // ReadSecret reads a secret from an environment variable or secret file.

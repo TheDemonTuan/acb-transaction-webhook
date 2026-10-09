@@ -18,9 +18,16 @@ import (
 type recoveryMockSender struct {
 	deliveredCount atomic.Int32
 	processDelay   time.Duration
+	started        chan struct{}
 }
 
 func (m *recoveryMockSender) Send(ctx context.Context, req notification.SendRequest) notification.SendResult {
+	if m.started != nil {
+		select {
+		case m.started <- struct{}{}:
+		default:
+		}
+	}
 	if m.processDelay > 0 {
 		select {
 		case <-ctx.Done():
@@ -65,32 +72,27 @@ func TestDispatcherTermAndRestartRecovery(t *testing.T) {
 	defer store.Close()
 	store.WithKeyring(kr)
 
-	conn, _ := store.ConfigureConnection(ctx, "***3333")
-	_, _ = store.DB().ExecContext(ctx, "UPDATE connections SET state = 'MONITORING' WHERE id = ?", conn.ID)
+	f := newPaymentFixture(t, store, nil)
 
 	ep, err := store.CreateEndpointWithSecret(ctx, "Webhook Hook", "https://example.com/webhook")
 	if err != nil {
 		t.Fatalf("create endpoint: %v", err)
 	}
-	_ = store.SetEndpointStatus(ctx, ep.ID, "ACTIVE")
-
-	// Ingest 5 transactions to generate 5 deliveries
-	var items []storage.BatchTransactionItem
-	for i := 1; i <= 5; i++ {
-		items = append(items, storage.BatchTransactionItem{
-			Number:        filepath.Base(dbDir) + "_TX_" + string(rune('0'+i)),
-			TransactionAt: time.Now().UTC().Format(time.RFC3339),
-			Credit:        100000,
-			Description:   "Test delivery",
-		})
+	if err := store.SetEndpointStatus(ctx, ep.ID, "ACTIVE"); err != nil {
+		t.Fatal(err)
 	}
-	_, err = store.IngestTransactionsBatch(ctx, conn.ID, conn.Generation, "***3333", items, false)
-	if err != nil {
-		t.Fatalf("ingest batch: %v", err)
+	// Real SDK creation and signed callbacks atomically generate the outbox.
+	for i := range 5 {
+		order := createPayment(t, f, 100000, i+1)
+		settlePayment(t, f, order)
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM deliveries`).Scan(&count); err != nil || count != 5 {
+		t.Fatalf("settlement outbox count=%d err=%v", count, err)
 	}
 
 	// Setup mock sender
-	sender1 := &recoveryMockSender{processDelay: 10 * time.Millisecond}
+	sender1 := &recoveryMockSender{}
 	reg1 := notification.NewRegistry()
 	reg1.Register("WEBHOOK", sender1)
 
@@ -111,16 +113,23 @@ func TestDispatcherTermAndRestartRecovery(t *testing.T) {
 		t.Fatalf("expected 2 delivered in phase 1, got %d", deliveredPhase1)
 	}
 
+	sender1.started = make(chan struct{}, 1)
+	sender1.processDelay = time.Hour
 	// Now start Dispatcher 1 in background with cancellable context (simulating SIGTERM drill)
 	termCtx, cancelDisp1 := context.WithCancel(ctx)
+	defer cancelDisp1()
 	disp1Done := make(chan struct{})
 	go func() {
 		defer close(disp1Done)
 		disp1.Start(termCtx)
 	}()
 
-	// Send SIGTERM immediately
-	time.Sleep(10 * time.Millisecond)
+	// Cancel only after a real delivery has been claimed and entered Send.
+	select {
+	case <-sender1.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher never started the in-flight delivery")
+	}
 	cancelDisp1()
 
 	// Dispatcher 1 must stop cleanly within 2 seconds
@@ -130,6 +139,9 @@ func TestDispatcherTermAndRestartRecovery(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatcher did not shut down cleanly on SIGTERM within timeout")
 	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE status='IN_FLIGHT'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("expected interrupted durable delivery: count=%d err=%v", count, err)
+	}
 
 	// Reopen/simulate time passage so any in-flight lease expires
 	// In SQLite: reset any stuck IN_FLIGHT leases to past so ClaimDelivery can claim them
@@ -138,6 +150,15 @@ func TestDispatcherTermAndRestartRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expire leases: %v", err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = storage.OpenRuntime(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.WithKeyring(kr)
 
 	// Start Dispatcher 2 (successor instance after restart)
 	sender2 := &recoveryMockSender{processDelay: 0}
@@ -147,7 +168,7 @@ func TestDispatcherTermAndRestartRecovery(t *testing.T) {
 	disp2 := notification.NewDispatcher(store, reg2)
 
 	// Process remaining 3 deliveries
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		processed, err := disp2.DispatchOne(ctx)
 		if err != nil {
 			t.Fatalf("dispatch remaining %d: %v", i, err)
@@ -179,5 +200,12 @@ func TestDispatcherTermAndRestartRecovery(t *testing.T) {
 	}
 	if sum.Pending != 0 {
 		t.Fatalf("expected 0 pending deliveries, got %d", sum.Pending)
+	}
+	var total int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*),sum(amount_vnd) FROM payment_receipts`).Scan(&count, &total); err != nil || count != 5 || total != 500000 {
+		t.Fatalf("restart changed receipts: count=%d amount=%d err=%v", count, total, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE endpoint_id=? AND status='DELIVERED'`, ep.ID).Scan(&count); err != nil || count != 5 {
+		t.Fatalf("outbox rows not preserved through restart: count=%d err=%v", count, err)
 	}
 }

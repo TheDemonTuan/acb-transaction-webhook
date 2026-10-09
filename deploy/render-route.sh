@@ -40,6 +40,20 @@ http:
       priority: 1000
       middlewares: [deny-internal]
       service: acb-service
+    acb-payos-webhook-router:
+      rule: "Host(\`${viewer_host}\`) && Path(\`/api/integrations/payos/webhook\`) && Method(\`POST\`)"
+      entryPoints: [web]
+      priority: 1150
+      middlewares: [tunnel-only, security-headers, payment-privacy, payos-webhook-rate-limit, payos-webhook-body-limit]
+      service: acb-service
+    acb-public-payments-router:
+      rule: "Host(\`${viewer_host}\`) && (Path(\`/api/public/v1/payment-config\`) || Path(\`/api/public/v1/payments\`) || PathPrefix(\`/api/public/v1/payments/\`))"
+      entryPoints: [web]
+      priority: 1120
+      middlewares: [tunnel-only, public-api-rate-limit, public-api-inflight-ip, public-api-inflight-global, security-headers, payment-privacy]
+      observability:
+        accessLogs: false
+      service: acb-service
     acb-public-sse-router:
       rule: "Host(\`${viewer_host}\`) && (Path(\`/api/public/v1/events\`) || Path(\`/api/public/v1/events/stream\`))"
       entryPoints: [web]
@@ -58,10 +72,36 @@ http:
       priority: 200
       middlewares: [tunnel-only, security-headers]
       service: acb-service
+    acb-admin-payments-router:
+      rule: "Host(\`${route_host}\`) && (Path(\`/api/v1/payments\`) || PathPrefix(\`/api/v1/payments/\`) || Path(\`/api/public/v1/payment-config\`) || Path(\`/api/public/v1/payments\`) || PathPrefix(\`/api/public/v1/payments/\`))"
+      entryPoints: [web]
+      priority: 210
+      middlewares: [tunnel-only, security-headers, payment-privacy]
+      observability:
+        accessLogs: false
+      service: acb-service
     acb-deploy-gateway:
       rule: "Host(\`gateway-deploy.acb.internal.invalid\`) && Path(\`/readyz\`)"
       entryPoints: [slot-probe]
       service: acb-service
+  middlewares:
+    # Bundle-local policies do not require changing shared edge middleware.
+    payment-privacy:
+      headers:
+        customResponseHeaders:
+          Referrer-Policy: "no-referrer"
+          Cache-Control: "no-store"
+    payos-webhook-body-limit:
+      buffering:
+        maxRequestBodyBytes: 65536
+        memRequestBodyBytes: 65536
+    payos-webhook-rate-limit:
+      rateLimit:
+        average: 60
+        period: 1s
+        burst: 120
+        sourceCriterion:
+          requestHost: true
   services:
     acb-service:
       loadBalancer:

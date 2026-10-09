@@ -77,6 +77,7 @@ func TestProductionWorkerDoesNotRequireTTSToken(t *testing.T) {
 		t.Fatalf("write key: %v", err)
 	}
 
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
 	t.Setenv("RUNTIME_ROLE", "worker")
@@ -99,6 +100,7 @@ func TestProductionGatewayRequiresTTSToken(t *testing.T) {
 		t.Fatalf("write key: %v", err)
 	}
 
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
 	t.Setenv("OWNER_SUBJECTS", "owner@example.com")
@@ -124,6 +126,7 @@ func TestProductionGatewayDoesNotRequireBarkCredentials(t *testing.T) {
 		t.Fatalf("write key: %v", err)
 	}
 
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
 	t.Setenv("OWNER_SUBJECTS", "owner@example.com")
@@ -150,6 +153,7 @@ func TestProductionWorkerRequiresBarkCredentialsWhenBarkConfigured(t *testing.T)
 		t.Fatalf("write key: %v", err)
 	}
 
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
 	t.Setenv("RUNTIME_ROLE", "worker")
@@ -165,6 +169,7 @@ func TestProductionWorkerRequiresBarkCredentialsWhenBarkConfigured(t *testing.T)
 }
 
 func TestProductionRejectsDirectAppMasterKeyWithoutFile(t *testing.T) {
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("RUNTIME_ROLE", "worker")
 	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
@@ -200,6 +205,7 @@ func TestProductionRequiresWorkerTokenWhenRPCConfigured(t *testing.T) {
 		t.Fatalf("write key: %v", err)
 	}
 
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("RUNTIME_ROLE", "gateway")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
@@ -223,6 +229,7 @@ func setupBaseProductionEnv(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("32byteslongkeyforproductiontest!"), 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
 	}
+	setPayOSTestSecrets(t)
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("APP_MASTER_KEY_FILE", keyFile)
 	t.Setenv("OWNER_SUBJECTS", "owner@example.com")
@@ -285,9 +292,6 @@ func TestProductionGatewayRequiresWorkerRPCAndToken(t *testing.T) {
 
 	// 3. Both present -> succeeds
 	t.Setenv("WORKER_INTERNAL_TOKEN", "worker-token")
-	// Gateway probes browser health without loading its private controller secret.
-	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN", "")
-	t.Setenv("AUTH_BROWSER_INTERNAL_TOKEN_FILE", filepath.Join(t.TempDir(), "not-mounted"))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("expected valid gateway config to succeed, got %v", err)

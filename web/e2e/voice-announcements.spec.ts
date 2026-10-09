@@ -1,5 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+type VoiceFixtureWindow = Window & {
+  __activeEventSource?: EventSource;
+  __spokenUtterances: Array<{ text: string; lang: string; volume: number; rate: number }>;
+};
+
 test.describe('Voice Announcements & Realtime Features', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
@@ -92,9 +97,48 @@ test.describe('Voice Announcements & Realtime Features', () => {
     expect(spoken[0].lang).toBe('vi-VN');
   });
 
-  test('receives bank.transaction.credit SSE event and announces in natural Vietnamese, then dedupes replay', async ({
+  test('announces independent KienlongBank orders once each while replay, stale and CATCH_UP stay silent', async ({
     page,
   }) => {
+    // Fixed committed snapshots, independent of the simulated SSE payloads.
+    // Refetching history must not erase rows or cause snapshot data to speak.
+    let historyRequests = 0;
+    const transactionDate = new Date().toISOString();
+    await page.route(/\/api\/(?:public\/)?v1\/transactions(?:\?.*)?$/, async (route) => {
+      historyRequests += 1;
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [
+            {
+              id: 'tx_e2e_realtime_500k', bank: 'KienlongBank', provider: 'PAYOS',
+              orderCode: '100000556677', semanticKey: 'PAYOS:e2e:556677',
+              credit: 500000, debit: 0, transactionDate, effectiveDate: transactionDate,
+              firstSeenAt: transactionDate, source: 'REALTIME',
+              description: 'NGUYEN VAN A CHUYEN TIEN REALTIME',
+            },
+            {
+              id: 'tx_catch_up_0', bank: 'ACB', semanticKey: 'ACB:778899',
+              credit: 250000, debit: 0, transactionDate, effectiveDate: transactionDate,
+              firstSeenAt: transactionDate, source: 'CATCH_UP', description: 'LỊCH SỬ ACB KHÔNG ĐỌC',
+            },
+            {
+              id: 'tx_catch_up_1', bank: 'KienlongBank', provider: 'PAYOS',
+              orderCode: '100000778899', semanticKey: 'PAYOS:e2e:778899',
+              credit: 250000, debit: 0, transactionDate, effectiveDate: transactionDate,
+              firstSeenAt: transactionDate, source: 'CATCH_UP', description: 'LỊCH SỬ KienlongBank KHÔNG ĐỌC',
+            },
+            {
+              id: 'tx_e2e_second_500k', bank: 'KienlongBank', provider: 'PAYOS',
+              orderCode: '100000556678', semanticKey: 'PAYOS:e2e:556678',
+              credit: 500000, debit: 0, transactionDate, effectiveDate: transactionDate,
+              firstSeenAt: transactionDate, source: 'REALTIME', description: 'KHÁCH THỨ HAI CÙNG SỐ TIỀN',
+            },
+          ],
+          summary: { count: 4, incoming: 1500000, outgoing: 0 },
+        }),
+      });
+    });
     await page.goto('/transactions');
 
     // 1. Enable voice announcement
@@ -116,7 +160,9 @@ test.describe('Voice Announcements & Realtime Features', () => {
 
       const event = new MessageEvent('bank.transaction.credit', {
         data: JSON.stringify({
-          bank: 'ACB',
+          bank: 'KienlongBank',
+          provider: 'PAYOS',
+          orderCode: '100000556677',
           transactionId: 'tx_e2e_realtime_500k',
           transactionNumber: '556677',
           credit: '500000',
@@ -149,13 +195,18 @@ test.describe('Voice Announcements & Realtime Features', () => {
 
     // 4. Assert transaction immediately appeared in the transaction list
     await expect(page.getByText('NGUYEN VAN A CHUYEN TIEN REALTIME')).toBeVisible();
+    await expect(page.getByText('KienlongBank', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('ACB', { exact: true }).first()).toBeVisible();
+    expect(historyRequests).toBeGreaterThanOrEqual(2);
 
-    // 5. Deduplication verification: re-dispatch the exact same SSE event (journal replay simulation)
+    // 5. Replay the same committed transaction under a different SSE event ID.
     await page.evaluate(() => {
       const es = (window as any).__activeEventSource;
       const event = new MessageEvent('bank.transaction.credit', {
         data: JSON.stringify({
-          bank: 'ACB',
+          bank: 'KienlongBank',
+          provider: 'PAYOS',
+          orderCode: '100000556677',
           transactionId: 'tx_e2e_realtime_500k',
           transactionNumber: '556677',
           credit: '500000',
@@ -166,7 +217,7 @@ test.describe('Voice Announcements & Realtime Features', () => {
           description: 'NGUYEN VAN A CHUYEN TIEN REALTIME',
           detectedAt: new Date().toISOString(),
         }),
-        lastEventId: 'ep1:888001',
+        lastEventId: 'ep1:888002',
       });
       es.dispatchEvent(event);
     });
@@ -182,17 +233,20 @@ test.describe('Voice Announcements & Realtime Features', () => {
       const staleTime = new Date(Date.now() - 150_000).toISOString();
       const event = new MessageEvent('bank.transaction.credit', {
         data: JSON.stringify({
-          bank: 'ACB',
+          bank: 'KienlongBank',
+          provider: 'PAYOS',
+          orderCode: '100000999999',
           transactionId: 'tx_stale_old',
           transactionNumber: '999999',
           credit: '1000000',
           debit: '0',
           currency: 'VND',
           transactionDate: staleTime,
+          source: 'REALTIME',
           description: 'GIAO DICH CU KHONG DUOC DOC',
           detectedAt: staleTime,
         }),
-        lastEventId: 'ep1:888002',
+        lastEventId: 'ep1:888003',
       });
       es.dispatchEvent(event);
     });
@@ -201,6 +255,65 @@ test.describe('Voice Announcements & Realtime Features', () => {
     await page.waitForTimeout(1000);
     const spokenAfterStale = await page.evaluate(() => (window as any).__spokenUtterances);
     expect(spokenAfterStale.length).toBe(1);
+
+    // Historical ACB and recovered payOS credits update history, never speech.
+    await page.evaluate(() => {
+      // Installed by the EventSource fixture in beforeEach.
+      const testWindow = window as VoiceFixtureWindow;
+      const es = testWindow.__activeEventSource;
+      if (!es) throw new Error('EventSource not initialized');
+      for (const [index, bank] of ['ACB', 'KienlongBank'].entries()) {
+        es.dispatchEvent(new MessageEvent('bank.transaction.credit', {
+          data: JSON.stringify({
+            bank,
+            provider: bank === 'KienlongBank' ? 'PAYOS' : undefined,
+            orderCode: bank === 'KienlongBank' ? '100000778899' : undefined,
+            transactionId: `tx_catch_up_${index}`,
+            transactionNumber: '778899',
+            credit: '250000',
+            debit: '0',
+            currency: 'VND',
+            transactionDate: new Date().toISOString(),
+            source: 'CATCH_UP',
+            description: `LỊCH SỬ ${bank} KHÔNG ĐỌC`,
+            detectedAt: new Date().toISOString(),
+          }),
+          lastEventId: `ep1:${888004 + index}`,
+        }));
+      }
+    });
+    await page.waitForTimeout(1000);
+    expect(await page.evaluate(() => {
+      // Installed by the speech fixture in beforeEach.
+      const testWindow = window as VoiceFixtureWindow;
+      return testWindow.__spokenUtterances.length;
+    })).toBe(1);
+    await expect(page.getByText('LỊCH SỬ ACB KHÔNG ĐỌC')).toBeVisible();
+    await expect(page.getByText('LỊCH SỬ KienlongBank KHÔNG ĐỌC')).toBeVisible();
+
+    // A different committed order for the same amount must still be announced.
+    await page.evaluate(() => {
+      // Installed by the EventSource fixture in beforeEach.
+      const testWindow = window as VoiceFixtureWindow;
+      const es = testWindow.__activeEventSource;
+      if (!es) throw new Error('EventSource not initialized');
+      es.dispatchEvent(new MessageEvent('bank.transaction.credit', {
+        data: JSON.stringify({
+          bank: 'KienlongBank', provider: 'PAYOS', orderCode: '100000556678',
+          transactionId: 'tx_e2e_second_500k', transactionNumber: '556678',
+          credit: '500000', debit: '0', currency: 'VND', source: 'REALTIME',
+          transactionDate: new Date().toISOString(), detectedAt: new Date().toISOString(),
+          description: 'KHÁCH THỨ HAI CÙNG SỐ TIỀN',
+        }),
+        lastEventId: 'ep1:888006',
+      }));
+    });
+    await expect.poll(() => page.evaluate(() => {
+      // Installed by the speech fixture in beforeEach.
+      const testWindow = window as VoiceFixtureWindow;
+      return testWindow.__spokenUtterances.length;
+    })).toBe(2);
+    await expect(page.getByText('KHÁCH THỨ HAI CÙNG SỐ TIỀN')).toBeVisible();
   });
 
   test('custom announcement template formats phrase correctly', async ({ page }) => {

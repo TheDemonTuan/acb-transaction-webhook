@@ -7,9 +7,6 @@ import (
 
 func TestTelemetry_PrivacyAndCardinalityControls(t *testing.T) {
 	reg := NewRegistry()
-	reg.SetSchedulerQueue(map[string]int{"REALTIME_POLL": 1, "FILTER_HISTORY": 2}, 3)
-	reg.SetHistoryJobs(map[string]int{"QUEUED": 2, "RUNNING": 1, "COMPLETED": 10}, 15*time.Second, 0, 50, 1200)
-	reg.SetAuthLifecycle(false, 0, false, "READY", 3, map[string]int{"COMPLETED": 3})
 	reg.SetNotificationBacklog(2, 0, false, map[string]ProviderSnapshot{
 		"WEBHOOK": {Pending: 1, Success: 100},
 		"BARK":    {Pending: 1, Success: 50},
@@ -55,12 +52,12 @@ func TestTelemetry_PrivacyAndCardinalityControls(t *testing.T) {
 		}
 	})
 
-	t.Run("detects raw ACB HTML table markup", func(t *testing.T) {
+	t.Run("detects raw HTML table markup", func(t *testing.T) {
 		leaky := map[string]any{
-			"rawHTML": "<table class='acb-grid'><tr><td>Transaction</td></tr></table>",
+			"rawHTML": "<table><tr><td>Transaction</td></tr></table>",
 		}
 		if err := ValidateNoSecrets(leaky); err == nil {
-			t.Fatal("expected ValidateNoSecrets to catch raw ACB HTML, got nil")
+			t.Fatal("expected ValidateNoSecrets to catch raw HTML, got nil")
 		}
 	})
 

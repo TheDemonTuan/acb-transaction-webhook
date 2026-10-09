@@ -37,52 +37,62 @@ finally: os.close(fd)
 PY
   then rm -f "$tmp"; return 1; fi
 }
-# Legacy bundles never receive recovery profiles, overrides, or secret requirements.
-load_recovery_flags() {
-  local release="${1:-}" settings
-  settings="$(python3 - "$DEPLOY_PATH/deploy/.env.production" "$release" <<'PY'
-import sys
-env,release=sys.argv[1:]
-supported=True
-if release:
-    import yaml
-    supported='recovery-controller' in (yaml.safe_load(open(release+'/compose.prod.yaml')).get('services') or {})
-values={'AUTH_RECOVERY_ENABLED':'false','AI_CAPTCHA_ENABLED':'false'}
-seen=set()
-if supported:
-    for raw in open(env,encoding='utf-8'):
-        line=raw.strip()
-        if not line or line.startswith('#'): continue
+PAYOS_IMAGE_KEYS='RELEASE_SHA PAYMENT_RUNTIME GATEWAY_IMAGE_REF WORKER_IMAGE_REF DBTOOL_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF'
+PAYOS_STATE_KEYS='RELEASE_SHA GATEWAY_SLOT PAYMENT_RUNTIME'
+PAYOS_RUNTIME_KEYS='IMAGE_REF_BLUE IMAGE_REF_GREEN WORKER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF DBTOOL_IMAGE_REF RELEASE_COMMIT_BLUE RELEASE_COMMIT_GREEN WORKER_RELEASE_COMMIT ENV_FILE SECRETS_DIR BARK_SECRET_GROUP PAYMENT_RUNTIME'
+require_payos_runtime() {
+  python3 - "$1" "$PAYOS_STATE_KEYS" "$PAYOS_RUNTIME_KEYS" "$PAYOS_IMAGE_KEYS" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+def values(path):
+    result={}
+    for line in path.read_text().splitlines():
         key,sep,value=line.partition('=')
-        if key.strip() not in values: continue
-        if not sep or key!=key.strip() or key in seen or value not in ('true','false'):
-            raise SystemExit('invalid or duplicate recovery flag: '+key)
-        seen.add(key); values[key]=value
-    if release and values['AUTH_RECOVERY_ENABLED']=='true' and values['AI_CAPTCHA_ENABLED']=='true':
-        import os
-        if not os.path.isfile(release+'/compose.auth-recovery-ai.yaml'):
-            raise SystemExit('bundle-invalid: missing compose.auth-recovery-ai.yaml')
-print(str(supported).lower(),values['AUTH_RECOVERY_ENABLED'],values['AI_CAPTCHA_ENABLED'])
+        if not sep or key in result: raise ValueError('invalid manifest')
+        result[key]=value
+    return result
+try:
+    state=values(root/'state.env')
+    if state.get('PAYMENT_RUNTIME')!='payos': raise ValueError('legacy state')
+    if set(state)!=set(sys.argv[2].split()): raise ValueError('invalid state keys')
+    release=root/'releases'/state['RELEASE_SHA']
+    for name,keys in (('runtime.env',sys.argv[3]),('images.env',sys.argv[4])):
+        manifest=values(release/name)
+        if manifest.get('PAYMENT_RUNTIME')!='payos' or set(manifest)!=set(keys.split()):
+            raise ValueError('legacy runtime')
+except (OSError,ValueError,KeyError):
+    raise SystemExit('PAYOS_RUNTIME_MIGRATION_REQUIRED')
+PY
+}
+payment_issuance_check() {
+  local counts
+  counts="$(dbtool ro -payment-counts)" || return 1
+  printf '%s' "$counts" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert all(type(d[k]) is int and d[k]>=0 for k in ("orders","receipts","journalSeq")); sys.exit("PAYOS_ROLLBACK_REQUIRES_PAYMENT_DRAIN" if d["orders"] or d["receipts"] else 0)'
+}
+provider_rollback_check() {
+  local target="$1" runtime
+  [[ -f "$target" ]] || return 0
+  if python3 - "$target" <<'PY'
+import sys
+values=dict(line.rstrip('\n').split('=',1) for line in open(sys.argv[1]))
+sys.exit(0 if values.get('PAYMENT_RUNTIME')=='payos' else 1)
+PY
+  then return 0; fi
+  runtime="$(python3 - "$DEPLOY_PATH" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+state=dict(line.rstrip('\n').split('=',1) for line in open(root/'state.env'))
+print(root/'releases'/state['RELEASE_SHA']/'runtime.env')
 PY
 )" || return 1
-  read -r RECOVERY_SERVICE_SUPPORTED AUTH_RECOVERY_ENABLED AI_CAPTCHA_ENABLED <<< "$settings"
-  export AUTH_RECOVERY_ENABLED AI_CAPTCHA_ENABLED
-}
-stop_recovery_controller() {
-  if docker inspect acb-recovery-controller >/dev/null 2>&1; then
-    docker stop -t 30 acb-recovery-controller >/dev/null || return 1
-    [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller)" == false ]] || fail 'recovery controller still running'
-  fi
+  load_keys "$runtime" "$PAYOS_RUNTIME_KEYS" || return 1
+  validate_digest "$DBTOOL_IMAGE_REF" dbtool || return 1
+  payment_issuance_check || return 1
+  fail 'PAYOS_RUNTIME_MIGRATION_REQUIRED: legacy rollback requires explicit cutover tool'
 }
 compose_release() {
   local release="$1" runtime="$2"; shift 2
-  local -a recovery_args=()
-  load_recovery_flags "$release" || return 1
-  if [[ "$AUTH_RECOVERY_ENABLED" == true ]]; then
-    recovery_args+=(--profile auth-recovery)
-    if [[ "$AI_CAPTCHA_ENABLED" == true ]]; then recovery_args+=(-f "$release/compose.auth-recovery-ai.yaml"); fi
-  fi
-  docker compose --project-name acb --project-directory "$release" --env-file "$DEPLOY_PATH/deploy/.env.production" --env-file "$runtime" -f "$release/compose.prod.yaml" "${recovery_args[@]}" "$@"
+  docker compose --project-name acb --project-directory "$release" --env-file "$DEPLOY_PATH/deploy/.env.production" --env-file "$runtime" -f "$release/compose.prod.yaml" "$@"
 }
 # Actual file ownership is significant: do not silently chmod live secrets.
 check_secret_permissions() {
@@ -112,65 +122,17 @@ check_secret_permissions() {
   return 0
 }
 validate_permissions() {
-  load_recovery_flags "${1:-}" || return 1
-  python3 - "$DEPLOY_PATH/deploy" "$DEPLOY_PATH/data/backups" "$AUTH_RECOVERY_ENABLED" "$AI_CAPTCHA_ENABLED" <<'PY'
+  python3 - "$DEPLOY_PATH/deploy" "$DEPLOY_PATH/data/backups" <<'PY'
 import os,stat,sys
-root,backup,recovery,ai=sys.argv[1:]
+root,backup=sys.argv[1:]
 checks=[(root+'/.env.production',0o600,1000,1000),(root+'/secrets',0o700,1000,1000),(backup,0o700,1000,1000)]
-checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','auth_browser_internal_token','tts_internal_token')]
+checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','tts_internal_token','payos_client_id','payos_api_key','payos_checksum_key')]
 checks += [(root+'/secrets/'+n,0o640,1000,1000) for n in ('bark_basic_auth_user','bark_basic_auth_password')]
-if recovery=='true':
-    checks += [(root+'/secrets/telegram_bot_token',0o600,1000,1000)]
-    if ai=='true': checks.append((root+'/secrets/ninerouter_api_key',0o600,1000,1000))
 for path,mode,uid,gid in checks:
     st=os.stat(path)
     actual=(stat.S_IMODE(st.st_mode),st.st_uid,st.st_gid)
     if actual!=(mode,uid,gid): raise SystemExit(f'{path}: expected {mode:04o} {uid}:{gid}, actual {actual[0]:04o} {actual[1]}:{actual[2]}')
 PY
-}
-# Import is a one-shot, never a runtime source of credentials. The controller's
-# importer checks the v13 checksum, mutation gate and shared singleton lock.
-validate_recovery_controller_bundle() {
-  python3 - "$1/compose.prod.yaml" <<'PY'
-import sys,yaml
-labels=yaml.safe_load(open(sys.argv[1]))['services']['recovery-controller'].get('labels',[])
-if 'platform.auth-control.schema=13' not in labels:
-    raise SystemExit('RECOVERY_SCHEMA_REQUIRED: refuse legacy auto-login controller; disable recovery and deploy forward')
-PY
-}
-import_recovery_credentials() {
-  local release="$1" runtime="$2" require_files="${3:-false}" available
-  [[ -z "${GATE_TOKEN:-}" ]] || fail 'release deploy gate before importing credentials' || return 1
-  validate_recovery_controller_bundle "$release" || return 1
-  available="$(python3 - "$DEPLOY_PATH/deploy/secrets" <<'PY'
-import os,stat,sys
-names = [
-    'acb_username',
-    'acb_password',
-    'acb_account',
-]
-paths = [os.path.join(sys.argv[1], name) for name in names]
-missing=False
-for path in paths:
-    try: st=os.lstat(path)
-    except FileNotFoundError:
-        missing=True
-        continue
-    if not stat.S_ISREG(st.st_mode) or (stat.S_IMODE(st.st_mode),st.st_uid,st.st_gid)!=(0o600,1000,1000):
-        raise SystemExit('CREDENTIAL_IMPORT_FILE_INVALID: expected regular 0600 file owned by 1000:1000, no symlink')
-print('false' if missing else 'true')
-PY
-)" || return 1
-  if [[ "$available" != true ]]; then
-    [[ "$require_files" != true ]] || fail 'CREDENTIAL_IMPORT_FILE_INVALID: provide all three legacy files before explicit import' || return 1
-    log_warn 'Legacy import files missing; encrypted DB credentials remain authoritative. If unconfigured, bot starts degraded; run setup-recovery.sh --import-credentials.'
-    return 0
-  fi
-  compose_release "$release" "$runtime" run -T --rm --no-deps \
-    -v "$DEPLOY_PATH/deploy/secrets/acb_username:/run/import/acb_username:ro" \
-    -v "$DEPLOY_PATH/deploy/secrets/acb_password:/run/import/acb_password:ro" \
-    -v "$DEPLOY_PATH/deploy/secrets/acb_account:/run/import/acb_account:ro" \
-    recovery-controller --import-credentials
 }
 dbtool() {
   local access="$1"; shift

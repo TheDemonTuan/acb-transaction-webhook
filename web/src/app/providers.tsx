@@ -4,7 +4,6 @@ import { queryClient } from '../shared/api/query-client';
 import { RealtimeProvider } from '../realtime/RealtimeProvider';
 import { VoiceAnnouncementProvider } from '../features/voice-announcements/VoiceAnnouncementProvider';
 import { TransactionAudioEngine } from '../features/voice-announcements/transaction-audio-engine';
-import { BankConnectionProvider } from '../features/bank-connection/BankConnectionProvider';
 import { RealtimeDomainBridge } from '../realtime/RealtimeDomainBridge';
 import { isPublicViewerHost } from './runtime-mode';
 
@@ -38,11 +37,23 @@ export const AppProviders: React.FC<{ children: React.ReactNode }> = ({ children
     <QueryClientProvider client={queryClient}>
       <RealtimeProvider onInitialState={refreshSnapshot} onResetState={refreshSnapshot}>
         <VoiceAnnouncementProvider engine={engine}>
-          <BankConnectionProvider>
-            <RealtimeDomainBridge />
-            {children}
-          </BankConnectionProvider>
+          <RealtimeDomainBridge />
+          {children}
         </VoiceAnnouncementProvider>
+      </RealtimeProvider>
+    </QueryClientProvider>
+  );
+};
+
+// A payer receives only their order snapshot, never the shop's voice/feed bridge.
+export const PaymentPageProviders: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const refreshOrders = () => {
+    queryClient.invalidateQueries({ queryKey: ['public-payment-order'], refetchType: 'active' });
+  };
+  return (
+    <QueryClientProvider client={queryClient}>
+      <RealtimeProvider url="/api/public/v1/events" onInitialState={refreshOrders} onResetState={refreshOrders}>
+        {children}
       </RealtimeProvider>
     </QueryClientProvider>
   );

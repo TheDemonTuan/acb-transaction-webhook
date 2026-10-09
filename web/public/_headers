@@ -9,17 +9,13 @@
   Cache-Control: no-store
   Content-Type: text/plain; charset=utf-8
 
-# Detach inherited values before attaching the credentials-specific policy.
-/admin/acb-credentials
+# Capability pages must never be cached or leaked through navigation referrers.
+/pay
   Cache-Control: no-store
   ! Referrer-Policy
-  ! Content-Security-Policy
   Referrer-Policy: no-referrer
-  Content-Security-Policy: default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; script-src-attr 'none'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'
 
-/admin/acb-credentials/
+/pay/*
   Cache-Control: no-store
   ! Referrer-Policy
-  ! Content-Security-Policy
   Referrer-Policy: no-referrer
-  Content-Security-Policy: default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; script-src-attr 'none'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'

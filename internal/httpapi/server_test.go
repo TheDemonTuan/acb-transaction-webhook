@@ -13,26 +13,15 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
-func TestStatusIncludesLastSuccessfulPoll(t *testing.T) {
+func TestStatusIncludesReadonlyPaymentMetadata(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "status.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if _, err := store.ConfigureConnection(ctx, "***1234"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(ctx, `UPDATE connections SET state='MONITORING'`); err != nil {
-		t.Fatal(err)
-	}
-	poll, err := store.StartPoll(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poll.Status = "SUCCEEDED"
-	if err := store.FinishPoll(ctx, poll); err != nil {
-		t.Fatal(err)
+	if err := store.RecordPaymentActivity(ctx, "", "WEBHOOK"); err == nil {
+		t.Fatal("empty channel accepted")
 	}
 
 	h := New(config.Config{Timezone: time.UTC, DevelopmentSubject: "owner"}, store).Handler()
@@ -42,15 +31,18 @@ func TestStatusIncludesLastSuccessfulPoll(t *testing.T) {
 		t.Fatalf("status %d %s", w.Code, w.Body.String())
 	}
 	var result struct {
-		ACB struct {
-			LastSuccessfulPollAt *string `json:"lastSuccessfulPollAt"`
-		} `json:"acb"`
+		Payments struct {
+			Provider      string  `json:"provider"`
+			Status        string  `json:"status"`
+			LastWebhookAt *string `json:"lastWebhookAt"`
+		} `json:"payments"`
+		ACB json.RawMessage `json:"acb"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.ACB.LastSuccessfulPollAt == nil || *result.ACB.LastSuccessfulPollAt == "" {
-		t.Fatal("expected lastSuccessfulPollAt")
+	if result.Payments.Provider != "PAYOS" || result.Payments.Status != "UNCONFIGURED" || result.Payments.LastWebhookAt != nil || result.ACB != nil {
+		t.Fatalf("unexpected status: %+v", result)
 	}
 }
 

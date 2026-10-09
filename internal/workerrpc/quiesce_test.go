@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thedemontuan/acb-transaction-webhook/internal/authsession"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/workerstate"
 )
@@ -16,34 +14,12 @@ import (
 type quiesceMockHandler struct {
 	coordinator *workerstate.Coordinator
 	quiesced    bool
-	generation  int64
-	checkpoint  string
 }
 
-func (q *quiesceMockHandler) RequestSync(ctx context.Context) error { return nil }
-func (q *quiesceMockHandler) CreateHistoryJob(ctx context.Context, from, to string) (storage.HistorySyncJob, error) {
-	return storage.HistorySyncJob{ID: "job_1"}, nil
-}
-func (q *quiesceMockHandler) CancelHistoryJob(ctx context.Context, jobID string) error { return nil }
-func (q *quiesceMockHandler) NotifySettingsChanged(ctx context.Context) error          { return nil }
-func (q *quiesceMockHandler) WakeDispatcher(ctx context.Context) error                 { return nil }
-func (q *quiesceMockHandler) ScheduleRecovery(ctx context.Context, connectionID string, generation int64, eventKey string) error {
-	return nil
-}
-func (q *quiesceMockHandler) VerifySession(ctx context.Context, acc string, gen int64, pw []byte) ([]byte, error) {
-	return nil, nil
-}
-func (q *quiesceMockHandler) InvalidateSession(ctx context.Context, connectionID string, generation int64) error {
-	return nil
-}
+func (q *quiesceMockHandler) WakeDispatcher(ctx context.Context) error        { return nil }
+func (q *quiesceMockHandler) WakePaymentReconciler(ctx context.Context) error { return nil }
 func (q *quiesceMockHandler) TestNotificationChannel(ctx context.Context, id string) (workerrpc.TestNotificationResponse, error) {
 	return workerrpc.TestNotificationResponse{Success: true}, nil
-}
-func (q *quiesceMockHandler) StartPaymentBoost(ctx context.Context, amount int64) (workerrpc.PaymentBoostStatus, error) {
-	return workerrpc.PaymentBoostStatus{Active: true}, nil
-}
-func (q *quiesceMockHandler) StopPaymentBoost(ctx context.Context, sessionID string) error {
-	return nil
 }
 
 func (q *quiesceMockHandler) Quiesce(ctx context.Context) (workerrpc.QuiesceResponse, error) {
@@ -52,11 +28,12 @@ func (q *quiesceMockHandler) Quiesce(ctx context.Context) (workerrpc.QuiesceResp
 	}
 	q.quiesced = true
 	return workerrpc.QuiesceResponse{
-		Status:     "quiesced",
-		Quiesced:   true,
-		Generation: q.generation,
-		Checkpoint: q.checkpoint,
-		ScanID:     "scan_123",
+		Status:                "quiesced",
+		Quiesced:              true,
+		Dispatcher:            "IDLE",
+		ActiveDeliveries:      0,
+		ActivePaymentRequests: 0,
+		JournalSeq:            999,
 	}, nil
 }
 
@@ -74,12 +51,7 @@ func TestWorkerRPC_QuiesceAndResume(t *testing.T) {
 		t.Fatalf("set ready: %v", err)
 	}
 
-	handler := &quiesceMockHandler{
-		coordinator: coordinator,
-		generation:  42,
-		checkpoint:  "2026-09-14",
-	}
-
+	handler := &quiesceMockHandler{coordinator: coordinator}
 	server, err := workerrpc.NewServer(handler, "test-token")
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -92,7 +64,7 @@ func TestWorkerRPC_QuiesceAndResume(t *testing.T) {
 	client := workerrpc.NewClient(ts.URL, "test-token")
 	ctx := context.Background()
 
-	// 1. Initially worker is ready
+	// 1. Worker is ready
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/readyz", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -105,22 +77,16 @@ func TestWorkerRPC_QuiesceAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quiesce call failed: %v", err)
 	}
-	if !qResp.Quiesced || qResp.Generation != 42 || qResp.Checkpoint != "2026-09-14" {
+	if !qResp.Quiesced || qResp.Status != "quiesced" || qResp.Dispatcher != "IDLE" || qResp.JournalSeq != 999 {
 		t.Fatalf("unexpected quiesce response: %+v", qResp)
 	}
 
-	// 3. While quiesced: upstream requests must be rejected with 503
-	_, err = client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02")
-	if err == nil {
-		t.Fatalf("expected CreateHistoryJob to fail while quiesced")
+	// 3. While quiesced: upstream payments/notification commands rejected with 503
+	if err := client.WakePaymentReconciler(ctx); err == nil {
+		t.Fatalf("expected WakePaymentReconciler to fail while quiesced")
 	}
 
-	envelope, err := client.VerifySession(ctx, "acc1", 42, []byte("pass"))
-	if authsession.VerificationCode(err) != "VERIFICATION_UNAVAILABLE" || envelope != nil {
-		t.Fatalf("expected verification unavailable without envelope while quiesced, got: %v", err)
-	}
-
-	// 4. Healthcheck continues to return 200 OK (worker process is healthy and alive)
+	// 4. Healthcheck continues to return 200 OK
 	reqHealth, _ := http.NewRequest(http.MethodGet, ts.URL+"/healthz", nil)
 	respHealth, err := http.DefaultClient.Do(reqHealth)
 	if err != nil || respHealth.StatusCode != http.StatusOK {
@@ -133,13 +99,9 @@ func TestWorkerRPC_QuiesceAndResume(t *testing.T) {
 		t.Fatalf("resume call failed: %v", err)
 	}
 
-	// 6. After resume: work is allowed again
-	job, err := client.CreateHistoryJob(ctx, "2026-09-01", "2026-09-02")
-	if err != nil {
-		t.Fatalf("CreateHistoryJob failed after resume: %v", err)
-	}
-	if job.ID != "job_1" {
-		t.Fatalf("unexpected job id: %s", job.ID)
+	// 6. After resume: wake payment reconciler allowed again
+	if err := client.WakePaymentReconciler(ctx); err != nil {
+		t.Fatalf("WakePaymentReconciler failed after resume: %v", err)
 	}
 }
 
@@ -156,7 +118,6 @@ func TestWorkerRPC_QuiesceCrashAndShutdownPersistence(t *testing.T) {
 		return nil
 	})
 
-	// Simulate Quiesce -> SIGTERM/crash -> Stop
 	ctx := context.Background()
 	if err := coordinator.Quiesce(ctx); err != nil {
 		t.Fatalf("quiesce: %v", err)

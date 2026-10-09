@@ -137,3 +137,44 @@ func (s *Store) SchemaVersion(ctx context.Context) (SchemaVersionReport, error) 
 	rep.AppliedAt = appliedAt
 	return rep, nil
 }
+
+// PaymentCounts is the durable issuance evidence used to fence legacy rollbacks.
+type PaymentCounts struct {
+	Orders     int64 `json:"orders"`
+	Receipts   int64 `json:"receipts"`
+	JournalSeq int64 `json:"journalSeq"`
+}
+
+// ReadPaymentCounts does not bootstrap schema and reads a consistent snapshot.
+// A legacy database reports zero only when sqlite_master proves a table absent.
+func (s *Store) ReadPaymentCounts(ctx context.Context) (PaymentCounts, error) {
+	var result PaymentCounts
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
+	for _, probe := range []struct {
+		table string
+		query string
+		value *int64
+	}{
+		{"payment_orders", `SELECT count(*) FROM payment_orders`, &result.Orders},
+		{"payment_receipts", `SELECT count(*) FROM payment_receipts`, &result.Receipts},
+		{"event_journal", `SELECT COALESCE(max(seq),0) FROM event_journal`, &result.JournalSeq},
+	} {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)`, probe.table).Scan(&exists); err != nil {
+			return PaymentCounts{}, fmt.Errorf("inspect %s: %w", probe.table, err)
+		}
+		if exists {
+			if err := tx.QueryRowContext(ctx, probe.query).Scan(probe.value); err != nil {
+				return PaymentCounts{}, fmt.Errorf("count %s: %w", probe.table, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return PaymentCounts{}, err
+	}
+	return result, nil
+}

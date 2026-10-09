@@ -40,7 +40,9 @@ func TestOpenReadOnly_RejectsMigrationsAndAllowsQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	_, _ = store.ConfigureConnection(ctx, "***1234")
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO connections(id,bank_code,state,account_masked,generation,created_at,updated_at) VALUES('historical-acb','ACB','PAUSED','***1234',1,'2026-09-12T00:00:00Z','2026-09-12T00:00:00Z')`); err != nil {
+		t.Fatalf("seed historical connection: %v", err)
+	}
 	_ = store.Close()
 
 	// Open read-only
@@ -54,16 +56,16 @@ func TestOpenReadOnly_RejectsMigrationsAndAllowsQueries(t *testing.T) {
 	defer roStore.Close()
 
 	// Queries should succeed
-	conn, err := roStore.Connection(ctx)
-	if err != nil {
+	var masked string
+	if err := roStore.DB().QueryRowContext(ctx, `SELECT account_masked FROM connections WHERE id='historical-acb'`).Scan(&masked); err != nil {
 		t.Fatalf("read connection from ro store: %v", err)
 	}
-	if conn.AccountMasked != "***1234" {
-		t.Errorf("expected ***1234, got %s", conn.AccountMasked)
+	if masked != "***1234" {
+		t.Errorf("expected ***1234, got %s", masked)
 	}
 
 	// Writes should fail
-	_, err = roStore.ConfigureConnection(ctx, "***9999")
+	_, err = roStore.CreateEndpoint(ctx, "Read-only write", "https://example.com/hook")
 	if err == nil {
 		t.Fatal("expected write to fail on read-only store, got nil")
 	}

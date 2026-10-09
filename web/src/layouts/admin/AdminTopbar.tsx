@@ -11,9 +11,9 @@ export const AdminTopbar: React.FC = () => {
     <header className="bg-white border-b border-stone-200 h-16 flex items-center justify-between px-4 sm:px-6 lg:px-8">
       <div className="flex items-center gap-2 sm:gap-3 shrink-0">
         <div className="w-8 h-8 rounded-xl bg-stone-900 text-white flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
-          A
+          P
         </div>
-        <h1 className="text-xs sm:text-sm font-bold text-stone-900 truncate">ACB Transaction Webhook</h1>
+        <h1 className="text-xs sm:text-sm font-bold text-stone-900 truncate">payOS Transaction Webhook</h1>
       </div>
 
       <div className="flex items-center gap-3">

@@ -7,12 +7,15 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/bank-event-gateway}"
 [[ "$DEPLOY_PATH" == /* && -d "$DEPLOY_PATH" ]] || { fail 'DEPLOY_PATH must be an existing absolute root'; exit 1; }
 [[ ! -e "$DEPLOY_PATH/.static-hosting-pending" ]] || { fail 'STATIC_HOSTING_MIGRATION_PENDING'; exit 1; }
 [[ -f "$DEPLOY_PATH/state.env" ]] || { fail 'BACKEND_STATE_MIGRATION_REQUIRED'; exit 1; }
+require_payos_runtime "$DEPLOY_PATH" || exit 1
+[[ ! -e "$DEPLOY_PATH/.payos-cutover-pending" ]] || { fail 'PAYOS_RUNTIME_MIGRATION_REQUIRED'; exit 1; }
 mode=deploy; [[ "${1:-}" == --check ]] && { mode=check; shift; }
 [[ "${1:-}" == --rollback ]] && { mode=rollback; shift; }
 [[ "${1:-}" == --reconcile ]] && { mode=reconcile; shift; }
 [[ $# == 1 || ( "$mode" == rollback && $# == 0 ) ]] || { fail 'usage: deploy.sh [--check | --reconcile] SHA | --rollback'; exit 1; }
 sha="${1:-}"
 [[ "$mode" == rollback ]] || validate_sha "$sha"
+if [[ "$mode" == rollback ]]; then provider_rollback_check "$DEPLOY_PATH/rollback/previous-state.env" || exit 1; fi
 if [[ "$mode" == check ]]; then
   if [[ -f "$DEPLOY_PATH/.deploy.lock" ]]; then
     exec 9<"$DEPLOY_PATH/.deploy.lock"
@@ -30,12 +33,13 @@ ROUTE="${ACB_ROUTE_FILE:-$(route_file)}"
 DYNAMIC="$(dirname "$ROUTE")"
 [[ "$ROUTE" == "$DYNAMIC/acb.yml" && -f "$ROUTE" ]] || { fail 'missing app-owned dynamic route'; exit 1; }
 RELEASE="$DEPLOY_PATH/releases/$sha"
-IMAGES='RELEASE_SHA GATEWAY_IMAGE_REF WORKER_IMAGE_REF DBTOOL_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF'
-STATE_KEYS='RELEASE_SHA GATEWAY_SLOT'
-RUNTIME_KEYS='IMAGE_REF_BLUE IMAGE_REF_GREEN WORKER_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF DBTOOL_IMAGE_REF RELEASE_COMMIT_BLUE RELEASE_COMMIT_GREEN WORKER_RELEASE_COMMIT ENV_FILE SECRETS_DIR BARK_SECRET_GROUP'
+IMAGES="$PAYOS_IMAGE_KEYS"
+STATE_KEYS="$PAYOS_STATE_KEYS"
+RUNTIME_KEYS="$PAYOS_RUNTIME_KEYS"
 validate_state() {
   load_keys "$1" "$STATE_KEYS"
   validate_sha "$RELEASE_SHA"
+  [[ "$PAYMENT_RUNTIME" == payos ]] || fail 'PAYOS_RUNTIME_MIGRATION_REQUIRED'
   [[ "$GATEWAY_SLOT" == blue || "$GATEWAY_SLOT" == green ]] || fail 'invalid gateway slot'
 }
 validate_bundle() {
@@ -43,9 +47,10 @@ validate_bundle() {
   [[ -f "$bundle/compose.prod.yaml" && -f "$bundle/deploy.sh" && -f "$bundle/images.env" ]] || fail "incomplete bundle: $bundle"
   load_keys "$bundle/images.env" "$IMAGES"
   [[ "$RELEASE_SHA" == "$requested" ]] || fail 'bundle SHA mismatch'
-  for key in GATEWAY_IMAGE_REF WORKER_IMAGE_REF DBTOOL_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF; do validate_digest "${!key}" "$key"; done
-  [[ -f "$bundle/SHA256SUMS" ]] && (cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null) || [[ ! -f "$bundle/SHA256SUMS" ]] || fail 'bundle contents changed'
-  load_recovery_flags "$bundle" || return 1
+  [[ "$PAYMENT_RUNTIME" == payos ]] || fail 'PAYOS_RUNTIME_MIGRATION_REQUIRED'
+  for key in GATEWAY_IMAGE_REF WORKER_IMAGE_REF DBTOOL_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF; do validate_digest "${!key}" "$key"; done
+  [[ -f "$bundle/SHA256SUMS" ]] || fail 'missing immutable bundle checksums'
+  (cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null) || fail 'bundle contents changed'
 }
 preflight() {
   local path component
@@ -53,7 +58,7 @@ preflight() {
   python3 -c 'import yaml' || fail 'PyYAML required'
   for path in edge-acb acb-core acb-egress; do docker network inspect "$path" >/dev/null || fail "missing network $path"; done
   for path in bank-event-gateway_gateway_data bank-event-gateway_bark_data; do docker volume inspect "$path" >/dev/null || fail "missing volume $path"; done
-  for path in acb worker auth-browser; do [[ ! -e "${FAILOVER_REGISTRY_DIR:-/etc/vps-failover/apps.d}/$path.json" ]] || fail "shared failover still owns $path"; done
+  for path in acb worker; do [[ ! -e "${FAILOVER_REGISTRY_DIR:-/etc/vps-failover/apps.d}/$path.json" ]] || fail "shared failover still owns $path"; done
   local permission_bundle="$RELEASE"
   if [[ "$mode" == rollback ]]; then
     validate_state "$ROLLBACK/previous-state.env"
@@ -96,13 +101,14 @@ load_runtime() {
   local dir="$1" key
   load_keys "$dir/runtime.env" "$RUNTIME_KEYS"
   [[ "$ENV_FILE" == "$DEPLOY_PATH/deploy/.env.production" && "$SECRETS_DIR" == "$DEPLOY_PATH/deploy/secrets" && "$BARK_SECRET_GROUP" == 1000 ]] || fail 'runtime paths/group mismatch'
-  for key in IMAGE_REF_BLUE IMAGE_REF_GREEN WORKER_IMAGE_REF BROWSER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF DBTOOL_IMAGE_REF; do validate_digest "${!key}" "$key"; done
+  [[ "$PAYMENT_RUNTIME" == payos ]] || fail 'PAYOS_RUNTIME_MIGRATION_REQUIRED'
+  for key in IMAGE_REF_BLUE IMAGE_REF_GREEN WORKER_IMAGE_REF TTS_IMAGE_REF BARK_IMAGE_REF DBTOOL_IMAGE_REF; do validate_digest "${!key}" "$key"; done
   for key in RELEASE_COMMIT_BLUE RELEASE_COMMIT_GREEN WORKER_RELEASE_COMMIT; do validate_sha "${!key}"; done
 }
 compose() { compose_release "$1" "$1/runtime.env" "${@:2}"; }
 write_runtime() {
   local dest="$1" gw="$2" previous="$3" candidate_gateway="$GATEWAY_IMAGE_REF"
-  local candidate_worker="$WORKER_IMAGE_REF" candidate_browser="$BROWSER_IMAGE_REF" candidate_tts="$TTS_IMAGE_REF" candidate_bark="$BARK_IMAGE_REF" candidate_dbtool="$DBTOOL_IMAGE_REF"
+  local candidate_worker="$WORKER_IMAGE_REF" candidate_tts="$TTS_IMAGE_REF" candidate_bark="$BARK_IMAGE_REF" candidate_dbtool="$DBTOOL_IMAGE_REF"
   [[ "$gw" == blue || "$gw" == green ]] || return 1
   load_runtime "$previous"
   local -A ref=([blue]="$IMAGE_REF_BLUE" [green]="$IMAGE_REF_GREEN")
@@ -111,52 +117,19 @@ write_runtime() {
   {
     printf 'IMAGE_REF_BLUE=%s\nIMAGE_REF_GREEN=%s\n' "${ref[blue]}" "${ref[green]}"
     printf 'RELEASE_COMMIT_BLUE=%s\nRELEASE_COMMIT_GREEN=%s\n' "${commit[blue]}" "${commit[green]}"
-    printf 'WORKER_IMAGE_REF=%s\nBROWSER_IMAGE_REF=%s\nTTS_IMAGE_REF=%s\nBARK_IMAGE_REF=%s\nDBTOOL_IMAGE_REF=%s\n' "$candidate_worker" "$candidate_browser" "$candidate_tts" "$candidate_bark" "$candidate_dbtool"
-    printf 'WORKER_RELEASE_COMMIT=%s\nENV_FILE=%s\nSECRETS_DIR=%s\nBARK_SECRET_GROUP=1000\n' "$sha" "$DEPLOY_PATH/deploy/.env.production" "$DEPLOY_PATH/deploy/secrets"
+    printf 'WORKER_IMAGE_REF=%s\nTTS_IMAGE_REF=%s\nBARK_IMAGE_REF=%s\nDBTOOL_IMAGE_REF=%s\n' "$candidate_worker" "$candidate_tts" "$candidate_bark" "$candidate_dbtool"
+    printf 'WORKER_RELEASE_COMMIT=%s\nENV_FILE=%s\nSECRETS_DIR=%s\nBARK_SECRET_GROUP=1000\nPAYMENT_RUNTIME=payos\n' "$sha" "$DEPLOY_PATH/deploy/.env.production" "$DEPLOY_PATH/deploy/secrets"
   } | atomic_write_file "$dest/runtime.env" 600
 }
 
-start_recovery_controller() {
-  local bundle="$1"
-  load_recovery_flags "$bundle" || return 1
-  [[ "$AUTH_RECOVERY_ENABLED" == true ]] || return 0
-  [[ -z "${GATE_TOKEN:-}" ]] || fail 'release deploy gate before starting recovery controller' || return 1
-  load_runtime "$bundle"
-  dbtool ro -readonly -schema-compat -min-version 13 >/dev/null || return 1
-  import_recovery_credentials "$bundle" "$bundle/runtime.env" || return 1
-  compose "$bundle" up -d --no-deps --force-recreate recovery-controller || return 1
-  EXPECTED_IMAGE_REF="$WORKER_IMAGE_REF" "$HERE/healthcheck.sh" container acb-recovery-controller 120 || return 1
-  container_image_check acb-recovery-controller "$WORKER_IMAGE_REF"
-}
-# Fence every running-controller reconfiguration, not just disabling.
-reconcile_runtime_recovery() {
-  local bundle="$1"
-  load_recovery_flags "$bundle" || return 1
-  if [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller 2>/dev/null || true)" == true ]]; then
-    load_runtime "$bundle"
-    GATE_OWNER="recovery-reconfigure-$$"; DEADLINE=$((SECONDS+600))
-    local gate
-    gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason recovery-reconfigure -lease-duration 15m)" || { fail 'active authentication blocks recovery reconfiguration; use /acb_pause or wait for expiry'; return 1; }
-    GATE_TOKEN="$(printf '%s' "$gate" | json_field leaseToken)"
-    [[ -n "$GATE_TOKEN" ]] || fail 'missing recovery-reconfigure lease token' || return 1
-    stop_recovery_controller || return 1
-    release_gate || return 1
-  fi
-  start_recovery_controller "$bundle"
-}
 check_running() {
   local bundle="$1" gw="$2" id="$3" key ref
-  local -a services=(gateway-$gw worker auth-browser tts-gateway bark)
+  local -a services=(gateway-$gw worker tts-gateway bark)
   load_runtime "$bundle"
-  load_recovery_flags "$bundle" || return 1
-  if [[ "${4:-}" != skip-recovery && "$AUTH_RECOVERY_ENABLED" == true ]]; then services+=(recovery-controller); fi
-  if [[ "${4:-}" != skip-recovery && "$AUTH_RECOVERY_ENABLED" != true ]] && [[ "$(docker inspect -f '{{.State.Running}}' acb-recovery-controller 2>/dev/null || true)" == true ]]; then
-    fail 'disabled recovery controller is still running'; return 1
-  fi
   for key in "${services[@]}"; do
     case "$key" in
       gateway-blue) ref="$IMAGE_REF_BLUE";; gateway-green) ref="$IMAGE_REF_GREEN";;
-      worker|recovery-controller) ref="$WORKER_IMAGE_REF";; auth-browser) ref="$BROWSER_IMAGE_REF";;
+      worker) ref="$WORKER_IMAGE_REF";;
       tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";;
     esac
     container_image_check "acb-$key" "$ref"
@@ -165,14 +138,16 @@ check_running() {
   "$HERE/healthcheck.sh" route "$gw" "$id"
 }
 public_smoke() {
-  local bank_status viewer_status status
+  local bank_status viewer_status callback_status private_status status
   PUBLIC_SMOKE_TMP="$(mktemp -d "$DEPLOY_PATH/.public-smoke.XXXXXXXX")" || return 1
-  if ! bank_status="$(curl -sS --max-time 15 -D "$PUBLIC_SMOKE_TMP/bank.headers" -o /dev/null -w '%{http_code}' "${PUBLIC_ORIGIN%/}/api/v1/connection")" ||
-     ! viewer_status="$(curl -sS --max-time 15 -H 'Accept: application/json' -D "$PUBLIC_SMOKE_TMP/viewer.headers" -o "$PUBLIC_SMOKE_TMP/viewer.json" -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/public/v1/transactions?limit=1")"; then
+  if ! bank_status="$(curl -sS --max-time 15 -D "$PUBLIC_SMOKE_TMP/bank.headers" -o /dev/null -w '%{http_code}' "${PUBLIC_ORIGIN%/}/api/v1/status")" ||
+     ! viewer_status="$(curl -sS --max-time 15 -H 'Accept: application/json' -D "$PUBLIC_SMOKE_TMP/viewer.headers" -o "$PUBLIC_SMOKE_TMP/viewer.json" -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/public/v1/transactions?limit=1")" ||
+     ! callback_status="$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' --data '{}' -D "$PUBLIC_SMOKE_TMP/callback.headers" -o "$PUBLIC_SMOKE_TMP/callback.json" -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/integrations/payos/webhook")" ||
+     ! private_status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "${PUBLIC_VIEWER_ORIGIN%/}/api/v1/status")"; then
     rm -rf "$PUBLIC_SMOKE_TMP"; PUBLIC_SMOKE_TMP=''
     fail 'public backend smoke transport failed'; return 1
   fi
-  if python3 - "$PUBLIC_SMOKE_TMP" "$bank_status" "$viewer_status" <<'PY'
+  if python3 - "$PUBLIC_SMOKE_TMP" "$bank_status" "$viewer_status" "$callback_status" "$private_status" <<'PY'
 import email.parser,json,pathlib,sys,urllib.parse
 root=pathlib.Path(sys.argv[1])
 def headers(name):
@@ -194,6 +169,12 @@ try:
     except (ValueError,UnicodeError): raise ValueError('viewer API JSON decode failed') from None
     if not isinstance(page,dict) or not isinstance(page.get('items'),list) or not isinstance(page.get('nextCursor'),str) or not isinstance(page.get('summary'),dict):
         raise ValueError('viewer API JSON contract mismatch')
+    callback=headers('callback.headers')
+    if sys.argv[4]!='400' or callback.get_content_type()!='application/json' or callback.get('cf-mitigated') or callback.get('Location'):
+        raise ValueError('exact callback did not return unchallenged HTTP 400 JSON')
+    with (root/'callback.json').open(encoding='utf-8') as response: callback_body=json.load(response)
+    if not isinstance(callback_body,dict): raise ValueError('callback error JSON contract mismatch')
+    if sys.argv[5]!='403': raise ValueError('public host did not deny private API')
 except (OSError,ValueError) as error:
     # Do not log response bodies, transaction data, or redirect query values.
     print('public backend smoke failed: '+str(error),file=sys.stderr)
@@ -214,14 +195,16 @@ release_gate() {
   dbtool rw -gate-release -owner "$GATE_OWNER" -lease-token "$GATE_TOKEN" >/dev/null
   GATE_TOKEN=''
 }
+# Regular deploy accepts only the payOS drain contract. Legacy admission and
+# authoritative post-drain backup belong exclusively to migrate-payos-runtime.sh.
 quiesce_worker() {
   local old="$1" candidate="$2" report
   for image in "$old" "$candidate"; do
     if [[ "$image" == "$old" ]]; then report="$(docker exec acb-worker /worker -deploy-capabilities)"; else report="$(docker run --rm --entrypoint /worker "$image" -deploy-capabilities)"; fi
-    printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["protocol"]>=2 and all(d.get(k) is True for k in ("quiesce","drain","resume","notificationDrain","sessionCheckpoint","journalCheckpoint"))'
+    printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert type(d["protocol"]) is int and d["protocol"]>=3 and all(d.get(k) is True for k in ("quiesce","drain","resume","notificationDrain","paymentDrain","journalCheckpoint"))'
   done
   report="$(timeout 45 docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -quiesce)"
-  printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["status"]=="quiesced" and d["quiesced"] is True and d["dispatcher"]=="IDLE" and d["activeDeliveries"]==0 and d["activePoll"] is False and d["sessionCheckpointed"] is True and all(type(d[k]) is int and d[k]>=0 for k in ("generation","journalSeq"))'
+  printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["status"]=="quiesced" and d["quiesced"] is True and d["dispatcher"]=="IDLE" and all(type(d[k]) is int and d[k]==0 for k in ("activeDeliveries","activePaymentRequests")) and type(d["journalSeq"]) is int and d["journalSeq"]>=0'
   QUIESCED=1
 }
 worker_switch() {
@@ -239,15 +222,15 @@ ensure_restore_gate() {
   local gate
   DEADLINE=$((SECONDS+600))
   if [[ -n "${GATE_TOKEN:-}" && -n "${GATE_OWNER:-}" ]] && dbtool rw -gate-renew -owner "$GATE_OWNER" -lease-token "$GATE_TOKEN" -lease-duration 15m >/dev/null 2>&1; then return 0; fi
-  # A crash may leave a snapshot before admission, or an expired lease. Never stop
-  # a controller until a fresh transactional admission rejects any active login.
+  # Expired leases require fresh admission before restoring a compatible runtime.
   GATE_OWNER="restore-$$"; GATE_TOKEN=''
-  gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason restore -lease-duration 15m)" || { fail 'restore admission failed; use /acb_pause or wait for active authentication to expire'; return 1; }
+  gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason restore -lease-duration 15m)" || { fail 'restore admission failed'; return 1; }
   GATE_TOKEN="$(printf '%s' "$gate" | json_field leaseToken)"
   [[ -n "$GATE_TOKEN" ]] || fail 'missing restore lease token'
 }
 restore_previous() {
   local snap="$1" prev_sha prev_gw prev_bundle svc
+  provider_rollback_check "$snap/previous-state.env" || return 1
   validate_state "$snap/previous-state.env"
   prev_sha="$RELEASE_SHA"; prev_gw="$GATEWAY_SLOT"
   prev_bundle="$DEPLOY_PATH/releases/$prev_sha"
@@ -256,10 +239,9 @@ restore_previous() {
   DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
   ensure_restore_gate || return 1
   printf '%s\n%s\n' "$GATE_OWNER" "$GATE_TOKEN" | atomic_write_file "$snap/gate-lease" 600 || return 1
-  stop_recovery_controller || return 1
-  for svc in worker auth-browser tts-gateway bark; do
+  for svc in worker tts-gateway bark; do
     local ref
-    case "$svc" in worker) ref="$WORKER_IMAGE_REF";; auth-browser) ref="$BROWSER_IMAGE_REF";; tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
+    case "$svc" in worker) ref="$WORKER_IMAGE_REF";; tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
     if [[ "$svc" == worker ]] && container_image_check acb-worker "$ref" >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Health.Status}}' acb-worker 2>/dev/null)" == healthy ]]; then
       docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -resume >/dev/null || return 1
       if EXPECTED_IMAGE_REF="$ref" "$HERE/healthcheck.sh" container acb-worker 30; then continue; fi
@@ -302,9 +284,9 @@ cleanup() {
       code=1
     else
       if [[ "${GATE_TOKEN:-}" ]]; then
-        if release_gate && start_recovery_controller "$RESTORED_BUNDLE"; then rm -rf "$PENDING"; else code=1; fi
+        if release_gate; then rm -rf "$PENDING"; else code=1; fi
       else
-        if start_recovery_controller "$RESTORED_BUNDLE"; then rm -rf "$PENDING"; else code=1; fi
+        rm -rf "$PENDING"
       fi
     fi
   elif (( code != 0 )) && [[ "${COMMITTED:-0}" == 1 ]]; then log_error 'RETIRE_FAILED: committed state retained; rerun to finish'; fi
@@ -324,7 +306,6 @@ if [[ "$mode" == rollback ]]; then
   if [[ -f "$STATE" ]] && cmp -s "$STATE" "$ROLLBACK/previous-state.env"; then
     validate_baseline_route "$ROUTE" "$GATEWAY_SLOT"
     prev_bundle="$DEPLOY_PATH/releases/$RELEASE_SHA"
-    reconcile_runtime_recovery "$prev_bundle"
     "$HERE/healthcheck.sh" route "$GATEWAY_SLOT" "$RELEASE_SHA"
     log_info 'rollback already committed'; exit 0
   fi
@@ -333,12 +314,10 @@ if [[ "$mode" == rollback ]]; then
   [[ -f "$previous/runtime.env" ]] || fail 'rollback bundle missing'
   load_runtime "$previous"
   DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
-  for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || docker pull "$ref"; done
-  auth="$(dbtool ro -readonly -active-auth-count)"
-  [[ "$(printf '%s' "$auth" | json_field activeCount)" == 0 ]] || fail 'active authentication blocks rollback; use /acb_pause or wait for the attempt to expire'
-  dbtool ro -readonly -schema-compat -min-version 13 >/dev/null
+  for ref in "$WORKER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || docker pull "$ref"; done
+  dbtool ro -readonly -schema-compat -min-version 14 >/dev/null
   GATE_OWNER="rollback-$$"; GATE_TOKEN=''; DEADLINE=$((SECONDS+600))
-  gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason rollback -lease-duration 15m)" || { fail 'rollback admission failed; use /acb_pause or wait for active authentication to expire'; exit 1; }
+  gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason rollback -lease-duration 15m)" || { fail 'rollback admission failed'; exit 1; }
   GATE_TOKEN="$(printf '%s' "$gate" | json_field leaseToken)"
   [[ -n "$GATE_TOKEN" ]] || fail 'missing rollback lease token'
   dbtool ro -readonly -gate-check -owner "$GATE_OWNER" >/dev/null
@@ -347,7 +326,6 @@ if [[ "$mode" == rollback ]]; then
     exit 1
   fi
   release_gate
-  start_recovery_controller "$RESTORED_BUNDLE"
   log_info 'rollback committed'
   exit 0
 fi
@@ -356,7 +334,7 @@ validate_state "$STATE"
 current="$RELEASE_SHA"; gateway_slot="$GATEWAY_SLOT"
 [[ -d "$PENDING" ]] || validate_baseline_route "$ROUTE" "$gateway_slot"
 if [[ "$mode" == reconcile ]]; then
-  [[ -f "$STATE" && "$current" == "$sha" && ! -d "$PENDING" ]] || { fail 'setup release changed or pending deployment exists; rerun setup after deploy completes'; exit 1; }
+  [[ -f "$STATE" && "$current" == "$sha" && ! -d "$PENDING" ]] || { fail 'reconciliation requires the current committed release with no pending deployment'; exit 1; }
 fi
 if [[ "$mode" == check ]]; then
   [[ ! -d "$PENDING" ]] || fail 'pending deployment requires recovery before check'
@@ -366,7 +344,7 @@ fi
 if [[ -d "$PENDING" ]]; then
   if cmp -s "$STATE" "$PENDING/target-state.env"; then
     validate_state "$STATE"
-    check_running "$DEPLOY_PATH/releases/$RELEASE_SHA" "$GATEWAY_SLOT" "$RELEASE_SHA" skip-recovery
+    check_running "$DEPLOY_PATH/releases/$RELEASE_SHA" "$GATEWAY_SLOT" "$RELEASE_SHA"
     public_smoke
     if [[ -f "$PENDING/gate-lease" ]]; then
       { IFS= read -r GATE_OWNER; IFS= read -r GATE_TOKEN; } < "$PENDING/gate-lease"
@@ -374,7 +352,6 @@ if [[ -d "$PENDING" ]]; then
       DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
       release_gate
     fi
-    reconcile_runtime_recovery "$DEPLOY_PATH/releases/$RELEASE_SHA"
     COMMITTED=1
   elif cmp -s "$STATE" "$PENDING/previous-state.env"; then
     if [[ -f "$PENDING/gate-lease" ]]; then
@@ -393,7 +370,6 @@ PY
       exit 1
     fi
     release_gate
-    start_recovery_controller "$RESTORED_BUNDLE"
     rm -rf "$PENDING"
   else fail 'pending deployment state disagrees with committed/previous; evidence retained'; exit 1; fi
 fi
@@ -405,7 +381,6 @@ if [[ "${COMMITTED:-0}" == 1 ]]; then
   log_info 'retire complete'; exit 0
 fi
 if [[ -f "$STATE" && "$current" == "$sha" ]]; then
-  reconcile_runtime_recovery "$RELEASE"
   check_running "$RELEASE" "$gateway_slot" "$sha"
   public_smoke
   log_info 'already committed; no mutation'; exit 0
@@ -415,27 +390,24 @@ next_gw=blue; [[ "$gateway_slot" == blue ]] && next_gw=green
 write_runtime "$RELEASE" "$next_gw" "$previous"
 compose "$RELEASE" config --quiet
 # Pull only services that may change. Rollback images must already be recoverable.
-compose "$RELEASE" pull worker auth-browser tts-gateway bark "gateway-$next_gw" dbtool
+compose "$RELEASE" pull worker tts-gateway bark "gateway-$next_gw" dbtool
 load_runtime "$previous"
-for ref in "$WORKER_IMAGE_REF" "$BROWSER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || timeout 90 docker pull "$ref"; done
+for ref in "$WORKER_IMAGE_REF" "$TTS_IMAGE_REF" "$BARK_IMAGE_REF"; do docker image inspect "$ref" >/dev/null || timeout 90 docker pull "$ref"; done
 snapshot="$(mktemp -d "$DEPLOY_PATH/.deploy-snapshot.XXXXXXXX")"
 cat "$STATE" | atomic_write_file "$snapshot/previous-state.env" 600
 cat "$ROUTE" | atomic_write_file "$snapshot/previous-acb.yml" 600
-printf 'RELEASE_SHA=%s\nGATEWAY_SLOT=%s\n' "$sha" "$next_gw" | atomic_write_file "$snapshot/target-state.env" 600
+printf 'RELEASE_SHA=%s\nGATEWAY_SLOT=%s\nPAYMENT_RUNTIME=payos\n' "$sha" "$next_gw" | atomic_write_file "$snapshot/target-state.env" 600
 printf '%s\n' "$previous" | atomic_write_file "$snapshot/previous-release" 600
 mv "$snapshot" "$PENDING"
 GATE_OWNER="deploy-$sha-$$"; GATE_TOKEN=''; QUIESCED=0; PREPARED=1; MUTATING=0; DEADLINE=$((SECONDS+600))
 load_runtime "$RELEASE"
 DBTOOL_IMAGE_REF="$DBTOOL_IMAGE_REF"
-auth="$(dbtool ro -readonly -active-auth-count)"
-[[ "$(printf '%s' "$auth" | json_field activeCount)" == 0 ]] || fail 'active authentication blocks deploy; use /acb_pause or wait for the attempt to expire'
-gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason deploy -lease-duration 15m)" || { fail 'deploy admission failed; use /acb_pause or wait for active authentication to expire'; exit 1; }
+gate="$(dbtool rw -gate-acquire -owner "$GATE_OWNER" -reason deploy -lease-duration 15m)" || { fail 'deploy admission failed'; exit 1; }
 GATE_TOKEN="$(printf '%s' "$gate" | json_field leaseToken)"
 [[ -n "$GATE_TOKEN" ]] || fail 'missing mutation lease token'
 printf '%s\n%s\n' "$GATE_OWNER" "$GATE_TOKEN" | atomic_write_file "$PENDING/gate-lease" 600
 dbtool ro -readonly -gate-check -owner "$GATE_OWNER" >/dev/null
 MUTATING=1
-stop_recovery_controller
 dbtool ro -readonly -check >/dev/null
 renew
 remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'snapshot deadline expired'
@@ -444,11 +416,11 @@ printf '%s\n' "$receipt" | atomic_write_file "$RELEASE/backup-receipt-path" 600
 renew
 remaining=$((DEADLINE-SECONDS)); (( remaining > 0 )) || fail 'migration deadline expired'
 DBTOOL_TIMEOUT_SEC="$remaining" dbtool rw -migrate
-dbtool ro -readonly -schema-compat -min-version 13
+dbtool ro -readonly -schema-compat -min-version 14
 dbtool ro -readonly -check
-for svc in auth-browser tts-gateway bark; do
+for svc in tts-gateway bark; do
   renew; compose "$RELEASE" up -d --no-deps "$svc"
-  case "$svc" in auth-browser) ref="$BROWSER_IMAGE_REF";; tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
+  case "$svc" in tts-gateway) ref="$TTS_IMAGE_REF";; bark) ref="$BARK_IMAGE_REF";; esac
   EXPECTED_IMAGE_REF="$ref" "$HERE/healthcheck.sh" container "acb-$svc" 120
 done
 renew; compose "$RELEASE" up -d --no-deps "gateway-$next_gw"
@@ -461,13 +433,12 @@ renew
 load_runtime "$previous"; old_worker="$WORKER_IMAGE_REF"
 load_runtime "$RELEASE"; worker_switch "$previous" "$RELEASE" "$old_worker" "$WORKER_IMAGE_REF"
 renew
-check_running "$RELEASE" "$next_gw" "$sha" skip-recovery
+check_running "$RELEASE" "$next_gw" "$sha"
 renew
 public_smoke
 cat "$PENDING/target-state.env" | atomic_write_file "$STATE" 600
 COMMITTED=1; MUTATING=0
 release_gate
-start_recovery_controller "$RELEASE"
 docker stop "acb-gateway-$gateway_slot" >/dev/null
 [[ ! -d "$ROLLBACK" ]] || mv "$ROLLBACK" "$DEPLOY_PATH/data/rollback-$(date -u +%Y%m%d%H%M%S)-$$"
 mv "$PENDING" "$ROLLBACK"

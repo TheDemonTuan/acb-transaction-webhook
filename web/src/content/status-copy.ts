@@ -7,43 +7,12 @@ export interface StatusDescriptor {
   description?: string;
 }
 
-export const ACB_STATUS_MAP: Record<string, StatusDescriptor> = {
-  UNCONFIGURED: {
-    label: 'Chưa kết nối ngân hàng',
-    badge: 'Chưa kết nối',
-    tone: 'neutral',
-    description: 'Chạy setup/import trên VPS để khởi tạo, sau đó dùng menu Telegram để đăng nhập ACB.',
-  },
-  AUTH_REQUIRED: {
-    label: 'Cần đăng nhập lại ACB',
-    badge: 'Cần xác thực',
-    tone: 'warning',
-    description: 'Phiên ACB cần xác thực lại. Mở menu Telegram và bấm Đăng nhập; hệ thống chưa tự đăng nhập lại.',
-  },
-  MONITORING: {
-    label: 'Đang cập nhật giao dịch',
-    badge: 'Đang hoạt động',
-    tone: 'success',
-    description: 'Hệ thống đang theo dõi và tự động cập nhật giao dịch mới từ ACB.',
-  },
-  PAUSED: {
-    label: 'Đang tạm dừng',
-    badge: 'Tạm dừng',
-    tone: 'neutral',
-    description: 'Đang tạm dừng cập nhật giao dịch từ ngân hàng.',
-  },
-  STOPPED: {
-    label: 'Đã dừng',
-    badge: 'Đã dừng',
-    tone: 'danger',
-    description: 'Dịch vụ kết nối ngân hàng đã dừng hoạt động.',
-  },
-  ERROR: {
-    label: 'Gặp sự cố kết nối',
-    badge: 'Lỗi',
-    tone: 'danger',
-    description: 'Không thể kết nối đến hệ thống ACB.',
-  },
+export const PAYMENT_STATUS_MAP: Record<string, StatusDescriptor> = {
+  READY: { label: 'Sẵn sàng nhận đơn payOS', badge: 'Sẵn sàng', tone: 'success', description: 'Nhận tiền qua KienlongBank theo từng đơn; webhook và đối soát xác nhận thanh toán.' },
+  DISABLED: { label: 'Đang tắt nhận đơn mới', badge: 'Tạm dừng', tone: 'neutral', description: 'Đơn đã phát hành vẫn được xử lý và đối soát; không phát QR thay thế.' },
+  UNCONFIGURED: { label: 'Chưa cấu hình đủ khóa payOS', badge: 'Chưa cấu hình', tone: 'warning', description: 'Cấu hình bộ khóa của cùng một kênh thu KienlongBank trên máy chủ.' },
+  WEBHOOK_UNCONFIRMED: { label: 'Webhook chưa được xác nhận', badge: 'Chờ xác nhận', tone: 'warning', description: 'Owner xác nhận URL webhook với payOS trước khi bật nhận đơn mới.' },
+  UNAVAILABLE: { label: 'Thanh toán tạm thời không sẵn sàng', badge: 'Không sẵn sàng', tone: 'danger', description: 'Kiểm tra trạng thái máy chủ và mạng. Không chuyển sang QR tài khoản cũ.' },
 };
 
 export const SERVICE_STATUS_MAP: Record<string, { label: string; tone: Tone }> = {
@@ -73,34 +42,9 @@ export const DELIVERY_STATUS_MAP: Record<string, { label: string; tone: Tone }> 
   DEAD_LETTER: { label: 'Không gửi được', tone: 'danger' },
 };
 
-export const COVERAGE_STATUS_MAP: Record<string, string> = {
-  FULL: 'Đầy đủ',
-  PARTIAL: 'Một phần',
-  NOT_STARTED: 'Chưa bắt đầu',
-};
-
-export const POLL_STATUS_MAP: Record<string, { label: string; tone: Tone }> = {
-  SUCCEEDED: { label: 'Thành công', tone: 'success' },
-  FAILED: { label: 'Thất bại', tone: 'danger' },
-  AUTH_REQUIRED: { label: 'Cần xác thực ACB', tone: 'warning' },
-  PROTOCOL_CHANGED: { label: 'Giao thức ACB thay đổi', tone: 'warning' },
-  PARTIAL: { label: 'Đồng bộ một phần', tone: 'warning' },
-};
-
-export function getPollStatus(status?: string): { label: string; tone: Tone } {
-  const normalized = (status || '').toUpperCase();
-  return POLL_STATUS_MAP[normalized] || { label: status || 'Không rõ', tone: 'neutral' };
-}
-
-export function getAcbStatusDescriptor(state?: string): StatusDescriptor {
-  const normalized = (state || 'UNCONFIGURED').toUpperCase();
-  return (
-    ACB_STATUS_MAP[normalized] || {
-      label: state || 'Chưa xác định',
-      badge: state || 'Chưa xác định',
-      tone: 'neutral',
-    }
-  );
+export function getPaymentStatusDescriptor(state?: string): StatusDescriptor {
+  const normalized = (state || '').toUpperCase();
+  return PAYMENT_STATUS_MAP[normalized] || { label: state || 'Chưa có trạng thái', badge: state || 'Chưa xác định', tone: 'neutral' };
 }
 
 export function getServiceStatus(status?: string): { label: string; tone: Tone } {

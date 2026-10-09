@@ -94,12 +94,19 @@ if [[ -z "$MANIFEST_FILE" ]]; then
   fi
 fi
 
-# Refuse production live database paths
-live_db_path="$SCRIPT_DIR/data/gateway.db"
-if [[ "$OUTPUT_FILE" == "$live_db_path" || "$OUTPUT_FILE" == "/data/gateway.db" ]]; then
-  log_error "RESTORE REFUSED: Output path points to live production database ($OUTPUT_FILE). Automatic overwrite is strictly forbidden."
-  exit 1
-fi
+# Resolve aliases/symlinks before admitting any output; this tool is isolated only.
+python3 - "$SCRIPT_DIR" "${DEPLOY_PATH:-/opt/bank-event-gateway}" "$OUTPUT_FILE" "$TARGET_DIR" <<'PY'
+import pathlib,sys
+script,root,output,target=sys.argv[1:]
+live=[pathlib.Path(p).resolve() for p in (script+'/data',root+'/data','/data')]
+for value in (output,target):
+    if not value: continue
+    path=pathlib.Path(value).resolve()
+    if any(path==base or base in path.parents for base in live):
+        raise SystemExit('RESTORE REFUSED: isolated output required; live database promotion forbidden')
+if output and pathlib.Path(output).exists():
+    raise SystemExit('RESTORE REFUSED: output already exists')
+PY
 
 ts="$(date -u +'%Y%m%d%H%M%S')"
 if [[ -z "$TARGET_DIR" ]]; then
@@ -116,6 +123,8 @@ if [[ -n "$OUTPUT_FILE" ]]; then
 else
   restored_db="$RESTORE_DIR/gateway-restored-${ts}.db"
 fi
+restore_verified=0
+trap 'if [[ "$restore_verified" != 1 ]]; then rm -f -- "$restored_db"; fi' EXIT
 
 # Decrypt using age private identity
 log_info "Decrypting backup file using recovery key..."
@@ -171,17 +180,17 @@ fi
 # Verify against manifest if present
 if [[ -n "$MANIFEST_FILE" && -f "$MANIFEST_FILE" ]]; then
   log_info "Verifying backup against manifest: ${MANIFEST_FILE}"
-  expected_enc_sha="$(grep -o '"sha256": *"[^"]*"' "$MANIFEST_FILE" | head -n1 | cut -d'"' -f4 || echo "")"
-  if [[ -n "$expected_enc_sha" ]]; then
-    actual_enc_sha="$(sha256sum "$BACKUP_FILE" | cut -d' ' -f1)"
-    if [[ "$expected_enc_sha" != "$actual_enc_sha" ]]; then
-      log_error "Manifest encrypted sha256 mismatch! Expected: $expected_enc_sha, Actual: $actual_enc_sha"
-      rm -f "$restored_db"
-      exit 1
-    fi
-    log_info "Manifest ciphertext SHA-256 match verified: ${actual_enc_sha}"
-  fi
+  python3 - "$MANIFEST_FILE" "$BACKUP_FILE" "$restored_db" <<'PY'
+import hashlib,json,sys
+manifest,encrypted,raw=sys.argv[1:]
+data=json.load(open(manifest))
+for section,path in (('sqlite_backup',encrypted),('raw_sqlite',raw)):
+    expected=data[section]['sha256']
+    with open(path,'rb') as stream: actual=hashlib.file_digest(stream,'sha256').hexdigest()
+    if actual!=expected: raise SystemExit('Manifest '+section+' sha256 mismatch')
+PY
 fi
+restore_verified=1
 
 log_info "================================================================="
 log_info "SUCCESS: Database restored and verified successfully."
@@ -189,7 +198,7 @@ log_info "Restored Database: ${restored_db}"
 log_info "SQLite Integrity:  ${integrity}"
 log_info "Schema Migrations: ${migrations}"
 log_info "SAFETY: Live production database was NOT overwritten."
-log_info "Follow docs/runbooks/RESTORE_RUNBOOK.md for production disaster promotion."
+log_info "SAFETY: Promote only via the explicit cutover policy; an issued payOS order forbids restoring a legacy database."
 log_info "================================================================="
 
 printf '%s\n' "$restored_db"

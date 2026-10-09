@@ -63,23 +63,23 @@ func (m *Middleware) Require(roles ...Role) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			identity, err := m.identity(r)
 			if err != nil {
-				slog.Warn("auth rejected", "method", r.Method, "path", r.URL.Path, "error", err)
+				slog.Warn("auth rejected", "method", r.Method, "path", authLogPath(r.URL.Path), "error", err)
 				writeAuthError(w, http.StatusUnauthorized, "unauthorized: "+err.Error())
 				return
 			}
 			if !allows(identity.Role, roles) {
-				slog.Warn("role rejected", "method", r.Method, "path", r.URL.Path, "role", identity.Role, "required", roles)
+				slog.Warn("role rejected", "method", r.Method, "path", authLogPath(r.URL.Path), "role", identity.Role, "required", roles)
 				writeAuthError(w, http.StatusForbidden, fmt.Sprintf("forbidden: role %s not permitted", identity.Role))
 				return
 			}
 			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 				if !m.sameOrigin(r) {
-					slog.Warn("csrf rejected: origin mismatch", "method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"), "expected", m.publicOriginURL(r).String())
+					slog.Warn("csrf rejected: origin mismatch", "method", r.Method, "path", authLogPath(r.URL.Path), "origin", r.Header.Get("Origin"), "expected", m.publicOriginURL(r).String())
 					writeAuthErrorWithCode(w, http.StatusForbidden, "csrf validation failed: origin mismatch", "ORIGIN_MISMATCH")
 					return
 				}
 				if !csrfValid(r) {
-					slog.Warn("csrf rejected: invalid token", "method", r.Method, "path", r.URL.Path)
+					slog.Warn("csrf rejected: invalid token", "method", r.Method, "path", authLogPath(r.URL.Path))
 					writeAuthErrorWithCode(w, http.StatusForbidden, "csrf validation failed: invalid token", "CSRF_TOKEN_INVALID")
 					return
 				}
@@ -87,6 +87,16 @@ func (m *Middleware) Require(roles ...Role) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, identity)))
 		})
 	}
+}
+
+// Payment capability URLs are credentials, including on rejected requests.
+func authLogPath(path string) string {
+	for _, prefix := range []string{"/api/v1/payments/", "/api/public/v1/payments/", "/pay/"} {
+		if strings.HasPrefix(path, prefix) {
+			return prefix + "{id}"
+		}
+	}
+	return path
 }
 
 func extractToken(r *http.Request) string {

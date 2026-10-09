@@ -9,17 +9,15 @@ import (
 )
 
 var (
-	uuidRegex    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	jwtRegex     = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
-	ageKeyRegex  = regexp.MustCompile(`AGE-SECRET-KEY-[0-9A-Z]{59}`)
+	uuidRegex   = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	jwtRegex    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
+	ageKeyRegex = regexp.MustCompile(`AGE-SECRET-KEY-[0-9A-Z]{59}`)
 )
 
 var forbiddenSubstrings = []string{
 	"AGE-SECRET-KEY-",
 	"Cf-Access-Jwt-Assertion",
 	"cf_clearance",
-	"acb_session",
-	"acb_jwt",
 	"<!DOCTYPE html",
 	"<html",
 	"<body",
@@ -27,7 +25,7 @@ var forbiddenSubstrings = []string{
 }
 
 // ValidateNoSecrets verifies that the given telemetry payload does not contain
-// secret credentials, tokens, raw ACB HTML, or high-cardinality identifiers in global keys.
+// secret credentials, tokens, raw HTML, or high-cardinality identifiers in global keys.
 func ValidateNoSecrets(payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -54,7 +54,8 @@ def trusted(path, directory=False):
 
 def scope(config):
     routers = {'acb-deny-internal', 'acb-public-deny-private', 'acb-public-sse-router',
-               'acb-public-api-router', 'acb-api-router', 'acb-deploy-gateway'}
+               'acb-public-api-router', 'acb-api-router', 'acb-deploy-gateway',
+               'acb-payos-webhook-router', 'acb-public-payments-router', 'acb-admin-payments-router'}
     if not isinstance(config, dict) or set(config) != {'http'}:
         raise PublishError('Only ACB HTTP topology may be published')
     http = config['http']
@@ -64,8 +65,19 @@ def scope(config):
         raise PublishError('Missing ACB topology')
     if set(http['routers']) - routers or set(http['services']) - {'acb-service'}:
         raise PublishError('Route contains objects outside ACB ownership')
-    if http.get('middlewares'):
-        raise PublishError('Route contains foreign middleware definitions')
+    payment_middlewares = {
+        'payment-privacy': {'headers': {'customResponseHeaders': {
+            'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store'}}},
+        'payos-webhook-body-limit': {'buffering': {
+            'maxRequestBodyBytes': 65536, 'memRequestBodyBytes': 65536}},
+        'payos-webhook-rate-limit': {'rateLimit': {
+            'average': 60, 'period': '1s', 'burst': 120, 'sourceCriterion': {'requestHost': True}}},
+    }
+    middlewares = http.get('middlewares', {})
+    if not isinstance(middlewares, dict) or any(
+            name not in payment_middlewares or policy != payment_middlewares[name]
+            for name, policy in middlewares.items()):
+        raise PublishError('Route contains foreign or altered payment middleware definitions')
     for service in http['services'].values():
         servers = service.get('loadBalancer', {}).get('servers')
         if not isinstance(servers, list) or len(servers) != 1 or set(servers[0]) != {'url'}:

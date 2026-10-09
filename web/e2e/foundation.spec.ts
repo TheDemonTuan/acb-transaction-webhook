@@ -1,21 +1,13 @@
 import { expect, test } from '@playwright/test';
 
-test('configures a connection and reflects the state across routes', async ({ page }) => {
-  await page.goto('/');
-  await expect(page).toHaveTitle('ACB Transaction Webhook — Monitor & Gateway');
-  await page.getByRole('button', { name: 'Kết nối ACB' }).click();
-  await expect(page.getByRole('heading', { name: 'Kết nối ACB' })).toBeVisible();
-
-  const accountInput = page.getByLabel('Số tài khoản đã che');
-  if (await accountInput.isVisible()) {
-    await accountInput.fill('***1234');
-    await page.getByRole('button', { name: 'Lưu kết nối' }).click();
-    await expect(page.getByText('Đã lưu kết nối.')).toBeVisible();
-  }
-  await expect(page.getByText(/AUTH_REQUIRED|MONITORING|Cần xác thực|Đang hoạt động/).first()).toBeVisible();
-  await page.getByRole('button', { name: 'Tổng quan' }).click();
+test('shows readonly payment configuration across routes', async ({ page }) => {
+  await page.goto('/admin/connection');
+  await expect(page.getByRole('heading', { name: 'Kết nối payOS / KienlongBank' })).toBeVisible();
+  await expect(page.getByText('Bộ khóa payOS:', { exact: true })).toBeVisible();
+  await expect(page.locator('input[type=password]')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Đơn cần đối soát' })).toBeVisible();
+  await page.getByRole('button', { name: 'Tổng quan', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tổng quan' })).toBeVisible();
-  await expect(page.getByText(/AUTH_REQUIRED|MONITORING|Cần xác thực|Đang hoạt động/).first()).toBeVisible();
 });
 
 test('creates and enables a guarded HTTPS webhook endpoint', async ({ page }, testInfo) => {
@@ -40,29 +32,20 @@ test('creates and enables a guarded HTTPS webhook endpoint', async ({ page }, te
 
 test('serves the dashboard on a future SPA route', async ({ page }) => {
   await page.goto('/transactions');
-  await expect(page.getByRole('heading', { name: 'ACB Transaction Webhook' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'payOS Transaction Webhook' })).toBeVisible();
   await page.getByRole('button', { name: 'Giao dịch' }).click();
   await expect(page.getByRole('heading', { name: 'Giao dịch' })).toBeVisible();
 });
 
-test('navigates monitoring and diagnostic pages without activating a bank session', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Kết nối ACB' }).click();
-  await expect(page.getByRole('heading', { name: 'Kết nối ACB' })).toBeVisible();
-  const accountInput = page.getByLabel('Số tài khoản đã che');
-  if (await accountInput.isVisible()) {
-    await accountInput.fill('***1234');
-    await page.getByRole('button', { name: 'Lưu kết nối' }).click();
-  }
+test('navigates payment and diagnostic pages without bank credentials', async ({ page }) => {
+  await page.goto('/admin/connection');
+  await expect(page.getByRole('heading', { name: 'Kết nối payOS / KienlongBank' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Giao dịch' }).click();
   await expect(page.getByRole('heading', { name: 'Giao dịch' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Phân phối' }).click();
   await expect(page.getByRole('heading', { name: /Phân phối/ })).toBeVisible();
-
-  await page.getByRole('button', { name: 'Polling' }).click();
-  await expect(page.getByRole('heading', { name: 'Chu kỳ Polling' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Chẩn đoán' }).click();
   await expect(page.getByRole('heading', { name: 'Chẩn đoán hệ thống' })).toBeVisible();

@@ -53,11 +53,22 @@ func TestBackupRestoreEncryptedDrill(t *testing.T) {
 	}
 	store.WithKeyring(kr)
 
-	conn, err := store.ConfigureConnection(ctx, "***8888")
-	if err != nil {
-		t.Fatalf("configure connection: %v", err)
+	seedLegacyHistory(t, store)
+	f := newPaymentFixture(t, store, nil)
+	order := createPayment(t, f, 50000, 1)
+	settlePayment(t, f, order)
+	paid, err := store.PaymentOrder(ctx, order.ID)
+	if err != nil || paid.Status != "PAID" {
+		t.Fatalf("payment snapshot before backup: %+v err=%v", paid, err)
 	}
-	_ = conn
+	var receiptHash string
+	if err := store.DB().QueryRowContext(ctx, `SELECT canonical_hash FROM payment_receipts WHERE order_id=?`, order.ID).Scan(&receiptHash); err != nil {
+		t.Fatal(err)
+	}
+	var paymentDeliveryID string
+	if err := store.DB().QueryRowContext(ctx, `SELECT d.id FROM deliveries d JOIN events e ON e.id=d.event_id WHERE e.transaction_id=? AND d.endpoint_id='legacy-endpoint'`, paid.TransactionID).Scan(&paymentDeliveryID); err != nil {
+		t.Fatal(err)
+	}
 
 	// 2. Perform live snapshot backup
 	snapshotDbPath := filepath.Join(workDir, "snapshot.db")
@@ -133,9 +144,19 @@ func TestBackupRestoreEncryptedDrill(t *testing.T) {
 		t.Fatalf("restored db integrity check failed: %v, result: %s", err, integrity)
 	}
 
-	var connCount int
-	if err := restoredDB.QueryRowContext(ctx, "SELECT count(*) FROM connections WHERE account_masked = '***8888'").Scan(&connCount); err != nil || connCount != 1 {
-		t.Fatalf("restored db missing data: count=%d, err=%v", connCount, err)
+	assertLegacyHistory(t, restoredDB)
+	var restoredTransactionID, restoredReceiptHash string
+	var restoredAmount int64
+	if err := restoredDB.QueryRowContext(ctx, `SELECT transaction_id,amount_vnd,canonical_hash FROM payment_receipts WHERE order_id=?`, order.ID).Scan(&restoredTransactionID, &restoredAmount, &restoredReceiptHash); err != nil || restoredTransactionID != paid.TransactionID || restoredAmount != 50000 || restoredReceiptHash != receiptHash {
+		t.Fatalf("restored payment receipt changed: transaction=%s amount=%d hash=%s err=%v", restoredTransactionID, restoredAmount, restoredReceiptHash, err)
+	}
+	var restoredStatus string
+	if err := restoredDB.QueryRowContext(ctx, `SELECT status FROM payment_orders WHERE id=? AND transaction_id=?`, order.ID, paid.TransactionID).Scan(&restoredStatus); err != nil || restoredStatus != "PAID" {
+		t.Fatalf("restored order lost payment: status=%s err=%v", restoredStatus, err)
+	}
+	var paymentDeliveryStatus string
+	if err := restoredDB.QueryRowContext(ctx, `SELECT d.status FROM deliveries d JOIN events e ON e.id=d.event_id WHERE d.id=? AND e.transaction_id=? AND d.endpoint_id='legacy-endpoint'`, paymentDeliveryID, paid.TransactionID).Scan(&paymentDeliveryStatus); err != nil || paymentDeliveryStatus != "PENDING" {
+		t.Fatalf("restored payment outbox identity lost: status=%s err=%v", paymentDeliveryStatus, err)
 	}
 
 	// 6. Negative Drill: Tampered ciphertext must fail decryption closed

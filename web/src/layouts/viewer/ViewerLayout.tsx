@@ -35,7 +35,7 @@ export const ViewerLayout: React.FC = () => {
               onClick={() => navigate('/admin/connection')}
               className="hover:text-stone-700 transition cursor-pointer"
             >
-              Kết nối ACB
+              Kết nối payOS
             </button>
             <span>&middot;</span>
             <button
@@ -54,15 +54,6 @@ export const ViewerLayout: React.FC = () => {
               className="hover:text-stone-700 transition cursor-pointer"
             >
               Webhooks
-            </button>
-            <span>&middot;</span>
-            <button
-              type="button"
-              role="button"
-              onClick={() => navigate('/admin/activity?tab=polling')}
-              className="hover:text-stone-700 transition cursor-pointer"
-            >
-              Polling
             </button>
             <span>&middot;</span>
             <button
@@ -95,7 +86,7 @@ export const ViewerLayout: React.FC = () => {
         )}
 
         <div className="text-[11px] text-stone-400">
-          Hệ thống theo dõi giao dịch &bull; Phiên bản tự động hoá &bull; ACB Webhook Gateway
+          Theo dõi giao dịch &bull; payOS / KienlongBank
         </div>
       </footer>
     </div>

@@ -15,8 +15,8 @@ test.describe('Browser Full Regression Suite (Desktop/Mobile, State Sharing, Mul
     await expect(page.getByRole('heading', { name: /Tổng quan/ })).toBeVisible();
 
     // 2. Navigate to Bank Connection
-    await page.getByRole('button', { name: 'Kết nối ACB' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Kết nối ACB' })).toBeVisible();
+    await page.getByRole('button', { name: 'Kết nối payOS' }).first().click();
+    await expect(page.getByRole('heading', { name: 'Kết nối payOS / KienlongBank' })).toBeVisible();
 
     // 3. Navigate to Notifications
     await page.getByRole('button', { name: /Kênh thông báo|Webhooks/ }).first().click();
