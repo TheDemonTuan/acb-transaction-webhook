@@ -17,14 +17,6 @@ RELEASE_COMMIT="${RELEASE_COMMIT:-${RELEASE_SHA:-unknown}}"
 DBTOOL_IMAGE="${DBTOOL_IMAGE_REF:-}"
 
 if [[ "${1:-}" == --snapshot && $# == 1 ]]; then
-  if (( EUID == 0 )); then
-    # Workflow orchestration needs root; backup files must retain app ownership.
-    exec sudo -n -u '#1000' -g '#1000' env \
-      "DEPLOY_PATH=${DEPLOY_PATH:-$SCRIPT_DIR}" "BACKUP_DIR=$BACKUP_DIR" \
-      "DATA_VOLUME_NAME=$DATA_VOLUME_NAME" "DBTOOL_IMAGE_REF=$DBTOOL_IMAGE" \
-      "RELEASE_COMMIT=$RELEASE_COMMIT" "ACTIVE_SLOT=$ACTIVE_SLOT" \
-      bash "$SCRIPT_DIR/backup-db.sh" --snapshot
-  fi
   trap 'code=$?; log_error "snapshot command failed at line $LINENO (exit $code)"' ERR
   [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { log_error 'RELEASE_COMMIT must be a lowercase 40-character SHA'; exit 1; }
   [[ "$DATA_VOLUME_NAME" == bank-event-gateway_gateway_data ]] || { log_error 'Snapshot requires bank-event-gateway_gateway_data volume'; exit 1; }
@@ -40,6 +32,7 @@ if [[ "${1:-}" == --snapshot && $# == 1 ]]; then
   snapshot_ok=0
   snapshot_cleanup() { if (( ! snapshot_ok )); then docker rm -f "acb-deploy-backup-$$" >/dev/null 2>&1 || true; rm -rf -- "$snapshot_dir"; fi; }
   trap snapshot_cleanup EXIT
+  if (( EUID == 0 )); then chown 1000:1000 "$snapshot_dir"; fi
   [[ "$(stat -c '%a:%u:%g' "$snapshot_dir")" == '700:1000:1000' ]] || { log_error 'Snapshot directory must be mode 0700 owner 1000:1000'; exit 1; }
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -72,6 +65,7 @@ with open(receipt, 'x', encoding='utf-8') as output:
     os.fsync(output.fileno())
 PY
   chmod 600 "$receipt"
+  if (( EUID == 0 )); then chown 1000:1000 "$receipt"; fi
   [[ "$(stat -c '%a:%u:%g' "$receipt")" == '600:1000:1000' ]] || { log_error 'Snapshot receipt owner or mode incorrect'; exit 1; }
   python3 - "$snapshot_dir" <<'PY'
 import os
