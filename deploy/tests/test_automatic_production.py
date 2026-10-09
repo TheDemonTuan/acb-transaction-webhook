@@ -193,6 +193,10 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(encoded['github_response']), b'\x00\xffzip')
         self.assertEqual(result, summary())
 
+    def test_configured_runtime_followup_preserves_completed_summary(self):
+        completed = {**summary(), 'awaiting_owner_configuration': False}
+        self.assertEqual(production.bridge(self.process([completed]), SHA, RUN), completed)
+
     def test_disallowed_request_receives_only_error(self):
         process = self.process([{'github_request': ['auth', 'token']}, summary()])
         with patch.object(production.subprocess, 'run') as run:

@@ -199,7 +199,7 @@ def sanitized_summary(value, sha, run_id):
     require(isinstance(value, dict) and value.get('phase') == 'FRONTEND_READY'
             and value.get('release_sha') == sha and str(value.get('source_run_id')) == run_id
             and type(value.get('authoritative_backup')) is bool
-            and value.get('awaiting_owner_configuration') is True, 'Invalid remote deployment summary')
+            and type(value.get('awaiting_owner_configuration')) is bool, 'Invalid remote deployment summary')
     return {key: value[key] for key in ('phase', 'release_sha', 'source_run_id', 'authoritative_backup', 'awaiting_owner_configuration')}
 
 
