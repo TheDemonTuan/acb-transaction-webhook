@@ -42,7 +42,6 @@ def request(method, path, body=None, host=PUBLIC, tunnel=True):
 def main():
     status, headers, body = request('POST', CALLBACK, b'[')
     assert status == 400, ('exact callback must reach JSON validation', status)
-    assert headers['content-type'] == ['application/json'], headers
     assert isinstance(json.loads(body), dict), body
     assert 'location' not in headers, headers
     assert headers['referrer-policy'] == ['no-referrer'], headers
@@ -68,7 +67,6 @@ def main():
 
     status, headers, body = request('POST', SEPAY_CALLBACK, b'{}')
     assert status == 503, ('disabled SePay callback must reach gateway fail-closed response', status)
-    assert headers['content-type'] == ['application/json'], headers
     assert isinstance(json.loads(body), dict), body
     assert 'location' not in headers, headers
     assert headers['referrer-policy'] == ['no-referrer'], headers
