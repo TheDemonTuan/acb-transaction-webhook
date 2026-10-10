@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { QrCode, CheckCircle2, RefreshCw, Wifi, Save } from 'lucide-react';
 import { fetchPaymentConfig } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
-import { FixedPaymentQR } from '../payment-qr/PaymentQRImage';
+import { PayOSLinkQR } from '../payment-qr/PaymentQRImage';
 import { loadWifiSettings, saveWifiSettings, buildWifiQRString, generateWifiQRDataURL, type WifiSettings } from '../payment-qr/wifi-qr';
 
 export const PaymentQRSettingsSection: React.FC = () => {
@@ -37,12 +37,12 @@ export const PaymentQRSettingsSection: React.FC = () => {
   };
   return <div className="bg-white rounded-2xl border border-stone-200/80 shadow-xs overflow-hidden">
     <div className="p-6 border-b border-stone-100 flex items-center justify-between gap-4">
-      <div><h3 className="flex items-center gap-2 text-base font-bold text-stone-900"><QrCode className="w-5 h-5" />QR URL cố định · payOS</h3><p className="text-xs text-stone-500 mt-1">KienlongBank · khách nhập số tiền để nhận một đơn thanh toán riêng.</p></div>
+      <div><h3 className="flex items-center gap-2 text-base font-bold text-stone-900"><QrCode className="w-5 h-5" />Liên kết nhập tiền payOS</h3><p className="text-xs text-stone-500 mt-1">KienlongBank · khách nhập số tiền để nhận một đơn thanh toán riêng.</p></div>
       <button type="button" onClick={() => { void config.refetch(); }} className="inline-flex items-center gap-2 text-xs font-semibold"><RefreshCw className="w-4 h-4" />Làm mới</button>
     </div>
     <div className="p-4">
       <p className="text-xs text-center text-stone-500">Trạng thái: {config.data?.status ?? (config.isError ? 'UNAVAILABLE' : 'Đang tải')}</p>
-      <FixedPaymentQR staticUrl={config.data?.staticUrl} />
+      <PayOSLinkQR staticUrl={config.data?.staticUrl} />
       {config.data && !config.data.ready && <p className="text-sm text-center text-amber-800">Chưa nhận đơn mới. Không dùng QR tài khoản cũ thay thế.</p>}
     </div>
       {/* Store WiFi Settings Section */}

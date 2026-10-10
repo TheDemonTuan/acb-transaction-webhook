@@ -7,8 +7,6 @@ import {
   RefreshCw,
   Clock,
   ChevronRight,
-  TrendingUp,
-  TrendingDown,
   Receipt,
   Copy,
   Check,
@@ -23,6 +21,7 @@ import { formatVndCurrency } from '../../shared/formatters/money';
 import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import type { Transaction } from '../../realtime-types';
 import { useCursorPagination, PaginationControls } from '../../shared/ui/PaginationControls';
+import { CounterCheckout } from '../../features/payment-qr/CounterCheckout';
 
 const getTodayISO = () => {
   const d = new Date();
@@ -45,7 +44,7 @@ export const TransactionsPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const isPublic = isPublicViewerHost();
-  const [filterType, setFilterType] = useState<'all' | 'credit' | 'debit'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'credit' | 'debit'>(isPublic ? 'credit' : 'all');
   // Default filter to 'today' as requested by user
   const [dateRange, setDateRange] = useState<'today' | '7days' | 'all' | 'custom'>('today');
   const [customFrom, setCustomFrom] = useState('');
@@ -96,12 +95,12 @@ export const TransactionsPage: React.FC = () => {
     return {
       from,
       to,
-      direction: filterType,
+      direction: isPublic ? 'credit' as const : filterType,
       query: debouncedSearch.trim() || undefined,
       limit: pagination.pageSize,
       cursor: pagination.cursor,
     };
-  }, [dateRange, customFrom, customTo, filterType, debouncedSearch, pagination.pageSize, pagination.cursor]);
+  }, [isPublic, dateRange, customFrom, customTo, filterType, debouncedSearch, pagination.pageSize, pagination.cursor]);
 
   const { data, isLoading, isRefetching, isError, error, refetch } = useQuery({
     queryKey: queryKeys.transactions(queryParams as unknown as Record<string, unknown>),
@@ -128,13 +127,13 @@ export const TransactionsPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Top section with heading & quick actions */}
+    <div className="space-y-6 min-w-0">
+      <CounterCheckout />
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight text-stone-900">Giao dịch</h2>
+          <h2 className="text-xl font-bold tracking-tight text-stone-900">Lịch sử giao dịch</h2>
           <p className="text-sm text-stone-600 mt-0.5">
-            Thanh toán payOS/KienlongBank và lịch sử ACB đã lưu trên máy chủ
+            SePay Store, payOS và lịch sử ngân hàng đã lưu
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
@@ -151,52 +150,10 @@ export const TransactionsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* KPI Stats Grid - Server Aggregate */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {/* Total count */}
-        <div className="bg-white p-5 rounded-2xl border border-stone-200/80 shadow-xs flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-stone-100 flex items-center justify-center text-stone-600 shrink-0">
-            <Receipt className="w-6 h-6" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-stone-600">
-              {dateRange === 'today' ? 'Giao dịch hôm nay' : 'Tổng số giao dịch'}
-            </p>
-            <p className="text-2xl font-bold text-stone-900 tracking-tight mt-0.5">
-              {stats.totalCount.toLocaleString('vi-VN')}
-            </p>
-          </div>
-        </div>
-
-        {/* Incoming */}
-        <div className="bg-white p-5 rounded-2xl border border-stone-200/80 shadow-xs flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600 shrink-0">
-            <TrendingUp className="w-6 h-6" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-stone-600">
-              {dateRange === 'today' ? 'Tiền vào hôm nay' : 'Tổng tiền vào'}
-            </p>
-            <p className="text-2xl font-bold text-emerald-600 tracking-tight mt-0.5 truncate">
-              {isPublic ? '****** ₫' : formatVndCurrency(stats.incoming)}
-            </p>
-          </div>
-        </div>
-
-        {/* Outgoing */}
-        <div className="bg-white p-5 rounded-2xl border border-stone-200/80 shadow-xs flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-rose-50 flex items-center justify-center text-rose-600 shrink-0">
-            <TrendingDown className="w-6 h-6" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-stone-600">
-              {dateRange === 'today' ? 'Tiền ra hôm nay' : 'Tổng tiền ra'}
-            </p>
-            <p className="text-2xl font-bold text-rose-600 tracking-tight mt-0.5 truncate">
-              {isPublic ? '****** ₫' : formatVndCurrency(stats.outgoing)}
-            </p>
-          </div>
-        </div>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm">
+        <span>{dateRange === 'today' ? 'Giao dịch hôm nay' : 'Tổng số giao dịch'}: <strong>{stats.totalCount.toLocaleString('vi-VN')}</strong></span>
+        <span>Tiền vào: <strong className="text-emerald-800">{isPublic ? '****** ₫' : formatVndCurrency(stats.incoming)}</strong></span>
+        {!isPublic && <span>Tiền ra: <strong className="text-rose-800">{formatVndCurrency(stats.outgoing)}</strong></span>}
       </div>
 
       {/* Filter & Search Bar */}
@@ -283,7 +240,7 @@ export const TransactionsPage: React.FC = () => {
         )}
 
         {/* Direction Filter */}
-        <div className="flex items-center gap-1.5 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0 pt-1">
+        {!isPublic && <div className="flex items-center gap-1.5 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0 pt-1">
           <button
             type="button"
             onClick={() => handleFilterTypeChange('all')}
@@ -317,7 +274,7 @@ export const TransactionsPage: React.FC = () => {
           >
             Tiền ra
           </button>
-        </div>
+        </div>}
       </div>
 
       {/* Transaction List */}
@@ -373,7 +330,7 @@ export const TransactionsPage: React.FC = () => {
                       )}
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span
                           className={`text-xs font-semibold px-2 py-0.5 rounded-md ${
                             isCredit
@@ -384,6 +341,7 @@ export const TransactionsPage: React.FC = () => {
                           {isCredit ? 'Tiền vào' : 'Tiền ra'}
                         </span>
                         <span className="text-xs font-medium text-stone-700">{tx.bank || 'Chưa rõ ngân hàng'}</span>
+                        {tx.provider && <span className="text-xs font-semibold text-stone-700">{tx.provider === 'SEPAY' ? 'SePay · QR cửa hàng' : 'payOS'}</span>}
                         <span className="text-xs text-stone-600 flex items-center gap-1">
                           <Clock className="w-3 h-3" />
                           {displayDate}

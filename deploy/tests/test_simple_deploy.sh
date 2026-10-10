@@ -248,6 +248,7 @@ docker pull python:3.13-alpine >/dev/null
 docker run --rm --network none --user 1000:1000 -v bank-event-gateway_gateway_data:/data python:3.13-alpine \
   python -c 'import sqlite3; db=sqlite3.connect("/data/gateway.db"); db.execute("CREATE TABLE rehearsal_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); db.execute("INSERT INTO rehearsal_sentinel VALUES (1, ?)", ("retain-after-migrate",)); db.execute("INSERT INTO connections(id,state,created_at,updated_at) VALUES (?,?,?,?)", ("rehearsal-connection","UNCONFIGURED","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z")); db.executemany("INSERT INTO transactions(id,connection_id,semantic_key,canonical_hash,transaction_date,effective_date,credit,parser_version,first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [("rehearsal-txn-"+str(n),"rehearsal-connection","rehearsal-key-"+str(n),"rehearsal-hash-"+str(n),"2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",100,"v1","2026-01-01T00:00:0"+str(n)+"Z") for n in (1,2)]); db.commit()'
 
+DEPLOY_PATH="$root" bash -Eeuo pipefail -c 'source "$1/simple-lib.sh"; bootstrap_sepay_store_config' rehearsal "$target"
 log_step "Starting canonical baseline containers..."
 docker compose --project-name acb --project-directory "$baseline" --env-file "$root/deploy/.env.production" --env-file "$baseline/runtime.env" \
   -f "$baseline/compose.prod.yaml" up -d --no-deps gateway-blue worker tts-gateway bark
@@ -550,6 +551,23 @@ run_suite_lifecycle() {
   rm "$root/registry/acb.json"
   log_test_pass "Preflight negative checks passed"
 
+  log_test_start "Existing payOS deployment bootstraps only a missing disabled SePay config"
+  rm "$root/deploy/secrets/sepay_store_config"
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" --check "$release_sha"
+  python3 - "$root/deploy/secrets/sepay_store_config" <<'PY'
+import json,os,stat,sys
+path=sys.argv[1];info=os.lstat(path)
+assert json.load(open(path))=={'mode':'disabled'}
+assert (stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid)==(0o600,1000,1000)
+PY
+  config_before="$(sha256sum "$root/deploy/secrets/sepay_store_config")"
+  DEPLOY_PATH="$root" bash "$target/deploy.sh" --check "$release_sha"
+  [[ "$(sha256sum "$root/deploy/secrets/sepay_store_config")" == "$config_before" ]] || fail 'Repeated preflight rewrote SePay config'
+  chmod 644 "$root/deploy/secrets/sepay_store_config"
+  expect_unchanged_failure 'world-readable SePay config' bash "$target/deploy.sh" --check "$release_sha"
+  chmod 600 "$root/deploy/secrets/sepay_store_config"
+  log_test_pass "Missing config self-bootstrap and existing config immutability passed"
+
   log_test_start "Baseline deploy and candidate promotion ($release_sha)"
   DEPLOY_PATH="$root" bash "$target/deploy.sh" --check "$release_sha"
   worker_events_since="$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')"
@@ -648,6 +666,11 @@ PY
   for name in acb-worker acb-gateway-green; do
     docker inspect "$name" | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; assert c["HostConfig"]["ReadonlyRootfs"]; assert c["Config"]["User"]=="1000:1000"; assert "ALL" in c["HostConfig"]["CapDrop"]; assert "no-new-privileges:true" in c["HostConfig"]["SecurityOpt"]; mounts={m["Destination"]:m for m in c["Mounts"]}; assert all(not mounts["/run/secrets/"+n]["RW"] for n in ("app_master_key","worker_internal_token")); assert not any("/run/secrets/"+n in mounts for n in ("payos_client_id","payos_api_key","payos_checksum_key")); env=dict(x.split("=",1) for x in c["Config"]["Env"]); assert not any("AUTH_BROWSER" in k or "POLL_MIN" in k for k in env)'
   done
+  for name in acb-gateway-blue acb-gateway-green acb-worker acb-tts-gateway acb-bark; do
+    docker inspect "$name" | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; mounts={m["Destination"]:m for m in c["Mounts"]}; env=dict(x.split("=",1) for x in c["Config"]["Env"]); gateway=c["Name"] in ("/acb-gateway-blue","/acb-gateway-green"); assert ("/run/secrets/sepay_store_config" in mounts)==gateway; assert ("SEPAY_STORE_CONFIG_FILE" in env)==gateway; assert not gateway or not mounts["/run/secrets/sepay_store_config"]["RW"]'
+  done
+  store_config="$(docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -fsS -H 'Host: transactions.tuannguyenviet.site' http://127.0.0.1:8080/api/public/v1/sepay-store)"
+  printf '%s' "$store_config" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c["provider"]=="SEPAY" and c["status"]=="DISABLED" and c["qrPayload"]==""'
   config="$(docker run --rm --network container:edge-traefik curlimages/curl:8.12.1 -fsS -H 'Host: transactions.tuannguyenviet.site' http://127.0.0.1:8080/api/public/v1/payment-config)"
   printf '%s' "$config" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c["provider"]=="PAYOS" and c["ready"] is False and c["status"]=="UNCONFIGURED"'
   [[ -z "$(docker ps -aq --filter name='^/acb-auth-browser$' --filter name='^/acb-recovery-controller$')" ]] || fail 'Retired runtime containers created'

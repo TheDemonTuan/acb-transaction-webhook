@@ -122,7 +122,7 @@ class ComposeRuntimeTests(unittest.TestCase):
         compose = yaml.safe_load((DEPLOY / 'compose.prod.yaml').read_text())
         self.assertEqual(set(compose['services']), {'worker', 'gateway-blue', 'gateway-green', 'dbtool', 'tts-gateway', 'bark'})
         self.assertEqual(compose['volumes']['gateway_data']['name'], '${DATA_VOLUME_NAME:-bank-event-gateway_gateway_data}')
-        expected_secrets = {'app_master_key', 'worker_internal_token', 'tts_internal_token', 'bark_basic_auth_user', 'bark_basic_auth_password'}
+        expected_secrets = {'app_master_key', 'worker_internal_token', 'tts_internal_token', 'bark_basic_auth_user', 'bark_basic_auth_password', 'sepay_store_config'}
         self.assertEqual(set(compose['secrets']), expected_secrets)
         for name in ('worker', 'gateway-blue', 'gateway-green'):
             service = compose['services'][name]
@@ -145,6 +145,17 @@ class ComposeRuntimeTests(unittest.TestCase):
             self.assertIn('tts_internal_token', compose['services'][name]['secrets'])
         for name in ('worker', 'bark'):
             self.assertTrue({'bark_basic_auth_user', 'bark_basic_auth_password'} <= set(compose['services'][name]['secrets']))
+        self.assertEqual(compose['secrets']['sepay_store_config']['file'],
+                         '${SECRETS_DIR:?SECRETS_DIR is required}/sepay_store_config')
+        for name, service in compose['services'].items():
+            self.assertNotIn('ports', service)
+            if name in ('gateway-blue', 'gateway-green'):
+                self.assertIn('sepay_store_config', service['secrets'])
+                self.assertEqual(service['environment']['SEPAY_STORE_CONFIG_FILE'],
+                                 '/run/secrets/sepay_store_config')
+            else:
+                self.assertNotIn('sepay_store_config', service.get('secrets', []))
+                self.assertNotIn('SEPAY_STORE_CONFIG_FILE', service.get('environment', {}))
         for service in compose['services'].values():
             self.assertFalse(any(key.startswith(('POLL_', 'AUTH_BROWSER', 'AI_CAPTCHA', 'AUTH_RECOVERY')) for key in service.get('environment', {})))
 

@@ -101,6 +101,8 @@ class PublisherTests(unittest.TestCase):
                 ('payment-privacy', {'headers': {'customResponseHeaders': {'Referrer-Policy': 'unsafe-url'}}}),
                 ('payos-webhook-body-limit', {'buffering': {'maxRequestBodyBytes': 0}}),
                 ('payos-webhook-rate-limit', {'rateLimit': {'average': 6000, 'burst': 12000}}),
+                ('sepay-telegram-body-limit', {'buffering': {'maxRequestBodyBytes': 0}}),
+                ('sepay-telegram-rate-limit', {'rateLimit': {'average': 6000, 'burst': 12000}}),
                 ('security-headers', {'headers': {'customResponseHeaders': {'X-Frame-Options': ''}}})):
             with self.subTest(policy=policy):
                 topology = self.publisher.yaml.safe_load(route)

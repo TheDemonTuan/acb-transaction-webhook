@@ -23,6 +23,8 @@ func TestSQLiteMigrationRollbackOnFailure(t *testing.T) {
 	seedLegacyHistory(t, store)
 	// Construct the retained v14 schema without editing historical migrations.
 	if _, err := store.DB().ExecContext(ctx, `
+DROP TABLE sepay_receipts;
+DROP TABLE sepay_telegram_inbox;
 DROP TABLE payment_provider_operations;
 DROP TABLE payment_provider_runtime;
 DROP TABLE payment_provider_credential_versions;
@@ -31,7 +33,7 @@ DROP TABLE payment_receipts;
 DROP TABLE payos_webhook_inbox;
 DROP TABLE payment_orders;
 DELETE FROM connections WHERE id='payos-klb';
-DELETE FROM schema_migrations WHERE version IN (15,16);
+DELETE FROM schema_migrations WHERE version >= 15;
 CREATE TRIGGER reject_payos_migration BEFORE INSERT ON connections
 WHEN NEW.id='payos-klb' BEGIN SELECT RAISE(ABORT,'migration fixture failure'); END;`); err != nil {
 		t.Fatal(err)

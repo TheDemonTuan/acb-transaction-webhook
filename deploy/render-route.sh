@@ -46,6 +46,14 @@ http:
       priority: 1150
       middlewares: [tunnel-only, security-headers, payment-privacy, payos-webhook-rate-limit, payos-webhook-body-limit]
       service: acb-service
+    acb-sepay-telegram-router:
+      rule: "Host(\`${viewer_host}\`) && Path(\`/api/integrations/sepay/telegram\`) && Method(\`POST\`)"
+      entryPoints: [web]
+      priority: 1150
+      middlewares: [tunnel-only, security-headers, payment-privacy, sepay-telegram-rate-limit, sepay-telegram-body-limit]
+      observability:
+        accessLogs: false
+      service: acb-service
     acb-public-payments-router:
       rule: "Host(\`${viewer_host}\`) && (Path(\`/api/public/v1/payment-config\`) || Path(\`/api/public/v1/payments\`) || PathPrefix(\`/api/public/v1/payments/\`))"
       entryPoints: [web]
@@ -96,6 +104,17 @@ http:
         maxRequestBodyBytes: 65536
         memRequestBodyBytes: 65536
     payos-webhook-rate-limit:
+      rateLimit:
+        average: 60
+        period: 1s
+        burst: 120
+        sourceCriterion:
+          requestHost: true
+    sepay-telegram-body-limit:
+      buffering:
+        maxRequestBodyBytes: 65536
+        memRequestBodyBytes: 65536
+    sepay-telegram-rate-limit:
       rateLimit:
         average: 60
         period: 1s

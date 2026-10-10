@@ -46,3 +46,8 @@ var PayOSPaymentOrdersSQL string
 //
 //go:embed 016_payment_provider_config.sql
 var PaymentProviderConfigSQL string
+
+// SePayStoreSQL embeds schema version 17 encrypted SePay Telegram evidence.
+//
+//go:embed 017_sepay_store.sql
+var SePayStoreSQL string

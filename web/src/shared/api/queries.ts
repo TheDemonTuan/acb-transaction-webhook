@@ -10,6 +10,7 @@ import {
   type PaymentProviderConfig,
   type PaymentProviderConfigInput,
 } from '../../features/payment-qr/payment-orders';
+import type { SePayStoreConfig } from '../../features/payment-qr/sepay-store';
 import type {
   AuditLog,
   BarkConfig,
@@ -18,6 +19,7 @@ import type {
   NotificationChannel,
   NotificationProvider,
   PageResponse,
+  SePayReview,
   Status,
   Transaction,
 } from '../../realtime-types';
@@ -28,6 +30,9 @@ export const fetchStatus = async (): Promise<Status> => {
 
 export const fetchPaymentConfig = async (): Promise<PaymentConfig> =>
   publicApi<PaymentConfig>('/payment-config');
+
+export const fetchSePayStore = async (): Promise<SePayStoreConfig> =>
+  publicApi<SePayStoreConfig>('/sepay-store');
 
 export const fetchPaymentProviderConfig = async (): Promise<PaymentProviderConfig> =>
   api<PaymentProviderConfig>('/payment-provider/config', { cache: 'no-store' });
@@ -97,6 +102,17 @@ export const fetchPaymentReviews = async (params?: {
   if (params?.limit !== undefined) query.set('limit', String(params.limit));
   const qStr = query.toString();
   return api<PageResponse<PaymentReview>>(`/payment-reviews${qStr ? `?${qStr}` : ''}`, { cache: 'no-store' });
+};
+
+export const fetchSePayReviews = async (params?: {
+  cursor?: string;
+  limit?: number;
+}): Promise<PageResponse<SePayReview>> => {
+  const query = new URLSearchParams();
+  if (params?.cursor) query.set('cursor', params.cursor);
+  if (params?.limit !== undefined) query.set('limit', String(params.limit));
+  const qStr = query.toString();
+  return api<PageResponse<SePayReview>>(`/sepay-reviews${qStr ? `?${qStr}` : ''}`, { cache: 'no-store' });
 };
 
 export const confirmPaymentWebhook = async (): Promise<{ confirmed: true }> =>

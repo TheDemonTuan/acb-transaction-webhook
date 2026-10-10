@@ -7,13 +7,23 @@ import {
   CheckCircle2,
   Activity,
 } from 'lucide-react';
-import { fetchStatus } from '../../shared/api/queries';
+import { fetchSePayReviews, fetchStatus } from '../../shared/api/queries';
 import { queryKeys } from '../../shared/api/query-keys';
 
+
+const recentSePayReviewParams = { limit: 20 };
 export const SystemPage: React.FC = () => {
   const { data: status, isLoading, isError, refetch } = useQuery({
     queryKey: queryKeys.status,
     queryFn: fetchStatus,
+  });
+  const canReviewSePay = status?.userRole === 'OWNER' || status?.userRole === 'OPERATOR';
+  const reviews = useQuery({
+    queryKey: queryKeys.sepayReviews(recentSePayReviewParams),
+    queryFn: () => fetchSePayReviews(recentSePayReviewParams),
+    enabled: canReviewSePay,
+    retry: false,
+    gcTime: 0,
   });
 
   return (
@@ -30,7 +40,10 @@ export const SystemPage: React.FC = () => {
         </div>
         <button
           type="button"
-          onClick={() => refetch()}
+          onClick={() => {
+            void refetch();
+            if (canReviewSePay) void reviews.refetch();
+          }}
           disabled={isLoading}
           className="inline-flex items-center self-start sm:self-auto gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-stone-200 text-stone-700 hover:bg-stone-50 transition shadow-2xs cursor-pointer"
         >
@@ -102,6 +115,35 @@ export const SystemPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <section className="bg-white p-5 rounded-2xl border border-stone-200 shadow-2xs space-y-4" aria-labelledby="sepay-system-heading">
+        <h3 id="sepay-system-heading" className="font-bold text-stone-900">SePay Store · Nhận thông báo</h3>
+        <dl className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+          <div><dt className="text-stone-500">Chế độ</dt><dd className="font-semibold text-stone-900">{status?.sepay?.mode ?? 'Đang tải'}</dd></div>
+          <div><dt className="text-stone-500">Lần nhận hợp lệ cuối</dt><dd className="font-semibold text-stone-900 break-words">{status?.sepay?.lastMessageAt || 'Chưa ghi nhận'}</dd></div>
+          <div><dt className="text-stone-500">Mục cần đối chiếu</dt><dd className="font-semibold text-stone-900">{status?.sepay?.reviewCount ?? 'Đang tải'}</dd></div>
+        </dl>
+        <p className="text-xs text-stone-500">Chế độ active chỉ cho biết đã bật nhận thông báo, không bảo đảm kết nối ngân hàng. Đối chiếu thông báo với Store/Telegram; không tự ghi lại giao dịch.</p>
+        {canReviewSePay && (
+          <div className="space-y-3">
+            <h4 className="text-sm font-semibold text-stone-900">20 mục đối chiếu gần nhất</h4>
+            {reviews.isPending && <p className="text-sm text-stone-500">Đang tải mục đối chiếu…</p>}
+            {reviews.isError && <p role="alert" className="text-sm text-rose-700">Không thể tải mục đối chiếu SePay.</p>}
+            {reviews.data && reviews.data.items.length === 0 && <p className="text-sm text-stone-500">Không có mục cần đối chiếu.</p>}
+            {reviews.data && reviews.data.items.length > 0 && (
+              <ul className="divide-y divide-stone-100">
+                {reviews.data.items.map((review, index) => (
+                  <li key={`${review.storeKey}:${review.messageId}:${review.receivedAt}:${index}`} className="py-3 text-sm break-words">
+                    <p className="font-semibold text-stone-900">{review.reason}</p>
+                    <p className="text-stone-600">{review.storeKey} · Tin {review.messageId}</p>
+                    <time className="text-xs text-stone-500" dateTime={review.receivedAt}>{review.receivedAt}</time>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
 
       {/* Technical Diagnostics Details */}
       <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-2xs space-y-4">

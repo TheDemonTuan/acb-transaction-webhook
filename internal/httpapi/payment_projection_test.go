@@ -100,8 +100,56 @@ func assertProjectionSafe(t *testing.T, data map[string]any, o storage.PaymentOr
 	}
 }
 
+func projectionSePay(t *testing.T, s *storage.Store, source string) storage.EventNotification {
+	t.Helper()
+	id := int64(1)
+	messageAt := time.Now().UTC()
+	if source == "CATCH_UP" {
+		id = 2
+		messageAt = messageAt.Add(-time.Hour)
+	}
+	at := time.Date(2026, 10, 10, 0, 5, 0, 0, time.FixedZone("VN", 7*3600))
+	raw, err := json.Marshal(map[string]any{
+		"update_id": id,
+		"message":   map[string]any{"message_id": id, "date": messageAt.Unix(), "chat": map[string]any{"id": -100900003}, "from": map[string]any{"id": 900002, "is_bot": true}, "text": "projection-private-payer-memo projection-private-payer-account"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.IngestSePayNotification(context.Background(), storage.SePayNotificationInput{
+		StoreKey: "projection-store", BankCode: "VCB", AccountNumber: "projection-private-store-account", Mode: "active",
+		BotID: 900001, UpdateID: id, ChatID: -100900003, MessageID: id,
+		ActivationAt: at.Add(-time.Hour), MessageAt: messageAt, RawPayload: raw,
+		Credit: &storage.SePayCredit{AmountVND: 50000, Reference: "SEPAY_PROJECTION_" + source, TransactionAt: at},
+	})
+	if err != nil || result.Event == nil {
+		t.Fatalf("SePay ingest: %+v err=%v", result, err)
+	}
+	return *result.Event
+}
+
+func assertSePayProjectionSafe(t *testing.T, data map[string]any) {
+	t.Helper()
+	assertProjectionSafe(t, data, storage.PaymentOrder{})
+	for _, key := range []string{"orderCode", "paymentOrigin", "botId", "chatId", "senderId", "senderBotId", "messageId", "rawPayload", "payloadEnvelope", "webhookSecret", "token"} {
+		if _, exists := data[key]; exists {
+			t.Fatalf("SePay projection contains private or payOS field %s: %v", key, data)
+		}
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"projection-private-payer-memo", "projection-private-payer-account", "projection-private-store-account", "projection-private-telegram-token", "projection-private-webhook-secret", "900001", "900002", "-100900003"} {
+		if strings.Contains(string(raw), private) {
+			t.Fatalf("SePay projection leaked %q: %s", private, raw)
+		}
+	}
+}
+
 func TestPublicPaymentTransactionsAndLegacyHistoryProjection(t *testing.T) {
 	s := projectionStore(t)
+	sepayWebhookKeyring(t, s)
 	ctx := context.Background()
 	if _, err := s.DB().ExecContext(ctx, `INSERT INTO connections(id,bank_code,state,generation,created_at,updated_at) VALUES('legacy-projection','ACB','MONITORING',1,'2026-09-12T00:00:00Z','2026-09-12T00:00:00Z')`); err != nil {
 		t.Fatal(err)
@@ -116,6 +164,7 @@ func TestPublicPaymentTransactionsAndLegacyHistoryProjection(t *testing.T) {
 	}
 	h := New(config.Config{DevelopmentSubject: "dev@example.com"}, s).Handler()
 	orders := map[string]storage.PaymentOrder{}
+	sepayTransactions := map[string]string{}
 	for _, source := range []string{"REALTIME", "CATCH_UP"} {
 		o, _ := projectionSettle(t, s, source)
 		orders[o.TransactionID] = o
@@ -130,6 +179,18 @@ func TestPublicPaymentTransactionsAndLegacyHistoryProjection(t *testing.T) {
 			if prefix == "/api/public/v1" {
 				assertProjectionSafe(t, detail, o)
 			}
+		}
+		sepay := projectionSePay(t, s, source)
+		sepayTransactions[sepay.TransactionID] = source
+		for _, prefix := range []string{"/api/public/v1", "/api/v1"} {
+			detail := projectionJSON(t, h, prefix+"/transactions/"+sepay.TransactionID)
+			want := map[string]any{"id": sepay.TransactionID, "bank": "VCB", "provider": "SEPAY", "credit": float64(50000), "debit": float64(0), "transactionDate": "2026-10-09T17:05:00Z", "transactionDay": "2026-10-10", "source": source, "description": "Thanh toán QR cửa hàng"}
+			for key, value := range want {
+				if detail[key] != value {
+					t.Fatalf("%s SePay detail[%s]=%v want=%v", prefix, key, detail[key], value)
+				}
+			}
+			assertSePayProjectionSafe(t, detail)
 		}
 	}
 	legacyID := legacy.NewEvents[0].TransactionID
@@ -157,7 +218,7 @@ func TestPublicPaymentTransactionsAndLegacyHistoryProjection(t *testing.T) {
 	}
 	page := projectionJSON(t, h, "/api/public/v1/transactions?direction=debit&limit=100")
 	items := page["items"].([]any)
-	if len(items) != 3 {
+	if len(items) != 5 {
 		t.Fatalf("public count=%d", len(items))
 	}
 	for _, value := range items {
@@ -171,13 +232,24 @@ func TestPublicPaymentTransactionsAndLegacyHistoryProjection(t *testing.T) {
 			if item["bank"] != "KienlongBank" || item["orderCode"] != strconv.FormatInt(o.OrderCode, 10) {
 				t.Fatalf("public list correlation=%v", item)
 			}
+		} else if source, ok := sepayTransactions[id]; ok {
+			assertSePayProjectionSafe(t, item)
+			if item["provider"] != "SEPAY" || item["bank"] != "VCB" || item["source"] != source || item["description"] != "Thanh toán QR cửa hàng" {
+				t.Fatalf("public SePay list=%v", item)
+			}
 		} else if id != legacyID || item["bank"] != "ACB" {
 			t.Fatalf("unexpected public transaction=%v", item)
 		}
 	}
 	summary := page["summary"].(map[string]any)
-	if summary["count"] != float64(3) || summary["incoming"] != float64(125000) || summary["outgoing"] != float64(0) {
+	if summary["count"] != float64(5) || summary["incoming"] != float64(225000) || summary["outgoing"] != float64(0) {
 		t.Fatalf("public summary=%v", summary)
+	}
+	for _, prefix := range []string{"/api/public/v1", "/api/v1"} {
+		privateSearch := projectionJSON(t, h, prefix+"/transactions?q=projection-private-payer-memo&limit=100")
+		if len(privateSearch["items"].([]any)) != 0 {
+			t.Fatalf("private memo searchable through %s: %v", prefix, privateSearch)
+		}
 	}
 }
 
@@ -291,5 +363,138 @@ func TestPublicPaymentSSELiveAndJournalReplaySecurity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPublicSePaySSELiveAndJournalReplaySecurity(t *testing.T) {
+	for _, source := range []string{"REALTIME", "CATCH_UP"} {
+		t.Run(source, func(t *testing.T) {
+			s := projectionStore(t)
+			sepayWebhookKeyring(t, s)
+			hub := eventhub.New()
+			server := New(config.Config{DevelopmentSubject: "dev@example.com"}, s).WithEventHub(hub)
+			ts := httptest.NewServer(server.Handler())
+			defer ts.Close()
+			client := ts.Client()
+			client.Timeout = 3 * time.Second
+			live, err := client.Get(ts.URL + "/api/public/v1/events")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer live.Body.Close()
+			scanner := bufio.NewScanner(live.Body)
+			_, initialKind, initial := projectionSSEFrame(t, scanner)
+			if initialKind != "initial_state" || initial["watermark"] != float64(0) {
+				t.Fatalf("initial=%s %v", initialKind, initial)
+			}
+			committed := projectionSePay(t, s, source)
+			var payload map[string]any
+			if err := json.Unmarshal(committed.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			assertSePayProjectionSafe(t, payload)
+			// Exercise the public allowlist on both live delivery and durable replay.
+			for key, value := range map[string]any{
+				"balance": 987654321, "botId": 900001, "chatId": -100900003, "senderBotId": 900002,
+				"messageId": 1, "rawPayload": "projection-private-payer-memo projection-private-payer-account",
+				"accountNumber": "projection-private-store-account", "token": "projection-private-telegram-token",
+				"webhookSecret": "projection-private-webhook-secret", "idCapability": "projection-private-capability",
+			} {
+				payload[key] = value
+			}
+			committed.Payload, err = json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB().Exec(`UPDATE event_journal SET payload_json=? WHERE epoch=? AND seq=?`, string(committed.Payload), committed.Epoch, committed.JournalSeq); err != nil {
+				t.Fatal(err)
+			}
+			hub.Publish(eventhub.Event{Epoch: committed.Epoch, Seq: committed.JournalSeq, EventType: committed.EventType, AggregateID: committed.TransactionID, Payload: committed.Payload, CommittedAt: committed.CommittedAt})
+			id, kind, liveData := projectionSSEFrame(t, scanner)
+			live.Body.Close()
+			if kind != "bank.transaction.credit" || id != fmt.Sprintf("ep1:%d", committed.JournalSeq) {
+				t.Fatalf("live id/type=%s %s", id, kind)
+			}
+			assertSePayProjectionSafe(t, liveData)
+			want := map[string]any{"provider": "SEPAY", "bank": "VCB", "transactionId": committed.TransactionID, "transactionNumber": "SEPAY_PROJECTION_" + source, "credit": "50000", "debit": "0", "currency": "VND", "transactionDate": "2026-10-09T17:05:00Z", "transactionDay": "2026-10-10", "source": source, "description": "Thanh toán QR cửa hàng", "datePrecision": "datetime"}
+			for key, value := range want {
+				if liveData[key] != value {
+					t.Fatalf("live[%s]=%v want=%v", key, liveData[key], value)
+				}
+			}
+			snapshot := projectionJSON(t, server.Handler(), "/api/public/v1/transactions/"+committed.TransactionID)
+			assertSePayProjectionSafe(t, snapshot)
+			if snapshot["id"] != liveData["transactionId"] || snapshot["provider"] != liveData["provider"] || snapshot["source"] != liveData["source"] || snapshot["description"] != liveData["description"] || snapshot["credit"] != float64(50000) {
+				t.Fatalf("snapshot/live disagree: snapshot=%v live=%v", snapshot, liveData)
+			}
+			for _, prefix := range []string{"/api/public/v1", "/api/v1"} {
+				req, err := http.NewRequest(http.MethodGet, ts.URL+prefix+"/events", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Last-Event-ID", "ep1:0")
+				response, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replayID, replayKind, replayData := projectionSSEFrame(t, bufio.NewScanner(response.Body))
+				response.Body.Close()
+				if replayID != id || replayKind != kind {
+					t.Fatalf("replay id/type=%s %s", replayID, replayKind)
+				}
+				for key, value := range want {
+					if replayData[key] != value {
+						t.Fatalf("%s replay[%s]=%v want=%v", prefix, key, replayData[key], value)
+					}
+				}
+				if prefix == "/api/public/v1" {
+					assertSePayProjectionSafe(t, replayData)
+					liveJSON, _ := json.Marshal(liveData)
+					replayJSON, _ := json.Marshal(replayData)
+					if string(liveJSON) != string(replayJSON) {
+						t.Fatalf("live/replay differ: %s %s", liveJSON, replayJSON)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSePayTransactionSnapshotDoesNotPaySameAmountOrders(t *testing.T) {
+	f := newPaymentHTTPFixture(t)
+	sepayWebhookKeyring(t, f.store)
+	orders := make([]storage.PaymentOrder, 0, 2)
+	for index := 1; index <= 2; index++ {
+		response := paymentRequest(f.handler, http.MethodPost, "/api/public/v1/payments", `{"amountVnd":50000,"origin":"STATIC_URL"}`, paymentKey(index), false)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("payOS create %d failed: %d %s", index, response.Code, response.Body.String())
+		}
+		orders = append(orders, decodePaymentOrder(t, response))
+	}
+	committed := projectionSePay(t, f.store, "REALTIME")
+	for _, order := range orders {
+		for _, prefix := range []string{"/api/public/v1", "/api/v1"} {
+			response := paymentRequest(f.handler, http.MethodGet, prefix+"/payments/"+order.ID, "", "", false)
+			if response.Code != http.StatusOK {
+				t.Fatalf("order snapshot failed: %d %s", response.Code, response.Body.String())
+			}
+			snapshot := decodePaymentOrder(t, response)
+			if snapshot.ID != order.ID || snapshot.Status != "PENDING" || snapshot.TransactionID != "" || snapshot.OrderCode != order.OrderCode || snapshot.QRCode != order.QRCode || snapshot.AmountVnd != 50000 {
+				t.Fatalf("SePay changed payOS snapshot: %+v", snapshot)
+			}
+		}
+	}
+	page := projectionJSON(t, f.handler, "/api/public/v1/transactions?limit=100")
+	items := page["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("same-amount public history count=%d", len(items))
+	}
+	item := items[0].(map[string]any)
+	assertSePayProjectionSafe(t, item)
+	if item["id"] != committed.TransactionID || item["provider"] != "SEPAY" || item["credit"] != float64(50000) {
+		t.Fatalf("same-amount public snapshot=%v", item)
+	}
+	if webhookTestCount(t, f.store, "payment_receipts") != 0 || webhookTestCount(t, f.store, "sepay_receipts") != 1 {
+		t.Fatal("transaction snapshots crossed receipt provenance")
 	}
 }

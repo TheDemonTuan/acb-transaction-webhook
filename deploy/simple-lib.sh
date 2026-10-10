@@ -121,12 +121,46 @@ check_secret_permissions() {
   fi
   return 0
 }
+# Create only a missing config: publish a durable, owned file without replacing
+# a concurrently supplied operator config. Existing secrets are never repaired.
+bootstrap_sepay_store_config() {
+  python3 - "${1:-$DEPLOY_PATH/deploy/secrets}" <<'PY'
+import os,stat,sys,tempfile
+directory=sys.argv[1]
+info=os.lstat(directory)
+if not stat.S_ISDIR(info.st_mode) or (stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid)!=(0o700,1000,1000):
+    raise SystemExit('SePay secrets directory must be a regular directory with mode 0700 owner 1000:1000')
+target=os.path.join(directory,'sepay_store_config')
+def existing():
+    try: info=os.lstat(target)
+    except FileNotFoundError: return False
+    if not stat.S_ISREG(info.st_mode) or (stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid)!=(0o600,1000,1000):
+        raise SystemExit('sepay_store_config must be a regular file with mode 0600 owner 1000:1000')
+    return True
+if not existing():
+    fd,temporary=tempfile.mkstemp(prefix='.sepay-config-',dir=directory)
+    try:
+        with os.fdopen(fd,'wb') as stream:
+            os.fchmod(stream.fileno(),0o600)
+            info=os.fstat(stream.fileno())
+            if (info.st_uid,info.st_gid)!=(1000,1000): os.fchown(stream.fileno(),1000,1000)
+            stream.write(b'{"mode":"disabled"}\n')
+            stream.flush();os.fsync(stream.fileno())
+        try: os.link(temporary,target)
+        except FileExistsError: existing()
+    finally:
+        os.unlink(temporary)
+    descriptor=os.open(directory,os.O_DIRECTORY)
+    try: os.fsync(descriptor)
+    finally: os.close(descriptor)
+PY
+}
 validate_permissions() {
   python3 - "$DEPLOY_PATH/deploy" "$DEPLOY_PATH/data/backups" <<'PY'
 import os,stat,sys
 root,backup=sys.argv[1:]
 checks=[(root+'/.env.production',0o600,1000,1000),(root+'/secrets',0o700,1000,1000),(backup,0o700,1000,1000)]
-checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','tts_internal_token')]
+checks += [(root+'/secrets/'+n,0o600,1000,1000) for n in ('app_master_key','worker_internal_token','tts_internal_token','sepay_store_config')]
 checks += [(root+'/secrets/'+n,0o640,1000,1000) for n in ('bark_basic_auth_user','bark_basic_auth_password')]
 for path,mode,uid,gid in checks:
     st=os.stat(path)

@@ -8,8 +8,8 @@ export interface RealtimeEnvelope<T = unknown> {
 }
 
 export interface BankTransactionCreditData {
-  bank: 'ACB' | 'KienlongBank';
-  provider?: 'PAYOS';
+  bank: string;
+  provider?: 'PAYOS' | 'SEPAY';
   orderCode?: string;
   paymentOrigin?: 'STATIC_URL' | 'OPERATOR_DYNAMIC';
   accountMasked?: string;

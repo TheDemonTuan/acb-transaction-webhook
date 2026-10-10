@@ -270,6 +270,11 @@ class Fixture(migration.Migration):
             function = args[4].split('; ')[-1].split()[0]
             bundle = Path(args[6])
             values = args[7:]
+            if function == 'bootstrap_sepay_store_config':
+                path = self.root / 'deploy/secrets/sepay_store_config'
+                if not path.exists():
+                    path.write_bytes(b'{"mode":"disabled"}\n')
+                return b''
             if function == 'compose_release':
                 candidate = bundle.name == NEW
                 for service in values[values.index('--no-deps') + 1:]:
@@ -368,6 +373,24 @@ class MigrationDrill(unittest.TestCase):
             with self.assertRaises(migration.MigrationError):
                 self.driver.apply(self.driver.prior)
         self.assertEqual(self.driver.plan['phase'], 'BACKEND_READY')
+
+    def test_candidate_bootstraps_disabled_config_before_starting_gateways(self):
+        self.stage_to_backend()
+        config = self.driver.root / 'deploy/secrets/sepay_store_config'
+        self.assertEqual(json.loads(config.read_bytes()), {'mode': 'disabled'})
+        bootstrap = next(i for i, call in enumerate(self.driver.calls)
+                         if call[:2] == ('bash', '-Eeuo') and 'bootstrap_sepay_store_config' in call[4])
+        startup = next(i for i, call in enumerate(self.driver.calls)
+                       if call[:2] == ('bash', '-Eeuo') and 'compose_release' in call[4]
+                       and call[6] == str(self.driver.release) and 'gateway-blue' in call)
+        self.assertLess(bootstrap, startup)
+
+    def test_candidate_startup_preserves_operator_sepay_config(self):
+        config = self.driver.root / 'deploy/secrets/sepay_store_config'
+        payload = b'{"mode":"observe","webhookSecret":"private-fixture"}\n'
+        config.write_bytes(payload)
+        self.stage_to_backend()
+        self.assertEqual(config.read_bytes(), payload)
 
     def test_readonly_check_no_lock_marker_snapshot_or_mutating_command(self):
         before = {p.relative_to(self.driver.root): p.read_bytes() for p in self.driver.root.rglob('*') if p.is_file()}
@@ -482,14 +505,21 @@ class MigrationDrill(unittest.TestCase):
         self.driver.receipts['100'] = self.driver.receipt(other_sha, 'publish', '99')
         self.driver.archives[1100] = zipped({'receipt.json': encoded(self.driver.receipts['100'])})
         original = self.driver.command
-        def commands(args, **kwargs):
-            result = original(args, **kwargs)
+        config = self.driver.root / 'deploy/secrets/sepay_store_config'
+        config.unlink()  # Existing deployment predates the new secret inventory.
+        def commands(args, *positional, **kwargs):
+            result = original(args, *positional, **kwargs)
             if args[:3] == ['gh', 'workflow', 'run']:
                 self.driver.current_frontend = other_sha
             return result
         with mock.patch.object(self.driver, 'source_proof', return_value=self.driver.plan['source']), \
-                mock.patch.object(self.driver, 'command', side_effect=commands):
+                mock.patch.object(self.driver, 'command', side_effect=commands), \
+                mock.patch.object(self.driver, 'upgrade_publisher', wraps=self.driver.upgrade_publisher) as upgrade, \
+                mock.patch.object(self.driver, 'publisher_ready', wraps=self.driver.publisher_ready) as ready:
             result = self.driver.deploy_and_publish()
+        upgrade.assert_called_once()
+        ready.assert_called_once()
+        self.assertEqual(json.loads(config.read_bytes()), {'mode': 'disabled'})
         self.assertEqual(result['phase'], 'FRONTEND_READY')
         self.assertEqual(result['release_sha'], other_sha)
         self.assertFalse(result['authoritative_backup'])

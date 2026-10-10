@@ -195,11 +195,12 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 			t.first_seen_at,
 			COALESCE(t.ingest_source, 'REALTIME'),
 			c.bank_code,
-			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' ELSE '' END,
+			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' WHEN sr.transaction_id IS NOT NULL THEN 'SEPAY' ELSE '' END,
 			COALESCE(CAST(po.order_code AS TEXT), '')
 		FROM transactions t
 		JOIN connections c ON c.id = t.connection_id
-		LEFT JOIN payment_orders po ON po.transaction_id = t.id` + itemWhere + ` ORDER BY t.first_seen_at DESC, t.id DESC LIMIT ?`
+		LEFT JOIN payment_orders po ON po.transaction_id = t.id
+		LEFT JOIN sepay_receipts sr ON sr.transaction_id = t.id` + itemWhere + ` ORDER BY t.first_seen_at DESC, t.id DESC LIMIT ?`
 	itemArgs = append(itemArgs, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, query, itemArgs...)
@@ -277,11 +278,12 @@ func (s *Store) GetTransactionByID(ctx context.Context, id string) (*Transaction
 			t.first_seen_at,
 			COALESCE(t.ingest_source, 'REALTIME'),
 			c.bank_code,
-			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' ELSE '' END,
+			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' WHEN sr.transaction_id IS NOT NULL THEN 'SEPAY' ELSE '' END,
 			COALESCE(CAST(po.order_code AS TEXT), '')
 		FROM transactions t
 		JOIN connections c ON c.id = t.connection_id
 		LEFT JOIN payment_orders po ON po.transaction_id = t.id
+		LEFT JOIN sepay_receipts sr ON sr.transaction_id = t.id
 		WHERE t.id = ?`
 
 	var item TransactionView

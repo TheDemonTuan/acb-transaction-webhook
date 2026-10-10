@@ -41,7 +41,7 @@ func (s *Server) savePaymentProviderConfig(w http.ResponseWriter, r *http.Reques
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
 	decoder.UseNumber()
-	value, err := decodePayOSJSONValue(decoder, 0)
+	value, err := decodeStrictJSONValue(decoder, 0)
 	if err != nil {
 		paymentBadRequest(w, "INVALID_PROVIDER_CONFIG")
 		return

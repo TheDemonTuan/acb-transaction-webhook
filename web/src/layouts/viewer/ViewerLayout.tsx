@@ -12,7 +12,7 @@ export const ViewerLayout: React.FC = () => {
     <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col font-sans antialiased">
       <ViewerHeader />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+      <main className="flex-1 max-w-[1280px] w-full mx-auto px-3 sm:px-6 py-4 sm:py-6">
         <Outlet />
       </main>
 
@@ -86,7 +86,7 @@ export const ViewerLayout: React.FC = () => {
         )}
 
         <div className="text-[11px] text-stone-400">
-          Theo dõi giao dịch &bull; payOS / KienlongBank
+          Theo dõi giao dịch &bull; SePay Store + payOS
         </div>
       </footer>
     </div>

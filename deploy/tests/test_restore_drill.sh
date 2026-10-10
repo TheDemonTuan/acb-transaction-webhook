@@ -91,7 +91,7 @@ else
   TESTS_FAILED=$(( TESTS_FAILED + 1 ))
 fi
 
-for secret in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for secret in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password sepay_store_config; do
   original="$T3/fixture/secrets/$secret"
   restored="$T3/canary_restored/secrets/$secret"
   if [[ -s "$original" && -s "$restored" ]] && cmp -s "$original" "$restored"; then
@@ -110,6 +110,25 @@ for secret in app_master_key worker_internal_token tts_internal_token bark_basic
     TESTS_PASSED=$(( TESTS_PASSED + 1 ))
   fi
 done
+
+rc=0
+python3 - "$evidence_out" "$T3/fixture/backups" <<'PY' || rc=$?
+import hashlib,json,pathlib,sys
+evidence=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert evidence['table_counts']['sepay_receipts']==1
+assert evidence['table_counts']['sepay_telegram_inbox']==1
+assert evidence['table_counts']['transactions']==5
+manifests=list(pathlib.Path(sys.argv[2]).glob('manifest-secrets-*.json'))
+assert len(manifests)==1
+manifest=json.loads(manifests[0].read_text())
+names={item['name'] for item in manifest['secret_files']}
+assert names=={'app_master_key','worker_internal_token','tts_internal_token',
+               'bark_basic_auth_user','bark_basic_auth_password','sepay_store_config'}
+fixture=pathlib.Path(sys.argv[2]).parent/'secrets'
+for item in manifest['secret_files']:
+    assert hashlib.sha256((fixture/item['name']).read_bytes()).hexdigest()==item['sha256']
+PY
+assert_eq "0" "$rc" "Backup manifest includes exact SePay config and restore evidence preserves receipts/inbox"
 
 # ==============================================================================
 # TEST 4: restore-db.sh fails when using wrong age recovery identity

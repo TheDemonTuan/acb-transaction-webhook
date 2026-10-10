@@ -55,7 +55,8 @@ def trusted(path, directory=False):
 def scope(config):
     routers = {'acb-deny-internal', 'acb-public-deny-private', 'acb-public-sse-router',
                'acb-public-api-router', 'acb-api-router', 'acb-deploy-gateway',
-               'acb-payos-webhook-router', 'acb-public-payments-router', 'acb-admin-payments-router'}
+               'acb-payos-webhook-router', 'acb-sepay-telegram-router',
+               'acb-public-payments-router', 'acb-admin-payments-router'}
     if not isinstance(config, dict) or set(config) != {'http'}:
         raise PublishError('Only ACB HTTP topology may be published')
     http = config['http']
@@ -71,6 +72,10 @@ def scope(config):
         'payos-webhook-body-limit': {'buffering': {
             'maxRequestBodyBytes': 65536, 'memRequestBodyBytes': 65536}},
         'payos-webhook-rate-limit': {'rateLimit': {
+            'average': 60, 'period': '1s', 'burst': 120, 'sourceCriterion': {'requestHost': True}}},
+        'sepay-telegram-body-limit': {'buffering': {
+            'maxRequestBodyBytes': 65536, 'memRequestBodyBytes': 65536}},
+        'sepay-telegram-rate-limit': {'rateLimit': {
             'average': 60, 'period': '1s', 'burst': 120, 'sourceCriterion': {'requestHost': True}}},
     }
     middlewares = http.get('middlewares', {})

@@ -13,6 +13,7 @@ import uuid
 PUBLIC = 'transactions.tuannguyenviet.site'
 ADMIN = 'bank.tuannguyenviet.site'
 CALLBACK = '/api/integrations/payos/webhook'
+SEPAY_CALLBACK = '/api/integrations/sepay/telegram'
 IMAGE = 'curlimages/curl:8.12.1'
 
 
@@ -65,6 +66,27 @@ def main():
     status, _, _ = request('POST', CALLBACK, b'[', tunnel=False)
     assert status == 403, ('provider callback accepted outside tunnel', status)
 
+    status, headers, body = request('POST', SEPAY_CALLBACK, b'{}')
+    assert status == 503, ('disabled SePay callback must reach gateway fail-closed response', status)
+    assert headers['content-type'] == ['application/json'], headers
+    assert isinstance(json.loads(body), dict), body
+    assert 'location' not in headers, headers
+    assert headers['referrer-policy'] == ['no-referrer'], headers
+    assert headers['cache-control'] == ['no-store'], headers
+    for method, path in (('GET', SEPAY_CALLBACK), ('HEAD', SEPAY_CALLBACK),
+                         ('OPTIONS', SEPAY_CALLBACK), ('PUT', SEPAY_CALLBACK),
+                         ('POST', SEPAY_CALLBACK + '/'), ('POST', SEPAY_CALLBACK + '/child'),
+                         ('POST', '/api/integrations/sepay/other'), ('GET', '/api/v1/sepay-reviews')):
+        status, headers, _ = request(method, path)
+        assert status == 403, ('non-exact SePay route admitted', method, path, status)
+        assert 'location' not in headers, headers
+    status, _, _ = request('POST', SEPAY_CALLBACK, b'[' + b' ' * 65535)
+    assert status == 503, ('64KiB SePay body incorrectly rejected by edge', status)
+    status, _, _ = request('POST', SEPAY_CALLBACK, b'[' + b' ' * 65536)
+    assert status == 413, ('oversized SePay body reached backend', status)
+    status, _, _ = request('POST', SEPAY_CALLBACK, b'{}', tunnel=False)
+    assert status == 403, ('SePay callback accepted outside tunnel', status)
+
     capability = 'ingress-capability-' + uuid.uuid4().hex
     for host, prefix in ((PUBLIC, '/api/public/v1/payments/'),
                          (ADMIN, '/api/public/v1/payments/'),
@@ -87,6 +109,7 @@ def main():
         assert time.monotonic() < deadline, 'Traefik access-log control request missing'
         time.sleep(0.1)
     assert capability not in text, 'Payment capability leaked into Traefik logs'
+    assert 'acb-sepay-telegram-router' not in text, 'SePay callback leaked into Traefik access logs'
 
     # One parallel curl process avoids container startup skew that would refill
     # the token bucket between requests. All bodies fail locally before provider IO.
@@ -103,7 +126,16 @@ def main():
     assert len(codes) == 400, ('missing burst responses', len(codes))
     assert '429' in codes, 'Provider burst never triggered its dedicated rate limit'
     assert set(codes) <= {'400', '429'}, ('unexpected provider burst status', set(codes))
-    print('Payment ingress: exact POST, deny boundaries, tunnel, 64KiB, privacy/logs and burst verified')
+    sepay_config = config.replace(CALLBACK.encode(), SEPAY_CALLBACK.encode())
+    burst = subprocess.run(['docker', 'run', '--rm', '-i', '--network', 'container:edge-traefik',
+                            IMAGE, '--parallel', '--parallel-max', '200', '--config', '-'],
+                           input=sepay_config, capture_output=True, check=True, timeout=40)
+    codes = burst.stdout.decode().splitlines()
+    assert len(codes) == 400 and '429' in codes, ('SePay dedicated rate limit missing', set(codes))
+    assert set(codes) <= {'503', '429'}, ('unexpected disabled SePay burst status', set(codes))
+    status, _, _ = request('POST', CALLBACK, b'[')
+    assert status == 400, ('SePay rate limit consumed payOS quota', status)
+    print('Payment/SePay ingress: exact POST, deny boundaries, tunnel, 64KiB, privacy/logs and isolated burst verified')
 
 
 if __name__ == '__main__':

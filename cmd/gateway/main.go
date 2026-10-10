@@ -26,6 +26,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/sepay"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/webhook"
@@ -197,6 +198,11 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	sepayConfig, err := sepay.ParseConfig(cfg.SePayStoreConfigJSON)
+	if err != nil {
+		logger.Error("invalid SePay Store configuration", "error", err)
+		os.Exit(1)
+	}
 
 	if cfg.Production && cfg.RuntimeRole != config.RuntimeRoleGateway {
 		logger.Error("gateway requires RUNTIME_ROLE=gateway in production", "role", cfg.RuntimeRole)
@@ -310,6 +316,7 @@ func main() {
 		service := payments.NewManagedService(cfg, store, server.PaymentCommitNotifier()).
 			WithReconcileWake(workerClient.WakePaymentReconciler)
 		server.WithPayments(service)
+		server.WithSePay(sepay.NewService(sepayConfig, store, server.PaymentCommitNotifier()))
 		if cfg.WorkerRealtimeEnabled {
 			coordinator := httpapi.NewRealtimeCoordinator(server, time.Second)
 			server.WithRealtimeSubmit(coordinator.Submit)
@@ -390,6 +397,7 @@ func main() {
 			})
 		service := payments.NewManagedService(cfg, store, server.PaymentCommitNotifier())
 		server.WithPayments(service)
+		server.WithSePay(sepay.NewService(sepayConfig, store, server.PaymentCommitNotifier()))
 		go service.Start(ctx)
 		monolithPayments = service
 		monolithDispatcher = dispatcher

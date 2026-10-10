@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = 'transactions.tuannguyenviet.site'
 ADMIN = 'bank.tuannguyenviet.site'
 CALLBACK = '/api/integrations/payos/webhook'
+SEPAY_CALLBACK = '/api/integrations/sepay/telegram'
 
 
 def matches(rule, host, path, method):
@@ -125,6 +126,53 @@ class PaymentIngressTests(unittest.TestCase):
             _, public_admin = selected(config, PUBLIC, '/api/v1/payments/opaque-capability', 'GET')
             self.assertIn('deny-internal', public_admin['middlewares'])
             self.assertEqual(selected(config, 'other.example', CALLBACK, 'POST'), (None, None))
+
+    def test_sepay_exact_callback_and_isolated_limits(self):
+        for label, config in self.configurations:
+            for method, path in (('GET', SEPAY_CALLBACK), ('HEAD', SEPAY_CALLBACK),
+                                 ('OPTIONS', SEPAY_CALLBACK), ('PUT', SEPAY_CALLBACK),
+                                 ('POST', SEPAY_CALLBACK + '/'), ('POST', SEPAY_CALLBACK + '/child'),
+                                 ('POST', '/api/integrations/sepay/other'),
+                                 ('GET', '/api/v1/sepay-reviews')):
+                with self.subTest(config=label, method=method, path=path):
+                    _, router = selected(config, PUBLIC, path, method)
+                    self.assertIn('deny-internal', router['middlewares'])
+            with self.subTest(config=label):
+                name, router = selected(config, PUBLIC, SEPAY_CALLBACK, 'POST')
+                self.assertEqual(name, 'acb-sepay-telegram-router')
+                self.assertEqual(router['priority'], 1150)
+                self.assertEqual(router['service'], 'acb-service')
+                self.assertIs(router['observability']['accessLogs'], False)
+                self.assertEqual(router['middlewares'], [
+                    'tunnel-only', 'security-headers', 'payment-privacy',
+                    'sepay-telegram-rate-limit', 'sepay-telegram-body-limit'])
+                policies = dict(self.shared, **config['http'].get('middlewares', {}))
+                self.assertEqual(policies['sepay-telegram-rate-limit'], {'rateLimit': {
+                    'average': 60, 'period': '1s', 'burst': 120,
+                    'sourceCriterion': {'requestHost': True}}})
+                self.assertEqual(policies['sepay-telegram-body-limit'], {'buffering': {
+                    'maxRequestBodyBytes': 65536, 'memRequestBodyBytes': 65536}})
+                headers = {}
+                for policy in (policies[name] for name in router['middlewares']):
+                    self.assertNotIn('redirectRegex', policy)
+                    self.assertNotIn('redirectScheme', policy)
+                    self.assertNotIn('forwardAuth', policy)
+                    request_headers = policy.get('headers', {}).get('customRequestHeaders', {})
+                    self.assertNotIn('x-telegram-bot-api-secret-token',
+                                     {name.lower() for name in request_headers})
+                    headers.update(policy.get('headers', {}).get('customResponseHeaders', {}))
+                self.assertEqual(headers['Referrer-Policy'], 'no-referrer')
+                self.assertEqual(headers['Cache-Control'], 'no-store')
+                self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+                self.assertEqual(headers['X-Frame-Options'], 'DENY')
+                expected_slot = 'blue' if label == 'shipped' else label
+                upstream = config['http']['services']['acb-service']['loadBalancer']['servers']
+                self.assertEqual(upstream, [{'url': f'http://acb-web-{expected_slot}:8090'}])
+                self.assertNotEqual(selected(config, ADMIN, SEPAY_CALLBACK, 'POST')[0], name)
+                self.assertEqual(selected(config, 'other.example', SEPAY_CALLBACK, 'POST'), (None, None))
+                _, payos = selected(config, PUBLIC, CALLBACK, 'POST')
+                self.assertIn('payos-webhook-rate-limit', payos['middlewares'])
+                self.assertNotIn('sepay-telegram-rate-limit', payos['middlewares'])
 
     def test_assets_payment_pages_remove_inherited_referrer_policy(self):
         # Cloudflare _headers replaces the inherited value only with its explicit

@@ -634,6 +634,7 @@ class Migration:
             require(regular(path) == data, 'candidate runtime drift')
         else:
             atomic(path, data)
+        self.shell(self.release, 'bootstrap_sepay_store_config')
         self.compose(False, 'up', '-d', '--no-deps', 'tts-gateway', 'bark', 'worker', 'gateway-' + slot)
         route = self.command(['bash', self.release / 'render-route.sh', slot])
         atomic(self.snapshot / 'candidate-acb.yml', route)
@@ -1015,12 +1016,16 @@ class Migration:
 
     def deploy_and_publish(self):
         # Post-cutover payOS deployments use standard deploy.sh under its lock,
-        # followed by exact central publication matching the successful source run.
+        # with app-scoped policy upgrade and exact central publication matching the source run.
         pending = self.root / '.payos-production-pending'
         self.publication_journal = pending
         entries = self.verified_bundle(self.release, self.sha, True)[1]
         source = self.source_proof(self.sha, self.source_run_id, entries)
         self.central_current()
+        self.shell(self.release, 'bootstrap_sepay_store_config')
+        if getattr(self, 'automatic', False):
+            self.upgrade_publisher()
+        self.publisher_ready()
         if pending.exists():
             plan = decode(regular(pending))
             require(plan.get('sha') == self.sha and plan.get('source') == source,

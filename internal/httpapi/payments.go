@@ -100,7 +100,7 @@ func decodePaymentRequest(w http.ResponseWriter, r *http.Request, public bool) (
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()
-	value, err := decodePayOSJSONValue(decoder, 0)
+	value, err := decodeStrictJSONValue(decoder, 0)
 	if err == nil {
 		_, err = decoder.Token()
 		if err == io.EOF {
