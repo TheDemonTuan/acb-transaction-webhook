@@ -525,6 +525,36 @@ class MigrationDrill(unittest.TestCase):
         self.assertFalse(result['authoritative_backup'])
         self.assertFalse(result['awaiting_owner_configuration'])
 
+    def test_automatic_supersedes_stale_failed_journal(self):
+        self.driver.automatic = True
+        self.driver.apply()
+        # Simulate an earlier failed automatic run that left an uncompleted journal for old_sha
+        old_sha = 'e' * 40
+        pending = self.driver.root / '.payos-production-pending'
+        pending.write_text(json.dumps({'sha': old_sha, 'source': {'source_run_id': '88'}}))
+        # Now a new commit arrives
+        new_sha = 'f' * 40
+        self.driver.bundle(new_sha, True)
+        self.driver.sha = new_sha
+        self.driver.release = self.driver.root / 'releases' / new_sha
+        self.driver.current_frontend = FRONTEND
+        self.driver.receipts['100'] = self.driver.receipt(new_sha, 'publish', '99')
+        self.driver.archives[1100] = zipped({'receipt.json': encoded(self.driver.receipts['100'])})
+        original = self.driver.command
+        def commands(args, *positional, **kwargs):
+            result = original(args, *positional, **kwargs)
+            if args[:3] == ['gh', 'workflow', 'run']:
+                self.driver.current_frontend = new_sha
+            return result
+        with mock.patch.object(self.driver, 'source_proof', return_value=self.driver.plan['source']), \
+                mock.patch.object(self.driver, 'command', side_effect=commands), \
+                mock.patch.object(self.driver, 'upgrade_publisher'), \
+                mock.patch.object(self.driver, 'publisher_ready'):
+            result = self.driver.deploy_and_publish()
+        self.assertEqual(result['phase'], 'FRONTEND_READY')
+        self.assertEqual(result['release_sha'], new_sha)
+        self.assertFalse(pending.exists())
+
     def test_unresolved_dispatch_times_out_without_redispatch(self):
         self.stage_to_backend()
         count = len(self.driver.dispatches)

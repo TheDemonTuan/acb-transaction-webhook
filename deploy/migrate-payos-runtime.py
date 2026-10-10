@@ -1028,9 +1028,14 @@ class Migration:
         self.publisher_ready()
         if pending.exists():
             plan = decode(regular(pending))
-            require(plan.get('sha') == self.sha and plan.get('source') == source,
-                    'production publication journal differs from requested release')
-            self.plan = plan
+            if getattr(self, 'automatic', False) and plan.get('sha') != self.sha:
+                pending.unlink()
+                self.plan = {'sha': self.sha, 'source': source, 'prior_frontend': self.latest_central_publication()}
+                atomic(pending, self.plan)
+            else:
+                require(plan.get('sha') == self.sha and plan.get('source') == source,
+                        'production publication journal differs from requested release')
+                self.plan = plan
         else:
             self.plan = {'sha': self.sha, 'source': source, 'prior_frontend': self.latest_central_publication()}
             atomic(pending, self.plan)
