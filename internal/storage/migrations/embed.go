@@ -51,3 +51,8 @@ var PaymentProviderConfigSQL string
 //
 //go:embed 017_sepay_store.sql
 var SePayStoreSQL string
+
+// SePayManagedConfigSQL embeds schema version 18 encrypted admin configuration.
+//
+//go:embed 018_sepay_managed_config.sql
+var SePayManagedConfigSQL string

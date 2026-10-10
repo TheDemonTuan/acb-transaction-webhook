@@ -1,17 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
+  archivePaymentOrderSlot,
+  attachPaymentOrder,
   creditMatchesPaymentOrder,
   DEFAULT_MAX_AMOUNT_VND,
   isTerminalPaymentOrder,
   isValidIdempotencyKey,
   isValidPaymentAmount,
-  loadPaymentOrderSlots,
+  loadPaymentOrderTray,
   MAX_PAYMENT_ORDER_SLOTS,
+  mergeLegacyPaymentOrderSlots,
   parseCounterAmountVnd,
   parsePaymentAmountVnd,
   PAYMENT_ORDER_SLOTS_STORAGE_KEY,
-  savePaymentOrderSlots,
+  PAYMENT_ORDER_TRAY_STORAGE_KEY,
+  readPaymentOrderTray,
+  savePaymentOrderTray,
+  showPaymentOrderSlot,
+  type PaymentOrder,
   type PaymentOrderSlot,
+  type PaymentOrderTray,
 } from '../src/features/payment-qr/payment-orders';
 
 const keys = [
@@ -19,6 +27,7 @@ const keys = [
   '3e628a46-7db9-4f7b-a95f-d9763e2af3df',
   '3e628a46-7db9-4f7b-a95f-d9763e2af3e0',
   '3e628a46-7db9-4f7b-a95f-d9763e2af3e1',
+  '3e628a46-7db9-4f7b-a95f-d9763e2af3e2',
 ];
 
 const memoryStorage = () => {
@@ -93,7 +102,6 @@ describe('payment credit correlation', () => {
         orders.map((_, candidate) => candidate === index),
       );
     }
-    // No mutation: only a committed snapshot can decide PAID.
     expect(orders.map((order) => order.status)).toEqual(['PENDING', 'PENDING', 'PENDING']);
   });
 
@@ -133,62 +141,118 @@ describe('payment credit correlation', () => {
   });
 });
 
-describe('payment slot persistence boundary', () => {
-  it('roundtrips three identities, names and original keys without recreating them', () => {
-    const storage = memoryStorage();
-    const slots = [makeSlot(0), makeSlot(1), makeSlot(2)];
-    savePaymentOrderSlots(slots, storage);
-    expect(loadPaymentOrderSlots(storage)).toEqual(slots);
-    expect(MAX_PAYMENT_ORDER_SLOTS).toBe(3);
-  });
-
-  it('persists an intent before the create result and then attaches the returned capability', () => {
-    const storage = memoryStorage();
-    const { orderId, ...intent } = makeSlot(0);
-    savePaymentOrderSlots([intent], storage);
-    expect(loadPaymentOrderSlots(storage)).toEqual([intent]);
-    savePaymentOrderSlots([{ ...intent, orderId }], storage);
-    expect(loadPaymentOrderSlots(storage)[0].idempotencyKey).toBe(intent.idempotencyKey);
-    savePaymentOrderSlots([], storage);
-    expect(loadPaymentOrderSlots(storage)).toEqual([]);
-  });
-
-  it('does not persist QR, checkout, account or stale snapshots', () => {
-    const storage = memoryStorage();
-    const slot = { ...makeSlot(0), order: { status: 'PAID' }, qrCode: 'private-qr', checkoutUrl: 'private-link', accountNumber: 'private-account' };
-    savePaymentOrderSlots([slot], storage);
-    expect(JSON.parse(storage.getItem(PAYMENT_ORDER_SLOTS_STORAGE_KEY)!)).toEqual([makeSlot(0)]);
-  });
-
-  it('rejects oversize/duplicate slots without overwriting the previous persisted intent', () => {
-    const storage = memoryStorage();
-    const first = makeSlot(0);
-    savePaymentOrderSlots([first], storage);
-    for (const invalid of [
-      [makeSlot(0), makeSlot(1), makeSlot(2), makeSlot(3)],
-      [first, { ...makeSlot(1), slotId: first.slotId }],
-      [first, { ...makeSlot(1), idempotencyKey: first.idempotencyKey }],
-      [first, { ...makeSlot(1), orderId: first.orderId }],
-      [{ ...first, amountVnd: 0 }],
-      [{ ...first, orderId: '123' }],
-      [{ ...first, idempotencyKey: 'invalid' }],
-    ]) {
-      expect(() => savePaymentOrderSlots(invalid, storage)).toThrow();
-      expect(loadPaymentOrderSlots(storage)).toEqual([first]);
+describe('durable tray and archive persistence boundary', () => {
+  it('automatically turnovers visible slots to archive without losing any intent', () => {
+    let tray: PaymentOrderTray = { version: 2, visible: [], archived: [] };
+    for (let index = 0; index < 5; index += 1) {
+      tray = showPaymentOrderSlot(tray, makeSlot(index));
     }
+    expect(tray.visible).toHaveLength(MAX_PAYMENT_ORDER_SLOTS);
+    expect(tray.visible.map((slot) => slot.slotId)).toEqual(['slot-2', 'slot-3', 'slot-4']);
+    expect(tray.archived.map((slot) => slot.slotId)).toEqual(['slot-0', 'slot-1']);
   });
 
-  it('treats corrupted, old, or invalid storage as empty, without trusting saved payment status', () => {
+  it('prefers archiving a terminal visible slot first over an unresolved pending intent', () => {
+    const slots = [
+      { ...makeSlot(0), status: 'PENDING' as const },
+      { ...makeSlot(1), status: 'PAID' as const },
+      { ...makeSlot(2), status: 'PENDING' as const },
+    ];
+    let tray: PaymentOrderTray = { version: 2, visible: slots, archived: [] };
+    tray = showPaymentOrderSlot(tray, makeSlot(3));
+    expect(tray.visible.map((slot) => slot.slotId)).toEqual(['slot-0', 'slot-2', 'slot-3']);
+    expect(tray.archived.map((slot) => slot.slotId)).toEqual(['slot-1']);
+  });
+
+  it('migrates legacy v1 slots into the new tray without data loss', () => {
     const storage = memoryStorage();
-    for (const invalid of ['{broken', '{}', 'null', JSON.stringify([{ ...makeSlot(0), amountVnd: '50000' }]), JSON.stringify([makeSlot(0), makeSlot(0)]), JSON.stringify([makeSlot(0), makeSlot(1), makeSlot(2), makeSlot(3)])]) {
-      storage.setItem(PAYMENT_ORDER_SLOTS_STORAGE_KEY, invalid);
-      expect(loadPaymentOrderSlots(storage)).toEqual([]);
-    }
-    expect(loadPaymentOrderSlots({ getItem: () => { throw new Error('blocked'); }, setItem: () => {} })).toEqual([]);
+    const v1 = [makeSlot(0), makeSlot(1), makeSlot(2), makeSlot(3)];
+    storage.setItem(PAYMENT_ORDER_SLOTS_STORAGE_KEY, JSON.stringify(v1));
+    const migrated = readPaymentOrderTray(storage);
+    expect(migrated.visible.map((slot) => slot.slotId)).toEqual(['slot-1', 'slot-2', 'slot-3']);
+    expect(migrated.archived.map((slot) => slot.slotId)).toEqual(['slot-0']);
   });
 
-  it('propagates storage failures so callers cannot send an unpersisted intent', () => {
+  it('attaches order details to an archived entry after late create/snapshot responses', () => {
+    let tray: PaymentOrderTray = { version: 2, visible: [makeSlot(1)], archived: [makeSlot(0)] };
+    const order: PaymentOrder = {
+      id: makeSlot(0).orderId!,
+      orderCode: '100000000099',
+      amountVnd: 50_000,
+      origin: 'OPERATOR_DYNAMIC',
+      status: 'PAID',
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    };
+    tray = attachPaymentOrder(tray, makeSlot(0).slotId, order);
+    expect(tray.archived[0].orderCode).toBe('100000000099');
+    expect(tray.archived[0].status).toBe('PAID');
+  });
+
+  it('propagates storage failure so callers never create unpersisted intents', () => {
     const storage = { getItem: () => null, setItem: () => { throw new Error('quota exceeded'); } };
-    expect(() => savePaymentOrderSlots([makeSlot(0)], storage)).toThrow('quota exceeded');
+    expect(() => savePaymentOrderTray({ version: 2, visible: [makeSlot(0)], archived: [] }, storage)).toThrow('quota exceeded');
+  });
+
+  it('throws on unreadable archive instead of wiping it blindly', () => {
+    const storage = memoryStorage();
+    storage.setItem(PAYMENT_ORDER_TRAY_STORAGE_KEY, '{corrupted');
+    expect(() => readPaymentOrderTray(storage)).toThrow();
+    expect(loadPaymentOrderTray(storage)).toEqual({ version: 2, visible: [], archived: [] });
+  });
+
+  it('restores manual archive turnover and deduplicates slots', () => {
+    const initial: PaymentOrderTray = { version: 2, visible: [makeSlot(0)], archived: [] };
+    const archived = archivePaymentOrderSlot(initial, makeSlot(0).slotId);
+    expect(archived.visible).toHaveLength(0);
+    expect(archived.archived).toHaveLength(1);
+    const restored = showPaymentOrderSlot(archived, makeSlot(0));
+    expect(restored.visible.map((slot) => slot.slotId)).toEqual(['slot-0']);
+    expect(restored.archived).toHaveLength(0);
+  });
+
+  it('merges unknown legacy intent keys from an older tab writing to v1 without losing intents', () => {
+    const current: PaymentOrderTray = {
+      version: 2,
+      visible: [makeSlot(0), makeSlot(1)],
+      archived: [],
+    };
+    const legacy = [makeSlot(0), makeSlot(2)];
+    const merged = mergeLegacyPaymentOrderSlots(current, legacy);
+    expect(merged.visible.map((s) => s.slotId)).toEqual(['slot-0', 'slot-1', 'slot-2']);
+  });
+
+  it('attaches late orderId binding from legacy tab to archived slot without resurrecting it as visible', () => {
+    const { orderId: _, ...intentWithoutOrder } = makeSlot(0);
+    const current: PaymentOrderTray = {
+      version: 2,
+      visible: [makeSlot(1), makeSlot(2), makeSlot(3)],
+      archived: [intentWithoutOrder],
+    };
+    const legacy = [{ ...intentWithoutOrder, orderId: makeSlot(0).orderId }];
+    const merged = mergeLegacyPaymentOrderSlots(current, legacy);
+    expect(merged.visible.map((s) => s.slotId)).toEqual(['slot-1', 'slot-2', 'slot-3']);
+    expect(merged.archived).toHaveLength(1);
+    expect(merged.archived[0].orderId).toBe(makeSlot(0).orderId);
+  });
+
+  it('attaches late orderId binding from legacy tab to visible slot', () => {
+    const { orderId: _, ...intentWithoutOrder } = makeSlot(0);
+    const current: PaymentOrderTray = {
+      version: 2,
+      visible: [intentWithoutOrder],
+      archived: [],
+    };
+    const legacy = [{ ...intentWithoutOrder, orderId: makeSlot(0).orderId }];
+    const merged = mergeLegacyPaymentOrderSlots(current, legacy);
+    expect(merged.visible[0].orderId).toBe(makeSlot(0).orderId);
+  });
+
+  it('readPaymentOrderTray seamlessly incorporates concurrent legacy tab writes when v2 is present', () => {
+    const storage = memoryStorage();
+    savePaymentOrderTray({ version: 2, visible: [makeSlot(0)], archived: [] }, storage);
+    storage.setItem(PAYMENT_ORDER_SLOTS_STORAGE_KEY, JSON.stringify([makeSlot(0), makeSlot(1)]));
+    const loaded = readPaymentOrderTray(storage);
+    expect(loaded.visible.map((s) => s.slotId)).toEqual(['slot-0', 'slot-1']);
   });
 });

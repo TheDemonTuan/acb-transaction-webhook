@@ -23,6 +23,7 @@ func TestSQLiteMigrationRollbackOnFailure(t *testing.T) {
 	seedLegacyHistory(t, store)
 	// Construct the retained v14 schema without editing historical migrations.
 	if _, err := store.DB().ExecContext(ctx, `
+DROP TABLE sepay_managed_config;
 DROP TABLE sepay_receipts;
 DROP TABLE sepay_telegram_inbox;
 DROP TABLE payment_provider_operations;

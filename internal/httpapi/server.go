@@ -133,6 +133,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		paymentCreateLimiter: newIPRateLimiter(),
 		paymentGetLimiter:    newIPRateLimiter(),
 	}
+	s.sepay = sepay.NewService(sepay.Config{Mode: sepay.ModeDisabled}, store, s.PaymentCommitNotifier())
 	r := chi.NewRouter()
 	r.Use(requestID, s.platformHeaders, securityHeaders, paymentResponseHeaders, recoverer)
 	r.Get("/healthz", s.health)
@@ -169,6 +170,10 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Post("/payment-provider/confirm-webhook", s.confirmPaymentWebhook)
 		api.With(s.auth.Require(auth.Owner)).Get("/payment-provider/config", s.paymentProviderConfig)
 		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Put("/payment-provider/config", s.savePaymentProviderConfig)
+		api.With(s.auth.Require(auth.Owner)).Get("/sepay-store/config", s.sepayAdminConfig)
+		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Put("/sepay-store/config", s.saveSePayAdminConfig)
+		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Post("/sepay-store/telegram/register", s.registerSePayTelegram)
+		api.With(s.auth.Require(auth.Owner)).Get("/sepay-store/telegram/status", s.sepayTelegramStatus)
 		api.Get("/status", s.status)
 		api.Get("/csrf", auth.CSRF)
 		api.Get("/telemetry", s.telemetry)

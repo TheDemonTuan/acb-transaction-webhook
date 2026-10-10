@@ -247,4 +247,5 @@ CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_provider_status ON webhook_endp
 	{14, "2026-10-05-v14-poll-rows-matched", migrationfiles.PollRowsMatchedSQL},
 	{15, "2026-10-08-v15-payos-payment-orders", migrationfiles.PayOSPaymentOrdersSQL},
 	{16, "2026-10-09-v16-payment-provider-config", migrationfiles.PaymentProviderConfigSQL},
-	{17, "2026-10-10-v17-sepay-store", migrationfiles.SePayStoreSQL}}
+	{17, "2026-10-10-v17-sepay-store", migrationfiles.SePayStoreSQL},
+	{18, "2026-10-10-v18-sepay-managed-config", migrationfiles.SePayManagedConfigSQL}}

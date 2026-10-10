@@ -18,8 +18,8 @@ test.describe('Browser Full Regression Suite (Desktop/Mobile, State Sharing, Mul
     await expect(page.getByRole('heading', { name: /Tổng quan/ })).toBeVisible();
 
     // 2. Navigate to Bank Connection
-    await page.getByRole('button', { name: 'Kết nối payOS' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Kết nối payOS / KienlongBank' })).toBeVisible();
+    await page.getByRole('button', { name: 'Kết nối ngân hàng' }).first().click();
+    await expect(page).toHaveURL(/\/admin\/connection$/);
 
     // 3. Navigate to Notifications
     await page.getByRole('button', { name: /Kênh thông báo|Webhooks/ }).first().click();
@@ -129,10 +129,22 @@ test.describe('Browser Full Regression Suite (Desktop/Mobile, State Sharing, Mul
 
   test('public root is the cashier and never requests private administration data', async ({ page, baseURL }) => {
     const apiRequests: string[] = [];
+    // Keep role routing independent of cancellation of in-flight backend requests
+    // during the forbidden-route redirect; use actual loopback public snapshots.
+    const snapshots = new Map<string, unknown>();
+    for (const endpoint of ['payment-config', 'sepay-store', 'transactions']) {
+      const path = `/api/public/v1/${endpoint}`;
+      const response = await page.request.get(`${baseURL ?? 'http://127.0.0.1:5173'}${path}`);
+      expect(response.ok()).toBe(true);
+      snapshots.set(path, await response.json());
+    }
     await page.route('https://transactions.tuannguyenviet.site/**', async (route) => {
       const url = new URL(route.request().url());
-      if (url.pathname.startsWith('/api/')) apiRequests.push(url.pathname);
       if (url.pathname.endsWith('/events')) return route.abort();
+      if (url.pathname.startsWith('/api/')) {
+        apiRequests.push(url.pathname);
+        return route.fulfill({ status: snapshots.has(url.pathname) ? 200 : 403, json: snapshots.get(url.pathname) ?? { error: 'Forbidden' } });
+      }
       const response = await route.fetch({ url: `${baseURL ?? 'http://127.0.0.1:5173'}${url.pathname}${url.search}` });
       await route.fulfill({ response });
     });

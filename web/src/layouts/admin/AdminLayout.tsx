@@ -18,7 +18,7 @@ export const AdminLayout: React.FC = () => {
 
   const navTabs = [
     { label: 'Tổng quan', onClick: () => navigate('/admin/overview'), active: isCurrent('/') || isCurrent('/admin') || isCurrent('/admin/overview') },
-    { label: 'Kết nối payOS', onClick: () => navigate('/admin/connection'), active: isCurrent('/admin/connection') },
+    { label: 'Kết nối ngân hàng', onClick: () => navigate('/admin/connection'), active: isCurrent('/admin/connection') },
     { label: 'Giao dịch', onClick: () => navigate('/transactions'), active: false },
     { label: 'Kênh thông báo', onClick: () => navigate('/admin/notifications'), active: isCurrent('/admin/notifications') },
     { label: 'Phân phối', onClick: () => navigate('/admin/activity?tab=deliveries'), active: isCurrent('/admin/activity', 'tab=deliveries') },
