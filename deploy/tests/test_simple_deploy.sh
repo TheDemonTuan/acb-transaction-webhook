@@ -374,7 +374,7 @@ case "${DOCKER_FAULT_MODE:-}" in
   quiesce-timeout)
     if [[ " $* " == *' /worker -quiesce '* ]]; then sleep 50; fi ;;
   legacy-worker-capabilities|candidate-missing-payment-drain)
-    if [[ " $* " == *' /worker -deploy-capabilities '* ]] && { [[ "$DOCKER_FAULT_MODE" == legacy-worker-capabilities && " $* " == *' exec '* ]] || [[ "$DOCKER_FAULT_MODE" == candidate-missing-payment-drain && " $* " == *' run '* ]]; }; then
+    if [[ " $* " == *' -deploy-capabilities'* ]] && { [[ "$DOCKER_FAULT_MODE" == legacy-worker-capabilities && " $* " == *' exec '* ]] || [[ "$DOCKER_FAULT_MODE" == candidate-missing-payment-drain && " $* " == *' run '* ]]; }; then
       report="$("$REAL_DOCKER" "$@")"
       printf '%s\n' "$DOCKER_FAULT_MODE" > "${IDENTITY_FAULT_MARKER:?}"
       printf '%s' "$report" | python3 -c 'import json,os,sys; d=json.load(sys.stdin); d.pop("paymentDrain"); d.update(protocol=2,sessionCheckpoint=True) if os.environ["DOCKER_FAULT_MODE"]=="legacy-worker-capabilities" else None; json.dump(d,sys.stdout)'
