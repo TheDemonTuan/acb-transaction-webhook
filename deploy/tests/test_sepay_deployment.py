@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import yaml
 
 DEPLOY = Path(__file__).resolve().parents[1]
 
@@ -122,6 +123,59 @@ class SePayBootstrapTests(unittest.TestCase):
                 self.assertEqual(archive.extractfile(item['name']).read(), expected)
                 self.assertEqual(item['sha256'], hashlib.sha256(expected).hexdigest())
                 self.assertNotIn(expected.decode().strip(), result.stdout + result.stderr)
+
+
+@unittest.skipUnless(shutil.which('bash'), 'bash required for route validation')
+class BaselineRouteTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        sha = 'a' * 40
+        self.bundle = self.root / 'releases' / sha
+        self.bundle.mkdir(parents=True)
+        (self.root / 'state.env').write_text(
+            f'RELEASE_SHA={sha}\nGATEWAY_SLOT=blue\nPAYMENT_RUNTIME=payos\n', encoding='utf-8', newline='\n')
+        rendered = subprocess.run(['bash', (DEPLOY / 'render-route.sh').as_posix(), 'blue'],
+                                  check=True, capture_output=True, text=True)
+        self.policy = yaml.safe_load(rendered.stdout)
+        del self.policy['http']['routers']['acb-sepay-telegram-router']
+        for key in ('sepay-telegram-rate-limit', 'sepay-telegram-body-limit'):
+            del self.policy['http']['middlewares'][key]
+        self.route = self.root / 'acb.yml'
+        self.route.write_text(yaml.safe_dump(self.policy), encoding='utf-8')
+        (self.bundle / 'simple-lib.sh').write_bytes((DEPLOY / 'simple-lib.sh').read_bytes())
+        (self.bundle / 'render-route.sh').write_text(
+            "#!/usr/bin/env bash\ncat <<'BASELINE_YAML'\n" + yaml.safe_dump(self.policy) +
+            'BASELINE_YAML\n', encoding='utf-8', newline='\n')
+        (self.bundle / 'SHA256SUMS').write_text(''.join(
+            hashlib.sha256((self.bundle / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+            for name in ('simple-lib.sh', 'render-route.sh')), encoding='utf-8', newline='\n')
+
+    def validate(self, function='validate_baseline_route'):
+        return subprocess.run(['bash', '-Eeuo', 'pipefail', '-c',
+                               'source "$1"; DEPLOY_PATH="$2"; "$3" "$4" blue',
+                               'fixture', (DEPLOY / 'simple-lib.sh').as_posix(), self.root.as_posix(),
+                               function, self.route.as_posix()], capture_output=True, text=True)
+
+    def test_prior_policy_remains_valid_only_as_committed_baseline(self):
+        current = self.validate('validate_route')
+        self.assertNotEqual(current.returncode, 0)
+        baseline = self.validate()
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+
+    def test_unexpected_public_route_is_rejected(self):
+        self.policy['http']['routers']['unexpected-public'] = {
+            'rule': 'PathPrefix(`/api/v1`)', 'service': 'acb-service'}
+        self.route.write_text(yaml.safe_dump(self.policy), encoding='utf-8')
+        self.assertNotEqual(self.validate().returncode, 0)
+
+    def test_baseline_renderer_tampering_is_rejected(self):
+        with (self.bundle / 'render-route.sh').open('a', encoding='utf-8') as stream:
+            stream.write('# modified after bundle publication\n')
+        result = self.validate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('baseline bundle changed', result.stderr)
 
 
 if __name__ == '__main__':
