@@ -35,10 +35,12 @@ func (s *Server) publicSePayStore(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	response := SePayStoreConfigResponse{Provider: "SEPAY", Status: "DISABLED"}
-	var cfg sepay.Config
-	if s.sepay != nil {
-		cfg = s.sepay.Config()
+	snapshot, err := s.sepay.Snapshot(r.Context())
+	if err != nil {
+		writeSePayWebhookError(w, http.StatusServiceUnavailable, "SEPAY_UNAVAILABLE")
+		return
 	}
+	cfg := snapshot.Config()
 	switch cfg.Mode {
 	case sepay.ModeObserve:
 		response.Status = "OBSERVING"
@@ -67,11 +69,12 @@ const maxSePayWebhookBytes = 64 << 10
 // HandleUpdate returns only after ignored input or a durable storage commit.
 func (s *Server) sepayTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if s.sepay == nil || !s.sepay.Enabled() {
+	snapshot, err := s.sepay.Snapshot(r.Context())
+	if err != nil || !snapshot.Enabled() {
 		writeSePayWebhookError(w, http.StatusServiceUnavailable, "SEPAY_UNAVAILABLE")
 		return
 	}
-	if !s.sepay.Authenticate(r.Header.Get("X-Telegram-Bot-Api-Secret-Token")) {
+	if !snapshot.Authenticate(r.Header.Get("X-Telegram-Bot-Api-Secret-Token")) {
 		writeSePayWebhookError(w, http.StatusUnauthorized, "INVALID_SECRET")
 		return
 	}
@@ -103,7 +106,7 @@ func (s *Server) sepayTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		writeSePayWebhookError(w, http.StatusBadRequest, "INVALID_WEBHOOK")
 		return
 	}
-	if err := s.sepay.HandleUpdate(r.Context(), update); err != nil {
+	if err := snapshot.HandleUpdate(r.Context(), update); err != nil {
 		writeSePayWebhookError(w, http.StatusServiceUnavailable, "SEPAY_UNAVAILABLE")
 		return
 	}
@@ -125,8 +128,12 @@ type SePayStatusResponse struct {
 
 func (s *Server) sepayStatus(r *http.Request) (SePayStatusResponse, error) {
 	response := SePayStatusResponse{Mode: sepay.ModeDisabled}
-	if s.sepay != nil {
-		cfg := s.sepay.Config()
+	snapshot, err := s.sepay.Snapshot(r.Context())
+	if err != nil {
+		return response, err
+	}
+	if snapshot != nil {
+		cfg := snapshot.Config()
 		if cfg.Mode != "" {
 			response.Mode = cfg.Mode
 		}

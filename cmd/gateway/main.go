@@ -198,11 +198,6 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
-	sepayConfig, err := sepay.ParseConfig(cfg.SePayStoreConfigJSON)
-	if err != nil {
-		logger.Error("invalid SePay Store configuration", "error", err)
-		os.Exit(1)
-	}
 
 	if cfg.Production && cfg.RuntimeRole != config.RuntimeRoleGateway {
 		logger.Error("gateway requires RUNTIME_ROLE=gateway in production", "role", cfg.RuntimeRole)
@@ -297,6 +292,11 @@ func main() {
 			os.Exit(1)
 		}
 		store.WithKeyring(keyring)
+	}
+	sepayConfig, err := sepay.BootstrapConfig(ctx, store, cfg.SePayStoreConfigJSON)
+	if err != nil {
+		logger.Error("invalid SePay Store configuration", "error", err)
+		os.Exit(1)
 	}
 
 	hub := eventhub.New()

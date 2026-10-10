@@ -17,6 +17,11 @@ type Service struct {
 	cfg      Config
 	store    *storage.Store
 	onCommit func(storage.EventNotification)
+	revision int64
+	pinned   bool
+	token    string
+	fields   *AdminFields
+	telegram *TelegramClient
 }
 
 func NewService(cfg Config, store *storage.Store, onCommit func(storage.EventNotification)) *Service {
@@ -47,6 +52,13 @@ func (s *Service) Authenticate(secret string) bool {
 // them. Trusted accepted, review and duplicate messages return only after the
 // durable ingest transaction completes. Commit hints are never sent on failure.
 func (s *Service) HandleUpdate(ctx context.Context, update TelegramUpdate) error {
+	if s != nil && !s.pinned && s.store != nil {
+		snapshot, err := s.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		return snapshot.HandleUpdate(ctx, update)
+	}
 	if !s.Enabled() || s.store == nil {
 		return ErrUnavailable
 	}
@@ -60,7 +72,8 @@ func (s *Service) HandleUpdate(ctx context.Context, update TelegramUpdate) error
 		BotID: s.cfg.BotID, UpdateID: update.UpdateID,
 		ChatID: message.Chat.ID, MessageID: message.MessageID,
 		ActivationAt: s.cfg.ActivationAt, MessageAt: time.Unix(message.Date, 0).UTC(),
-		RawPayload: update.RawPayload,
+		RawPayload:     update.RawPayload,
+		ConfigRevision: s.revision,
 	}
 	if edited {
 		in.ReviewReason = ReasonEditedMessage

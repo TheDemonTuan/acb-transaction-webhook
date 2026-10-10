@@ -13,6 +13,7 @@ export const queryKeys = {
   adminOverview: ['admin-overview'] as const,
   paymentConfig: ['payment-config'] as const,
   sepayStore: ['sepay-store'] as const,
+  sepayAdminConfig: ['sepay-admin-config'] as const,
   paymentProviderConfig: ['payment-provider-config'] as const,
   payments: (params?: Record<string, unknown>) =>
     params !== undefined ? (['payments', params] as const) : (['payments'] as const),

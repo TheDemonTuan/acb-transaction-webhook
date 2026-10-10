@@ -35,7 +35,7 @@ export const ViewerLayout: React.FC = () => {
               onClick={() => navigate('/admin/connection')}
               className="hover:text-stone-700 transition cursor-pointer"
             >
-              Kết nối payOS
+              Kết nối ngân hàng
             </button>
             <span>&middot;</span>
             <button

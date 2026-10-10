@@ -11,6 +11,7 @@ import {
   type PaymentProviderConfigInput,
 } from '../../features/payment-qr/payment-orders';
 import type { SePayStoreConfig } from '../../features/payment-qr/sepay-store';
+import type { SePayAdminConfig, SePayAdminConfigInput, SePayTelegramStatus } from '../../features/bank-connection/sepay-admin';
 import type {
   AuditLog,
   BarkConfig,
@@ -33,6 +34,21 @@ export const fetchPaymentConfig = async (): Promise<PaymentConfig> =>
 
 export const fetchSePayStore = async (): Promise<SePayStoreConfig> =>
   publicApi<SePayStoreConfig>('/sepay-store');
+
+export const fetchSePayAdminConfig = async (): Promise<SePayAdminConfig> =>
+  api<SePayAdminConfig>('/sepay-store/config', { cache: 'no-store' });
+
+// Call directly: the write-only bot token must never enter a mutation cache.
+export const saveSePayAdminConfig = async (input: SePayAdminConfigInput): Promise<SePayAdminConfig> =>
+  api<SePayAdminConfig>('/sepay-store/config', {
+    method: 'PUT', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+
+export const registerSePayTelegram = async (): Promise<SePayTelegramStatus> =>
+  api<SePayTelegramStatus>('/sepay-store/telegram/register', { method: 'POST', cache: 'no-store' });
+
+export const fetchSePayTelegramStatus = async (): Promise<SePayTelegramStatus> =>
+  api<SePayTelegramStatus>('/sepay-store/telegram/status', { cache: 'no-store' });
 
 export const fetchPaymentProviderConfig = async (): Promise<PaymentProviderConfig> =>
   api<PaymentProviderConfig>('/payment-provider/config', { cache: 'no-store' });

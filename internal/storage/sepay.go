@@ -26,6 +26,7 @@ var ErrSePayReceiverMismatch = errors.New("SePay store receiver is immutable; us
 type SePayNotificationInput struct {
 	StoreKey, BankCode, AccountNumber, Mode, ReviewReason string
 	BotID, UpdateID, ChatID, MessageID                    int64
+	ConfigRevision                                        int64
 	ActivationAt, MessageAt                               time.Time
 	RawPayload                                            []byte
 	Credit                                                *SePayCredit
@@ -175,6 +176,9 @@ func (s *Store) IngestSePayNotification(ctx context.Context, in SePayNotificatio
 			return err
 		}
 		if err := s.checkMutationAllowedTx(ctx, tx); err != nil {
+			return err
+		}
+		if err := checkSePayRevisionTx(ctx, tx, in.ConfigRevision); err != nil {
 			return err
 		}
 		if err := s.ensureSePayConnectionTx(ctx, tx, in, receivedAt); err != nil {

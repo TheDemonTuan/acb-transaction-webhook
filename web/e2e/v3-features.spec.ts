@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 test.describe('Payment configuration, QR, server-side transactions and detail', () => {
   test('shows readonly payOS configuration and reconciliation controls', async ({ page }) => {
     await page.goto('/admin/connection');
-    await expect(page.getByRole('heading', { name: 'Kết nối payOS / KienlongBank' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Kết nối ngân hàng' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Đơn cần đối soát' })).toBeVisible();
     await expect(page.getByLabel('Trạng thái đơn')).toHaveValue('CREATING');
     const processingResponse = page.waitForResponse(response => {
@@ -81,8 +81,8 @@ test.describe('Payment configuration, QR, server-side transactions and detail', 
     await expect(page.getByRole('heading', { name: 'Tổng quan' })).toBeVisible();
 
     // Navigate to Bank Connection
-    await page.getByRole('button', { name: 'Kết nối payOS' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Kết nối payOS / KienlongBank' })).toBeVisible();
+    await page.getByRole('button', { name: 'Kết nối ngân hàng' }).first().click();
+    await expect(page).toHaveURL(/\/admin\/connection$/);
 
     // Navigate to Transactions
     await page.getByRole('button', { name: 'Giao dịch' }).first().click();

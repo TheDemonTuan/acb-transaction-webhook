@@ -5,6 +5,7 @@ import { confirmPaymentWebhook, fetchPaymentConfig, fetchPaymentOrders, fetchPay
 import { queryKeys } from '../../shared/api/query-keys';
 import { getPaymentStatusDescriptor } from '../../content/status-copy';
 import { PaymentQRSettingsSection } from '../../features/bank-connection/PaymentQRSettingsSection';
+import { SePaySettingsSection } from '../../features/bank-connection/SePaySettingsSection';
 import type { PaymentOrderStatus, PaymentProviderConfig } from '../../features/payment-qr/payment-orders';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { formatDateTimeVN } from '../../shared/formatters/datetime';
@@ -132,6 +133,8 @@ export const BankConnectionPage: React.FC = () => {
     void status.refetch(); void config.refetch(); void orders.refetch();
     if (isOwner) void ownerConfig.refetch();
     if (canReview) void reviews.refetch();
+    if (isOwner) void queryClient.invalidateQueries({ queryKey: queryKeys.sepayAdminConfig });
+    if (canReview) void queryClient.invalidateQueries({ queryKey: ['sepay-reviews'] });
   };
   const providerSaved = (saved: PaymentProviderConfig) => {
     queryClient.setQueryData(queryKeys.paymentProviderConfig, saved);
@@ -141,10 +144,11 @@ export const BankConnectionPage: React.FC = () => {
 
   return <div className="space-y-6">
     <div className="flex items-center justify-between gap-4">
-      <div><h2 className="text-2xl font-bold text-stone-900">Kết nối payOS / KienlongBank</h2><p className="text-sm text-stone-600">Cấu hình kênh thu, webhook và đối soát đơn thanh toán.</p></div>
+      <div><h2 className="text-2xl font-bold text-stone-900">Kết nối ngân hàng</h2><p className="text-sm text-stone-600">SePay Store cho QR cửa hàng · payOS cho đơn theo số tiền.</p></div>
       <button type="button" onClick={refresh} className="flex items-center gap-2 rounded-xl border bg-white px-3 py-2 text-xs"><RefreshCw className="h-4 w-4" />Làm mới</button>
     </div>
     {(status.isError || config.isError) && <p role="alert" className="text-rose-700">Không thể tải cấu hình hoặc trạng thái thanh toán. Không dùng QR ngân hàng thay thế.</p>}
+    <SePaySettingsSection isOwner={isOwner} canReview={canReview} status={status.data?.sepay} />
     <section className="space-y-4 rounded-2xl border border-stone-200 bg-white p-6">
       <h3 className="font-bold">{provider ? desc.label : 'Đang tải trạng thái'}</h3>
       <p className="text-sm text-stone-600">{desc.description}</p>

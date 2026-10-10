@@ -9,22 +9,22 @@ export const AdminTopbar: React.FC = () => {
 
   return (
     <header className="bg-white border-b border-stone-200 h-16 flex items-center justify-between px-4 sm:px-6 lg:px-8">
-      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
         <div className="w-8 h-8 rounded-xl bg-stone-900 text-white flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
-          P
+          A
         </div>
-        <h1 className="text-xs sm:text-sm font-bold text-stone-900 truncate">payOS Transaction Webhook</h1>
+        <h1 className="truncate text-xs font-bold text-stone-900 sm:text-sm"><span className="sm:hidden">Quản trị</span><span className="hidden sm:inline">SePay Store + payOS</span></h1>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-1 sm:gap-3">
         <div className="hidden sm:block">
           <ViewerRealtimeStatus />
         </div>
-        <VoiceToggle />
+        <VoiceToggle className="[&_button]:min-h-11 [&_button]:min-w-11 [&_button_span]:hidden sm:[&_button_span]:inline" />
         <button
           type="button"
           onClick={() => navigate('/transactions')}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition shadow-xs cursor-pointer"
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition hover:bg-emerald-700 cursor-pointer"
         >
           <Receipt className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">Transaction Viewer</span>
