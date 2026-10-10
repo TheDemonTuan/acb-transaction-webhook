@@ -5,6 +5,7 @@ export interface SePayAdminFields {
   bankCode: string;
   bankName: string;
   accountNumber: string;
+  notificationAccountNumber: string;
   accountName: string;
   qrPayload: string;
   botId: string;

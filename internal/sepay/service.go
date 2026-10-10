@@ -82,7 +82,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update TelegramUpdate) error
 		switch {
 		case err != nil:
 			in.ReviewReason = notificationReviewReason(err)
-		case notification.AccountNumber != s.cfg.AccountNumber || notification.BankName != s.cfg.BankName:
+		case notification.AccountNumber != s.cfg.effectiveNotificationAccountNumber() || notification.BankName != s.cfg.BankName:
 			in.ReviewReason = ReasonAccountMismatch
 		default:
 			in.Credit = &storage.SePayCredit{

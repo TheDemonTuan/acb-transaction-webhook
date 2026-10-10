@@ -291,3 +291,51 @@ func TestServiceFailedCommitRollsBackBeforeHint(t *testing.T) {
 		t.Fatal("recovered commit did not emit one hint")
 	}
 }
+
+func TestServiceNotificationAccountMatchesExactlyAndKeepsVAIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, override, account, bank string
+		accepted                      bool
+	}{
+		{"legacy absent", "", "VA012345", "Fixture Bank", true},
+		{"legacy main rejected", "", "2210112002", "Fixture Bank", false},
+		{"explicit main", "2210112002", "2210112002", "Fixture Bank", true},
+		{"VA not main", "2210112002", "VA012345", "Fixture Bank", false},
+		{"other main", "2210112002", "2210112003", "Fixture Bank", false},
+		{"bank exact", "2210112002", "2210112002", "fixture bank", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := protocolConfig(t)
+			cfg.NotificationAccountNumber = tc.override
+			store := protocolStore(t)
+			hints := 0
+			service := NewService(cfg, store, func(storage.EventNotification) { hints++ })
+			text := strings.Replace(fixtureNotification, "VA012345", tc.account, 1)
+			text = strings.Replace(text, "Fixture Bank", tc.bank, 1)
+			update := decodeFixture(t, telegramFixture(t, cfg, 1, 1, text))
+			for range 2 {
+				if err := service.HandleUpdate(context.Background(), update); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, reason := 0, ReasonAccountMismatch
+			if tc.accepted {
+				want, reason = 1, "ACCEPTED"
+				var account, bank, connection string
+				if err := store.DB().QueryRow(`SELECT r.account_number,r.bank_code,t.connection_id FROM sepay_receipts r JOIN transactions t ON t.id=r.transaction_id`).Scan(&account, &bank, &connection); err != nil || account != cfg.AccountNumber || bank != cfg.BankCode || connection != "sepay-store:"+cfg.StoreKey {
+					t.Fatalf("notification override changed persisted VA identity: %v", err)
+				}
+			}
+			var actualReason string
+			if err := store.DB().QueryRow(`SELECT reason FROM sepay_telegram_inbox`).Scan(&actualReason); err != nil || actualReason != reason {
+				t.Fatalf("wrong inbox reason %s: %v", actualReason, err)
+			}
+			protocolCount(t, store, "transactions", want)
+			protocolCount(t, store, "sepay_receipts", want)
+			protocolCount(t, store, "sepay_telegram_inbox", 1)
+			if hints != want {
+				t.Fatal("replay changed committed hint count")
+			}
+		})
+	}
+}

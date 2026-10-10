@@ -20,20 +20,21 @@ const (
 // Config is an immutable, owner-verified Store receiver and Telegram source.
 // QRPayload is opaque: configuration validation never rewrites bank QR data.
 type Config struct {
-	Mode          string    `json:"mode"`
-	StoreKey      string    `json:"storeKey"`
-	StoreName     string    `json:"storeName"`
-	BankCode      string    `json:"bankCode"`
-	BankName      string    `json:"bankName"`
-	AccountNumber string    `json:"accountNumber"`
-	AccountName   string    `json:"accountName"`
-	QRPayload     string    `json:"qrPayload"`
-	BotID         int64     `json:"botId"`
-	ChatID        int64     `json:"chatId"`
-	SenderBotID   int64     `json:"senderBotId"`
-	TopicID       int64     `json:"topicId"`
-	WebhookSecret string    `json:"webhookSecret"`
-	ActivationAt  time.Time `json:"activationAt"`
+	Mode                      string    `json:"mode"`
+	StoreKey                  string    `json:"storeKey"`
+	StoreName                 string    `json:"storeName"`
+	BankCode                  string    `json:"bankCode"`
+	BankName                  string    `json:"bankName"`
+	AccountNumber             string    `json:"accountNumber"`
+	NotificationAccountNumber string    `json:"notificationAccountNumber"`
+	AccountName               string    `json:"accountName"`
+	QRPayload                 string    `json:"qrPayload"`
+	BotID                     int64     `json:"botId"`
+	ChatID                    int64     `json:"chatId"`
+	SenderBotID               int64     `json:"senderBotId"`
+	TopicID                   int64     `json:"topicId"`
+	WebhookSecret             string    `json:"webhookSecret"`
+	ActivationAt              time.Time `json:"activationAt"`
 }
 
 var (
@@ -41,6 +42,14 @@ var (
 	accountPattern   = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 	urlSchemePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 )
+
+// effectiveNotificationAccountNumber preserves legacy matching when no override is set.
+func (cfg Config) effectiveNotificationAccountNumber() string {
+	if cfg.NotificationAccountNumber != "" {
+		return cfg.NotificationAccountNumber
+	}
+	return cfg.AccountNumber
+}
 
 // ParseConfig accepts only the exact, flat configuration contract. Errors name
 // trusted fields, never supplied values, secrets, QR data, or unknown keys.
@@ -57,7 +66,8 @@ func ParseConfig(raw string) (Config, error) {
 		"mode": &cfg.Mode, "storeKey": &cfg.StoreKey, "storeName": &cfg.StoreName,
 		"bankCode": &cfg.BankCode, "bankName": &cfg.BankName,
 		"accountNumber": &cfg.AccountNumber, "accountName": &cfg.AccountName,
-		"qrPayload": &cfg.QRPayload, "botId": &cfg.BotID, "chatId": &cfg.ChatID,
+		"notificationAccountNumber": &cfg.NotificationAccountNumber,
+		"qrPayload":                 &cfg.QRPayload, "botId": &cfg.BotID, "chatId": &cfg.ChatID,
 		"senderBotId": &cfg.SenderBotID, "topicId": &cfg.TopicID,
 		"webhookSecret": &cfg.WebhookSecret, "activationAt": &cfg.ActivationAt,
 	}
@@ -103,6 +113,9 @@ func ParseConfig(raw string) (Config, error) {
 	}
 	if _, err := decoder.Token(); err != io.EOF {
 		return Config{}, fmt.Errorf("sepay config: trailing JSON")
+	}
+	if cfg.NotificationAccountNumber != "" && (len(cfg.NotificationAccountNumber) > 200 || !accountPattern.MatchString(cfg.NotificationAccountNumber)) {
+		return Config{}, fmt.Errorf("sepay config: invalid notificationAccountNumber")
 	}
 	if cfg.Mode == ModeDisabled {
 		return Config{Mode: ModeDisabled}, nil

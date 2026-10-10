@@ -150,3 +150,36 @@ func TestParseConfigPreservesOpaqueQRAtByteLimit(t *testing.T) {
 		t.Fatalf("4096-byte opaque payload was rejected or rewritten: %v", err)
 	}
 }
+
+func TestParseConfigOptionalNotificationAccount(t *testing.T) {
+	for _, account := range []string{"", "2210112002", "MAINabc123", strings.Repeat("A", 200)} {
+		fields := testConfigFields()
+		fields["notificationAccountNumber"] = account
+		cfg, err := ParseConfig(configJSON(t, fields))
+		if err != nil || cfg.NotificationAccountNumber != account || cfg.AccountNumber != "VA012345" || cfg.QRPayload != fields["qrPayload"] {
+			t.Fatalf("optional notification account changed receiver: %v", err)
+		}
+		want := account
+		if want == "" {
+			want = cfg.AccountNumber
+		}
+		if cfg.effectiveNotificationAccountNumber() != want {
+			t.Fatal("notification account fallback changed")
+		}
+	}
+	cfg := protocolConfig(t)
+	if cfg.NotificationAccountNumber != "" || cfg.effectiveNotificationAccountNumber() != cfg.AccountNumber {
+		t.Fatal("absent notification account did not preserve legacy matching")
+	}
+	for _, account := range []any{nil, 2210112002, true, " 2210112002", "2210112002 ", "2210-112002", "２２１０", strings.Repeat("A", 201)} {
+		fields := testConfigFields()
+		fields["notificationAccountNumber"] = account
+		if _, err := ParseConfig(configJSON(t, fields)); err == nil || !strings.Contains(err.Error(), "notificationAccountNumber") {
+			t.Fatalf("invalid notification account accepted: %v", err)
+		}
+	}
+	raw := strings.TrimSuffix(configJSON(t, testConfigFields()), "}") + `,"notificationAccountNumber":"2210112002","notificationAccountNumber":"2210112002"}`
+	if _, err := ParseConfig(raw); err == nil || !strings.Contains(err.Error(), "duplicate notificationAccountNumber") {
+		t.Fatalf("duplicate notification account accepted: %v", err)
+	}
+}
