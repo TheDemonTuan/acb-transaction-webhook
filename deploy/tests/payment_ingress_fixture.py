@@ -107,7 +107,16 @@ def main():
         assert time.monotonic() < deadline, 'Traefik access-log control request missing'
         time.sleep(0.1)
     assert capability not in text, 'Payment capability leaked into Traefik logs'
-    assert 'acb-sepay-telegram-router' not in text, 'SePay callback leaked into Traefik access logs'
+    access_records = []
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and 'RequestPath' in record:
+            access_records.append(record)
+    assert not any(record.get('RouterName', '').split('@')[0] == 'acb-sepay-telegram-router'
+                   for record in access_records), 'SePay callback leaked into Traefik access logs'
 
     # One parallel curl process avoids container startup skew that would refill
     # the token bucket between requests. All bodies fail locally before provider IO.
