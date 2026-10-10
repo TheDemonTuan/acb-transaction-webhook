@@ -29,19 +29,22 @@ test.describe('Payment configuration, QR, server-side transactions and detail', 
     await page.getByRole('button', { name: 'Lưu cấu hình WiFi', exact: true }).click();
     await page.goto('/transactions');
     const cashier = page.getByRole('region', { name: 'Thu ngân', exact: true });
-    await cashier.getByText('Tiện ích', { exact: true }).click();
+    await cashier.getByRole('button', { name: 'WiFi quán' }).click();
     await expect(cashier.getByRole('img', { name: 'Mã QR kết nối WiFi', exact: true })).toHaveAttribute('src', /^data:image\/png/);
     await cashier.getByRole('button', { name: 'Sửa thông tin WiFi', exact: true }).click();
     await expect(cashier.getByLabel('Tên WiFi (SSID)', { exact: true })).toHaveValue('Regression WiFi');
     await expect(cashier.getByLabel('Mật khẩu WiFi', { exact: true })).toHaveValue('wifi-fixture-password');
   });
 
-  test('retains server-side history filters while cashier stays inline', async ({ page }) => {
+  test('retains server-side history filters and cashier navigation', async ({ page }) => {
     await page.goto('/transactions');
     const cashier = page.getByRole('region', { name: 'Thu ngân', exact: true });
     await expect(cashier).toBeVisible();
+    await cashier.getByRole('button', { name: /Chế độ payOS/i }).click();
     const amount = cashier.getByLabel('Số tiền · nghìn đồng');
     await amount.fill('120');
+    // Switch to history tab
+    await page.getByRole('tab', { name: /Lịch sử giao dịch/i }).click();
     // 2. Date filter tabs
     await page.getByRole('button', { name: 'Hôm nay' }).click();
     await page.getByRole('button', { name: '7 ngày' }).click();
@@ -68,8 +71,10 @@ test.describe('Payment configuration, QR, server-side transactions and detail', 
     expect((await searchResponse).status()).toBe(200);
     await searchInput.clear();
 
+    await page.getByRole('tab', { name: /Quầy thu ngân/i }).click();
     await expect(amount).toHaveValue('120');
     await expect(cashier).toBeVisible();
+    await page.getByRole('tab', { name: /Lịch sử giao dịch/i }).click();
     await page.getByRole('link', { name: 'Thu tiền', exact: true }).click();
     await expect(page).toHaveURL(/#counter-checkout$/);
     await expect(amount).toHaveValue('120');

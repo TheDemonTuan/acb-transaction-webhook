@@ -106,13 +106,22 @@ async function installFixture(page: Page) {
 const counter = (page: Page) => page.getByRole('region', { name: 'Thu ngân', exact: true });
 const activeQr = (page: Page) => page.getByTestId('counter-active-qr');
 
-async function openCounter(page: Page) {
+async function openCounter(page: Page, mode: 'store' | 'payos' = 'store') {
   await page.goto('/transactions');
   await expect(counter(page)).toBeVisible();
   await expect(activeQr(page)).toHaveAttribute('data-qr-kind', 'store');
+  if (mode === 'payos') {
+    await counter(page).getByRole('button', { name: /Chế độ payOS/i }).click();
+  }
 }
 
 async function addCustomer(page: Page, name: string, amount: string) {
+  const amountInput = counter(page).getByLabel('Số tiền · nghìn đồng');
+  if (!await amountInput.isVisible()) {
+    const payOsTab = counter(page).getByRole('button', { name: /Chế độ payOS/i });
+    if (await payOsTab.isVisible()) await payOsTab.click();
+    await expect(amountInput).toBeVisible();
+  }
   if (name) {
     const nameInput = counter(page).getByLabel('Tên khách (tùy chọn)');
     if (!await nameInput.isVisible()) await counter(page).getByText('Thêm tên khách', { exact: true }).click();
@@ -215,7 +224,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
 
   test('submitting 5 sequential orders works without manual cleaning and archives older orders reachable in drawer', async ({ page }) => {
     const fixture = await installFixture(page);
-    await openCounter(page);
+    await openCounter(page, 'payos');
 
     // Sequential 5 submissions
     for (let i = 1; i <= 5; i++) {
@@ -290,7 +299,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
 
   test('Enter persists one intent, selects the creating slot, and a late response does not switch away from Store', async ({ page }) => {
     const fixture = await installFixture(page);
-    await openCounter(page);
+    await openCounter(page, 'payos');
     fixture.holdNextCreate = true;
     const input = counter(page).getByLabel('Số tiền · nghìn đồng');
     await input.fill('50');
@@ -312,7 +321,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
 
   test('a creation response after navigation cannot erase a newer persisted customer', async ({ page }) => {
     const fixture = await installFixture(page);
-    await openCounter(page);
+    await openCounter(page, 'payos');
     fixture.holdNextCreate = true;
     await counter(page).getByLabel('Số tiền · nghìn đồng').fill('50');
     await counter(page).getByLabel('Số tiền · nghìn đồng').press('Enter');
@@ -344,7 +353,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
 
   test('uncertain creation recovers the persisted amount and key after reload', async ({ page }) => {
     const fixture = await installFixture(page);
-    await openCounter(page);
+    await openCounter(page, 'payos');
     fixture.failNextCreate = true;
     await counter(page).getByLabel('Số tiền · nghìn đồng').fill('50');
     await counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true }).click();
@@ -368,23 +377,24 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
     expect(fixture.orders).toHaveLength(1);
   });
 
-  test('rejects invalid thousand amounts and keeps payment-link QR and WiFi in utilities', async ({ page }) => {
+  test('rejects invalid thousand amounts and configures WiFi in modal', async ({ page }) => {
     const fixture = await installFixture(page);
     await openCounter(page);
+    const payOsTab = counter(page).getByRole('button', { name: /Chế độ payOS/i });
+    if (await payOsTab.isVisible()) await payOsTab.click();
     for (const input of ['0', '-50', '1.5', '+50', '50k', '9007199254740991']) {
       await counter(page).getByLabel('Số tiền · nghìn đồng').fill(input);
       await expect(counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true })).toBeDisabled();
     }
     expect(fixture.creates).toHaveLength(0);
 
-    await counter(page).getByText('Tiện ích', { exact: true }).click();
-    await expect(counter(page).getByRole('link', { name: config.staticUrl, exact: true })).toHaveAttribute('href', config.staticUrl);
-    await expect(counter(page).getByRole('link', { name: 'Tải ảnh QR', exact: true })).toHaveAttribute('download', 'payment-url-qr.png');
+    await counter(page).getByRole('button', { name: 'WiFi quán' }).click();
     await counter(page).getByRole('button', { name: 'Sửa thông tin WiFi', exact: true }).click();
     await counter(page).getByLabel('Tên WiFi (SSID)', { exact: true }).fill('Counter WiFi');
     await counter(page).getByLabel('Mật khẩu WiFi', { exact: true }).fill('secret123');
     await counter(page).getByRole('button', { name: 'Lưu WiFi', exact: true }).click();
     await expect(counter(page).getByRole('img', { name: 'Mã QR kết nối WiFi', exact: true })).toHaveAttribute('src', /^data:image\/png/);
+    await counter(page).getByRole('button', { name: 'Đóng', exact: true }).click();
     await expect(activeQr(page)).toHaveAttribute('data-qr-kind', 'store');
     expect(fixture.creates).toHaveLength(0);
   });
@@ -456,6 +466,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
     fixture.paymentConfig.ready = false;
     fixture.paymentConfig.status = 'DISABLED';
     await openCounter(page);
+    await counter(page).getByRole('button', { name: /Chế độ payOS/i }).click();
     await expect(activeQr(page)).toHaveAttribute('data-qr-kind', 'store');
     await counter(page).getByLabel('Số tiền · nghìn đồng').fill('50');
     await expect(counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true })).toBeDisabled();
@@ -475,7 +486,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
   });
   test('legacy open tab writing payment_order_slots_v1 merges intent and missing order bindings into v2 without resurrecting archived', async ({ page }) => {
     const fixture = await installFixture(page);
-    await openCounter(page);
+    await openCounter(page, 'payos');
     for (let i = 1; i <= 4; i++) {
       const input = counter(page).getByLabel('Số tiền · nghìn đồng');
       await input.fill(String(50 + i * 10));
@@ -517,7 +528,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
   test('late create binds the remounted cashier without reload or another POST', async ({ page }) => {
     const fixture = await installFixture(page);
     fixture.holdNextCreate = true;
-    await openCounter(page);
+    await openCounter(page, 'payos');
     await counter(page).getByLabel('Số tiền · nghìn đồng').fill('50');
     await expect(counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true })).toBeEnabled();
     await counter(page).getByLabel('Số tiền · nghìn đồng').press('Enter');
@@ -536,7 +547,7 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
 
   test('queued persistence preserves newer same-valued draft, Store selection and focus', async ({ page }) => {
     const fixture = await installFixture(page);
-    await openCounter(page);
+    await openCounter(page, 'payos');
     const amount = counter(page).getByLabel('Số tiền · nghìn đồng');
     await amount.fill('50');
     await expect(counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true })).toBeEnabled();
