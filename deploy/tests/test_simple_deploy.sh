@@ -210,6 +210,7 @@ set +a
 # Baseline is the candidate payOS contract with a different release identity.
 # Legacy-tool admission/drain phases belong to the one-time cutover drill.
 cp "$target/compose.prod.yaml" "$target/bark-entrypoint.sh" "$baseline/"
+chmod 644 "$baseline/bark-entrypoint.sh"
 python3 - "$root" "$baseline" "$base_sha" <<'PY'
 import pathlib,sys
 root,baseline=map(pathlib.Path,sys.argv[1:3])
