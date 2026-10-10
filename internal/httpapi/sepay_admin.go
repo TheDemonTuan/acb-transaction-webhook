@@ -97,7 +97,7 @@ func (s *Server) saveSePayAdminConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch key {
-		case "mode", "storeKey", "storeName", "bankCode", "bankName", "accountNumber", "accountName", "qrPayload", "botId", "chatId", "senderBotId", "topicId", "activationAt":
+		case "mode", "storeKey", "storeName", "bankCode", "bankName", "accountNumber", "notificationAccountNumber", "accountName", "qrPayload", "botId", "chatId", "senderBotId", "topicId", "activationAt":
 			if _, ok := val.(string); !ok {
 				writeError(w, http.StatusBadRequest, "INVALID_SEPAY_CONFIG")
 				return
@@ -131,6 +131,19 @@ func (s *Server) saveSePayAdminConfig(w http.ResponseWriter, r *http.Request) {
 	strict.DisallowUnknownFields()
 	if strict.Decode(&body) != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_SEPAY_CONFIG")
+		return
+	}
+	oldNotificationAccount := existing.Config.NotificationAccountNumber
+	if oldNotificationAccount == "" {
+		oldNotificationAccount = existing.Config.AccountNumber
+	}
+	nextNotificationAccount := body.Config.NotificationAccountNumber
+	if nextNotificationAccount == "" {
+		nextNotificationAccount = body.Config.AccountNumber
+	}
+	if body.Config.Mode == sepay.ModeActive && nextNotificationAccount != oldNotificationAccount && configFields["sourceSeparated"] != true {
+		// A partial update must not silently inherit an old source-isolation attestation.
+		sepayAdminError(w, &sepay.FieldError{Field: "sourceSeparated"})
 		return
 	}
 	result, err := s.sepay.SaveAdminConfig(r.Context(), body.Revision, body.Config, body.BotToken, paymentProviderActor(r))

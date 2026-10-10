@@ -29,21 +29,22 @@ func BootstrapConfig(ctx context.Context, store *storage.Store, legacy string) (
 // AdminFields deliberately excludes every secret and encodes Telegram IDs as
 // decimal strings, including values beyond JavaScript's exact integer range.
 type AdminFields struct {
-	Mode             string `json:"mode"`
-	StoreKey         string `json:"storeKey"`
-	StoreName        string `json:"storeName"`
-	BankCode         string `json:"bankCode"`
-	BankName         string `json:"bankName"`
-	AccountNumber    string `json:"accountNumber"`
-	AccountName      string `json:"accountName"`
-	QRPayload        string `json:"qrPayload"`
-	BotID            string `json:"botId"`
-	ChatID           string `json:"chatId"`
-	SenderBotID      string `json:"senderBotId"`
-	TopicID          string `json:"topicId"`
-	ActivationAt     string `json:"activationAt"`
-	ReceiverVerified bool   `json:"receiverVerified"`
-	SourceSeparated  bool   `json:"sourceSeparated"`
+	Mode                      string `json:"mode"`
+	StoreKey                  string `json:"storeKey"`
+	StoreName                 string `json:"storeName"`
+	BankCode                  string `json:"bankCode"`
+	BankName                  string `json:"bankName"`
+	AccountNumber             string `json:"accountNumber"`
+	NotificationAccountNumber string `json:"notificationAccountNumber"`
+	AccountName               string `json:"accountName"`
+	QRPayload                 string `json:"qrPayload"`
+	BotID                     string `json:"botId"`
+	ChatID                    string `json:"chatId"`
+	SenderBotID               string `json:"senderBotId"`
+	TopicID                   string `json:"topicId"`
+	ActivationAt              string `json:"activationAt"`
+	ReceiverVerified          bool   `json:"receiverVerified"`
+	SourceSeparated           bool   `json:"sourceSeparated"`
 }
 
 type managedFields struct {
@@ -87,7 +88,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Service, error) {
 }
 
 func fieldsFromConfig(cfg Config) AdminFields {
-	f := AdminFields{Mode: cfg.Mode, StoreKey: cfg.StoreKey, StoreName: cfg.StoreName, BankCode: cfg.BankCode, BankName: cfg.BankName, AccountNumber: cfg.AccountNumber, AccountName: cfg.AccountName, QRPayload: cfg.QRPayload, TopicID: strconv.FormatInt(cfg.TopicID, 10)}
+	f := AdminFields{Mode: cfg.Mode, StoreKey: cfg.StoreKey, StoreName: cfg.StoreName, BankCode: cfg.BankCode, BankName: cfg.BankName, AccountNumber: cfg.AccountNumber, NotificationAccountNumber: cfg.NotificationAccountNumber, AccountName: cfg.AccountName, QRPayload: cfg.QRPayload, TopicID: strconv.FormatInt(cfg.TopicID, 10)}
 	if f.Mode == "" {
 		f.Mode = ModeDisabled
 	}
@@ -145,7 +146,7 @@ func validateDraft(f AdminFields) error {
 		key, value string
 		max        int
 	}{
-		{"storeKey", f.StoreKey, 48}, {"storeName", f.StoreName, 200}, {"bankCode", f.BankCode, 100}, {"bankName", f.BankName, 200}, {"accountNumber", f.AccountNumber, 200}, {"accountName", f.AccountName, 200}, {"qrPayload", f.QRPayload, 4096},
+		{"storeKey", f.StoreKey, 48}, {"storeName", f.StoreName, 200}, {"bankCode", f.BankCode, 100}, {"bankName", f.BankName, 200}, {"accountNumber", f.AccountNumber, 200}, {"notificationAccountNumber", f.NotificationAccountNumber, 200}, {"accountName", f.AccountName, 200}, {"qrPayload", f.QRPayload, 4096},
 	} {
 		if !utf8.ValidString(v.value) || len(v.value) > v.max || strings.ContainsAny(v.value, "\r\n\x00") || strings.TrimSpace(v.value) != v.value {
 			return &FieldError{v.key}
@@ -157,6 +158,9 @@ func validateDraft(f AdminFields) error {
 	if f.AccountNumber != "" && !accountPattern.MatchString(f.AccountNumber) {
 		return &FieldError{"accountNumber"}
 	}
+	if f.NotificationAccountNumber != "" && !accountPattern.MatchString(f.NotificationAccountNumber) {
+		return &FieldError{"notificationAccountNumber"}
+	}
 	if f.QRPayload != "" && (urlSchemePattern.MatchString(f.QRPayload) || strings.HasPrefix(f.QRPayload, "/") || strings.HasPrefix(strings.ToLower(f.QRPayload), "www.")) {
 		return &FieldError{"qrPayload"}
 	}
@@ -167,7 +171,7 @@ func adminRuntime(f AdminFields, secret string) (Config, error) {
 	if err := validateDraft(f); err != nil {
 		return Config{}, err
 	}
-	cfg := Config{Mode: f.Mode, StoreKey: f.StoreKey, StoreName: f.StoreName, BankCode: f.BankCode, BankName: f.BankName, AccountNumber: f.AccountNumber, AccountName: f.AccountName, QRPayload: f.QRPayload, WebhookSecret: secret}
+	cfg := Config{Mode: f.Mode, StoreKey: f.StoreKey, StoreName: f.StoreName, BankCode: f.BankCode, BankName: f.BankName, AccountNumber: f.AccountNumber, NotificationAccountNumber: f.NotificationAccountNumber, AccountName: f.AccountName, QRPayload: f.QRPayload, WebhookSecret: secret}
 	for _, v := range []struct {
 		key, value string
 		dest       *int64
@@ -248,7 +252,10 @@ func (s *Service) SaveAdminConfig(ctx context.Context, revision int64, fields Ad
 		}
 		secret = base64.RawURLEncoding.EncodeToString(random)
 	}
-	if fields.Mode != ModeDisabled && (fields.ActivationAt == "" || (fields.Mode == ModeActive && old.cfg.Mode != ModeActive && fields.ActivationAt == fieldsFromConfig(old.cfg).ActivationAt)) {
+	if fields.Mode == ModeActive && old.cfg.Mode == ModeActive {
+		// Receiver matching changes must not move the live activation boundary.
+		fields.ActivationAt = fieldsFromConfig(old.cfg).ActivationAt
+	} else if fields.Mode != ModeDisabled && (fields.ActivationAt == "" || (fields.Mode == ModeActive && fields.ActivationAt == fieldsFromConfig(old.cfg).ActivationAt)) {
 		fields.ActivationAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	cfg, err := adminRuntime(fields, secret)

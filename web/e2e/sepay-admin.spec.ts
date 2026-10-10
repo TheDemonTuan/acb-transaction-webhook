@@ -2,9 +2,9 @@ import { expect, test, type Page } from '@playwright/test';
 import QRCode from 'qrcode';
 import type { SePayAdminConfig, SePayAdminConfigInput, SePayAdminFields } from '../src/features/bank-connection/sepay-admin';
 
-const transferPayload = () => {
+const transferPayload = (accountNumber = '0000000000') => {
   const field = (tag: string, value: string) => `${tag}${String(value.length).padStart(2, '0')}${value}`;
-  const merchant = field('00', 'A000000727') + field('01', field('00', '970436') + field('01', '0000000000')) + field('02', 'QRIBFTTA');
+  const merchant = field('00', 'A000000727') + field('01', field('00', '970436') + field('01', accountNumber)) + field('02', 'QRIBFTTA');
   const raw = field('00', '01') + field('01', '11') + field('38', merchant) + field('53', '704') + field('58', 'VN') + '6304';
   let crc = 0xffff;
   for (const byte of new TextEncoder().encode(raw)) {
@@ -13,7 +13,7 @@ const transferPayload = () => {
   }
   return raw + crc.toString(16).toUpperCase().padStart(4, '0');
 };
-const blank: SePayAdminFields = { mode: 'disabled', storeKey: '', storeName: '', bankCode: '', bankName: '', accountNumber: '', accountName: '', qrPayload: '', botId: '', chatId: '', senderBotId: '', topicId: '0', activationAt: '', receiverVerified: false, sourceSeparated: false };
+const blank: SePayAdminFields = { mode: 'disabled', storeKey: '', storeName: '', bankCode: '', bankName: '', accountNumber: '', notificationAccountNumber: '', accountName: '', qrPayload: '', botId: '', chatId: '', senderBotId: '', topicId: '0', activationAt: '', receiverVerified: false, sourceSeparated: false };
 
 async function fixture(page: Page, role = 'OWNER') {
   let config: SePayAdminConfig = { revision: 0, config: { ...blank }, hasBotToken: false, hasWebhookSecret: false, lastMessageAt: null, reviewCount: 0 };
@@ -73,6 +73,7 @@ test('owner decodes locally without BarcodeDetector, saves exact payload and str
   await section(page).getByRole('button', { name: 'Lưu & bật SePay', exact: true }).click();
   await expect.poll(() => api.saves.length).toBe(1);
   expect(api.saves[0].config.qrPayload).toBe(transferPayload());
+  expect(api.saves[0].config.notificationAccountNumber).toBe('');
   expect(api.saves[0].config.botId).toBe('9007199254740993');
   expect(api.saves[0].config.mode).toBe('active');
   expect(JSON.stringify(api.saves[0])).not.toContain('data:image');
@@ -80,6 +81,8 @@ test('owner decodes locally without BarcodeDetector, saves exact payload and str
   await expect(field(page, 'botToken')).toHaveValue('');
   await section(page).getByRole('button', { name: 'Đăng ký webhook Telegram' }).click();
   await expect(page.getByTestId('sepay-telegram-diagnostics')).toBeVisible();
+  await expect(page.getByTestId('sepay-telegram-diagnostics')).toContainText('Địa chỉ webhook');
+  await expect(page.getByTestId('sepay-telegram-diagnostics')).not.toContainText('Telegram báo lỗi giao webhook');
   await section(page).getByRole('button', { name: 'Kiểm tra kết nối Telegram' }).click();
   await expect.poll(() => api.checks).toBe(1);
   expect(api.registrations).toBe(1);
@@ -92,6 +95,65 @@ test('owner decodes locally without BarcodeDetector, saves exact payload and str
   await page.reload();
   await expect(field(page, 'botToken')).toHaveValue('');
   await expect(field(page, 'accountNumber')).toHaveValue('0000000000');
+});
+
+test('distinct notification account preserves QR receiver and payload and requires renewed source attestation', async ({ page }) => {
+  const api = await fixture(page);
+  const qrAccount = 'VA101499100004639250';
+  const payload = transferPayload(qrAccount);
+  await page.goto('/admin/connection');
+  await field(page, 'notificationAccountNumber').fill('2210112002');
+  await upload(page, payload);
+  await expect(field(page, 'accountNumber')).toHaveValue(qrAccount);
+  await expect(field(page, 'notificationAccountNumber')).toHaveValue('2210112002');
+  await expect(page.getByTestId('sepay-decoded-receiver')).toContainText(qrAccount);
+  for (const [name, value] of Object.entries({ storeKey: 'fixture-store', storeName: 'Fixture Store', bankName: 'Vietcombank', accountName: 'FIXTURE RECEIVER', botId: '900001', chatId: '-100900003', senderBotId: '900002', topicId: '0' })) await field(page, name).fill(value);
+  await field(page, 'botToken').fill('notification-account-write-only-token');
+  await field(page, 'receiverVerified').check();
+  await field(page, 'sourceSeparated').check();
+  await expect(section(page).getByRole('alert')).toHaveCount(0);
+  await expect(section(page).getByRole('button', { name: 'Lưu & bật SePay', exact: true })).toBeEnabled();
+  await section(page).getByRole('button', { name: 'Lưu & bật SePay', exact: true }).click();
+  await expect.poll(() => api.saves.length).toBe(1);
+  expect(api.saves[0].config).toMatchObject({ mode: 'active', notificationAccountNumber: '2210112002', accountNumber: qrAccount, qrPayload: payload, receiverVerified: true, sourceSeparated: true });
+  await expect(field(page, 'botToken')).toHaveValue('');
+  await field(page, 'notificationAccountNumber').fill('2210112003');
+  await expect(field(page, 'receiverVerified')).toBeChecked();
+  await expect(field(page, 'sourceSeparated')).not.toBeChecked();
+  await expect(field(page, 'accountNumber')).toHaveValue(qrAccount);
+  await expect(field(page, 'qrPayload')).toHaveValue(payload);
+  await expect(page.getByTestId('sepay-decoded-receiver')).toContainText(qrAccount);
+  await expect(section(page).getByRole('button', { name: 'Lưu & tiếp tục nhận SePay', exact: true })).toBeDisabled();
+  await expect(section(page).getByRole('button', { name: 'Kiểm tra kết nối Telegram', exact: true })).toBeDisabled();
+  await field(page, 'sourceSeparated').check();
+  await expect(section(page).getByRole('button', { name: 'Lưu & tiếp tục nhận SePay', exact: true })).toBeEnabled();
+  await section(page).getByRole('button', { name: 'Lưu & tiếp tục nhận SePay', exact: true }).click();
+  await expect.poll(() => api.saves.length).toBe(2);
+  expect(api.saves[1].config).toMatchObject({ mode: 'active', notificationAccountNumber: '2210112003', accountNumber: qrAccount, qrPayload: payload, receiverVerified: true, sourceSeparated: true });
+  expect(api.saves[1].botToken).toBe('');
+  await page.reload();
+  await expect(field(page, 'notificationAccountNumber')).toHaveValue('2210112003');
+  await expect(field(page, 'accountNumber')).toHaveValue(qrAccount);
+});
+
+
+test('notification account validates separately and empty retains the QR account fallback', async ({ page }) => {
+  const api = await fixture(page);
+  await page.goto('/admin/connection');
+  await upload(page, transferPayload());
+  await expect(field(page, 'accountNumber')).toHaveValue('0000000000');
+  for (const invalid of [' 2210112002', '2210112002 ', 'VA-2210112002', 'á123', 'A'.repeat(201)]) {
+    await field(page, 'notificationAccountNumber').fill(invalid);
+    await expect(section(page).getByRole('alert')).toHaveCount(1);
+    await section(page).getByRole('button', { name: 'Lưu bản nháp', exact: true }).click();
+    expect(api.saves).toHaveLength(0);
+    await expect(field(page, 'accountNumber')).toHaveValue('0000000000');
+  }
+  await field(page, 'notificationAccountNumber').fill('');
+  await expect(section(page).getByRole('alert')).toHaveCount(0);
+  await section(page).getByRole('button', { name: 'Lưu bản nháp', exact: true }).click();
+  await expect.poll(() => api.saves.length).toBe(1);
+  expect(api.saves[0].config).toMatchObject({ notificationAccountNumber: '', accountNumber: '0000000000', qrPayload: transferPayload() });
 });
 
 test('invalid URL, multi-QR and invalid files cannot replace the decoded transfer payload', async ({ page }) => {
@@ -126,20 +188,24 @@ test('preserves unsaved receiver, decoded QR and token across failed background 
   await expect(field(page, 'accountNumber')).toHaveValue('0000000000');
   await field(page, 'storeName').fill('Unsubmitted receiver');
   await field(page, 'botToken').fill('unsaved-token-not-for-storage');
+  await field(page, 'notificationAccountNumber').fill('2210112002');
   api.failReads(true);
   await page.getByRole('button', { name: 'Làm mới', exact: true }).first().click();
   await expect(section(page).getByRole('alert')).toBeVisible();
   await expect(field(page, 'storeName')).toHaveValue('Unsubmitted receiver');
   await expect(field(page, 'botToken')).toHaveValue('unsaved-token-not-for-storage');
   await expect(field(page, 'accountNumber')).toHaveValue('0000000000');
+  await expect(field(page, 'notificationAccountNumber')).toHaveValue('2210112002');
   api.failReads(false);
   await section(page).getByRole('button', { name: 'Tải lại cấu hình SePay', exact: true }).click();
   await expect(section(page).getByRole('alert')).toHaveCount(0);
   await expect(field(page, 'storeName')).toHaveValue('Unsubmitted receiver');
+  await expect(field(page, 'notificationAccountNumber')).toHaveValue('2210112002');
   await section(page).getByRole('button', { name: 'Lưu bản nháp', exact: true }).click();
   await expect.poll(() => api.saves.length).toBe(1);
   expect(api.saves[0].config.qrPayload).toBe(transferPayload());
   expect(api.saves[0].botToken).toBe('unsaved-token-not-for-storage');
+  expect(api.saves[0].config.notificationAccountNumber).toBe('2210112002');
 });
 
 test('does not echo token in API errors and explicitly recovers revision conflicts', async ({ page }) => {

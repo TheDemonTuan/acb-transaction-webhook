@@ -21,7 +21,8 @@ func TestPublicSePayStoreConfig(t *testing.T) {
 		Mode: sepay.ModeActive, StoreKey: "private-store-key", StoreName: "Public Store",
 		BankCode: "TESTBANK", BankName: "Private Template Bank Name",
 		AccountNumber: "VA123456", AccountName: "PUBLIC RECEIVER",
-		QRPayload: "0002010102116304ABCD", BotID: 900001,
+		NotificationAccountNumber: "2210112002",
+		QRPayload:                 "0002010102116304ABCD", BotID: 900001,
 		ChatID: -100900003, SenderBotID: 900002, TopicID: 42,
 		WebhookSecret: base64.RawURLEncoding.EncodeToString([]byte("01234567890123456789012345678901")),
 		ActivationAt:  time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC),
@@ -58,7 +59,7 @@ func TestPublicSePayStoreConfig(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("DTO fields do not match public contract: got=%v want=%v", got, want)
 			}
-			for _, private := range []string{fixture.StoreKey, fixture.BankName, fixture.WebhookSecret, "900001", "900002", "-100900003", "activationAt", "topicId"} {
+			for _, private := range []string{fixture.StoreKey, fixture.BankName, fixture.WebhookSecret, fixture.NotificationAccountNumber, "notificationAccountNumber", "900001", "900002", "-100900003", "activationAt", "topicId"} {
 				if strings.Contains(w.Body.String(), private) {
 					t.Fatal("public response leaked private configuration")
 				}
