@@ -248,6 +248,14 @@ expected=yaml.load(subprocess.check_output(['bash',renderer,gw],text=True),Loade
 if actual!=expected: raise SystemExit('backend route topology/policy/slot mismatch')
 PY
 }
-validate_baseline_route() {
+validate_baseline_route() (
+  # Validate the running topology against its own verified release, not the
+  # candidate: adding an exact callback must not invalidate the prior baseline.
+  load_keys "$DEPLOY_PATH/state.env" "$PAYOS_STATE_KEYS" || return 1
+  validate_sha "$RELEASE_SHA" || return 1
+  local baseline="$DEPLOY_PATH/releases/$RELEASE_SHA"
+  [[ -f "$baseline/SHA256SUMS" ]] || { fail 'missing baseline checksums'; return 1; }
+  (cd "$baseline" && sha256sum -c SHA256SUMS >/dev/null) || { fail 'baseline bundle changed'; return 1; }
+  source "$baseline/simple-lib.sh"
   validate_route "$@"
-}
+)
