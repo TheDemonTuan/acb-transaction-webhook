@@ -239,9 +239,14 @@ func TestCreateOrderProviderRejectionStillNeedsEvidence(t *testing.T) {
 				_, _ = w.Write([]byte(`{"code":"unverified-code","desc":"SECRET must not escape","data":null}`))
 			}))
 			defer server.Close()
-			// Bound the SDK's own retry/backoff for the throttling case.
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
+			// Only throttling needs a deadline to bound the SDK retry/backoff.
+			// Immediate rejection cases must not race a 100ms disk/HTTP budget.
+			ctx := context.Background()
+			if status == http.StatusTooManyRequests {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Second)
+				defer cancel()
+			}
 			order, created, err := createTestService(t, store, server).CreateOrder(ctx, 50000, "STATIC_URL", createKey)
 			if err != nil || !created || order.Status != "CREATING" || strings.Contains(order.LastErrorCode, "SECRET") {
 				t.Fatalf("unproven rejection became terminal: %+v %v %v", order, created, err)
