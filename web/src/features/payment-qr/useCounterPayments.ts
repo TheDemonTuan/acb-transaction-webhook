@@ -8,6 +8,7 @@ import type { BankTransactionCreditData } from '../../realtime/realtime.types';
 import { archivePaymentOrderSlot, attachPaymentOrder, creditMatchesPaymentOrder, isTerminalPaymentOrder, loadPaymentOrderTray, mergeLegacyPaymentOrderSlots, readPaymentOrderTray, savePaymentOrderTray, showPaymentOrderSlot, parseCounterAmountVnd, PAYMENT_ORDER_SLOTS_STORAGE_KEY, PAYMENT_ORDER_TRAY_STORAGE_KEY, type PaymentConfig, type PaymentOrder, type PaymentOrderSlot, type PaymentOrderTray } from './payment-orders';
 
 const orderKey = (id: string, isPublic: boolean) => isPublic ? queryKeys.publicPaymentOrder(id) : queryKeys.paymentOrder(id);
+const TRAY_CHANGED_EVENT = 'counter:payment-tray-changed';
 export const COUNTER_ARCHIVE_PAGE_SIZE = 8;
 
 export function useCounterPayments(isPublic: boolean, selectedSlotId?: string, archivePage: number | null = null) {
@@ -36,6 +37,9 @@ export function useCounterPayments(isPublic: boolean, selectedSlotId?: string, a
       savePaymentOrderTray(next);
       trayRef.current = next;
       if (mounted.current) setTray(next);
+      // Storage events only reach other documents; late responses from an old
+      // mount must also wake the cashier that remounted in this document.
+      window.dispatchEvent(new Event(TRAY_CHANGED_EVENT));
       return next;
     };
     if (navigator.locks) return navigator.locks.request(PAYMENT_ORDER_TRAY_STORAGE_KEY, commit);
@@ -100,6 +104,10 @@ export function useCounterPayments(isPublic: boolean, selectedSlotId?: string, a
     void Promise.all(batch.map(fetchSlot)).finally(() => { recoveryRunning.current = false; });
   }, [client, isPublic, fetchSlot]);
   useEffect(() => {
+    const reloadTray = () => {
+      try { const next = readPaymentOrderTray(); trayRef.current = next; setTray(next); }
+      catch { setNotice('Không đọc được khay đơn đã lưu. Chưa gửi đơn mới để tránh mất dữ liệu.'); }
+    };
     const storage = (event: StorageEvent) => {
       if (event.key === PAYMENT_ORDER_SLOTS_STORAGE_KEY) {
         void mutateTray((current) => {
@@ -115,16 +123,17 @@ export function useCounterPayments(isPublic: boolean, selectedSlotId?: string, a
         return;
       }
       if (event.key !== PAYMENT_ORDER_TRAY_STORAGE_KEY && event.key !== null) return;
-      try { const next = readPaymentOrderTray(); trayRef.current = next; setTray(next); }
-      catch { setNotice('Không đọc được khay đơn đã lưu. Chưa gửi đơn mới để tránh mất dữ liệu.'); }
+      reloadTray();
     };
     window.addEventListener('storage', storage);
+    window.addEventListener(TRAY_CHANGED_EVENT, reloadTray);
     window.addEventListener('pageshow', refreshOrders);
     window.addEventListener('focus', refreshOrders);
     window.addEventListener('online', refreshOrders);
     refreshOrders();
     return () => {
       window.removeEventListener('storage', storage);
+      window.removeEventListener(TRAY_CHANGED_EVENT, reloadTray);
       window.removeEventListener('pageshow', refreshOrders);
       window.removeEventListener('focus', refreshOrders);
       window.removeEventListener('online', refreshOrders);

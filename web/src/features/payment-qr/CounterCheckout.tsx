@@ -50,6 +50,8 @@ export const CounterCheckout: React.FC = () => {
   const dialogRef = useRef<HTMLDivElement>(null);
   const enlargeButtonRef = useRef<HTMLButtonElement>(null);
   const submitLocked = useRef(false);
+  // Revisions distinguish a newer same-valued draft from the submitted draft.
+  const interaction = useRef({ amount: 0, name: 0, selection: 0, focus: 0 });
   const activeSlot = activeQr.kind === 'payos' ? payments.allSlots.find((slot) => slot.slotId === activeQr.slotId) : undefined;
   const order = activeSlot ? payments.orders[activeSlot.slotId] : undefined;
   const expired = !!order && Date.parse(order.expiresAt) <= now;
@@ -57,7 +59,7 @@ export const CounterCheckout: React.FC = () => {
   const storeReady = store.data?.status === 'ACTIVE' && !!store.data.qrPayload;
   const preview = parseCounterAmountVnd(amount, config.data?.maxAmountVnd);
   const payload = activeQr.kind === 'store' ? (storeReady ? store.data!.qrPayload : '') : (payable ? order!.qrCode ?? '' : '');
-  const select = (next: ActiveQR) => { setActiveQr(next); setCopyNotice(''); };
+  const select = (next: ActiveQR) => { interaction.current.selection++; setActiveQr(next); setCopyNotice(''); };
   useEffect(() => {
     try { sessionStorage.setItem(ACTIVE_QR_KEY, JSON.stringify(activeQr)); } catch { /* No receiver or payment data is cached offline. */ }
   }, [activeQr]);
@@ -104,6 +106,7 @@ export const CounterCheckout: React.FC = () => {
     if (window.matchMedia('(min-width: 1024px)').matches) amountRef.current?.focus({ preventScroll: true });
   };
   const archiveSlot = async (slotId: string) => {
+    interaction.current.selection++;
     if (!await payments.removeSlot(slotId)) return;
     setActiveQr((current) => current.kind === 'payos' && current.slotId === slotId ? { kind: 'store' } : current);
     setRemoveConfirmation(null);
@@ -124,27 +127,32 @@ export const CounterCheckout: React.FC = () => {
       {order!.checkoutUrl && <a href={order!.checkoutUrl} target="_blank" rel="noreferrer" className={`${buttonClass} text-emerald-800`}>Thanh toán trên payOS</a>}
     </> : <div className="min-h-64 flex items-center justify-center rounded-xl bg-stone-50 p-5 font-semibold">{activeSlot && payments.creatingKeys.includes(activeSlot.idempotencyKey) ? 'Đang tạo QR payOS' : 'Đang chờ xác nhận QR payOS'}</div>}
   </>;
-  return <section id="counter-checkout" aria-label="Thu ngân" className="scroll-mt-4 space-y-4 [&_button]:cursor-pointer [&_button]:focus-visible:outline-2 [&_button]:focus-visible:outline-offset-2 [&_button]:focus-visible:outline-emerald-600 [&_input]:focus-visible:outline-2 [&_input]:focus-visible:outline-emerald-600">
+  return <section id="counter-checkout" aria-label="Thu ngân" onFocusCapture={() => { interaction.current.focus++; }} className="scroll-mt-4 space-y-4 [&_button]:cursor-pointer [&_button]:focus-visible:outline-2 [&_button]:focus-visible:outline-offset-2 [&_button]:focus-visible:outline-emerald-600 [&_input]:focus-visible:outline-2 [&_input]:focus-visible:outline-emerald-600">
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-xl font-bold">Thu ngân</h2><p className="text-xs text-stone-600">Nhập tiền · Enter · khách tiếp theo</p></div>
     {(!realtime.networkOnline || !realtime.serverReachable || realtime.status !== 'CONNECTED') && <p role="status" className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-900">Đang mất cập nhật — kiểm tra nhận tiền trước khi giao hàng</p>}
     <div className="grid min-w-0 items-start gap-4 md:grid-cols-[320px_minmax(0,1fr)] lg:grid-cols-[380px_minmax(0,1fr)]">
       <form className="min-w-0 rounded-2xl border border-stone-200 bg-white p-3 sm:p-4 space-y-2 md:col-start-2" onSubmit={async (event) => {
         event.preventDefault(); if (submitLocked.current) return;
         submitLocked.current = true;
+        const submitted = { ...interaction.current };
         try {
           const slot = await payments.addSlot(amount, name);
           if (slot) {
-            select({ kind: 'payos', slotId: slot.slotId });
-            setAmount((current) => current === amount ? '' : current);
-            setName((current) => current === name ? '' : current);
-            amountRef.current?.focus({ preventScroll: true });
+            const unchangedSelection = interaction.current.selection === submitted.selection;
+            const unchangedAmount = interaction.current.amount === submitted.amount;
+            const unchangedName = interaction.current.name === submitted.name;
+            const unchangedFocus = interaction.current.focus === submitted.focus;
+            if (unchangedSelection) select({ kind: 'payos', slotId: slot.slotId });
+            if (unchangedAmount) setAmount('');
+            if (unchangedName) setName('');
+            if (unchangedSelection && unchangedAmount && unchangedName && unchangedFocus) amountRef.current?.focus({ preventScroll: true });
           }
         } finally { submitLocked.current = false; }
       }}>
         <label htmlFor="counter-amount" className="block text-sm font-semibold">Số tiền · nghìn đồng</label>
-        <div className="flex gap-2"><input ref={amountRef} id="counter-amount" type="text" inputMode="numeric" autoComplete="off" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="50 = 50.000đ" aria-describedby="counter-amount-preview" className="min-h-12 min-w-0 w-full rounded-xl border border-stone-300 px-3 text-2xl font-bold" /><button type="submit" disabled={preview === null || !config.data?.ready || !realtime.networkOnline} className={`${buttonClass} shrink-0 bg-emerald-700 text-white border-emerald-700`}>Tạo QR payOS</button></div>
+        <div className="flex gap-2"><input ref={amountRef} id="counter-amount" type="text" inputMode="numeric" autoComplete="off" value={amount} onChange={(event) => { interaction.current.amount++; setAmount(event.target.value); }} placeholder="50 = 50.000đ" aria-describedby="counter-amount-preview" className="min-h-12 min-w-0 w-full rounded-xl border border-stone-300 px-3 text-2xl font-bold" /><button type="submit" disabled={preview === null || !config.data?.ready || !realtime.networkOnline} className={`${buttonClass} shrink-0 bg-emerald-700 text-white border-emerald-700`}>Tạo QR payOS</button></div>
         <div className="flex flex-wrap items-center justify-between gap-2"><p id="counter-amount-preview" className="text-lg font-bold text-emerald-800">{preview === null ? '50 → 50.000đ' : formatVndCurrency(preview)}</p><span className="text-xs text-stone-500">Enter để tạo · không giới hạn lượt khách</span></div>
-        <details className="text-sm text-stone-600" open={nameOpen || Boolean(name)} onToggle={(e) => setNameOpen(e.currentTarget.open)}><summary className="min-h-11 cursor-pointer py-3">Thêm tên khách</summary><label className="block">Tên khách (tùy chọn)<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} className="mt-1 block min-h-11 w-full rounded-xl border border-stone-300 px-3 text-stone-900" /></label></details>
+        <details className="text-sm text-stone-600" open={nameOpen || Boolean(name)} onToggle={(e) => setNameOpen(e.currentTarget.open)}><summary className="min-h-11 cursor-pointer py-3">Thêm tên khách</summary><label className="block">Tên khách (tùy chọn)<input value={name} onChange={(event) => { interaction.current.name++; setName(event.target.value); }} maxLength={80} className="mt-1 block min-h-11 w-full rounded-xl border border-stone-300 px-3 text-stone-900" /></label></details>
         {config.data && !config.data.ready && <p className="text-sm text-amber-900">payOS chưa sẵn sàng nhận đơn mới. QR cửa hàng và các đơn hiện có vẫn được giữ nguyên.</p>}
         {config.isError && <p role="alert" className="text-sm text-amber-900">Chưa tải được cấu hình payOS. Không tạo đơn mới khi chưa xác nhận dịch vụ.</p>}
         {payments.notice && <p role="alert" className="text-sm text-amber-900">{payments.notice}</p>}
