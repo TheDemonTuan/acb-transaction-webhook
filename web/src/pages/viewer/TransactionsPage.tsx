@@ -128,7 +128,31 @@ export const TransactionsPage: React.FC = () => {
 
   return (
     <div className="space-y-6 min-w-0">
+      {/* Quick Navigation Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-white px-3 py-2 rounded-2xl border border-stone-200 shadow-2xs">
+        <div className="flex items-center gap-2">
+          <a
+            href="#counter-checkout"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-700 text-white shadow-xs hover:bg-emerald-800 transition"
+          >
+            <span>⚡ Quầy thu ngân</span>
+          </a>
+          <a
+            href="#transactions-history"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-stone-100 text-stone-700 hover:bg-stone-200/70 transition"
+          >
+            <span>📋 Lịch sử giao dịch ({stats.totalCount})</span>
+          </a>
+        </div>
+        <div className="text-xs text-stone-600 font-medium px-2 hidden sm:flex items-center gap-2">
+          <span>Tiền vào hôm nay:</span>
+          <strong className="text-emerald-800 font-bold">{isPublic ? '****** ₫' : formatVndCurrency(stats.incoming)}</strong>
+        </div>
+      </div>
+
       <CounterCheckout />
+
+      <div id="transactions-history" className="space-y-6 scroll-mt-6 pt-2">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-stone-900">Lịch sử giao dịch</h2>
@@ -392,6 +416,7 @@ export const TransactionsPage: React.FC = () => {
             onPageSizeChange={pagination.setPageSize}
           />
         )}
+      </div>
       </div>
 
       {/* Transaction Detail Modal */}
