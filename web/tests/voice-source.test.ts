@@ -35,17 +35,41 @@ describe('Voice credit identity', () => {
     expect(dedupe.has({ semanticKey: creditTransactionKey(credit({ transactionId: 'txn_payos_2' })) })).toBe(false);
   });
 
+  it('announces equal-amount SePay receipts separately and rejects same-ID replay before and after playback', () => {
+    const dedupe = new VoiceDedupe();
+    const receipts = [
+      credit({ bank: 'Vietcombank', provider: 'SEPAY', orderCode: undefined, credit: '50000', transactionId: 'txn_sepay_voice_1', transactionNumber: 'SEPAY_REF_1' }),
+      credit({ bank: 'Vietcombank', provider: 'SEPAY', orderCode: undefined, credit: '50000', transactionId: 'txn_sepay_voice_2', transactionNumber: 'SEPAY_REF_2' }),
+    ];
+    const announcements: string[] = [];
+    for (const [index, receipt] of receipts.entries()) {
+      const original = { eventId: `sepay-epoch1:${index + 1}`, semanticKey: creditTransactionKey(receipt) };
+      const replay = { eventId: `sepay-epoch2:${index + 10}`, semanticKey: creditTransactionKey({ ...receipt }) };
+      expect(dedupe.reserve(original)).toBe(true);
+      announcements.push(receipt.transactionId);
+      expect(dedupe.reserve(replay)).toBe(false);
+      dedupe.commit(original);
+      expect(dedupe.reserve(replay)).toBe(false);
+    }
+    expect(announcements).toEqual(['txn_sepay_voice_1', 'txn_sepay_voice_2']);
+  });
+
   it('scopes reference fallback to the provider and preserves ACB history', () => {
     const payos = creditTransactionKey(credit({ transactionId: '' }));
     const legacy = creditTransactionKey(credit({ transactionId: '', provider: undefined, bank: 'ACB', source: 'CATCH_UP' }));
+    const sepay = creditTransactionKey(credit({ transactionId: '', provider: 'SEPAY', bank: 'Vietcombank' }));
     expect(payos).toBe('PAYOS:REFERENCE123');
     expect(legacy).toBe('ACB:REFERENCE123');
+    expect(sepay).toBe('SEPAY:REFERENCE123');
     const dedupe = new VoiceDedupe();
     dedupe.commit({ semanticKey: legacy });
     expect(dedupe.has({ semanticKey: payos })).toBe(false);
     expect(dedupe.reserve({ semanticKey: payos })).toBe(true);
     dedupe.commit({ semanticKey: payos });
     expect(dedupe.has({ semanticKey: creditTransactionKey(credit({ transactionId: '' })) })).toBe(true);
+    expect(dedupe.reserve({ semanticKey: sepay })).toBe(true);
+    dedupe.commit({ semanticKey: sepay });
+    expect(dedupe.reserve({ semanticKey: sepay })).toBe(false);
     expect(creditTransactionKey(credit({ transactionId: '', transactionNumber: '' }))).toBeUndefined();
   });
 });

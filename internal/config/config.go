@@ -48,6 +48,7 @@ type Config struct {
 	PaymentsEnabled       bool
 	PayOSWebhookConfirmed bool
 	PaymentMaxAmountVND   int64
+	SePayStoreConfigJSON  string `json:"-"`
 	TTSGatewayURL         string
 	TTSInternalToken      string
 	BarkServerURL         string
@@ -175,6 +176,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("PAYMENT_MAX_AMOUNT_VND must be an integer from 1 to 9007199254740991")
 	}
 
+	sepayStoreConfigJSON, err := ReadSecret("", "SEPAY_STORE_CONFIG_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+
 	ttsToken, err := ReadSecret("TTS_INTERNAL_TOKEN", "TTS_INTERNAL_TOKEN_FILE")
 	if err != nil {
 		return Config{}, err
@@ -275,12 +281,13 @@ func Load() (Config, error) {
 			Operators: set("OPERATOR_SUBJECTS"),
 			Viewers:   set("VIEWER_SUBJECTS"),
 		},
-		DevelopmentSubject:  value("DEVELOPMENT_SUBJECT", "local-owner"),
-		Production:          production,
-		PublicOrigin:        publicOrigin,
-		PaymentPublicOrigin: paymentPublicOrigin,
-		PaymentMaxAmountVND: paymentMaxAmountVND,
-		TTSGatewayURL:       ttsGatewayURL,
+		DevelopmentSubject:   value("DEVELOPMENT_SUBJECT", "local-owner"),
+		Production:           production,
+		PublicOrigin:         publicOrigin,
+		PaymentPublicOrigin:  paymentPublicOrigin,
+		PaymentMaxAmountVND:  paymentMaxAmountVND,
+		SePayStoreConfigJSON: sepayStoreConfigJSON,
+		TTSGatewayURL:        ttsGatewayURL,
 
 		TTSInternalToken:      ttsToken,
 		BarkServerURL:         barkServerURL,

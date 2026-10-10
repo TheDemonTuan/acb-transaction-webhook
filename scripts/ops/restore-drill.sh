@@ -138,15 +138,22 @@ sqlite3 "$fixture_db" <<'SQL'
 PRAGMA foreign_keys=ON;
 BEGIN;
 INSERT INTO connections(id,bank_code,state,created_at,updated_at) VALUES('restore-acb','ACB','PAUSED','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z');
+INSERT INTO connections(id,bank_code,state,created_at,updated_at) VALUES('sepay-store:restore-store','TESTBANK','WEBHOOK','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z');
 INSERT INTO transactions(id,connection_id,semantic_key,canonical_hash,transaction_date,effective_date,credit,parser_version,first_seen_at)
 VALUES('tx_001','restore-acb','restore:1','hash:1','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',150000,'v1','2026-10-09T00:00:00Z'),
 ('tx_002','restore-acb','restore:2','hash:2','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',300000,'v1','2026-10-09T00:00:00Z'),
 ('tx_003','restore-acb','restore:3','hash:3','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',450000,'v1','2026-10-09T00:00:00Z'),
-('tx_payos','payos-klb','PAYOS:restore:ref','payos:hash','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',2000,'payos-v1','2026-10-09T00:00:00Z');
+('tx_payos','payos-klb','PAYOS:restore:ref','payos:hash','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',2000,'payos-v1','2026-10-09T00:00:00Z'),
+('tx_sepay','sepay-store:restore-store','SEPAY:restore-store:fixture-reference','sepay:hash','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z',50000,'sepay-telegram-v1','2026-10-09T00:00:00Z');
 INSERT INTO payment_orders(id,order_code,channel_id,idempotency_key,request_hash,amount_vnd,description,origin,status,payment_link_id,transaction_id,created_at,updated_at,expires_at,paid_at)
 VALUES('restore-order',100000000001,'restore-channel','00000000-0000-4000-8000-000000000001','restore-hash',2000,'DH100000000001','STATIC_URL','PAID','restore-link','tx_payos','2026-10-09T00:00:00Z','2026-10-09T00:00:00Z','2026-10-09T00:30:00Z','2026-10-09T00:00:00Z');
 INSERT INTO payment_receipts(channel_id,reference,order_id,payment_link_id,amount_vnd,transaction_at,canonical_hash,transaction_id,received_at)
 VALUES('restore-channel','restore-reference','restore-order','restore-link',2000,'2026-10-09T00:00:00Z','payos:hash','tx_payos','2026-10-09T00:00:00Z');
+INSERT INTO sepay_receipts(store_key,bank_code,account_number,reference,canonical_hash,transaction_id,message_id,received_at)
+VALUES('restore-store','TESTBANK','0000000000','fixture-reference','sepay:hash','tx_sepay',42,'2026-10-09T00:00:00Z');
+-- Opaque encrypted-envelope fixture: restore must preserve bytes, not decrypt evidence.
+INSERT INTO sepay_telegram_inbox(bot_id,update_id,chat_id,message_id,payload_hash,payload_envelope,store_key,reason,received_at,transaction_id)
+VALUES(900001,1,-100900003,42,'fixture:payload',X'0102030405','restore-store','ACCEPTED','2026-10-09T00:00:00Z','tx_sepay');
 COMMIT;
 SQL
 fixture_schema="$(sqlite3 "$fixture_db" 'SELECT count(*) FROM schema_migrations;')"
@@ -158,6 +165,7 @@ printf 'test_worker_token_canary_0123456789\n' > "$fixture_dir/secrets/worker_in
 printf 'test_tts_token_canary_0123456789\n' > "$fixture_dir/secrets/tts_internal_token"
 printf 'test_bark_admin\n' > "$fixture_dir/secrets/bark_basic_auth_user"
 printf 'test_bark_pass_canary_0123456789\n' > "$fixture_dir/secrets/bark_basic_auth_password"
+printf '{"mode":"disabled"}\n' > "$fixture_dir/secrets/sepay_store_config"
 for f in "$fixture_dir/secrets"/*; do
   chmod 600 "$f" 2>/dev/null || true
 done
@@ -204,9 +212,12 @@ migrations_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM schema_migr
 tx_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM transactions;')"
 order_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM payment_orders;')"
 receipt_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM payment_receipts;')"
-[[ "$migrations_count" == "$fixture_schema" && "$tx_count" == 4 && "$order_count" == 1 && "$receipt_count" == 1 ]] || { printf 'FAIL: Restored financial row counts mismatch\n' >&2; exit 1; }
+sepay_receipt_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM sepay_receipts;')"
+sepay_inbox_count="$(sqlite3 "$restored_db_out" 'SELECT count(*) FROM sepay_telegram_inbox;')"
+[[ "$migrations_count" == "$fixture_schema" && "$tx_count" == 5 && "$order_count" == 1 && "$receipt_count" == 1 && "$sepay_receipt_count" == 1 && "$sepay_inbox_count" == 1 ]] || { printf 'FAIL: Restored financial row counts mismatch\n' >&2; exit 1; }
 cmp -s <(sqlite3 "$fixture_db" .dump) <(sqlite3 "$restored_db_out" .dump) || { printf 'FAIL: Restored financial database rows differ\n' >&2; exit 1; }
 [[ "$(sqlite3 "$restored_db_out" 'SELECT amount_vnd FROM payment_receipts WHERE reference="restore-reference";')" == 2000 ]] || { printf 'FAIL: payOS receipt amount changed\n' >&2; exit 1; }
+[[ "$(sqlite3 "$restored_db_out" 'SELECT credit FROM transactions WHERE id="tx_sepay";')" == 50000 && "$(sqlite3 "$restored_db_out" 'SELECT hex(payload_envelope) FROM sepay_telegram_inbox WHERE bot_id=900001 AND update_id=1;')" == 0102030405 ]] || { printf 'FAIL: SePay receipt or encrypted evidence changed\n' >&2; exit 1; }
 log "Integrity: ${integrity_status} (migrations: ${migrations_count}, transactions: ${tx_count})"
 
 # 8. Restore and verify secret bundle
@@ -217,7 +228,7 @@ chmod 700 "$restored_secrets_dir" 2>/dev/null || true
 log "Decrypting secret recovery bundle into isolated directory..."
 "$AGE_BIN" -d -i "$identity_file" "$secret_artifact" | tar -C "$restored_secrets_dir" -xf -
 
-for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password; do
+for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth_user bark_basic_auth_password sepay_store_config; do
   if [[ ! -s "$restored_secrets_dir/$s" ]]; then
     printf 'FAIL: Restored secret is missing: %s\n' "$s" >&2
     exit 1
@@ -229,7 +240,7 @@ for s in app_master_key worker_internal_token tts_internal_token bark_basic_auth
     exit 1
   fi
 done
-log "All 5 required production secrets restored and verified with exact checksum match; payOS configuration is preserved in the restored database."
+log "All 6 required production secrets restored and verified with exact checksum match; payOS configuration and SePay receipts/evidence are preserved in the restored database."
 
 # 9. Record Evidence JSON (No secret values!)
 release_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"
@@ -260,7 +271,9 @@ cat <<EOF > "$EVIDENCE_FILE"
     "schema_migrations": ${migrations_count},
     "transactions": ${tx_count},
     "payment_orders": ${order_count},
-    "payment_receipts": ${receipt_count}
+    "payment_receipts": ${receipt_count},
+    "sepay_receipts": ${sepay_receipt_count},
+    "sepay_telegram_inbox": ${sepay_inbox_count}
   },
   "recipient_fingerprint": "$(printf '%s' "$recipient" | sha256sum | cut -d' ' -f1)",
   "drill_status": "SUCCESS"

@@ -162,6 +162,11 @@ if [[ -n "$DEPLOY_PYTHON" ]]; then
   else
     record_fail "deployment behavior tests failed"
   fi
+  if "$DEPLOY_PYTHON" -m unittest discover -s tests/integration -p 'test_sepay_telegram_ops.py' -v; then
+    record_pass "SePay Telegram registration and diagnostic safety tests passed"
+  else
+    record_fail "SePay Telegram operations tests failed"
+  fi
 else
   record_skip "Python unavailable for deployment behavior tests"
 fi

@@ -97,6 +97,23 @@ describe('payment credit correlation', () => {
     expect(orders.map((order) => order.status)).toEqual(['PENDING', 'PENDING', 'PENDING']);
   });
 
+  it('does not correlate SePay credits with payOS orders even with a spoofed matching code', () => {
+    const orders = [
+      { orderCode: '100000000004', amountVnd: 50_000, status: 'PENDING' },
+      { orderCode: '100000000005', amountVnd: 50_000, status: 'PENDING' },
+    ];
+    for (const order of orders) {
+      const credit = {
+        provider: 'SEPAY',
+        orderCode: order.orderCode,
+        credit: '50000',
+        transactionId: `txn_sepay_${order.orderCode}`,
+      };
+      expect(orders.map((candidate) => creditMatchesPaymentOrder(candidate, credit))).toEqual([false, false]);
+    }
+    expect(orders.map((order) => order.status)).toEqual(['PENDING', 'PENDING']);
+  });
+
   it('never uses amount, legacy bank credits, missing codes, or numeric coercion', () => {
     const order = { orderCode: '100000000001' };
     expect(creditMatchesPaymentOrder(order, {})).toBe(false);

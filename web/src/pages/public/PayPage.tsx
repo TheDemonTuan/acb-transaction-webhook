@@ -178,14 +178,14 @@ export const PayPage: React.FC = () => {
   };
 
   return (
-    <main className="min-h-dvh bg-stone-100 px-4 py-8 sm:py-12 text-stone-900">
-      <div className="mx-auto max-w-lg space-y-5">
+    <main className="min-h-dvh bg-stone-50 px-4 py-6 sm:py-10 text-stone-900">
+      <div className="mx-auto max-w-lg space-y-5 [&_button]:min-h-11 [&_button]:focus-visible:outline-2 [&_button]:focus-visible:outline-offset-2 [&_button]:focus-visible:outline-emerald-600 [&_input]:focus-visible:outline-2 [&_input]:focus-visible:outline-emerald-600">
         <header className="text-center space-y-1">
           <p className="text-sm font-medium text-stone-500">payOS · KienlongBank</p>
           <h1 className="text-2xl font-bold">Thanh toán cho cửa hàng</h1>
           <p className="text-sm text-stone-600">Nhập số tiền bằng VND, sau đó thanh toán đơn riêng của bạn.</p>
         </header>
-        <section className="rounded-2xl bg-white p-5 sm:p-7 shadow-sm space-y-5">
+        <section className="rounded-3xl border border-stone-200 bg-white p-5 sm:p-7 shadow-sm space-y-5">
           {!id ? (
             <form onSubmit={submit} className="space-y-4">
               <label className="block font-semibold" htmlFor="payment-amount">Số tiền thanh toán (VND)</label>

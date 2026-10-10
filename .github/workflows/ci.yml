@@ -40,6 +40,7 @@ jobs:
         run: |
           python3 -m pip install PyYAML
           python3 -m unittest discover -s deploy/tests -p 'test_*.py' -v
+          python3 -m unittest discover -s tests/integration -p 'test_sepay_telegram_ops.py' -v
       - name: Test root-owned ACB route publisher in isolated directories
         run: |
           sudo apt-get update

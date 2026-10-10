@@ -70,6 +70,7 @@ preflight() {
     validate_state "$ROLLBACK/previous-state.env"
     permission_bundle="$DEPLOY_PATH/releases/$RELEASE_SHA"
   fi
+  bootstrap_sepay_store_config
   validate_permissions "$permission_bundle"
   local origins
   origins="$(python3 - "$DEPLOY_PATH/deploy/.env.production" <<'PY'

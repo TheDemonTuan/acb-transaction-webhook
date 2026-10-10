@@ -23,6 +23,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/security"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/sepay"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/ttsclient"
@@ -85,6 +86,7 @@ type WakeDispatcherFunc func(ctx context.Context) error
 
 type Server struct {
 	payments             *payments.Service
+	sepay                *sepay.Service
 	workerProber         WorkerProber
 	channelTester        NotificationChannelTester
 	providerReader       NotificationProviderReader
@@ -139,8 +141,10 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	r.Get("/ready", s.ready)
 	r.Get("/internal/deployz", s.deployReady)
 	r.Post("/api/integrations/payos/webhook", s.payOSWebhook)
+	r.Post("/api/integrations/sepay/telegram", s.sepayTelegramWebhook)
 	r.Route("/api/public/v1", func(api chi.Router) {
 		api.Get("/payment-config", s.publicPaymentConfig)
+		api.Get("/sepay-store", s.publicSePayStore)
 		api.Post("/payments", s.createPublicPayment)
 		api.Get("/payments/{id}", s.publicPayment)
 		api.Get("/transactions", s.publicTransactions)
@@ -161,6 +165,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requirePaymentMutationAllowed).Post("/payments", s.createAdminPayment)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requirePaymentMutationAllowed).Post("/payments/{id}/cancel", s.cancelPayment)
 		api.With(s.auth.Require(auth.Owner, auth.Operator)).Get("/payment-reviews", s.paymentReviews)
+		api.With(s.auth.Require(auth.Owner, auth.Operator)).Get("/sepay-reviews", s.sepayReviews)
 		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Post("/payment-provider/confirm-webhook", s.confirmPaymentWebhook)
 		api.With(s.auth.Require(auth.Owner)).Get("/payment-provider/config", s.paymentProviderConfig)
 		api.With(s.auth.Require(auth.Owner), s.requirePaymentMutationAllowed).Put("/payment-provider/config", s.savePaymentProviderConfig)
@@ -575,12 +580,18 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage_error"})
 		return
 	}
+	sepayStatus, err := s.sepayStatus(r)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage_error"})
+		return
+	}
 	identity, _ := auth.FromContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service":       "HEALTHY",
 		"version":       "2.0.0-dev",
 		"uptimeSeconds": int(time.Since(s.started).Seconds()),
 		"payments":      paymentStatus,
+		"sepay":         sepayStatus,
 		"storage":       map[string]string{"status": "READY"},
 		"webhooks":      summary.ByProvider[notification.ProviderWebhook],
 		"notifications": summary,

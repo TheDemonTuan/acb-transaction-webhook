@@ -8,12 +8,20 @@ export type Status = {
   uptimeSeconds: number;
   userRole?: 'OWNER' | 'OPERATOR' | 'VIEWER';
   payments: PaymentProviderState;
+  sepay: { mode: string; lastMessageAt: string | null; reviewCount: number };
   storage: { status: string };
   webhooks: { pending: number; deadLetter: number };
   notifications?: {
     total: { pending: number; deadLetter: number };
     byProvider: Record<string, { pending: number; deadLetter: number }>;
   };
+};
+
+export type SePayReview = {
+  storeKey: string;
+  messageId: string;
+  reason: string;
+  receivedAt: string;
 };
 
 export type BarkConfig = {
@@ -53,8 +61,8 @@ export type Endpoint = NotificationChannel;
 
 export type Transaction = {
   id: string;
-  bank: 'ACB' | 'KienlongBank';
-  provider?: 'PAYOS';
+  bank: string;
+  provider?: 'PAYOS' | 'SEPAY';
   orderCode?: string;
   semanticKey: string;
   transactionDate: string;

@@ -27,6 +27,10 @@ export const RealtimeDomainBridge: React.FC = () => {
         // Trigger voice announcement
         handleCreditEvent(envelope);
 
+        if (data.provider === 'SEPAY') {
+          queryClient.invalidateQueries({ queryKey: queryKeys.sepayStore });
+        }
+
         // Credit is a refetch signal, never authority to mark an order PAID.
         if (data.provider === 'PAYOS' && data.orderCode) {
           queryClient.invalidateQueries({ queryKey: queryKeys.payments() });

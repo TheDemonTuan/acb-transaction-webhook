@@ -191,6 +191,7 @@ services:
       DATABASE_PATH: /data/gateway.db
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+      SEPAY_STORE_CONFIG_FILE: /run/secrets/sepay_store_config
       WORKER_RPC_URL: http://acb-worker:8190
       WORKER_REALTIME_URL: http://acb-worker:8191
       WORKER_REALTIME_ENABLED: "true"
@@ -213,6 +214,7 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - sepay_store_config
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -259,6 +261,7 @@ services:
       DATABASE_PATH: /data/gateway.db
       TZ: Asia/Ho_Chi_Minh
       APP_MASTER_KEY_FILE: /run/secrets/app_master_key
+      SEPAY_STORE_CONFIG_FILE: /run/secrets/sepay_store_config
       WORKER_RPC_URL: http://acb-worker:8190
       WORKER_REALTIME_URL: http://acb-worker:8191
       WORKER_REALTIME_ENABLED: "true"
@@ -281,6 +284,7 @@ services:
       - app_master_key
       - tts_internal_token
       - worker_internal_token
+      - sepay_store_config
     labels:
       - "platform.workload.class=http"
     healthcheck:
@@ -362,6 +366,8 @@ secrets:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/tts_internal_token
   worker_internal_token:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/worker_internal_token
+  sepay_store_config:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/sepay_store_config
   bark_basic_auth_user:
     file: ${SECRETS_DIR:?SECRETS_DIR is required}/bark_basic_auth_user
   bark_basic_auth_password:

@@ -12,6 +12,7 @@ export const queryKeys = {
     params !== undefined ? (['auditLogs', params] as const) : (['auditLogs'] as const),
   adminOverview: ['admin-overview'] as const,
   paymentConfig: ['payment-config'] as const,
+  sepayStore: ['sepay-store'] as const,
   paymentProviderConfig: ['payment-provider-config'] as const,
   payments: (params?: Record<string, unknown>) =>
     params !== undefined ? (['payments', params] as const) : (['payments'] as const),
@@ -19,4 +20,5 @@ export const queryKeys = {
   publicPaymentOrder: (id: string) => ['public-payment-order', id] as const,
   paymentReviews: (params?: Record<string, unknown>) =>
     params !== undefined ? (['payment-reviews', params] as const) : (['payment-reviews'] as const),
+  sepayReviews: (params?: { cursor?: string; limit?: number }) => ['sepay-reviews', params] as const,
 };

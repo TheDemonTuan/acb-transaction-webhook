@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Root installation; the verified automatic cutover may upgrade only this app's fixed policy destinations.
+# Root installation; verified automatic releases upgrade only this app's fixed policy destinations.
 set -euo pipefail
 upgrade=false
 if [[ ${1:-} == --upgrade ]]; then upgrade=true; shift; fi
@@ -23,8 +23,8 @@ for path in (pathlib.Path('/usr/local/libexec'),pathlib.Path('/etc/acb-route-pub
         raise SystemExit('Existing helper/policy directory is not root-controlled')
 PY
 if [[ "$upgrade" == true ]]; then
-  # Explicit reviewed upgrade, invoked under the cutover deployment lock only
-  # after legacy gate admission. Content-addressed additions preserve rollback policies.
+  # Reviewed release upgrade runs under the deployment lock after source proof.
+  # Content-addressed additions preserve all authorized rollback policies.
   python3 - "$HERE/acb-route-publish.py" "$1" <<'PY'
 import fcntl,hashlib,importlib.util,os,pathlib,stat,sys,tempfile
 source,incoming=map(pathlib.Path,sys.argv[1:])

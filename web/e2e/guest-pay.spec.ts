@@ -24,6 +24,16 @@ test.describe('guest payment pages', () => {
     getCount = 0;
     failNextCreate = false;
     requests = [];
+    await page.addInitScript(() => {
+      const OriginalEventSource = window.EventSource;
+      window.EventSource = new Proxy(OriginalEventSource, {
+        construct(target, args: [string | URL, EventSourceInit?]) {
+          const source = new target(...args);
+          (window as Window & { __guestSource?: EventSource }).__guestSource = source;
+          return source;
+        },
+      });
+    });
     // Match root API requests, not Vite module URLs under /src/shared/api/.
     await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
       const request = route.request();
@@ -31,6 +41,8 @@ test.describe('guest payment pages', () => {
       requests.push(path);
       if (path === '/api/public/v1/payment-config') {
         await route.fulfill({ json: { provider: 'PAYOS', bank: 'KienlongBank', staticUrl: new URL('/pay', baseURL ?? 'http://127.0.0.1:5173').href, minAmountVnd: 1, maxAmountVnd: 500_000_000, ready: true, status: 'READY' } });
+      } else if (path === '/api/public/v1/sepay-store') {
+        await route.fulfill({ json: { provider: 'SEPAY', status: 'ACTIVE', storeName: 'Fixture Store', bank: 'VCB', accountNumber: 'STORE000001', accountName: 'STORE FIXTURE', qrPayload: 'fixture-store-qr-payload', lastMessageAt: null } });
       } else if (path === '/api/public/v1/payments' && request.method() === 'POST') {
         creates.push({ key: request.headers()['idempotency-key'], amountVnd: request.postDataJSON().amountVnd });
         if (failNextCreate) { failNextCreate = false; await route.abort('failed'); }
@@ -88,7 +100,32 @@ test.describe('guest payment pages', () => {
     expect(getCount).toBeGreaterThan(initialGets);
     await expect(page.getByRole('img', { name: /QR payOS/ })).toHaveCount(0);
     await expect(checkout).toHaveCount(0);
-    await expect(page.getByText(/Không thanh toán lại đơn này/)).toBeVisible();
+    expect(creates).toHaveLength(0);
+  });
+
+  test('SePay credit cannot replace or settle the guest payOS order even with a matching order code', async ({ page }) => {
+    await page.goto(`/pay/${id}`);
+    const qr = page.getByRole('img', { name: /QR payOS thanh toán/ });
+    await expect(qr).toHaveAttribute('src', /^data:image\/png;base64,/);
+    const originalQr = await qr.getAttribute('src');
+    await expect.poll(() => page.evaluate(() => Boolean((window as Window & { __guestSource?: EventSource }).__guestSource))).toBe(true);
+    await page.evaluate(({ orderCode, amountVnd }) => {
+      const source = (window as Window & { __guestSource?: EventSource }).__guestSource!;
+      source.dispatchEvent(new MessageEvent('bank.transaction.credit', { data: JSON.stringify({
+        provider: 'SEPAY', bank: 'VCB', orderCode, transactionId: 'sepay-guest-crossover',
+        transactionNumber: 'sepay-reference', credit: String(amountVnd), debit: '0', currency: 'VND',
+        description: 'Thanh toán QR cửa hàng', source: 'CATCH_UP',
+        transactionDate: new Date().toISOString(), detectedAt: '2020-01-01T00:00:00Z',
+      }) }));
+    }, { orderCode, amountVnd: order.amountVnd });
+    // Exercise a fresh authoritative snapshot after the unrelated event.
+    const before = getCount;
+    await page.evaluate(() => window.dispatchEvent(new Event('pageshow')));
+    await expect.poll(() => getCount).toBeGreaterThan(before);
+    await expect(page.getByRole('heading', { name: 'Đang chờ thanh toán' })).toBeVisible();
+    await expect(qr).toHaveAttribute('src', originalQr!);
+    await expect(page).toHaveURL(new RegExp(`/pay/${id}$`));
+    expect(order.status).toBe('PENDING');
     expect(creates).toHaveLength(0);
   });
 

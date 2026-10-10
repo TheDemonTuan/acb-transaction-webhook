@@ -1,7 +1,7 @@
 export const LABELS = {
-  appTitle: 'payOS Transaction Webhook — KienlongBank',
-  brandName: 'payOS Transaction Webhook',
-  viewerTitle: 'Giao dịch',
+  appTitle: 'Thu ngân · SePay Store + payOS',
+  brandName: 'SePay Store + payOS',
+  viewerTitle: 'Thu ngân',
   adminTitle: 'Quản trị hệ thống',
   searchPlaceholder: 'Tìm kiếm giao dịch (nội dung, số tiền)...',
   noTransactions: 'Chưa có giao dịch nào được ghi nhận.',
