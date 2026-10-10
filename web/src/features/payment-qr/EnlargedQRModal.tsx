@@ -188,8 +188,8 @@ export const EnlargedQRModal: React.FC<EnlargedQRModalProps> = ({
         {/* 2-Column Split Content */}
         <div className="flex-1 grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-stone-200 min-h-0 overflow-y-auto md:overflow-hidden">
           {/* Cột trái: QR Code to rõ, thông tin nhận tiền */}
-          <div className="p-5 sm:p-6 flex flex-col items-center justify-center text-center bg-white overflow-y-auto min-h-0">
-            <div className="w-full max-w-sm flex flex-col items-center gap-3">
+          <div className="p-4 sm:p-5 md:p-6 flex flex-col items-center justify-center text-center bg-white overflow-y-auto md:overflow-hidden min-h-0">
+            <div className="w-full max-w-sm flex flex-col items-center gap-2.5">
               <div className="text-center">
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-700">
                   {isStore ? 'QR chuyển khoản cửa hàng' : 'Mã QR thanh toán đơn hàng'}
@@ -200,7 +200,7 @@ export const EnlargedQRModal: React.FC<EnlargedQRModalProps> = ({
               </div>
 
               {/* QR Image rendering */}
-              <div className="bg-stone-50 p-3.5 rounded-2xl border border-stone-200 shadow-2xs w-full flex flex-col items-center [&_img]:w-[240px] sm:[&_img]:w-[260px] md:[&_img]:w-[280px]">
+              <div className="bg-stone-50 p-3 sm:p-3.5 rounded-2xl border border-stone-200 shadow-2xs w-full flex flex-col items-center [&_img]:w-[200px] sm:[&_img]:w-[220px] md:[&_img]:w-[235px] lg:[&_img]:w-[245px] [&_img]:max-h-[245px]">
                 {isStore ? (
                   storeReady ? (
                     <>
@@ -258,9 +258,6 @@ export const EnlargedQRModal: React.FC<EnlargedQRModalProps> = ({
                 )}
               </div>
 
-              <p className="text-xs text-stone-500">
-                Khách dùng ứng dụng ngân hàng hoặc ví điện tử bất kỳ để quét
-              </p>
             </div>
           </div>
 
@@ -388,6 +385,12 @@ export const EnlargedQRModal: React.FC<EnlargedQRModalProps> = ({
             )}
           </div>
 
+          {store?.lastMessageAt && (
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs text-stone-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <span>Lần nhận cuối: {formatDateTimeVN(store.lastMessageAt)}</span>
+            </span>
+          )}
           <button
             type="button"
             onClick={onClose}

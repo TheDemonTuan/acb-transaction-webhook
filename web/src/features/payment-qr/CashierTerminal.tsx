@@ -472,12 +472,57 @@ export const CashierTerminal: React.FC = () => {
           </div>
         </div>
 
-        {/* Right utility buttons */}
-        <div className="flex items-center gap-2 self-start md:self-auto">
+        {/* Right utility & Connection status */}
+        <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+          {/* Realtime & SePay Live Connection Status Badge */}
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-stone-50 border border-stone-200/90 text-xs text-stone-600 shadow-2xs">
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                realtime.status === 'CONNECTED' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+              }`}
+            />
+            <span className="font-semibold text-stone-800">
+              {realtime.status === 'CONNECTED' ? 'Đã kết nối' : 'Đang kết nối lại'}
+            </span>
+            <span className="text-stone-300">·</span>
+            <span>
+              SePay:{' '}
+              <strong
+                className={
+                  store.data?.status === 'ACTIVE'
+                    ? 'text-emerald-700 font-semibold'
+                    : 'text-stone-700 font-semibold'
+                }
+              >
+                {store.data?.status === 'ACTIVE'
+                  ? 'Đã bật nhận thông báo'
+                  : store.data?.status === 'OBSERVING'
+                  ? 'Đang quan sát'
+                  : 'Chưa bật'}
+              </strong>
+            </span>
+            {store.data?.lastMessageAt && (
+              <>
+                <span className="text-stone-300 hidden lg:inline">·</span>
+                <span className="text-stone-500 hidden lg:inline">
+                  Lần nhận cuối: {formatDateTimeVN(store.data.lastMessageAt)}
+                </span>
+              </>
+            )}
+            <button
+              type="button"
+              className="ml-1 text-[11px] font-bold text-emerald-800 hover:text-emerald-900 underline cursor-pointer"
+              onClick={realtime.forceReconnect}
+              title="Bấm để kết nối lại máy chủ realtime"
+            >
+              Kết nối lại
+            </button>
+          </div>
+
           <button
             type="button"
             onClick={() => setWifiOpen(true)}
-            className="min-h-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-700 text-xs font-semibold transition cursor-pointer"
+            className="min-h-9 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-700 text-xs font-semibold transition cursor-pointer"
             title="Xem mã kết nối WiFi quán"
           >
             <Wifi className="w-4 h-4 text-blue-600" />
@@ -1128,32 +1173,6 @@ export const CashierTerminal: React.FC = () => {
         </div>
       </div>
 
-      {/* Realtime Connection Details Accordion */}
-      <details className="text-xs text-stone-500 pt-1">
-        <summary className="min-h-9 cursor-pointer py-2 hover:text-stone-800">
-          Kết nối cập nhật · {realtime.status === 'CONNECTED' ? 'Đã kết nối' : 'Đang kết nối lại'}
-        </summary>
-        <div className="flex flex-wrap items-center gap-3 pt-1 text-stone-600">
-          <span>
-            SePay:{' '}
-            {store.data?.status === 'ACTIVE'
-              ? 'Đã bật nhận thông báo'
-              : store.data?.status === 'OBSERVING'
-              ? 'Đang quan sát'
-              : 'Chưa bật'}
-          </span>
-          {store.data?.lastMessageAt && (
-            <span>Lần nhận cuối: {formatDateTimeVN(store.data.lastMessageAt)}</span>
-          )}
-          <button
-            type="button"
-            className="underline font-semibold text-emerald-800 cursor-pointer"
-            onClick={realtime.forceReconnect}
-          >
-            Kết nối lại
-          </button>
-        </div>
-      </details>
 
       {/* Enlarged 2-Column Landscape Split Modal */}
       <EnlargedQRModal
