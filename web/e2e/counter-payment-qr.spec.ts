@@ -142,6 +142,10 @@ async function sendCredit(page: Page, order: PaymentOrder, provider: 'PAYOS' | '
 }
 
 test.describe('Independent fast counter automatic tray turnover and payments', () => {
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'wait' });
+  });
+
   test('persists before submit, correlates equal amounts out of order and restores selected receipts without create', async ({ page }) => {
     const fixture = await installFixture(page);
     await openCounter(page);
@@ -508,6 +512,57 @@ test.describe('Independent fast counter automatic tray turnover and payments', (
     expect(finalTray.visible.some((s) => s.idempotencyKey === slot1Key)).toBe(false);
     // The legacy extra slot was merged without loss
     expect([...finalTray.visible, ...finalTray.archived].some((s) => s.idempotencyKey === legacyExtraSlot.idempotencyKey)).toBe(true);
+  });
+
+  test('late create binds the remounted cashier without reload or another POST', async ({ page }) => {
+    const fixture = await installFixture(page);
+    fixture.holdNextCreate = true;
+    await openCounter(page);
+    await counter(page).getByLabel('Số tiền · nghìn đồng').fill('50');
+    await expect(counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true })).toBeEnabled();
+    await counter(page).getByLabel('Số tiền · nghìn đồng').press('Enter');
+    await expect.poll(() => fixture.creates.length).toBe(1);
+    await page.getByRole('button', { name: 'Tổng quan', exact: true }).click();
+    await expect(page).toHaveURL(/\/admin(?:\/overview)?$/);
+    await page.getByRole('button', { name: 'Giao dịch', exact: true }).click();
+    const card = counter(page).getByRole('article', { name: 'Khách 1', exact: true });
+    await expect(card).toBeVisible();
+    fixture.orders[0].status = 'PAID';
+    fixture.releaseCreate();
+    await expect(card.getByText('Đã thanh toán', { exact: true })).toBeVisible();
+    await expect(activeQr(page).getByRole('heading', { name: 'Thanh toán thành công', exact: true })).toBeVisible();
+    expect(fixture.creates).toHaveLength(1);
+  });
+
+  test('queued persistence preserves newer same-valued draft, Store selection and focus', async ({ page }) => {
+    const fixture = await installFixture(page);
+    await openCounter(page);
+    const amount = counter(page).getByLabel('Số tiền · nghìn đồng');
+    await amount.fill('50');
+    await expect(counter(page).getByRole('button', { name: 'Tạo QR payOS', exact: true })).toBeEnabled();
+    await page.evaluate(() => {
+      const fixtureWindow = window as Window & { __releaseTrayLock?: () => void };
+      void navigator.locks.request('payment_order_tray_v2', () => new Promise<void>((resolve) => {
+        fixtureWindow.__releaseTrayLock = resolve;
+      }));
+    });
+    await expect.poll(() => page.evaluate(async () => (await navigator.locks.query()).held?.some((lock) => lock.name === 'payment_order_tray_v2'))).toBe(true);
+    await amount.press('Enter');
+    await expect.poll(() => page.evaluate(async () => (await navigator.locks.query()).pending?.some((lock) => lock.name === 'payment_order_tray_v2'))).toBe(true);
+    await amount.fill('');
+    await amount.fill('50');
+    await counter(page).getByRole('button', { name: 'QR cửa hàng · SePay', exact: true }).click();
+    const nameInput = counter(page).getByLabel('Tên khách (tùy chọn)');
+    if (!await nameInput.isVisible()) await counter(page).getByText('Thêm tên khách', { exact: true }).click();
+    await nameInput.fill('Khách tiếp theo');
+    await page.evaluate(() => (window as Window & { __releaseTrayLock?: () => void }).__releaseTrayLock?.());
+    await expect(counter(page).getByRole('article', { name: 'Khách 1', exact: true }).getByText('Đang chờ thanh toán', { exact: true })).toBeVisible();
+    await expect(amount).toHaveValue('50');
+    await expect(nameInput).toHaveValue('Khách tiếp theo');
+    await expect(nameInput).toBeFocused();
+    await expect(activeQr(page)).toHaveAttribute('data-qr-kind', 'store');
+    expect(fixture.creates).toHaveLength(1);
+    expect(fixture.creates[0].amountVnd).toBe(50_000);
   });
 
 });
