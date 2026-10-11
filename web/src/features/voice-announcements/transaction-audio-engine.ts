@@ -85,12 +85,15 @@ export class TransactionAudioEngine implements VoiceEngine {
     const context = this.context();
     if (!context || context.state !== 'running' || volume <= 0) return 0;
     const start = context.currentTime;
-    for (const [frequency, offset, duration] of [[880, 0, 0.12], [1320, 0.12, 0.13]]) {
+    const level = Math.min(1, volume);
+    let end = start;
+    for (const [frequency, offset, duration] of [[880, 0, 0.4], [1320, 0.22, 0.48]]) {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = 'sine'; oscillator.frequency.setValueAtTime(frequency, start + offset);
       gain.gain.setValueAtTime(0.0001, start + offset);
-      gain.gain.exponentialRampToValueAtTime(0.15 * Math.min(1, volume), start + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.42 * level, start + offset + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.12 * level, start + offset + duration * 0.45);
       gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration);
       oscillator.connect(gain); gain.connect(context.destination);
       const node = { oscillator, gain };
@@ -100,8 +103,9 @@ export class TransactionAudioEngine implements VoiceEngine {
         this.chimeNodes = this.chimeNodes.filter((entry) => entry !== node);
       };
       oscillator.start(start + offset); oscillator.stop(start + offset + duration);
+      end = Math.max(end, start + offset + duration);
     }
-    return start + 0.25;
+    return end;
   }
   private clearPrefetch(): void {
     const prefetched = this.prefetched;
