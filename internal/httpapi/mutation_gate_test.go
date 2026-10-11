@@ -72,7 +72,7 @@ func TestMutationGate_GuardsAllGatewayWrites(t *testing.T) {
 		body   string
 	}{
 		{http.MethodPost, "/api/v1/webhooks", `{"name":"test","url":"https://example.com"}`},
-		{http.MethodPut, "/api/v1/voice/settings", `{"providerMode":"ONLINE_AUTO","edgeVoice":"vi-VN-HoaiMyNeural"}`},
+		{http.MethodPut, "/api/v1/voice/settings", `{"providerMode":"ONLINE_AUTO","voiceId":"vi-VN-HoaiMyNeural"}`},
 	}
 
 	for _, ep := range writeEndpoints {

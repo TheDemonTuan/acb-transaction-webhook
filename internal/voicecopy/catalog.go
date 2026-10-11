@@ -359,8 +359,16 @@ type AudioInputs struct {
 
 // ExportAudioInputs uses the production Go formatter; no Python money formatter is needed.
 func ExportAudioInputs(profile AudioInputProfile) (AudioInputs, error) {
-	if profile.VoiceID != "vi-VN-HoaiMyNeural" && profile.VoiceID != "vi-VN-NamMinhNeural" {
-		return AudioInputs{}, errors.New("unsupported Edge voice")
+	provider := "edge"
+	switch profile.VoiceID {
+	case "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural":
+	case "vi-VN-vais1000-medium":
+		provider = "piper"
+		if profile.PitchHz != 0 {
+			return AudioInputs{}, errors.New("Piper requires pitchHz 0")
+		}
+	default:
+		return AudioInputs{}, errors.New("unsupported voiceId")
 	}
 	if profile.Rate < .75 || profile.Rate > 2 || profile.PitchHz < -50 || profile.PitchHz > 50 {
 		return AudioInputs{}, errors.New("invalid profile rate or pitch")
@@ -377,7 +385,7 @@ func ExportAudioInputs(profile AudioInputProfile) (AudioInputs, error) {
 	if err != nil {
 		return AudioInputs{}, err
 	}
-	hash := sha256.Sum256([]byte(fmt.Sprintf("edge|%s|%s|%d|%s|pack-schema-1", profile.VoiceID, rateText, profile.PitchHz, FormatterVersion)))
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s|pack-schema-1", provider, profile.VoiceID, rateText, profile.PitchHz, FormatterVersion)))
 	result := AudioInputs{SchemaVersion: 1, SynthesisKey: hex.EncodeToString(hash[:]), VoiceID: profile.VoiceID, Rate: profile.Rate, PitchHz: profile.PitchHz, FormatterVersion: FormatterVersion, CatalogVersion: CatalogVersion, Amounts: make(map[string]AudioInputAmount, 20)}
 	amounts := [...]int64{1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000, 750000, 1000000, 2000000, 5000000}
 	for _, amount := range amounts {

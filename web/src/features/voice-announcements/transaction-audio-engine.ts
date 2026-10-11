@@ -70,7 +70,7 @@ export class TransactionAudioEngine implements VoiceEngine {
     return typeof window !== 'undefined' && Boolean(window.Audio);
   }
   public async getVoices(): Promise<VoiceInfo[]> {
-    // These are device-only Vietnamese choices; Edge voice is server profile data.
+    // These are device-only Vietnamese choices; server voices come from the profile.
     return this.browser.getVoices();
   }
   private stopChime(): void {

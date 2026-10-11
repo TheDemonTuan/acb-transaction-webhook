@@ -80,7 +80,7 @@ describe('bounded browser audio assets', () => {
   });
   it('rejects packs for another synthesis profile before any clip download', async () => {
     const manifest: VoiceManifest = { schemaVersion: 1, packVersion: 'c'.repeat(64), synthesisKey: 'b'.repeat(64),
-      voiceId: profile.edgeVoice, rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [], amounts: {} };
+      voiceId: profile.voiceId, rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [], amounts: {} };
     await expect(validateManifest(manifest, profile)).rejects.toThrow('VOICE_PACK_MISMATCH');
   });
   it('preloads only six active-profile cores plus eight fragments through real verified fetch/decode, concurrency two', async () => {
@@ -92,7 +92,7 @@ describe('bounded browser audio assets', () => {
       clipId: index < amounts.length ? `amount-${amounts[index]}` : `fragment-${index - amounts.length}`,
       kind: index < amounts.length ? 'amount' : 'tail-fragment',
     }));
-    const unsigned = { schemaVersion: 1, synthesisKey: profile.synthesisKey, voiceId: profile.edgeVoice,
+    const unsigned = { schemaVersion: 1, synthesisKey: profile.synthesisKey, voiceId: profile.voiceId,
       rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips,
       amounts: Object.fromEntries(amounts.map((amount) => [amount, { standard: `amount-${amount}`, classic: {} }])) };
     const canonical = (value: unknown): string => {

@@ -29,9 +29,11 @@ func setupTestVoiceServer(t *testing.T) (*Server, *storage.Store, *httptest.Serv
 	}
 
 	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var synth ttsclient.SynthesizeRequest
+		_ = json.NewDecoder(r.Body).Decode(&synth)
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
-		w.Header().Set("X-TTS-Voice", "vi-VN-HoaiMyNeural")
+		w.Header().Set("X-TTS-Provider", (storage.VoiceProfile{ProviderMode: synth.ProviderMode}).SynthesisProvider())
+		w.Header().Set("X-TTS-Voice", synth.Voice)
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-TTS-Cached", "false")
 		w.WriteHeader(http.StatusOK)
@@ -82,7 +84,7 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &settings); err != nil {
 		t.Fatalf("unmarshal settings: %v", err)
 	}
-	if settings.Revision != 1 || settings.ProviderMode != "EDGE_ONLY" {
+	if settings.Revision != 1 || settings.ProviderMode != "PIPER_ONLY" || settings.VoiceID != storage.VoiceIDPiperVais1000 {
 		t.Errorf("unexpected settings: %+v", settings)
 	}
 
@@ -107,8 +109,14 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	}
 
 	// 2. PUT /api/v1/voice/settings
-	settings.EdgeVoice = "vi-VN-NamMinhNeural"
-	bodyBytes, _ := json.Marshal(settings)
+	input := storage.VoiceSettingsInput{
+		Revision: settings.Revision, ProviderMode: storage.ProviderModeEdgeOnly,
+		VoiceID: storage.VoiceIDNamMinh, Rate: settings.Rate, PitchHz: settings.PitchHz,
+		AmountBands: settings.AmountBands, ChimeEnabled: settings.ChimeEnabled,
+		LoadingSoundEnabled: settings.LoadingSoundEnabled, FunEnabled: settings.FunEnabled,
+		IncludeDescription: settings.IncludeDescription, CustomTemplate: settings.CustomTemplate,
+	}
+	bodyBytes, _ := json.Marshal(input)
 	putReq := prepareAuthedRequest(
 		httptest.NewRequest(http.MethodPut, "http://example.test/api/v1/voice/settings", bytes.NewReader(bodyBytes)),
 		cookie,
@@ -122,7 +130,7 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	}
 	var updated storage.VoiceProfile
 	_ = json.Unmarshal(putW.Body.Bytes(), &updated)
-	if updated.Revision != 2 || updated.EdgeVoice != "vi-VN-NamMinhNeural" {
+	if updated.Revision != 2 || updated.VoiceID != "vi-VN-NamMinhNeural" {
 		t.Errorf("unexpected updated settings: %+v", updated)
 	}
 }
@@ -401,8 +409,8 @@ func TestSynthesizeTransactionAudioPolicies(t *testing.T) {
 	if wRT.Header().Get("Content-Type") != "audio/mpeg" {
 		t.Errorf("expected Content-Type audio/mpeg, got %s", wRT.Header().Get("Content-Type"))
 	}
-	if wRT.Header().Get("X-TTS-Provider") != "edge" {
-		t.Errorf("expected X-TTS-Provider edge, got %s", wRT.Header().Get("X-TTS-Provider"))
+	if wRT.Header().Get("X-TTS-Provider") != "piper" {
+		t.Errorf("expected X-TTS-Provider piper, got %s", wRT.Header().Get("X-TTS-Provider"))
 	}
 
 	// 4. Replay CATCH_UP transaction -> 200 OK (manual replay allowed!)
@@ -474,7 +482,7 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Provider", (storage.VoiceProfile{ProviderMode: lastTTSReq.ProviderMode}).SynthesisProvider())
 		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-TTS-Cached", "false")
@@ -520,7 +528,7 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
 		Revision:     prof.Revision,
 		ProviderMode: "EDGE_ONLY",
-		EdgeVoice:    "vi-VN-HoaiMyNeural",
+		VoiceID:      "vi-VN-HoaiMyNeural",
 		Rate:         1.25,
 		PitchHz:      5,
 		AmountBands:  prof.AmountBands,
@@ -566,7 +574,7 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
 		Revision:     prof.Revision,
 		ProviderMode: "EDGE_ONLY",
-		EdgeVoice:    "vi-VN-HoaiMyNeural",
+		VoiceID:      "vi-VN-HoaiMyNeural",
 		Rate:         0.80,
 		PitchHz:      0,
 		AmountBands:  prof.AmountBands,
@@ -609,7 +617,7 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Provider", (storage.VoiceProfile{ProviderMode: lastTTSReq.ProviderMode}).SynthesisProvider())
 		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-TTS-Cached", "false")
@@ -656,8 +664,8 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 	}
 	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
 		Revision:       prof.Revision,
-		ProviderMode:   "EDGE_ONLY",
-		EdgeVoice:      prof.EdgeVoice,
+		ProviderMode:   prof.ProviderMode,
+		VoiceID:        prof.VoiceID,
 		Rate:           prof.Rate,
 		PitchHz:        prof.PitchHz,
 		AmountBands:    prof.AmountBands,
@@ -730,7 +738,7 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Provider", (storage.VoiceProfile{ProviderMode: lastTTSReq.ProviderMode}).SynthesisProvider())
 		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-TTS-Cached", "false")
@@ -828,7 +836,7 @@ func TestVoiceSummaryStreamGETWithQueryParams(t *testing.T) {
 	mockTTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&lastTTSReq)
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Provider", (storage.VoiceProfile{ProviderMode: lastTTSReq.ProviderMode}).SynthesisProvider())
 		w.Header().Set("X-TTS-Voice", lastTTSReq.Voice)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("summary_audio_stream"))

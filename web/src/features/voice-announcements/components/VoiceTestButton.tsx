@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Play } from 'lucide-react';
 import { useVoiceAnnouncements } from '../VoiceAnnouncementProvider';
+import { isVoiceCancellation } from '../voice-engine';
 
 export interface VoiceTestButtonProps {
   className?: string;
@@ -22,6 +23,7 @@ export const VoiceTestButton: React.FC<VoiceTestButtonProps> = ({ className = ''
       }
       await testVoice();
     } catch (err: any) {
+      if (isVoiceCancellation(err)) return;
       const msg =
         err?.message === 'BROWSER_VIETNAMESE_VOICE_UNAVAILABLE'
           ? 'Thiết bị chưa có giọng đọc Tiếng Việt'

@@ -1,4 +1,4 @@
-"""Build tooling tests use stub media and provider bytes, never live synthesis."""
+"""Deterministic build contracts plus real licensed Piper/media integration."""
 import importlib.util
 import hashlib
 from pathlib import Path
@@ -116,3 +116,48 @@ def test_initial_input_validation_requires_approved_amounts(tmp_path):
     path.write_bytes(canonical_json(inputs()))
     with pytest.raises(InvalidPack, match="twenty approved"):
         builder.load_inputs(path)
+
+
+def test_piper_license_gate_uses_original_model_card_not_edge_attestation(tmp_path):
+    card = Path(__file__).parents[1] / "assets" / "models" / "MODEL_CARD"
+    builder.require_piper_license(card)
+    with pytest.raises(InvalidPack, match="model-card required"):
+        builder.require_piper_license(None)
+    forged = tmp_path / "MODEL_CARD"
+    forged.write_text("CC-BY-4.0 vais1000 authorized=true", encoding="utf-8")
+    with pytest.raises(InvalidPack, match="pinned upstream"):
+        builder.require_piper_license(forged)
+
+
+def test_build_error_keeps_nested_cause():
+    error = ExceptionGroup("worker failure", [ValueError("specific cause")])
+    assert builder.failure_details(error) == "ValueError: specific cause"
+
+
+@pytest.mark.asyncio
+async def test_real_piper_pack_build_and_verify(tmp_path):
+    import shutil
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("Build-only ffmpeg/ffprobe required for real normalization")
+    data = inputs()
+    data["voiceId"] = "vi-VN-vais1000-medium"
+    data["synthesisKey"] = synthesis_key(data["voiceId"], data["rate"], 0)
+    await builder.build(data, tmp_path)
+    manifest = builder.verify_pack(tmp_path, tmp_path / data["synthesisKey"])
+    assert manifest["voiceId"] == data["voiceId"]
+    assert manifest["clips"][0]["sampleRate"] == 24000
+    assert manifest["clips"][0]["transcript"] == "Đã nhận một đồng."
+    builder.verify_output(tmp_path, data)
+
+
+@pytest.mark.parametrize("input_i", ["-18.02", "-inf"])
+def test_loudnorm_json_followed_by_ffmpeg7_progress(monkeypatch, input_i):
+    from types import SimpleNamespace
+    measurements = {"input_i": input_i, "input_tp": "-3.85", "input_lra": "0.00", "input_thresh": "-28.02", "target_offset": "0.02"}
+    stderr = "[Parsed_loudnorm_0] \n" + canonical_json(measurements).decode() + "\n[out#0/null] video:0KiB audio:387KiB\nsize=N/A time=00:00:01.03\n"
+    monkeypatch.setattr(builder, "run_media", lambda arguments: SimpleNamespace(stderr=stderr))
+    if input_i == "-inf":
+        with pytest.raises(InvalidPack, match="Invalid loudness"):
+            builder.loudness(Path("fixture.wav"))
+    else:
+        assert builder.loudness(Path("fixture.wav")) == measurements

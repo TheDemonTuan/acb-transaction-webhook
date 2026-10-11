@@ -1407,15 +1407,15 @@ func (h *harness) audio() error {
 	if err != nil {
 		return err
 	}
-	var profile struct {
-		Revision     int64  `json:"revision"`
-		ProviderMode string `json:"providerMode"`
-		EdgeVoice    string `json:"edgeVoice"`
-	}
+	var profile storage.VoiceProfile
 	err = json.NewDecoder(io.LimitReader(resp.Body, 1024*1024)).Decode(&profile)
 	_ = resp.Body.Close()
 	if err != nil || resp.StatusCode != 200 {
 		return errors.New("local TTS configured but public voice profile unavailable")
+	}
+	expectedProvider := profile.SynthesisProvider()
+	if expectedProvider != "piper" && expectedProvider != "edge" {
+		return errors.New("local TTS smoke requires an explicit server synthesis provider")
 	}
 	start := time.Now()
 	req, err = http.NewRequestWithContext(h.ctx, "POST", h.baseA+"/api/public/v1/voice/test", bytes.NewReader(encode(map[string]any{"profileRevision": profile.Revision, "part": "full"})))
@@ -1431,7 +1431,12 @@ func (h *harness) audio() error {
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	_ = resp.Body.Close()
 	mpeg := len(raw) >= 3 && (string(raw[:3]) == "ID3" || (raw[0] == 0xff && raw[1]&0xe0 == 0xe0))
-	valid := readErr == nil && resp.StatusCode == 200 && len(raw) <= 4*1024*1024 && mpeg && strings.EqualFold(resp.Header.Get("X-TTS-Provider"), "edge") && resp.Header.Get("X-TTS-Voice") == profile.EdgeVoice
+	valid := readErr == nil && resp.StatusCode == 200 && len(raw) <= 4*1024*1024 && mpeg &&
+		resp.Header.Get("Content-Type") == "audio/mpeg" &&
+		resp.Header.Get("X-TTS-Provider") == expectedProvider && resp.Header.Get("X-TTS-Voice") == profile.VoiceID &&
+		resp.Header.Get("X-TTS-Fallback") == "false" &&
+		resp.Header.Get("X-Voice-Revision") == strconv.FormatInt(profile.Revision, 10) &&
+		resp.Header.Get("X-Voice-Synthesis-Key") == profile.SynthesisKey
 	status := "PASS"
 	if !valid {
 		status = "EXTERNAL_FAILURE"

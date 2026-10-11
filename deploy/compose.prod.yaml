@@ -93,7 +93,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; response=json.load(urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2)); assert response['piper']['available'], 'Fixed Piper provider unavailable'"]
       interval: 10s
       timeout: 3s
       retries: 3

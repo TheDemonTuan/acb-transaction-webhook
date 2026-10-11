@@ -176,7 +176,7 @@ func TestDeploymentControl_MutationGuards(t *testing.T) {
 	}
 
 	// SaveVoiceProfile must fail while locked.
-	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{ProviderMode: "EDGE_ONLY", EdgeVoice: "vi-VN-HoaiMyNeural", Rate: 1.25, AmountBands: storage.DefaultVoiceProfile.AmountBands})
+	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{ProviderMode: "EDGE_ONLY", VoiceID: "vi-VN-HoaiMyNeural", Rate: 1.25, AmountBands: storage.DefaultVoiceProfile.AmountBands})
 	if !errors.Is(err, storage.ErrMutationGateLocked) {
 		t.Errorf("SaveVoiceProfile: expected ErrMutationGateLocked, got %v", err)
 	}

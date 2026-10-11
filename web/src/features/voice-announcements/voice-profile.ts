@@ -7,10 +7,15 @@ export interface AmountBand {
   styleId: 'classic' | 'cute' | 'funny' | 'custom';
 }
 
+export type VoiceProviderMode = 'PIPER_ONLY' | 'EDGE_ONLY' | 'BROWSER_ONLY';
+export const PIPER_VOICE_ID = 'vi-VN-vais1000-medium';
+export const PIPER_VOICE_LABEL = 'Piper Việt · miễn phí, chạy tại máy chủ';
+export const EDGE_VOICE_IDS = ['vi-VN-HoaiMyNeural', 'vi-VN-NamMinhNeural'] as const;
+
 export interface VoiceProfile {
   revision: number;
-  providerMode: 'EDGE_ONLY' | 'BROWSER_ONLY';
-  edgeVoice: string;
+  providerMode: VoiceProviderMode;
+  voiceId: string;
   rate: number;
   pitchHz: number;
   amountBands: AmountBand[];
@@ -27,8 +32,8 @@ export interface VoiceProfile {
 
 export interface VoiceSettingsInput {
   revision: number;
-  providerMode: 'EDGE_ONLY' | 'BROWSER_ONLY';
-  edgeVoice: string;
+  providerMode: VoiceProviderMode;
+  voiceId: string;
   rate: number;
   pitchHz: number;
   amountBands: AmountBand[];
@@ -48,8 +53,8 @@ export const DEFAULT_AMOUNT_BANDS: AmountBand[] = [
 
 export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
   revision: 1,
-  providerMode: 'EDGE_ONLY',
-  edgeVoice: 'vi-VN-HoaiMyNeural',
+  providerMode: 'PIPER_ONLY',
+  voiceId: PIPER_VOICE_ID,
   rate: 1.25,
   pitchHz: 0,
   amountBands: DEFAULT_AMOUNT_BANDS,
@@ -67,8 +72,10 @@ export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
 export function validateVoiceProfile(value: unknown): VoiceProfile {
   if (!value || typeof value !== 'object') throw new Error('VOICE_PROFILE_INVALID');
   const p = value as Record<string, unknown>;
-  if (!Number.isSafeInteger(p.revision) || Number(p.revision) <= 0 || !['EDGE_ONLY', 'BROWSER_ONLY'].includes(String(p.providerMode)) ||
-      !['vi-VN-HoaiMyNeural', 'vi-VN-NamMinhNeural'].includes(String(p.edgeVoice)) ||
+  if (!Number.isSafeInteger(p.revision) || Number(p.revision) <= 0 || !['PIPER_ONLY', 'EDGE_ONLY', 'BROWSER_ONLY'].includes(String(p.providerMode)) ||
+      (p.providerMode === 'PIPER_ONLY' ? p.voiceId !== PIPER_VOICE_ID || p.pitchHz !== 0
+        : ![PIPER_VOICE_ID, ...EDGE_VOICE_IDS].includes(String(p.voiceId)) ||
+          (p.providerMode === 'EDGE_ONLY' && !EDGE_VOICE_IDS.some((id) => id === p.voiceId))) ||
       typeof p.rate !== 'number' || p.rate < 0.75 || p.rate > 2 || Math.abs(p.rate * 100 - Math.round(p.rate * 100)) > 1e-8 ||
       typeof p.pitchHz !== 'number' || !Number.isInteger(p.pitchHz) || p.pitchHz < -50 || p.pitchHz > 50 ||
       p.catalogVersion !== 'v1' || typeof p.synthesisKey !== 'string' || !/^[a-f0-9]{64}$/.test(p.synthesisKey) ||

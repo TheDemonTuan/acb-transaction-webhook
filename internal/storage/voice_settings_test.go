@@ -26,11 +26,11 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 	if profile.Revision != 1 {
 		t.Errorf("expected revision 1, got %d", profile.Revision)
 	}
-	if profile.ProviderMode != ProviderModeEdgeOnly {
-		t.Errorf("expected %s, got %s", ProviderModeEdgeOnly, profile.ProviderMode)
+	if profile.ProviderMode != ProviderModePiperOnly {
+		t.Errorf("expected %s, got %s", ProviderModePiperOnly, profile.ProviderMode)
 	}
-	if profile.EdgeVoice != EdgeVoiceHoaiMy {
-		t.Errorf("expected %s, got %s", EdgeVoiceHoaiMy, profile.EdgeVoice)
+	if profile.VoiceID != VoiceIDPiperVais1000 {
+		t.Errorf("expected %s, got %s", VoiceIDPiperVais1000, profile.VoiceID)
 	}
 	if profile.Rate != 1.25 {
 		t.Errorf("expected rate 1.25, got %f", profile.Rate)
@@ -49,7 +49,7 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 	input := VoiceSettingsInput{
 		Revision:            profile.Revision,
 		ProviderMode:        ProviderModeEdgeOnly,
-		EdgeVoice:           EdgeVoiceNamMinh,
+		VoiceID:             VoiceIDNamMinh,
 		Rate:                1.50,
 		PitchHz:             10,
 		AmountBands:         profile.AmountBands,
@@ -66,8 +66,8 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 	if saved.Revision != 2 {
 		t.Errorf("expected revision 2, got %d", saved.Revision)
 	}
-	if saved.EdgeVoice != EdgeVoiceNamMinh {
-		t.Errorf("expected %s, got %s", EdgeVoiceNamMinh, saved.EdgeVoice)
+	if saved.VoiceID != VoiceIDNamMinh {
+		t.Errorf("expected %s, got %s", VoiceIDNamMinh, saved.VoiceID)
 	}
 	if saved.Rate != 1.50 || saved.PitchHz != 10 {
 		t.Errorf("unexpected rate/pitch: %f / %d", saved.Rate, saved.PitchHz)
@@ -98,9 +98,9 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 
 	invalidVoice := input
 	invalidVoice.Revision = saved.Revision
-	invalidVoice.EdgeVoice = "en-US-Jenny"
+	invalidVoice.VoiceID = "en-US-Jenny"
 	if _, err = store.SaveVoiceProfile(ctx, invalidVoice); err == nil {
-		t.Error("expected error for invalid edgeVoice")
+		t.Error("expected error for invalid voiceId")
 	}
 
 	invalidTemplate := input

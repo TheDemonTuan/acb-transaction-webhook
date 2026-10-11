@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Build approved exact-profile packs, or verify them without contacting Edge.
+"""Build exact-profile Piper or explicitly authorized Edge packs.
 
-Network generation requires --rights-evidence: a release-owner JSON attestation
-with authorized=true and nonempty deployment, use, retention, redistribution,
-and evidenceReference strings. The attestation must refer to actual reviewed
-permission; it is not itself a grant of rights. Keep private evidence out of packs.
+Piper generation requires --model-card containing the fixed upstream CC-BY-4.0
+model card. Its published license, not an Edge permission attestation, authorizes
+the pack; release artifacts must retain model attribution. Edge generation still
+requires --rights-evidence with reviewed deployment/use/retention/redistribution
+permission. ffmpeg/ffprobe are build-only normalization dependencies.
 """
 import argparse
 import asyncio
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -52,6 +55,15 @@ def require_rights(path):
             raise InvalidPack("Audio rights gate: missing reviewed " + field + " evidence")
 
 
+def require_piper_license(path):
+    if path is None:
+        raise InvalidPack("Piper license gate: --model-card required")
+    card = read_bounded(Path(path), 64 * 1024)
+    if hashlib.sha256(card).hexdigest() != "302db8a930ffc2b1c2181db26deaf8272116eca2b08b8f80da6375b0a994af7b":
+        raise InvalidPack("Piper model card differs from pinned upstream card")
+    if b"https://creativecommons.org/licenses/by/4.0/" not in card or b"vais1000" not in card.lower():
+        raise InvalidPack("Piper model card does not grant the fixed voice license")
+
 def run_media(arguments):
     try:
         result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=120)
@@ -68,9 +80,15 @@ def loudness(path):
     if start < 0:
         raise InvalidPack("Missing loudness measurements")
     try:
-        return json.loads(result.stderr[start:])
-    except ValueError as exc:
-        raise InvalidPack("Invalid loudness measurements") from exc
+        # FFmpeg 7 writes final muxer/progress lines after the loudnorm object.
+        # Parse exactly one JSON object, not the surrounding diagnostic stream.
+        measured, _ = json.JSONDecoder().raw_decode(result.stderr[start:])
+        for field in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset"):
+            if not math.isfinite(float(measured[field])):
+                raise ValueError("Non-finite loudness measurement")
+        return measured
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidPack("Invalid loudness measurements: " + result.stderr[-2000:]) from exc
 
 
 def audio_metadata(path):
@@ -101,12 +119,28 @@ def normalize_audio(raw, temporary):
         f":offset={measured['target_offset']}"
     )
     run_media(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(trimmed), "-af", normalization, "-ar", "24000", "-ac", "1", "-codec:a", "libmp3lame", "-b:a", "64k", "-map_metadata", "-1", str(output)])
-    audio = read_bounded(output, MAX_CLIP_BYTES)
-    duration = audio_metadata(output)
     actual = loudness(output)
-    if not -19 <= float(actual["input_i"]) <= -17 or float(actual["input_tp"]) > -1:
-        raise InvalidPack("Normalized clip failed loudness/true-peak gate")
-    return audio, duration
+    # Lossy encoding can change integrated loudness and inter-sample peaks.
+    # Correct from the original PCM, never repeatedly transcode MP3. An
+    # oversampled limiter provides codec headroom; every result is remeasured.
+    gain_db = -18.0 - float(measured["input_i"])
+    for _ in range(3):
+        if -19 <= float(actual["input_i"]) <= -17 and float(actual["input_tp"]) <= -1:
+            return read_bounded(output, MAX_CLIP_BYTES), audio_metadata(output)
+        correction = f"volume={gain_db:.4f}dB,aresample=96000,alimiter=limit=0.749894:level=false:attack=5:release=50,aresample=24000"
+        run_media(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(trimmed), "-af", correction, "-ar", "24000", "-ac", "1", "-codec:a", "libmp3lame", "-b:a", "64k", "-map_metadata", "-1", str(output)])
+        actual = loudness(output)
+        gain_db += -18.0 - float(actual["input_i"])
+    if -19 <= float(actual["input_i"]) <= -17 and float(actual["input_tp"]) <= -1:
+        return read_bounded(output, MAX_CLIP_BYTES), audio_metadata(output)
+    artifact_root = os.environ.get("VOICE_PACK_FAILURE_ROOT")
+    if artifact_root:
+        destination = Path(artifact_root) / hashlib.sha256(raw).hexdigest()
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in (source, trimmed, output):
+            shutil.copyfile(path, destination / path.name)
+        atomic_write(destination / "measurements.json", canonical_json({"source": measured, "encoded": actual}))
+    raise InvalidPack(f"Normalized clip failed loudness/true-peak gate: I={actual['input_i']} LUFS, TP={actual['input_tp']} dBTP")
 
 
 def atomic_write(path, content):
@@ -151,9 +185,13 @@ def verify_output(root, inputs=None):
 
 
 async def build(inputs, root):
-    # Imported only after the rights gate; verification never initializes Edge.
-    from app.providers.edge import EdgeTTSProvider
-    provider = EdgeTTSProvider()
+    from app.providers.piper import PiperTTSProvider, VOICE_ID
+    is_piper = inputs["voiceId"] == VOICE_ID
+    if is_piper:
+        provider = PiperTTSProvider()
+    else:
+        from app.providers.edge import EdgeTTSProvider
+        provider = EdgeTTSProvider()
     directory = root / inputs["synthesisKey"]
     if (directory / "manifest.json").exists():
         verify_output(root, inputs)
@@ -221,11 +259,22 @@ async def build(inputs, root):
 
     async def worker():
         for clip in pending:
-            await create(clip)
+            try:
+                await create(clip)
+            except Exception as exc:
+                raise InvalidPack(f"Clip {clip['clipId']} ({clip['transcript']!r}): {failure_details(exc)}") from exc
 
-    async with asyncio.TaskGroup() as group:
-        for _ in range(2):
-            group.create_task(worker())
+    try:
+        if is_piper:
+            await provider.start()
+        async with asyncio.TaskGroup() as group:
+            for _ in range(2):
+                group.create_task(worker())
+    finally:
+        if is_piper:
+            import anyio
+            with anyio.CancelScope(shield=True):
+                await provider.close()
     manifest = dict(inputs, clips=[completed[clip["clipId"]] for clip in inputs["clips"]])
     manifest["packVersion"] = hashlib.sha256(canonical_json(manifest)).hexdigest()
     validate_manifest(manifest)
@@ -236,6 +285,12 @@ async def build(inputs, root):
     checkpoint.unlink(missing_ok=True)
     print(f"Built {inputs['synthesisKey']}: {len(manifest['clips'])} clips; listening/release gates still required")
 
+def failure_details(error):
+    if isinstance(error, BaseExceptionGroup):
+        return "; ".join(failure_details(child) for child in error.exceptions)
+    # Build diagnostics are local, never embedded in public manifests/responses.
+    return f"{type(error).__name__}: {str(error)[:2000]}"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -243,6 +298,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--rights-evidence", type=Path)
+    parser.add_argument("--model-card", type=Path)
     args = parser.parse_args()
     try:
         inputs = load_inputs(args.inputs) if args.inputs else None
@@ -251,14 +307,17 @@ def main():
                 raise InvalidPack("ffprobe required in build environment")
             verify_output(args.output, inputs)
         else:
-            require_rights(args.rights_evidence)
             if inputs is None:
                 raise InvalidPack("--inputs required for generation")
+            if inputs["voiceId"] == "vi-VN-vais1000-medium":
+                require_piper_license(args.model_card)
+            else:
+                require_rights(args.rights_evidence)
             if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
                 raise InvalidPack("ffmpeg and ffprobe required in build environment")
             asyncio.run(build(inputs, args.output))
-    except (InvalidPack, OSError, ValueError, ExceptionGroup) as exc:
-        parser.exit(1, f"Voice pack failed: {exc}\n")
+    except (InvalidPack, OSError, ValueError, RuntimeError, ExceptionGroup) as exc:
+        parser.exit(1, f"Voice pack failed: {failure_details(exc)}\n")
 
 
 if __name__ == "__main__":

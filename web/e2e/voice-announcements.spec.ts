@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
+import { DEFAULT_VOICE_PROFILE, PIPER_VOICE_ID } from '../src/features/voice-announcements/voice-profile';
 
 type VoiceFixtureWindow = Window & {
   __activeEventSource?: EventSource;
@@ -21,7 +21,7 @@ async function expectTestAmount(page: Page) {
 
 test.describe('Voice Announcements & Realtime Features', () => {
   test.beforeEach(async ({ page }) => {
-    // Deterministic browser-mode lifecycle fixture, not evidence for Edge audio.
+    // Deterministic browser-mode lifecycle fixture, not evidence for server-generated audio.
     await page.route(/\/api\/(?:public\/)?v1\/voice\/profile$/, (route) => route.fulfill({
       contentType: 'application/json', body: JSON.stringify({ ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY',
         synthesisKey: 'a'.repeat(64), funEnabled: false, chimeEnabled: false }),
@@ -330,6 +330,66 @@ test.describe('Voice Announcements & Realtime Features', () => {
       expect(announcement.lang).toBe('vi-VN');
     }
     await expect(history.getByText('KHÁCH THỨ HAI CÙNG SỐ TIỀN', { exact: true })).toBeVisible();
+  });
+
+  test('exposes the Piper model attribution and license to audio recipients', async ({ page }) => {
+    await page.route(/\/api\/(?:public\/)?v1\/voice\/profile$/, route => route.fulfill({
+      json: { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64) },
+    }));
+    await page.goto('/transactions');
+    await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc' }).click();
+    const model = page.getByRole('link', { name: 'Piper / VAIS-1000', exact: true });
+    const license = page.getByRole('link', { name: 'CC BY 4.0', exact: true });
+    await expect(model).toBeVisible();
+    await expect(model).toHaveAttribute('href', 'https://huggingface.co/rhasspy/piper-voices/tree/c10ece1aade47bb51c153c893d14e5bf8e5b7117/vi/vi_VN/vais1000/medium');
+    await expect(license).toHaveAttribute('href', 'https://creativecommons.org/licenses/by/4.0/');
+    for (const link of [model, license]) {
+      await expect(link).toHaveAttribute('target', '_blank');
+      await expect(link).toHaveAttribute('rel', /noopener/);
+    }
+  });
+
+  test('switches explicitly between Piper, Edge and browser while saving one resolved voice ID', async ({ page }) => {
+    const initial = { ...DEFAULT_VOICE_PROFILE, providerMode: 'EDGE_ONLY', voiceId: 'vi-VN-NamMinhNeural',
+      synthesisKey: 'a'.repeat(64), rate: 1.2, pitchHz: 25 };
+    await page.route(/\/api\/(?:public\/)?v1\/voice\/profile$/, route => route.fulfill({ json: initial }));
+    await page.route(/\/api\/v1\/status$/, async route => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...await response.json(), userRole: 'OWNER' } });
+    });
+    await page.route(/\/api\/v1\/voice\/settings$/, route => route.fulfill({
+      json: { ...initial, ...route.request().postDataJSON(), revision: 2, synthesisKey: 'b'.repeat(64) },
+    }));
+    await page.goto('/transactions');
+    await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc' }).click();
+    const mode = page.getByLabel('Chế độ phát', { exact: true });
+    const voice = page.getByLabel('Giọng máy chủ', { exact: true });
+    const pitch = page.getByRole('slider', { name: 'Cao độ (Pitch)', exact: true });
+    await expect(mode).toHaveValue('EDGE_ONLY');
+    await expect(voice).toHaveValue('vi-VN-NamMinhNeural');
+    await expect(pitch).toHaveValue('25');
+    await mode.selectOption('PIPER_ONLY');
+    await expect(voice).toBeDisabled();
+    await expect(voice).toHaveValue(PIPER_VOICE_ID);
+    await expect(voice.locator('option')).toHaveCount(1);
+    await expect(pitch).toBeDisabled();
+    await expect(pitch).toHaveValue('0');
+    await expect(page.getByRole('slider', { name: 'Tốc độ đọc', exact: true })).toHaveValue('1.2');
+    await mode.selectOption('EDGE_ONLY');
+    await expect(voice).toBeEnabled();
+    await expect(voice.locator('option')).toHaveCount(2);
+    await voice.selectOption('vi-VN-NamMinhNeural');
+    await expect(pitch).toBeEnabled();
+    await mode.selectOption('BROWSER_ONLY');
+    await expect(voice).toBeDisabled();
+    await mode.selectOption('PIPER_ONLY');
+    const saveRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/api/v1/voice/settings' && request.method() === 'PUT');
+    await page.getByRole('button', { name: 'Lưu cấu hình máy chủ', exact: true }).click();
+    const saved = (await saveRequest).postDataJSON();
+    expect(saved).toMatchObject({ revision: 1, providerMode: 'PIPER_ONLY', voiceId: PIPER_VOICE_ID, rate: 1.2, pitchHz: 0 });
+    expect(Object.keys(saved).sort()).toEqual(['amountBands', 'chimeEnabled', 'customTemplate', 'funEnabled',
+      'includeDescription', 'loadingSoundEnabled', 'pitchHz', 'providerMode', 'rate', 'revision', 'voiceId'].sort());
+    await expect(mode).toHaveValue('PIPER_ONLY');
   });
 
   test('unsaved template draft does not override confirmed profile', async ({ page }) => {

@@ -99,10 +99,12 @@ class AdmissionController:
         async with self._use_reservation(reservation, deadline):
             yield
 
-    async def run_singleflight(self, key, producer_fn, timeout_seconds):
+    async def run_singleflight(self, key, producer_fn, timeout_seconds, disconnected=None):
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         await self.register_waiter()
         entry = None
+        disconnect_task = None
+        disconnect_stop = asyncio.Event()
         try:
             async with self._lock:
                 remaining(deadline)
@@ -115,11 +117,33 @@ class AdmissionController:
                     entry.task = asyncio.create_task(self._producer_runner(entry, producer_fn, deadline))
                 entry.waiters_count += 1
             try:
-                return await asyncio.wait_for(asyncio.shield(entry.future), timeout=remaining(deadline))
+                if disconnected is None:
+                    return await asyncio.wait_for(asyncio.shield(entry.future), timeout=remaining(deadline))
+                async def watch_disconnect():
+                    while not disconnect_stop.is_set():
+                        if await disconnected():
+                            return
+                        try:
+                            await asyncio.wait_for(disconnect_stop.wait(), timeout=0.025)
+                        except TimeoutError:
+                            pass
+                disconnect_task = asyncio.create_task(watch_disconnect())
+                done, _ = await asyncio.wait((entry.future, disconnect_task), timeout=remaining(deadline), return_when=asyncio.FIRST_COMPLETED)
+                if entry.future in done:
+                    return entry.future.result()
+                if disconnect_task in done:
+                    raise asyncio.CancelledError
+                raise timeout_error()
             except TimeoutError:
                 raise timeout_error() from None
         finally:
             with anyio.CancelScope(shield=True):
+                if disconnect_task is not None:
+                    # Request.is_disconnected uses an internally cancelled AnyIO
+                    # scope and can consume an external task.cancel race. Signal
+                    # cooperative completion instead, then join its bounded poll.
+                    disconnect_stop.set()
+                    await asyncio.gather(disconnect_task, return_exceptions=True)
                 if entry is not None:
                     task_to_join = None
                     async with self._lock:

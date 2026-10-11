@@ -40,6 +40,7 @@ describe('transaction audio explicit profile ownership', () => {
     const controller = new AbortController();
     await engine.prefetch(message, controller.signal);
     expect(NativeAudio.owners).toHaveLength(1);
+    expect(NativeAudio.owners[0].src).toContain('/voice/transactions/tx/stream?profileRevision=1');
     expect(NativeAudio.owners[0].play).not.toHaveBeenCalled();
     await engine.speak(message);
     expect(NativeAudio.owners).toHaveLength(1);
@@ -47,10 +48,13 @@ describe('transaction audio explicit profile ownership', () => {
     expect(NativeAudio.owners[0].stopped).toBe(true);
     engine.dispose();
   });
-  it('binds native query to snapshot revision and never retries or falls back on Edge failure', async () => {
+  it.each([
+    profile,
+    { ...profile, providerMode: 'EDGE_ONLY' as const, voiceId: 'vi-VN-NamMinhNeural' },
+  ])('never retries or changes provider after $providerMode native preparation fails', async (chosenProfile) => {
     NativeAudio.failPrepare = true;
     const onProfileChanged = vi.fn();
-    const engine = new TransactionAudioEngine({ isPublic: true, onProfileChanged }); engine.setProfile(profile);
+    const engine = new TransactionAudioEngine({ isPublic: true, onProfileChanged }); engine.setProfile(chosenProfile);
     await expect(engine.speak({ text: '', amountVnd: '50000', transactionId: 'tx' })).rejects.toThrow('AUDIO_PREPARATION_FAILED');
     expect(NativeAudio.owners).toHaveLength(1);
     expect(NativeAudio.owners[0].stopped).toBe(true);
@@ -62,7 +66,7 @@ describe('transaction audio explicit profile ownership', () => {
     const engine = new TransactionAudioEngine({ isPublic: true }); engine.setProfile(profile);
     const next = { text: '', amountVnd: '50000', transactionId: 'tx' };
     await engine.prefetch(next, new AbortController().signal);
-    engine.setProfile({ ...profile, revision: 2, edgeVoice: 'vi-VN-NamMinhNeural', synthesisKey: 'b'.repeat(64) });
+    engine.setProfile({ ...profile, revision: 2, providerMode: 'EDGE_ONLY', voiceId: 'vi-VN-NamMinhNeural', synthesisKey: 'b'.repeat(64) });
     await Promise.resolve();
     expect(NativeAudio.owners[0].src).toBe('');
     engine.dispose(); engine.dispose();

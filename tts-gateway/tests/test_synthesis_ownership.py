@@ -68,7 +68,7 @@ async def test_64_actual_cancellations_release_all_ownership_and_recover(monkeyp
             await stack.enter_async_context(controller.acquire_slot(8))
         for index in range(64):
             started.clear()
-            request = SynthesizeRequest(text=f"cycle {index}", cacheable=False)
+            request = SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text=f"cycle {index}", cacheable=False)
             if phase == "first-yield":
                 response = await gateway.synthesize_stream(request)
                 assert await anext(response.body_iterator) == b"first"
@@ -95,7 +95,7 @@ async def test_64_actual_cancellations_release_all_ownership_and_recover(monkeyp
     async def recovered(**kwargs):
         return b"recovered"
     monkeypatch.setattr(gateway.edge_provider, "synthesize", recovered)
-    result = await gateway.synthesize(SynthesizeRequest(text="recovery", cacheable=False))
+    result = await gateway.synthesize(SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text="recovery", cacheable=False))
     assert result.body == b"recovered"
     assert_empty(controller)
 
@@ -110,7 +110,7 @@ async def test_response_send_failure_before_first_yield_still_closes_upstream(mo
         finally:
             closed.set()
     monkeypatch.setattr(gateway.edge_provider, "stream", stream)
-    response = await gateway.synthesize_stream(SynthesizeRequest(text="header disconnect", cacheable=False))
+    response = await gateway.synthesize_stream(SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text="header disconnect", cacheable=False))
     async def receive():
         await asyncio.Event().wait()
     async def send(message):
@@ -187,7 +187,7 @@ async def test_one_buffered_deadline_includes_admission_and_upstream(monkeypatch
     slot_b = controller.acquire_slot(8)
     await slot_a.__aenter__()
     await slot_b.__aenter__()
-    request = asyncio.create_task(gateway.synthesize(SynthesizeRequest(text="total budget", timeout_ms=100, cacheable=False)))
+    request = asyncio.create_task(gateway.synthesize(SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text="total budget", timeout_ms=100, cacheable=False)))
     await until(lambda: controller.waiting_count == 1)
     # The only wall-time dependency is the budget under test, not a race/speed assertion.
     await asyncio.sleep(0.05)
@@ -215,7 +215,7 @@ async def test_stream_total_budget_expires_despite_regular_chunks_and_never_cach
         finally:
             closed.set()
     monkeypatch.setattr(gateway.edge_provider, "stream", stream)
-    request = SynthesizeRequest(text="regular but endless", timeout_ms=50)
+    request = SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text="regular but endless", timeout_ms=50)
     response = await gateway.synthesize_stream(request)
     chunks = []
     with pytest.raises((HTTPException, TimeoutError)):
@@ -243,7 +243,7 @@ async def test_first_byte_budget_includes_admission(monkeypatch):
         first = await stack.enter_async_context(controller.acquire_slot(8))
         second_slot = controller.acquire_slot(8)
         await second_slot.__aenter__()
-        task = asyncio.create_task(gateway.synthesize_stream(SynthesizeRequest(text="first byte total", timeout_ms=80, cacheable=False)))
+        task = asyncio.create_task(gateway.synthesize_stream(SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text="first byte total", timeout_ms=80, cacheable=False)))
         await until(lambda: controller.waiting_count == 1)
         await asyncio.sleep(0.04)
         await second_slot.__aexit__(None, None, None)
@@ -268,7 +268,7 @@ async def test_stream_size_cap_never_caches_partial(monkeypatch):
         yield b"x" * gateway.MAX_AUDIO_BYTES
         yield b"extra"
     monkeypatch.setattr(gateway.edge_provider, "stream", stream)
-    request = SynthesizeRequest(text="over cap")
+    request = SynthesizeRequest(voice="vi-VN-HoaiMyNeural", provider_mode="EDGE_ONLY", text="over cap")
     response = await gateway.synthesize_stream(request)
     with pytest.raises(RuntimeError, match="TTS_AUDIO_TOO_LARGE"):
         async for _ in response.body_iterator:

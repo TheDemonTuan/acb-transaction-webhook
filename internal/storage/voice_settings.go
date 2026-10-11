@@ -21,9 +21,11 @@ const (
 	CatalogVersionV1        = "v1"
 	ColdRequestTimeoutMs    = 8000
 	ProviderModeEdgeOnly    = "EDGE_ONLY"
+	ProviderModePiperOnly   = "PIPER_ONLY"
 	ProviderModeBrowserOnly = "BROWSER_ONLY"
-	EdgeVoiceHoaiMy         = "vi-VN-HoaiMyNeural"
-	EdgeVoiceNamMinh        = "vi-VN-NamMinhNeural"
+	VoiceIDHoaiMy           = "vi-VN-HoaiMyNeural"
+	VoiceIDNamMinh          = "vi-VN-NamMinhNeural"
+	VoiceIDPiperVais1000    = "vi-VN-vais1000-medium"
 )
 
 type AmountBand struct {
@@ -36,7 +38,7 @@ type AmountBand struct {
 type VoiceProfile struct {
 	Revision             int64        `json:"revision"`
 	ProviderMode         string       `json:"providerMode"`
-	EdgeVoice            string       `json:"edgeVoice"`
+	VoiceID              string       `json:"voiceId"`
 	Rate                 float64      `json:"rate"`
 	PitchHz              int          `json:"pitchHz"`
 	AmountBands          []AmountBand `json:"amountBands"`
@@ -54,7 +56,7 @@ type VoiceProfile struct {
 type VoiceSettingsInput struct {
 	Revision            int64        `json:"revision"`
 	ProviderMode        string       `json:"providerMode"`
-	EdgeVoice           string       `json:"edgeVoice"`
+	VoiceID             string       `json:"voiceId"`
 	Rate                float64      `json:"rate"`
 	PitchHz             int          `json:"pitchHz"`
 	AmountBands         []AmountBand `json:"amountBands"`
@@ -77,16 +79,34 @@ func defaultAmountBands() []AmountBand {
 	}
 }
 
-func ComputeSynthesisKey(edgeVoice string, rate float64, pitchHz int) string {
-	raw := fmt.Sprintf("edge|%s|%.2f|%d|money-vi-v1|pack-schema-1", edgeVoice, rate, pitchHz)
+func ComputeSynthesisKey(voiceID string, rate float64, pitchHz int) string {
+	provider := "edge"
+	if voiceID == VoiceIDPiperVais1000 {
+		provider = "piper"
+	}
+	raw := fmt.Sprintf("%s|%s|%.2f|%d|money-vi-v1|pack-schema-1", provider, voiceID, rate, pitchHz)
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
 }
 
+// SynthesisProvider identifies the explicitly selected runtime, never a fallback.
+func (p VoiceProfile) SynthesisProvider() string {
+	switch p.ProviderMode {
+	case ProviderModePiperOnly:
+		return "piper"
+	case ProviderModeEdgeOnly:
+		return "edge"
+	case ProviderModeBrowserOnly:
+		return "browser"
+	default:
+		return ""
+	}
+}
+
 var DefaultVoiceProfile = VoiceProfile{
 	Revision:             1,
-	ProviderMode:         ProviderModeEdgeOnly,
-	EdgeVoice:            EdgeVoiceHoaiMy,
+	ProviderMode:         ProviderModePiperOnly,
+	VoiceID:              VoiceIDPiperVais1000,
 	Rate:                 1.25,
 	PitchHz:              0,
 	AmountBands:          defaultAmountBands(),
@@ -96,7 +116,7 @@ var DefaultVoiceProfile = VoiceProfile{
 	IncludeDescription:   false,
 	CustomTemplate:       "",
 	CatalogVersion:       CatalogVersionV1,
-	SynthesisKey:         ComputeSynthesisKey(EdgeVoiceHoaiMy, 1.25, 0),
+	SynthesisKey:         ComputeSynthesisKey(VoiceIDPiperVais1000, 1.25, 0),
 	ColdRequestTimeoutMs: ColdRequestTimeoutMs,
 	UpdatedAt:            "2026-10-11T00:00:00Z",
 }
@@ -104,18 +124,24 @@ var DefaultVoiceProfile = VoiceProfile{
 var placeholderRegex = regexp.MustCompile(`\{([^}]+)\}`)
 
 func ValidateVoiceProfileInput(in *VoiceSettingsInput) error {
-	// Normalize ONLINE_AUTO to EDGE_ONLY
-	if in.ProviderMode == "ONLINE_AUTO" {
-		in.ProviderMode = ProviderModeEdgeOnly
-	}
-	if in.ProviderMode != ProviderModeEdgeOnly && in.ProviderMode != ProviderModeBrowserOnly {
-		return errors.New("invalid providerMode: must be EDGE_ONLY or BROWSER_ONLY")
-	}
-	if in.EdgeVoice != EdgeVoiceHoaiMy && in.EdgeVoice != EdgeVoiceNamMinh {
-		return errors.New("invalid edgeVoice: must be vi-VN-HoaiMyNeural or vi-VN-NamMinhNeural")
+	switch in.ProviderMode {
+	case ProviderModePiperOnly:
+		if in.VoiceID != VoiceIDPiperVais1000 || in.PitchHz != 0 {
+			return errors.New("PIPER_ONLY requires vi-VN-vais1000-medium and pitchHz 0")
+		}
+	case ProviderModeEdgeOnly:
+		if in.VoiceID != VoiceIDHoaiMy && in.VoiceID != VoiceIDNamMinh {
+			return errors.New("EDGE_ONLY requires an approved Edge voiceId")
+		}
+	case ProviderModeBrowserOnly:
+		if in.VoiceID != VoiceIDHoaiMy && in.VoiceID != VoiceIDNamMinh && in.VoiceID != VoiceIDPiperVais1000 {
+			return errors.New("invalid voiceId")
+		}
+	default:
+		return errors.New("invalid providerMode: must be PIPER_ONLY, EDGE_ONLY or BROWSER_ONLY")
 	}
 
-	if in.Rate < 0.75 || in.Rate > 2.00 {
+	if math.IsNaN(in.Rate) || math.IsInf(in.Rate, 0) || in.Rate < 0.75 || in.Rate > 2.00 {
 		return errors.New("invalid rate: must be between 0.75 and 2.00")
 	}
 	if math.Abs(in.Rate-math.Round(in.Rate*100)/100) > 1e-6 {
@@ -202,7 +228,7 @@ func (s *Store) GetVoiceProfile(ctx context.Context) (VoiceProfile, error) {
 	var (
 		revision        int64
 		providerMode    string
-		edgeVoice       string
+		voiceID         string
 		rate            float64
 		pitchHz         int
 		amountBandsJSON string
@@ -221,7 +247,7 @@ func (s *Store) GetVoiceProfile(ctx context.Context) (VoiceProfile, error) {
 		FROM voice_settings
 		WHERE id = 'singleton'
 	`).Scan(
-		&revision, &providerMode, &edgeVoice, &rate, &pitchHz, &amountBandsJSON,
+		&revision, &providerMode, &voiceID, &rate, &pitchHz, &amountBandsJSON,
 		&chimeEnabledInt, &loadingSoundInt, &funEnabledInt, &includeDescInt,
 		&customTemplate, &updatedAt,
 	)
@@ -234,11 +260,6 @@ func (s *Store) GetVoiceProfile(ctx context.Context) (VoiceProfile, error) {
 		return VoiceProfile{}, fmt.Errorf("get voice profile: %w", err)
 	}
 
-	// Normalize provider mode if migration hasn't run or legacy value read
-	if providerMode == "ONLINE_AUTO" {
-		providerMode = ProviderModeEdgeOnly
-	}
-
 	var bands []AmountBand
 	if err := json.Unmarshal([]byte(amountBandsJSON), &bands); err != nil || len(bands) != 4 {
 		bands = defaultAmountBands()
@@ -247,7 +268,7 @@ func (s *Store) GetVoiceProfile(ctx context.Context) (VoiceProfile, error) {
 	return VoiceProfile{
 		Revision:             revision,
 		ProviderMode:         providerMode,
-		EdgeVoice:            edgeVoice,
+		VoiceID:              voiceID,
 		Rate:                 rate,
 		PitchHz:              pitchHz,
 		AmountBands:          bands,
@@ -257,7 +278,7 @@ func (s *Store) GetVoiceProfile(ctx context.Context) (VoiceProfile, error) {
 		IncludeDescription:   includeDescInt == 1,
 		CustomTemplate:       customTemplate,
 		CatalogVersion:       CatalogVersionV1,
-		SynthesisKey:         ComputeSynthesisKey(edgeVoice, rate, pitchHz),
+		SynthesisKey:         ComputeSynthesisKey(voiceID, rate, pitchHz),
 		ColdRequestTimeoutMs: ColdRequestTimeoutMs,
 		UpdatedAt:            updatedAt,
 	}, nil
@@ -309,7 +330,7 @@ func (s *Store) SaveVoiceProfile(ctx context.Context, input VoiceSettingsInput) 
 						chime_enabled, loading_sound_enabled, fun_enabled, include_description,
 						custom_template, online_fallback, updated_at
 					) VALUES ('singleton', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-				`, newRevision, input.ProviderMode, input.EdgeVoice, input.Rate, input.PitchHz, bandsJSON,
+				`, newRevision, input.ProviderMode, input.VoiceID, input.Rate, input.PitchHz, bandsJSON,
 					chimeInt, loadingInt, funInt, includeDescInt, input.CustomTemplate, nowStr)
 				return insertErr
 			}
@@ -327,7 +348,7 @@ func (s *Store) SaveVoiceProfile(ctx context.Context, input VoiceSettingsInput) 
 			    fun_enabled = ?, include_description = ?, custom_template = ?,
 			    online_fallback = 0, updated_at = ?
 			WHERE id = 'singleton' AND revision = ?
-		`, newRevision, input.ProviderMode, input.EdgeVoice, input.Rate, input.PitchHz, bandsJSON,
+		`, newRevision, input.ProviderMode, input.VoiceID, input.Rate, input.PitchHz, bandsJSON,
 			chimeInt, loadingInt, funInt, includeDescInt, input.CustomTemplate, nowStr, input.Revision)
 		if updateErr != nil {
 			return updateErr
@@ -349,7 +370,7 @@ func (s *Store) SaveVoiceProfile(ctx context.Context, input VoiceSettingsInput) 
 	return VoiceProfile{
 		Revision:             newRevision,
 		ProviderMode:         input.ProviderMode,
-		EdgeVoice:            input.EdgeVoice,
+		VoiceID:              input.VoiceID,
 		Rate:                 input.Rate,
 		PitchHz:              input.PitchHz,
 		AmountBands:          input.AmountBands,
@@ -359,7 +380,7 @@ func (s *Store) SaveVoiceProfile(ctx context.Context, input VoiceSettingsInput) 
 		IncludeDescription:   input.IncludeDescription,
 		CustomTemplate:       input.CustomTemplate,
 		CatalogVersion:       CatalogVersionV1,
-		SynthesisKey:         ComputeSynthesisKey(input.EdgeVoice, input.Rate, input.PitchHz),
+		SynthesisKey:         ComputeSynthesisKey(input.VoiceID, input.Rate, input.PitchHz),
 		ColdRequestTimeoutMs: ColdRequestTimeoutMs,
 		UpdatedAt:            nowStr,
 	}, nil
