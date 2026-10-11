@@ -54,6 +54,14 @@ http:
       observability:
         accessLogs: false
       service: acb-service
+    acb-sepay-native-router:
+      rule: "Host(\`${viewer_host}\`) && Path(\`/api/integrations/sepay/webhook\`) && Method(\`POST\`)"
+      entryPoints: [web]
+      priority: 1150
+      middlewares: [tunnel-only, security-headers, payment-privacy, sepay-telegram-rate-limit, sepay-telegram-body-limit]
+      observability:
+        accessLogs: false
+      service: acb-service
     acb-public-payments-router:
       rule: "Host(\`${viewer_host}\`) && (Path(\`/api/public/v1/payment-config\`) || Path(\`/api/public/v1/payments\`) || PathPrefix(\`/api/public/v1/payments/\`))"
       entryPoints: [web]

@@ -17,6 +17,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/httpapi"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/realtimestream"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/workerrpc"
 )
 
 type reconnectGateHandler struct {
@@ -380,4 +381,139 @@ func waitCoordinator(t *testing.T, coordinator *httpapi.RealtimeCoordinator, seq
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func TestTwoGatewaysWorkerStreamRelayAndNonBlockingACK(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dbPath := filepath.Join(t.TempDir(), "two_gateways_relay.db")
+	storeWorker, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeWorker.Close()
+
+	storeA, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeA.Close()
+
+	storeB, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeB.Close()
+
+	// 1. Worker setup with JournalPublisher
+	workerHub := eventhub.New()
+	publisher := realtimestream.NewJournalPublisher(storeWorker, workerHub)
+	if err := publisher.Init(ctx); err != nil {
+		t.Fatalf("publisher init: %v", err)
+	}
+	go publisher.Run(ctx)
+
+	workerStreamServer := httptest.NewServer(realtimestream.NewServer(realtimestream.ServerConfig{
+		Hub:   workerHub,
+		Token: "worker-token",
+	}))
+	defer workerStreamServer.Close()
+
+	// 2. Gateway A setup with SSE and stream client
+	gatewayA := httpapi.New(config.Config{Slot: "blue", RuntimeRole: "gateway"}, storeA).WithEventHub(eventhub.New())
+	coordinatorA := httpapi.NewRealtimeCoordinator(gatewayA, time.Hour) // 1h tick so periodic reconciliation is suppressed
+	gatewayA.WithRealtimeSubmit(coordinatorA.Submit)
+	gatewayA.WithReadyChecker(coordinatorA.WaitReady)
+	go coordinatorA.Run(ctx)
+
+	initCtx, cancelInit := context.WithTimeout(ctx, 2*time.Second)
+	if err := coordinatorA.WaitReady(initCtx); err != nil {
+		cancelInit()
+		t.Fatalf("coordinatorA not ready: %v", err)
+	}
+	cancelInit()
+
+	clientA, err := realtimestream.NewClient(realtimestream.ClientConfig{
+		BaseURL: workerStreamServer.URL,
+		Token:   "worker-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go clientA.Run(ctx, coordinatorA.Submit)
+
+	serverA := httptest.NewServer(gatewayA.Handler())
+	defer serverA.Close()
+
+	framesA := make(chan string, 16)
+	go readPublicSSE(ctx, t, serverA.URL+"/api/public/v1/events", framesA)
+
+	// Wait for initial SSE connection at Gateway A
+	select {
+	case frame := <-framesA:
+		if !strings.Contains(frame, "event: initial_state") {
+			t.Fatalf("expected initial_state on A, got %s", frame)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for Gateway A SSE initial state")
+	}
+
+	// 3. Gateway B setup with blocking fake RPC
+	rpcBlock := make(chan struct{})
+	rpcEntered := make(chan struct{}, 1)
+	wakerFn := func(ctx context.Context) error {
+		select {
+		case rpcEntered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-rpcBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		publisher.Wake()
+		return nil
+	}
+	wakeSignalB := workerrpc.NewWakeSignal(wakerFn, 2*time.Second)
+	go wakeSignalB.Run(ctx)
+
+	fB := newPaymentFixture(t, storeB, func(event storage.EventNotification) {
+		_ = wakeSignalB.Wake(ctx)
+	})
+	gatewayB := httpapi.New(config.Config{Slot: "green", RuntimeRole: "gateway"}, storeB).
+		WithPayments(fB.service).
+		WithWakeDispatcher(wakeSignalB.Wake)
+	serverB := httptest.NewServer(gatewayB.Handler())
+	defer serverB.Close()
+
+	order := createPayment(t, fB, 50000, 1)
+
+	// Send webhook callback to Gateway B. Handler must return 200 before rpcBlock is released!
+	body := paymentWebhookBody(t, order)
+	reqB, _ := http.NewRequestWithContext(ctx, http.MethodPost, serverB.URL+integrationWebhookPath, strings.NewReader(string(body)))
+	reqB.Header.Set("Content-Type", "application/json")
+
+	respB, err := http.DefaultClient.Do(reqB)
+	if err != nil {
+		t.Fatalf("webhook to B failed: %v", err)
+	}
+	respB.Body.Close()
+	if respB.StatusCode != 200 {
+		t.Fatalf("expected 200 from Gateway B, got %d", respB.StatusCode)
+	}
+
+	// Release blocked RPC waker so worker publisher is triggered
+	close(rpcBlock)
+
+	// Gateway A's SSE client should receive credit event via worker stream relay!
+	select {
+	case frame := <-framesA:
+		if !strings.Contains(frame, "bank.transaction.credit") || !strings.Contains(frame, strconv.FormatInt(order.OrderCode, 10)) {
+			t.Fatalf("unexpected frame at Gateway A: %s", frame)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Gateway A did not receive relayed credit event from worker stream")
+	}
+	cancel()
 }

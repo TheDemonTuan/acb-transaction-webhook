@@ -27,9 +27,7 @@ func (s *Server) PaymentCommitNotifier() func(storage.EventNotification) {
 	return func(event storage.EventNotification) {
 		s.Publish(eventhub.Event{Seq: event.JournalSeq, Epoch: event.Epoch, EventType: event.EventType, AggregateID: event.TransactionID, Payload: event.Payload, CreatedAt: event.CreatedAt, CommittedAt: event.CommittedAt})
 		if s.wakeFn != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = s.wakeFn(ctx)
+			_ = s.wakeFn(context.Background())
 		}
 	}
 }

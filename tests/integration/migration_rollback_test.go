@@ -23,6 +23,7 @@ func TestSQLiteMigrationRollbackOnFailure(t *testing.T) {
 	seedLegacyHistory(t, store)
 	// Construct the retained v14 schema without editing historical migrations.
 	if _, err := store.DB().ExecContext(ctx, `
+DROP TABLE sepay_native_inbox;
 DROP TABLE sepay_managed_config;
 DROP TABLE sepay_receipts;
 DROP TABLE sepay_telegram_inbox;
@@ -33,6 +34,15 @@ DROP TABLE payment_provider_config;
 DROP TABLE payment_receipts;
 DROP TABLE payos_webhook_inbox;
 DROP TABLE payment_orders;
+DROP TABLE voice_settings;
+CREATE TABLE voice_settings (
+    id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL DEFAULT 1,
+    provider_mode TEXT NOT NULL DEFAULT 'ONLINE_AUTO',
+    edge_voice TEXT NOT NULL DEFAULT 'vi-VN-HoaiMyNeural',
+    online_fallback INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
 DELETE FROM connections WHERE id='payos-klb';
 DELETE FROM schema_migrations WHERE version >= 15;
 CREATE TRIGGER reject_payos_migration BEFORE INSERT ON connections

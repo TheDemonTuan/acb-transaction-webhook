@@ -1,302 +1,201 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { TransactionAudioEngine } from './transaction-audio-engine';
 import { MultiTabLeader } from './multi-tab-leader';
 import { VoiceDedupe } from './voice-dedupe';
-import type { VoiceEngine, VoiceInfo, VoiceTelemetry } from './voice-engine';
+import type { VoiceEngine, VoiceInfo, VoiceMessage, VoiceTelemetry } from './voice-engine';
 import { VoiceQueue } from './voice-queue';
-import {
-  loadVoiceSettings,
-  saveVoiceSettings,
-  type VoiceSettings,
-} from './voice-settings';
-import {
-  buildSingleTransactionPhrase,
-  selectAnnouncementTemplate,
-} from './voice-copy';
+import { loadVoiceSettings, saveVoiceSettings, type VoiceSettings } from './voice-settings';
+import { fetchVoiceProfile, type VoiceProfile } from './voice-profile';
+import { fetchTransactionDetail } from '../../shared/api/queries';
+import { isPublicViewerHost } from '../../app/runtime-mode';
 import type { BankTransactionCreditData, RealtimeEnvelope } from '../../realtime/realtime.types';
 import { creditTransactionKey } from '../../realtime/realtime.events';
 
+export interface SkippedVoice { transactionId: string; reason: string }
 export interface VoiceAnnouncementContextValue {
   settings: VoiceSettings;
   updateSettings: (changes: Partial<VoiceSettings>) => void;
   isSupported: boolean;
   isLeader: boolean;
   isSpeaking: boolean;
+  audioUnlocked: boolean;
   voices: VoiceInfo[];
+  profile?: VoiceProfile;
+  profileOffline: boolean;
+  voiceState: 'ready' | 'cold' | 'unavailable';
+  voiceDetail?: string;
+  pendingCount: number;
+  skippedCount: number;
+  recentSkipped: SkippedVoice[];
   lastTelemetry?: VoiceTelemetry | null;
+  refreshProfile: (revision?: number) => void;
   handleCreditEvent: (envelope: RealtimeEnvelope<BankTransactionCreditData>) => void;
   testVoice: (customPhrase?: string) => Promise<void>;
   replayVoice: (transactionId: string) => Promise<void>;
   unlockAudio: () => Promise<boolean>;
   cancelVoice: () => void;
 }
-
 const VoiceAnnouncementContext = createContext<VoiceAnnouncementContextValue | null>(null);
+export interface VoiceAnnouncementProviderProps { children: React.ReactNode; engine?: VoiceEngine }
+interface VoiceOwner { engine: VoiceEngine; queue: VoiceQueue }
 
-export interface VoiceAnnouncementProviderProps {
-  children: React.ReactNode;
-  engine?: VoiceEngine;
-}
-
-export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps> = ({
-  children,
-  engine: injectedEngine,
-}) => {
+export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps> = ({ children, engine: injectedEngine }) => {
+  const queryClient = useQueryClient();
+  const isPublic = isPublicViewerHost();
+  const profileQuery = useQuery({ queryKey: ['voice-profile'], queryFn: () => fetchVoiceProfile(isPublic), retry: false,
+    staleTime: Infinity, refetchOnWindowFocus: 'always', refetchOnReconnect: 'always' });
   const [settings, setSettings] = useState<VoiceSettings>(() => loadVoiceSettings());
   const [isLeader, setIsLeader] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
   const [lastTelemetry, setLastTelemetry] = useState<VoiceTelemetry | null>(null);
-
-  const engine = useMemo<VoiceEngine>(() => {
-    return injectedEngine || new TransactionAudioEngine();
-  }, [injectedEngine]);
-
-  const queue = useMemo(() => {
-    return new VoiceQueue(engine, (state) => {
-      setIsSpeaking(state === 'speaking');
-    });
-  }, [engine]);
-
+  const [voiceState, setVoiceState] = useState<'ready' | 'cold' | 'unavailable'>('unavailable');
+  const [voiceDetail, setVoiceDetail] = useState<string>();
+  const [pendingCount, setPendingCount] = useState(0);
+  const [skippedCount, setSkippedCount] = useState(0);
+  const [recentSkipped, setRecentSkipped] = useState<SkippedVoice[]>([]);
+  const [owner, setOwner] = useState<VoiceOwner | null>(null);
+  const ownerRef = useRef<VoiceOwner | null>(null);
+  const profileRef = useRef(profileQuery.data);
+  profileRef.current = profileQuery.data;
+  const requestedRevision = useRef(0);
+  const unlocked = useRef(false);
   const dedupe = useMemo(() => new VoiceDedupe(), []);
 
-  const leaderManager = useMemo(() => {
-    return new MultiTabLeader({
-      onLeaderChange: (leader) => setIsLeader(leader),
-    });
-  }, []);
+  const refreshProfile = useCallback((revision?: number) => {
+    if (revision !== undefined) {
+      if (!Number.isSafeInteger(revision) || revision <= Math.max(profileRef.current?.revision || 0, requestedRevision.current)) return;
+      requestedRevision.current = revision;
+    }
+    void queryClient.invalidateQueries({ queryKey: ['voice-profile'] });
+  }, [queryClient]);
 
-  const isSupported = useMemo(() => engine.isSupported(), [engine]);
-
-  // Load voices on mount and persistently listen for voiceschanged
   useEffect(() => {
-    if (!isSupported) return;
-    const refreshVoices = () => {
-      engine.getVoices().then((v) => setVoices(v));
-    };
+    let live = true;
+    const engine = injectedEngine || new TransactionAudioEngine({ isPublic, onProfileChanged: () => refreshProfile(),
+      onStatus: (state, detail) => { if (live) { setVoiceState(state); setVoiceDetail(detail); } } });
+    const queue = new VoiceQueue(engine, (state) => {
+      if (live) { setIsSpeaking(state === 'speaking'); setPendingCount(queue.getPendingCount()); }
+    }, { getProfile: () => profileRef.current });
+    const next = { engine, queue };
+    ownerRef.current = next; setOwner(next); unlocked.current = false;
+    setAudioUnlocked(false);
+    const refreshVoices = () => { void engine.getVoices().then((items) => { if (live) setVoices(items); }); };
     refreshVoices();
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.addEventListener('voiceschanged', refreshVoices);
-      return () => {
-        window.speechSynthesis.removeEventListener('voiceschanged', refreshVoices);
-      };
-    }
-  }, [engine, isSupported]);
-
-  // Sync settings across tabs via localStorage storage event
-  useEffect(() => {
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'acb.voice.settings.v1') {
-        const fresh = loadVoiceSettings();
-        setSettings(fresh);
-        if (fresh.enabled === false) {
-          queue.cancel();
-        }
-      }
-    };
-    if (typeof window !== 'undefined') {
-      window.addEventListener('storage', handleStorage);
-      return () => window.removeEventListener('storage', handleStorage);
-    }
-  }, [queue]);
-
-  // Start leader manager on mount
-  useEffect(() => {
-    leaderManager.start();
+    window.speechSynthesis?.addEventListener('voiceschanged', refreshVoices);
     return () => {
-      leaderManager.stop();
+      live = false; ownerRef.current = null; unlocked.current = false;
+      window.speechSynthesis?.removeEventListener('voiceschanged', refreshVoices);
+      // Injected engines have external ownership. Production owners are fresh on
+      // each effect setup, including React StrictMode's setup-cleanup-setup cycle.
+      if (injectedEngine) queue.cancel(); else queue.dispose();
     };
-  }, [leaderManager]);
+  }, [injectedEngine, isPublic, refreshProfile]);
 
-  // Update settings handler
-  const updateSettings = (changes: Partial<VoiceSettings>) => {
-    const updated = saveVoiceSettings(changes);
-    setSettings(updated);
-    if (changes.enabled === false) {
-      queue.cancel();
-    }
-  };
+  useEffect(() => {
+    if (!owner || !profileQuery.data) return;
+    if (owner.engine instanceof TransactionAudioEngine) owner.engine.setProfile(profileQuery.data);
+    owner.queue.refreshPendingProfile();
+    setVoiceState(profileQuery.data.providerMode === 'BROWSER_ONLY' ? 'ready' : 'cold');
+  }, [owner, profileQuery.data]);
 
-  const handleCreditEvent = (envelope: RealtimeEnvelope<BankTransactionCreditData>) => {
-    if (!settings.enabled) return;
-    if (!isLeader) return;
-
-    // Check if browser tab is hidden and announceWhenHidden is false
-    if (
-      typeof document !== 'undefined' &&
-      document.visibilityState === 'hidden' &&
-      !settings.announceWhenHidden
-    ) {
-      return;
-    }
-
+  useEffect(() => {
+    const manager = new MultiTabLeader({ onLeaderChange: (leader) => {
+      setIsLeader(leader);
+      if (!leader) ownerRef.current?.queue.cancel();
+    } });
+    manager.start();
+    return () => manager.stop();
+  }, []);
+  useEffect(() => {
+    const storage = (event: StorageEvent) => {
+      if (event.key !== 'acb.voice.settings.v1') return;
+      const next = loadVoiceSettings(); setSettings(next);
+      if (!next.enabled) ownerRef.current?.queue.cancel();
+    };
+    window.addEventListener('storage', storage);
+    return () => window.removeEventListener('storage', storage);
+  }, []);
+  const updateSettings = useCallback((changes: Partial<VoiceSettings>) => {
+    setSettings(saveVoiceSettings(changes));
+    if (changes.enabled === false) ownerRef.current?.queue.cancel();
+  }, []);
+  const noteSkipped = useCallback((transactionId: string, reason: string) => {
+    setSkippedCount((count) => count + 1);
+    setRecentSkipped((items) => [{ transactionId, reason }, ...items].slice(0, 20));
+  }, []);
+  const handleCreditEvent = useCallback((envelope: RealtimeEnvelope<BankTransactionCreditData>) => {
+    const active = ownerRef.current;
+    if (!settings.enabled || settings.volume === 0 || !isLeader || !unlocked.current || !active || !profileRef.current) return;
+    if (document.visibilityState === 'hidden' && !settings.announceWhenHidden) return;
     const data = envelope.data;
-    if (!data) return;
-
-    // Strict source policy: ONLY REALTIME sources are voice eligible
-    if (data.source !== 'REALTIME') {
-      return;
+    if (!data || data.source !== 'REALTIME' || !/^[1-9][0-9]*$/.test(data.credit || '')) return;
+    const amount = BigInt(data.credit);
+    if (amount > 9007199254740991n) return;
+    const keys = { eventId: envelope.id, transactionId: data.transactionId, semanticKey: creditTransactionKey(data) };
+    if (dedupe.has(keys) || dedupe.isReserved(keys)) return;
+    if (!dedupe.isFreshEnough(data.detectedAt, 30000, envelope.receivedAt)) {
+      dedupe.markSkipped(keys, 'EXPIRED_FRESHNESS'); noteSkipped(data.transactionId, 'EXPIRED_FRESHNESS'); return;
     }
-
-    // Dedupe checks
-    const dedupeOpts = {
-      eventId: envelope.id,
-      transactionId: data.transactionId,
-      semanticKey: creditTransactionKey(data),
-    };
-
-    if (dedupe.has(dedupeOpts) || dedupe.isReserved(dedupeOpts)) {
-      return;
-    }
-
-    // Freshness check: allow future clock skew up to 30s and max age 120s
-    if (!dedupe.isFreshEnough(data.detectedAt, undefined, envelope.receivedAt)) {
-      dedupe.markSkipped(dedupeOpts, 'EXPIRED_FRESHNESS');
-      return;
-    }
-
-    // Parse amount
-    let amountBigInt = 0n;
-    try {
-      const cleaned = (data.credit || '0').replace(/[^\d]/g, '');
-      amountBigInt = BigInt(cleaned || '0');
-    } catch {
-      return;
-    }
-
-    if (amountBigInt <= 0n) return;
-
-    // Two-phase reservation: reserve before enqueuing/playing
-    if (!dedupe.reserve(dedupeOpts)) {
-      return;
-    }
-
-    const now = Date.now();
-    const sseReceivedAt = envelope.receivedAt || now;
-    const detectedAtMs = data.detectedAt ? new Date(data.detectedAt).getTime() : undefined;
-    const telemetry: VoiceTelemetry = {
-      detectedAt: data.detectedAt,
-      sseReceivedAt,
-      queuedAt: now,
-      detectedToSseMs: detectedAtMs ? Math.max(0, sseReceivedAt - detectedAtMs) : undefined,
-      sseToQueueMs: Math.max(0, now - sseReceivedAt),
-    };
-
-    const template = selectAnnouncementTemplate(settings.announcementTemplate, data.transactionId);
-    const text = buildSingleTransactionPhrase(amountBigInt.toString(), data.description || '', {
-      includeDescription: settings.includeDescription,
-      template,
-    });
-    queue.enqueue({
-      text,
-      volume: settings.volume,
-      rate: settings.rate,
-      pitch: settings.pitch,
-      voiceURI: settings.voiceURI,
-      transactionId: dedupeOpts.transactionId || undefined,
-      includeDescription: settings.includeDescription,
-      template,
-      telemetry,
-      onStart: (t) => {
-        if (t) setLastTelemetry({ ...t });
-      },
-      onSuccess: () => {
-        dedupe.commit(dedupeOpts);
-      },
+    if (!dedupe.reserve(keys)) return;
+    const telemetry: VoiceTelemetry = { detectedAt: data.detectedAt, sseReceivedAt: envelope.receivedAt,
+      receivedMonotonicAt: envelope.receivedMonotonicAt, queuedAt: Date.now(),
+      sseToQueueMs: envelope.receivedMonotonicAt === undefined ? undefined : performance.now() - envelope.receivedMonotonicAt };
+    const message: VoiceMessage = { text: '', amountVnd: amount.toString(), description: data.description,
+      volume: settings.volume, voiceURI: settings.browserVoiceURI, transactionId: data.transactionId, chime: true, telemetry,
+      onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
+      onSuccess: () => { dedupe.commit(keys); setPendingCount(active.queue.getPendingCount()); },
       onError: (error) => {
-        if ((error as { playbackStarted?: boolean })?.playbackStarted) {
-          dedupe.commit(dedupeOpts);
-        } else {
-          dedupe.release(dedupeOpts);
-        }
-      },
-    });
+        const started = error && typeof error === 'object' && 'playbackStarted' in error && error.playbackStarted;
+        const reason = error instanceof Error ? error.message : 'VOICE_UNAVAILABLE';
+        if (started) dedupe.commit(keys);
+        else if (reason === 'QUEUE_OVERFLOW' || reason === 'EXPIRED_AGE' || reason === 'VOICE_CANCELLED') dedupe.markSkipped(keys, reason);
+        else dedupe.release(keys);
+        noteSkipped(data.transactionId, reason); setPendingCount(active.queue.getPendingCount());
+      } };
+    active.queue.enqueue(message); setPendingCount(active.queue.getPendingCount());
+  }, [settings, isLeader, dedupe, noteSkipped]);
+
+  const testVoice = useCallback(async (_customPhrase?: string) => {
+    const active = ownerRef.current;
+    if (!active || !profileRef.current) throw new Error('VOICE_PROFILE_UNAVAILABLE');
+    if (settings.volume === 0) return;
+    await active.queue.speak({ text: '', amountVnd: '500000', isTest: true, volume: settings.volume, voiceURI: settings.browserVoiceURI });
+  }, [settings.volume, settings.browserVoiceURI]);
+  const replayVoice = useCallback(async (transactionId: string) => {
+    const active = ownerRef.current;
+    if (!active || !profileRef.current) throw new Error('VOICE_PROFILE_UNAVAILABLE');
+    const generation = active.queue.getCancellationGeneration();
+    const transaction = await fetchTransactionDetail(transactionId);
+    if (ownerRef.current !== active || active.queue.getCancellationGeneration() !== generation) throw new Error('VOICE_CANCELLED');
+    if (!Number.isSafeInteger(transaction.credit) || transaction.credit <= 0) throw new Error('VOICE_INVALID_AMOUNT');
+    if (settings.volume === 0) return;
+    await active.queue.speak({ text: '', amountVnd: String(transaction.credit), description: transaction.description,
+      transactionId, isReplay: true, volume: settings.volume, voiceURI: settings.browserVoiceURI });
+  }, [settings.volume, settings.browserVoiceURI]);
+  const unlockAudio = useCallback(async () => {
+    const active = ownerRef.current;
+    if (!active || !profileRef.current) return false;
+    const engine = active.engine;
+    let ready = true;
+    if ('unlock' in engine && typeof engine.unlock === 'function') ready = await engine.unlock();
+    if (ownerRef.current !== active) return false;
+    unlocked.current = ready;
+    setAudioUnlocked(ready);
+    return ready;
+  }, []);
+  const cancelVoice = useCallback(() => { ownerRef.current?.queue.cancel(); setPendingCount(0); }, []);
+  const value: VoiceAnnouncementContextValue = {
+    settings, updateSettings, isSupported: owner?.engine.isSupported() ?? false, isLeader, isSpeaking, audioUnlocked, voices,
+    profile: profileQuery.data, profileOffline: profileQuery.isError, voiceState, voiceDetail, pendingCount, skippedCount,
+    recentSkipped, lastTelemetry, refreshProfile, handleCreditEvent, testVoice, replayVoice, unlockAudio, cancelVoice,
   };
-
-  const testVoice = async (customPhrase?: string) => {
-    queue.cancel();
-    const template = selectAnnouncementTemplate(settings.announcementTemplate, '');
-    const testText =
-      customPhrase ||
-      buildSingleTransactionPhrase('500000', 'Ung ho quy', {
-        includeDescription: settings.includeDescription,
-        template,
-      });
-
-    return new Promise<void>((resolve, reject) => {
-      queue.enqueue({
-        text: testText,
-        volume: settings.volume,
-        rate: settings.rate,
-        pitch: settings.pitch,
-        voiceURI: settings.voiceURI,
-        template,
-        includeDescription: settings.includeDescription,
-        isTest: true,
-        onSuccess: () => resolve(),
-        onError: (err) => reject(err),
-      });
-    });
-  };
-
-  const replayVoice = async (transactionId: string) => {
-    queue.cancel();
-    return new Promise<void>((resolve, reject) => {
-      queue.enqueue({
-        text: 'Đang phát lại giao dịch...',
-        volume: settings.volume,
-        rate: settings.rate,
-        pitch: settings.pitch,
-        voiceURI: settings.voiceURI,
-        transactionId,
-        isReplay: true,
-        includeDescription: settings.includeDescription,
-        template: selectAnnouncementTemplate(settings.announcementTemplate, transactionId),
-        onSuccess: () => resolve(),
-        onError: (err) => reject(err),
-      });
-    });
-  };
-
-  const unlockAudio = async (): Promise<boolean> => {
-    if ('unlock' in engine && typeof (engine as any).unlock === 'function') {
-      return await (engine as any).unlock();
-    }
-    return true;
-  };
-
-  const cancelVoice = () => {
-    queue.cancel();
-  };
-
-  const value: VoiceAnnouncementContextValue = useMemo(() => {
-    return {
-      settings,
-      updateSettings,
-      isSupported,
-      isLeader,
-      isSpeaking,
-      voices,
-      lastTelemetry,
-      handleCreditEvent,
-      testVoice,
-      replayVoice,
-      unlockAudio,
-      cancelVoice,
-    };
-  }, [settings, isSupported, isLeader, isSpeaking, voices, lastTelemetry]);
-
-  return (
-    <VoiceAnnouncementContext.Provider value={value}>
-      {children}
-    </VoiceAnnouncementContext.Provider>
-  );
+  return <VoiceAnnouncementContext.Provider value={value}>{children}</VoiceAnnouncementContext.Provider>;
 };
-
 export function useVoiceAnnouncements(): VoiceAnnouncementContextValue {
-  const ctx = useContext(VoiceAnnouncementContext);
-  if (!ctx) {
-    throw new Error('useVoiceAnnouncements must be used within a VoiceAnnouncementProvider');
-  }
-  return ctx;
+  const context = useContext(VoiceAnnouncementContext);
+  if (!context) throw new Error('useVoiceAnnouncements must be used within a VoiceAnnouncementProvider');
+  return context;
 }

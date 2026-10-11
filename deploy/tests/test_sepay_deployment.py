@@ -140,6 +140,7 @@ class BaselineRouteTests(unittest.TestCase):
                                   check=True, capture_output=True, text=True)
         self.policy = yaml.safe_load(rendered.stdout)
         del self.policy['http']['routers']['acb-sepay-telegram-router']
+        del self.policy['http']['routers']['acb-sepay-native-router']
         for key in ('sepay-telegram-rate-limit', 'sepay-telegram-body-limit'):
             del self.policy['http']['middlewares'][key]
         self.route = self.root / 'acb.yml'

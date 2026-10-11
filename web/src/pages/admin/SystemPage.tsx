@@ -120,7 +120,7 @@ export const SystemPage: React.FC = () => {
         <h3 id="sepay-system-heading" className="font-bold text-stone-900">SePay Store · Nhận thông báo</h3>
         <dl className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
           <div><dt className="text-stone-500">Chế độ</dt><dd className="font-semibold text-stone-900">{status?.sepay?.mode ?? 'Đang tải'}</dd></div>
-          <div><dt className="text-stone-500">Lần nhận hợp lệ cuối</dt><dd className="font-semibold text-stone-900 break-words">{status?.sepay?.lastMessageAt || 'Chưa ghi nhận'}</dd></div>
+          <div><dt className="text-stone-500">Lần nhận hợp lệ cuối</dt><dd className="font-semibold text-stone-900 break-words">Telegram: {status?.sepay?.lastMessageAt || 'Chưa ghi nhận'} · Native: {status?.sepay?.lastWebhookAt || 'Chưa ghi nhận'}</dd></div>
           <div><dt className="text-stone-500">Mục cần đối chiếu</dt><dd className="font-semibold text-stone-900">{status?.sepay?.reviewCount ?? 'Đang tải'}</dd></div>
         </dl>
         <p className="text-xs text-stone-500">Chế độ active chỉ cho biết đã bật nhận thông báo, không bảo đảm kết nối ngân hàng. Đối chiếu thông báo với Store/Telegram; không tự ghi lại giao dịch.</p>
@@ -133,9 +133,9 @@ export const SystemPage: React.FC = () => {
             {reviews.data && reviews.data.items.length > 0 && (
               <ul className="divide-y divide-stone-100">
                 {reviews.data.items.map((review, index) => (
-                  <li key={`${review.storeKey}:${review.messageId}:${review.receivedAt}:${index}`} className="py-3 text-sm break-words">
+                  <li key={`${review.storeKey}:${review.transport}:${review.sourceId}:${review.receivedAt}:${index}`} className="py-3 text-sm break-words">
                     <p className="font-semibold text-stone-900">{review.reason}</p>
-                    <p className="text-stone-600">{review.storeKey} · Tin {review.messageId}</p>
+                    <p className="text-stone-600">{review.storeKey} · {review.transport === 'native' ? 'Webhook' : 'Telegram'} ({review.sourceId})</p>
                     <time className="text-xs text-stone-500" dateTime={review.receivedAt}>{review.receivedAt}</time>
                   </li>
                 ))}

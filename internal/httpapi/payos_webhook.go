@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
 const maxPayOSWebhookBytes = 64 << 10
@@ -20,6 +22,7 @@ func (s *Server) WithPayments(service *payments.Service) *Server {
 // The callback is deliberately outside owner authentication and CSRF. Authenticity
 // is provided by the SDK signature verification, never by browser credentials.
 func (s *Server) payOSWebhook(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, maxPayOSWebhookBytes)
 	encoded, err := io.ReadAll(r.Body)
@@ -53,11 +56,14 @@ func (s *Server) payOSWebhook(w http.ResponseWriter, r *http.Request) {
 		writePayOSWebhookError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE")
 		return
 	}
-	err = s.payments.HandleWebhook(r.Context(), body)
+	ctx := telemetry.WithPaymentReceivedAt(r.Context(), receivedAt)
+	commitDone := time.Now()
+	err = s.payments.HandleWebhook(ctx, body)
 	switch {
 	case err == nil:
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		telemetry.RecordPaymentStage(telemetry.PaymentProviderPayOS, telemetry.PaymentStageAck, time.Since(commitDone))
 	case errors.Is(err, payments.ErrInvalidWebhook):
 		writePayOSWebhookError(w, http.StatusBadRequest, "INVALID_WEBHOOK")
 	case errors.Is(err, payments.ErrInvalidSignature):

@@ -1,0 +1,507 @@
+{
+  "id": "cute-celebrate-b10",
+  "styleId": "cute",
+  "bandId": "celebrate",
+  "recipes": [
+    {
+      "id": "cute-celebrate-o046-c001",
+      "text": "Quầy có thêm phút đáng quý. Trân trọng cảm ơn bạn nhé."
+    },
+    {
+      "id": "cute-celebrate-o046-c002",
+      "text": "Quầy có thêm phút đáng quý. Chúc bạn một ngày rực rỡ."
+    },
+    {
+      "id": "cute-celebrate-o046-c003",
+      "text": "Quầy có thêm phút đáng quý. Mong bạn nhiều niềm vui mới."
+    },
+    {
+      "id": "cute-celebrate-o046-c004",
+      "text": "Quầy có thêm phút đáng quý. Gửi bạn lời tri ân đẹp."
+    },
+    {
+      "id": "cute-celebrate-o046-c005",
+      "text": "Quầy có thêm phút đáng quý. Chúc bạn luôn tràn sức sống."
+    },
+    {
+      "id": "cute-celebrate-o046-c006",
+      "text": "Quầy có thêm phút đáng quý. Cảm ơn bạn đã dành sự tin tưởng."
+    },
+    {
+      "id": "cute-celebrate-o046-c007",
+      "text": "Quầy có thêm phút đáng quý. Mong bạn bình an mỗi bước."
+    },
+    {
+      "id": "cute-celebrate-o046-c008",
+      "text": "Quầy có thêm phút đáng quý. Chúc bạn thêm nhiều khởi sắc."
+    },
+    {
+      "id": "cute-celebrate-o046-c009",
+      "text": "Quầy có thêm phút đáng quý. Gửi bạn một trời lời chúc."
+    },
+    {
+      "id": "cute-celebrate-o046-c010",
+      "text": "Quầy có thêm phút đáng quý. Cảm ơn tấm lòng của bạn."
+    },
+    {
+      "id": "cute-celebrate-o046-c011",
+      "text": "Quầy có thêm phút đáng quý. Chúc hôm nay đầy hân hoan."
+    },
+    {
+      "id": "cute-celebrate-o046-c012",
+      "text": "Quầy có thêm phút đáng quý. Mong bạn có phút thật đẹp."
+    },
+    {
+      "id": "cute-celebrate-o046-c013",
+      "text": "Quầy có thêm phút đáng quý. Gửi bạn niềm vui rạng rỡ."
+    },
+    {
+      "id": "cute-celebrate-o046-c014",
+      "text": "Quầy có thêm phút đáng quý. Cảm ơn bạn đã tin chọn."
+    },
+    {
+      "id": "cute-celebrate-o046-c015",
+      "text": "Quầy có thêm phút đáng quý. Chúc bạn một buổi trọn vui."
+    },
+    {
+      "id": "cute-celebrate-o046-c016",
+      "text": "Quầy có thêm phút đáng quý. Mong ngày mai thêm tươi sáng."
+    },
+    {
+      "id": "cute-celebrate-o046-c017",
+      "text": "Quầy có thêm phút đáng quý. Gửi bạn lòng biết ơn này."
+    },
+    {
+      "id": "cute-celebrate-o046-c018",
+      "text": "Quầy có thêm phút đáng quý. Cảm ơn một lần đồng hành."
+    },
+    {
+      "id": "cute-celebrate-o046-c019",
+      "text": "Quầy có thêm phút đáng quý. Chúc bạn nhẹ lòng mà vui."
+    },
+    {
+      "id": "cute-celebrate-o046-c020",
+      "text": "Quầy có thêm phút đáng quý. Mong bạn luôn được an hòa."
+    },
+    {
+      "id": "cute-celebrate-o046-c021",
+      "text": "Quầy có thêm phút đáng quý. Gửi bạn lời mến thật lòng."
+    },
+    {
+      "id": "cute-celebrate-o046-c022",
+      "text": "Quầy có thêm phút đáng quý. Xin gửi bạn lời cảm ơn chân thành."
+    },
+    {
+      "id": "cute-celebrate-o046-c023",
+      "text": "Quầy có thêm phút đáng quý. Chúc bạn đón nhiều sắc vui."
+    },
+    {
+      "id": "cute-celebrate-o046-c024",
+      "text": "Quầy có thêm phút đáng quý. Mong điều đẹp luôn bên bạn."
+    },
+    {
+      "id": "cute-celebrate-o046-c025",
+      "text": "Quầy có thêm phút đáng quý. Gửi lời cảm ơn nồng hậu."
+    },
+    {
+      "id": "cute-celebrate-o047-c001",
+      "text": "Một mùa nắng đang lên tiếng. Trân trọng cảm ơn bạn nhé."
+    },
+    {
+      "id": "cute-celebrate-o047-c002",
+      "text": "Một mùa nắng đang lên tiếng. Chúc bạn một ngày rực rỡ."
+    },
+    {
+      "id": "cute-celebrate-o047-c003",
+      "text": "Một mùa nắng đang lên tiếng. Mong bạn nhiều niềm vui mới."
+    },
+    {
+      "id": "cute-celebrate-o047-c004",
+      "text": "Một mùa nắng đang lên tiếng. Gửi bạn lời tri ân đẹp."
+    },
+    {
+      "id": "cute-celebrate-o047-c005",
+      "text": "Một mùa nắng đang lên tiếng. Chúc bạn luôn tràn sức sống."
+    },
+    {
+      "id": "cute-celebrate-o047-c006",
+      "text": "Một mùa nắng đang lên tiếng. Cảm ơn bạn đã dành sự tin tưởng."
+    },
+    {
+      "id": "cute-celebrate-o047-c007",
+      "text": "Một mùa nắng đang lên tiếng. Mong bạn bình an mỗi bước."
+    },
+    {
+      "id": "cute-celebrate-o047-c008",
+      "text": "Một mùa nắng đang lên tiếng. Chúc bạn thêm nhiều khởi sắc."
+    },
+    {
+      "id": "cute-celebrate-o047-c009",
+      "text": "Một mùa nắng đang lên tiếng. Gửi bạn một trời lời chúc."
+    },
+    {
+      "id": "cute-celebrate-o047-c010",
+      "text": "Một mùa nắng đang lên tiếng. Cảm ơn tấm lòng của bạn."
+    },
+    {
+      "id": "cute-celebrate-o047-c011",
+      "text": "Một mùa nắng đang lên tiếng. Chúc hôm nay đầy hân hoan."
+    },
+    {
+      "id": "cute-celebrate-o047-c012",
+      "text": "Một mùa nắng đang lên tiếng. Mong bạn có phút thật đẹp."
+    },
+    {
+      "id": "cute-celebrate-o047-c013",
+      "text": "Một mùa nắng đang lên tiếng. Gửi bạn niềm vui rạng rỡ."
+    },
+    {
+      "id": "cute-celebrate-o047-c014",
+      "text": "Một mùa nắng đang lên tiếng. Cảm ơn bạn đã tin chọn."
+    },
+    {
+      "id": "cute-celebrate-o047-c015",
+      "text": "Một mùa nắng đang lên tiếng. Chúc bạn một buổi trọn vui."
+    },
+    {
+      "id": "cute-celebrate-o047-c016",
+      "text": "Một mùa nắng đang lên tiếng. Mong ngày mai thêm tươi sáng."
+    },
+    {
+      "id": "cute-celebrate-o047-c017",
+      "text": "Một mùa nắng đang lên tiếng. Gửi bạn lòng biết ơn này."
+    },
+    {
+      "id": "cute-celebrate-o047-c018",
+      "text": "Một mùa nắng đang lên tiếng. Cảm ơn một lần đồng hành."
+    },
+    {
+      "id": "cute-celebrate-o047-c019",
+      "text": "Một mùa nắng đang lên tiếng. Chúc bạn nhẹ lòng mà vui."
+    },
+    {
+      "id": "cute-celebrate-o047-c020",
+      "text": "Một mùa nắng đang lên tiếng. Mong bạn luôn được an hòa."
+    },
+    {
+      "id": "cute-celebrate-o047-c021",
+      "text": "Một mùa nắng đang lên tiếng. Gửi bạn lời mến thật lòng."
+    },
+    {
+      "id": "cute-celebrate-o047-c022",
+      "text": "Một mùa nắng đang lên tiếng. Xin gửi bạn lời cảm ơn chân thành."
+    },
+    {
+      "id": "cute-celebrate-o047-c023",
+      "text": "Một mùa nắng đang lên tiếng. Chúc bạn đón nhiều sắc vui."
+    },
+    {
+      "id": "cute-celebrate-o047-c024",
+      "text": "Một mùa nắng đang lên tiếng. Mong điều đẹp luôn bên bạn."
+    },
+    {
+      "id": "cute-celebrate-o047-c025",
+      "text": "Một mùa nắng đang lên tiếng. Gửi lời cảm ơn nồng hậu."
+    },
+    {
+      "id": "cute-celebrate-o048-c001",
+      "text": "Niềm hân hoan vừa đơm hoa. Trân trọng cảm ơn bạn nhé."
+    },
+    {
+      "id": "cute-celebrate-o048-c002",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc bạn một ngày rực rỡ."
+    },
+    {
+      "id": "cute-celebrate-o048-c003",
+      "text": "Niềm hân hoan vừa đơm hoa. Mong bạn nhiều niềm vui mới."
+    },
+    {
+      "id": "cute-celebrate-o048-c004",
+      "text": "Niềm hân hoan vừa đơm hoa. Gửi bạn lời tri ân đẹp."
+    },
+    {
+      "id": "cute-celebrate-o048-c005",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc bạn luôn tràn sức sống."
+    },
+    {
+      "id": "cute-celebrate-o048-c006",
+      "text": "Niềm hân hoan vừa đơm hoa. Cảm ơn bạn đã dành sự tin tưởng."
+    },
+    {
+      "id": "cute-celebrate-o048-c007",
+      "text": "Niềm hân hoan vừa đơm hoa. Mong bạn bình an mỗi bước."
+    },
+    {
+      "id": "cute-celebrate-o048-c008",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc bạn thêm nhiều khởi sắc."
+    },
+    {
+      "id": "cute-celebrate-o048-c009",
+      "text": "Niềm hân hoan vừa đơm hoa. Gửi bạn một trời lời chúc."
+    },
+    {
+      "id": "cute-celebrate-o048-c010",
+      "text": "Niềm hân hoan vừa đơm hoa. Cảm ơn tấm lòng của bạn."
+    },
+    {
+      "id": "cute-celebrate-o048-c011",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc hôm nay đầy hân hoan."
+    },
+    {
+      "id": "cute-celebrate-o048-c012",
+      "text": "Niềm hân hoan vừa đơm hoa. Mong bạn có phút thật đẹp."
+    },
+    {
+      "id": "cute-celebrate-o048-c013",
+      "text": "Niềm hân hoan vừa đơm hoa. Gửi bạn niềm vui rạng rỡ."
+    },
+    {
+      "id": "cute-celebrate-o048-c014",
+      "text": "Niềm hân hoan vừa đơm hoa. Cảm ơn bạn đã tin chọn."
+    },
+    {
+      "id": "cute-celebrate-o048-c015",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc bạn một buổi trọn vui."
+    },
+    {
+      "id": "cute-celebrate-o048-c016",
+      "text": "Niềm hân hoan vừa đơm hoa. Mong ngày mai thêm tươi sáng."
+    },
+    {
+      "id": "cute-celebrate-o048-c017",
+      "text": "Niềm hân hoan vừa đơm hoa. Gửi bạn lòng biết ơn này."
+    },
+    {
+      "id": "cute-celebrate-o048-c018",
+      "text": "Niềm hân hoan vừa đơm hoa. Cảm ơn một lần đồng hành."
+    },
+    {
+      "id": "cute-celebrate-o048-c019",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc bạn nhẹ lòng mà vui."
+    },
+    {
+      "id": "cute-celebrate-o048-c020",
+      "text": "Niềm hân hoan vừa đơm hoa. Mong bạn luôn được an hòa."
+    },
+    {
+      "id": "cute-celebrate-o048-c021",
+      "text": "Niềm hân hoan vừa đơm hoa. Gửi bạn lời mến thật lòng."
+    },
+    {
+      "id": "cute-celebrate-o048-c022",
+      "text": "Niềm hân hoan vừa đơm hoa. Xin gửi bạn lời cảm ơn chân thành."
+    },
+    {
+      "id": "cute-celebrate-o048-c023",
+      "text": "Niềm hân hoan vừa đơm hoa. Chúc bạn đón nhiều sắc vui."
+    },
+    {
+      "id": "cute-celebrate-o048-c024",
+      "text": "Niềm hân hoan vừa đơm hoa. Mong điều đẹp luôn bên bạn."
+    },
+    {
+      "id": "cute-celebrate-o048-c025",
+      "text": "Niềm hân hoan vừa đơm hoa. Gửi lời cảm ơn nồng hậu."
+    },
+    {
+      "id": "cute-celebrate-o049-c001",
+      "text": "Ngày thêm một lời cảm mến. Trân trọng cảm ơn bạn nhé."
+    },
+    {
+      "id": "cute-celebrate-o049-c002",
+      "text": "Ngày thêm một lời cảm mến. Chúc bạn một ngày rực rỡ."
+    },
+    {
+      "id": "cute-celebrate-o049-c003",
+      "text": "Ngày thêm một lời cảm mến. Mong bạn nhiều niềm vui mới."
+    },
+    {
+      "id": "cute-celebrate-o049-c004",
+      "text": "Ngày thêm một lời cảm mến. Gửi bạn lời tri ân đẹp."
+    },
+    {
+      "id": "cute-celebrate-o049-c005",
+      "text": "Ngày thêm một lời cảm mến. Chúc bạn luôn tràn sức sống."
+    },
+    {
+      "id": "cute-celebrate-o049-c006",
+      "text": "Ngày thêm một lời cảm mến. Cảm ơn bạn đã dành sự tin tưởng."
+    },
+    {
+      "id": "cute-celebrate-o049-c007",
+      "text": "Ngày thêm một lời cảm mến. Mong bạn bình an mỗi bước."
+    },
+    {
+      "id": "cute-celebrate-o049-c008",
+      "text": "Ngày thêm một lời cảm mến. Chúc bạn thêm nhiều khởi sắc."
+    },
+    {
+      "id": "cute-celebrate-o049-c009",
+      "text": "Ngày thêm một lời cảm mến. Gửi bạn một trời lời chúc."
+    },
+    {
+      "id": "cute-celebrate-o049-c010",
+      "text": "Ngày thêm một lời cảm mến. Cảm ơn tấm lòng của bạn."
+    },
+    {
+      "id": "cute-celebrate-o049-c011",
+      "text": "Ngày thêm một lời cảm mến. Chúc hôm nay đầy hân hoan."
+    },
+    {
+      "id": "cute-celebrate-o049-c012",
+      "text": "Ngày thêm một lời cảm mến. Mong bạn có phút thật đẹp."
+    },
+    {
+      "id": "cute-celebrate-o049-c013",
+      "text": "Ngày thêm một lời cảm mến. Gửi bạn niềm vui rạng rỡ."
+    },
+    {
+      "id": "cute-celebrate-o049-c014",
+      "text": "Ngày thêm một lời cảm mến. Cảm ơn bạn đã tin chọn."
+    },
+    {
+      "id": "cute-celebrate-o049-c015",
+      "text": "Ngày thêm một lời cảm mến. Chúc bạn một buổi trọn vui."
+    },
+    {
+      "id": "cute-celebrate-o049-c016",
+      "text": "Ngày thêm một lời cảm mến. Mong ngày mai thêm tươi sáng."
+    },
+    {
+      "id": "cute-celebrate-o049-c017",
+      "text": "Ngày thêm một lời cảm mến. Gửi bạn lòng biết ơn này."
+    },
+    {
+      "id": "cute-celebrate-o049-c018",
+      "text": "Ngày thêm một lời cảm mến. Cảm ơn một lần đồng hành."
+    },
+    {
+      "id": "cute-celebrate-o049-c019",
+      "text": "Ngày thêm một lời cảm mến. Chúc bạn nhẹ lòng mà vui."
+    },
+    {
+      "id": "cute-celebrate-o049-c020",
+      "text": "Ngày thêm một lời cảm mến. Mong bạn luôn được an hòa."
+    },
+    {
+      "id": "cute-celebrate-o049-c021",
+      "text": "Ngày thêm một lời cảm mến. Gửi bạn lời mến thật lòng."
+    },
+    {
+      "id": "cute-celebrate-o049-c022",
+      "text": "Ngày thêm một lời cảm mến. Xin gửi bạn lời cảm ơn chân thành."
+    },
+    {
+      "id": "cute-celebrate-o049-c023",
+      "text": "Ngày thêm một lời cảm mến. Chúc bạn đón nhiều sắc vui."
+    },
+    {
+      "id": "cute-celebrate-o049-c024",
+      "text": "Ngày thêm một lời cảm mến. Mong điều đẹp luôn bên bạn."
+    },
+    {
+      "id": "cute-celebrate-o049-c025",
+      "text": "Ngày thêm một lời cảm mến. Gửi lời cảm ơn nồng hậu."
+    },
+    {
+      "id": "cute-celebrate-o050-c001",
+      "text": "Quầy vừa đón cả trời vui. Trân trọng cảm ơn bạn nhé."
+    },
+    {
+      "id": "cute-celebrate-o050-c002",
+      "text": "Quầy vừa đón cả trời vui. Chúc bạn một ngày rực rỡ."
+    },
+    {
+      "id": "cute-celebrate-o050-c003",
+      "text": "Quầy vừa đón cả trời vui. Mong bạn nhiều niềm vui mới."
+    },
+    {
+      "id": "cute-celebrate-o050-c004",
+      "text": "Quầy vừa đón cả trời vui. Gửi bạn lời tri ân đẹp."
+    },
+    {
+      "id": "cute-celebrate-o050-c005",
+      "text": "Quầy vừa đón cả trời vui. Chúc bạn luôn tràn sức sống."
+    },
+    {
+      "id": "cute-celebrate-o050-c006",
+      "text": "Quầy vừa đón cả trời vui. Cảm ơn bạn đã dành sự tin tưởng."
+    },
+    {
+      "id": "cute-celebrate-o050-c007",
+      "text": "Quầy vừa đón cả trời vui. Mong bạn bình an mỗi bước."
+    },
+    {
+      "id": "cute-celebrate-o050-c008",
+      "text": "Quầy vừa đón cả trời vui. Chúc bạn thêm nhiều khởi sắc."
+    },
+    {
+      "id": "cute-celebrate-o050-c009",
+      "text": "Quầy vừa đón cả trời vui. Gửi bạn một trời lời chúc."
+    },
+    {
+      "id": "cute-celebrate-o050-c010",
+      "text": "Quầy vừa đón cả trời vui. Cảm ơn tấm lòng của bạn."
+    },
+    {
+      "id": "cute-celebrate-o050-c011",
+      "text": "Quầy vừa đón cả trời vui. Chúc hôm nay đầy hân hoan."
+    },
+    {
+      "id": "cute-celebrate-o050-c012",
+      "text": "Quầy vừa đón cả trời vui. Mong bạn có phút thật đẹp."
+    },
+    {
+      "id": "cute-celebrate-o050-c013",
+      "text": "Quầy vừa đón cả trời vui. Gửi bạn niềm vui rạng rỡ."
+    },
+    {
+      "id": "cute-celebrate-o050-c014",
+      "text": "Quầy vừa đón cả trời vui. Cảm ơn bạn đã tin chọn."
+    },
+    {
+      "id": "cute-celebrate-o050-c015",
+      "text": "Quầy vừa đón cả trời vui. Chúc bạn một buổi trọn vui."
+    },
+    {
+      "id": "cute-celebrate-o050-c016",
+      "text": "Quầy vừa đón cả trời vui. Mong ngày mai thêm tươi sáng."
+    },
+    {
+      "id": "cute-celebrate-o050-c017",
+      "text": "Quầy vừa đón cả trời vui. Gửi bạn lòng biết ơn này."
+    },
+    {
+      "id": "cute-celebrate-o050-c018",
+      "text": "Quầy vừa đón cả trời vui. Cảm ơn một lần đồng hành."
+    },
+    {
+      "id": "cute-celebrate-o050-c019",
+      "text": "Quầy vừa đón cả trời vui. Chúc bạn nhẹ lòng mà vui."
+    },
+    {
+      "id": "cute-celebrate-o050-c020",
+      "text": "Quầy vừa đón cả trời vui. Mong bạn luôn được an hòa."
+    },
+    {
+      "id": "cute-celebrate-o050-c021",
+      "text": "Quầy vừa đón cả trời vui. Gửi bạn lời mến thật lòng."
+    },
+    {
+      "id": "cute-celebrate-o050-c022",
+      "text": "Quầy vừa đón cả trời vui. Xin gửi bạn lời cảm ơn chân thành."
+    },
+    {
+      "id": "cute-celebrate-o050-c023",
+      "text": "Quầy vừa đón cả trời vui. Chúc bạn đón nhiều sắc vui."
+    },
+    {
+      "id": "cute-celebrate-o050-c024",
+      "text": "Quầy vừa đón cả trời vui. Mong điều đẹp luôn bên bạn."
+    },
+    {
+      "id": "cute-celebrate-o050-c025",
+      "text": "Quầy vừa đón cả trời vui. Gửi lời cảm ơn nồng hậu."
+    }
+  ]
+}

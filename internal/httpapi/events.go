@@ -20,4 +20,7 @@ func (s *Server) publishStateEvent(eventType, aggregateID string, data any) {
 		return
 	}
 	s.Publish(eventhub.Event{Seq: seq, Epoch: realtimeEpoch, EventType: eventType, AggregateID: aggregateID, Payload: payload, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	if s.wakeFn != nil {
+		_ = s.wakeFn(context.Background())
+	}
 }

@@ -1,0 +1,507 @@
+{
+  "id": "funny-small-b08",
+  "styleId": "funny",
+  "bandId": "small",
+  "recipes": [
+    {
+      "id": "funny-small-o036-c001",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn bạn đã tiếp vui."
+    },
+    {
+      "id": "funny-small-o036-c002",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc bạn cười không cần nhắc."
+    },
+    {
+      "id": "funny-small-o036-c003",
+      "text": "Nụ cười đã nhận nhiệm vụ. Mong bạn vui đúng lịch nhé."
+    },
+    {
+      "id": "funny-small-o036-c004",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn lượt ghé có duyên."
+    },
+    {
+      "id": "funny-small-o036-c005",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc ngày của bạn thêm nhiều niềm vui."
+    },
+    {
+      "id": "funny-small-o036-c006",
+      "text": "Nụ cười đã nhận nhiệm vụ. Gửi bạn một vé cười tươi."
+    },
+    {
+      "id": "funny-small-o036-c007",
+      "text": "Nụ cười đã nhận nhiệm vụ. Mong bạn gặp toàn chuyện vui."
+    },
+    {
+      "id": "funny-small-o036-c008",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc bạn nhẹ việc nặng vui."
+    },
+    {
+      "id": "funny-small-o036-c009",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn bạn đã mang niềm vui tới."
+    },
+    {
+      "id": "funny-small-o036-c010",
+      "text": "Nụ cười đã nhận nhiệm vụ. Mong bạn cười đều mỗi buổi."
+    },
+    {
+      "id": "funny-small-o036-c011",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc nụ cười luôn đúng hẹn."
+    },
+    {
+      "id": "funny-small-o036-c012",
+      "text": "Nụ cười đã nhận nhiệm vụ. Gửi bạn chút duyên mang về."
+    },
+    {
+      "id": "funny-small-o036-c013",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn bạn đã bật vui."
+    },
+    {
+      "id": "funny-small-o036-c014",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc bạn thong thả mà cười."
+    },
+    {
+      "id": "funny-small-o036-c015",
+      "text": "Nụ cười đã nhận nhiệm vụ. Mong ngày vui không rớt sóng."
+    },
+    {
+      "id": "funny-small-o036-c016",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn lần ghé vui ghê."
+    },
+    {
+      "id": "funny-small-o036-c017",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc bạn đón tin vui sớm."
+    },
+    {
+      "id": "funny-small-o036-c018",
+      "text": "Nụ cười đã nhận nhiệm vụ. Gửi bạn nụ cười bỏ túi."
+    },
+    {
+      "id": "funny-small-o036-c019",
+      "text": "Nụ cười đã nhận nhiệm vụ. Mong niềm vui luôn đúng chỗ."
+    },
+    {
+      "id": "funny-small-o036-c020",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn bạn ghé thật khéo."
+    },
+    {
+      "id": "funny-small-o036-c021",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc bạn vui không lệch nhịp."
+    },
+    {
+      "id": "funny-small-o036-c022",
+      "text": "Nụ cười đã nhận nhiệm vụ. Mong hôm nay cười vừa đủ."
+    },
+    {
+      "id": "funny-small-o036-c023",
+      "text": "Nụ cười đã nhận nhiệm vụ. Gửi bạn lời chúc có duyên."
+    },
+    {
+      "id": "funny-small-o036-c024",
+      "text": "Nụ cười đã nhận nhiệm vụ. Chúc bạn tỉnh táo mà vui."
+    },
+    {
+      "id": "funny-small-o036-c025",
+      "text": "Nụ cười đã nhận nhiệm vụ. Cảm ơn bạn vì phút vui."
+    },
+    {
+      "id": "funny-small-o037-c001",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn bạn đã tiếp vui."
+    },
+    {
+      "id": "funny-small-o037-c002",
+      "text": "Góc quầy vừa có tín hiệu. Chúc bạn cười không cần nhắc."
+    },
+    {
+      "id": "funny-small-o037-c003",
+      "text": "Góc quầy vừa có tín hiệu. Mong bạn vui đúng lịch nhé."
+    },
+    {
+      "id": "funny-small-o037-c004",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn lượt ghé có duyên."
+    },
+    {
+      "id": "funny-small-o037-c005",
+      "text": "Góc quầy vừa có tín hiệu. Chúc ngày của bạn thêm nhiều niềm vui."
+    },
+    {
+      "id": "funny-small-o037-c006",
+      "text": "Góc quầy vừa có tín hiệu. Gửi bạn một vé cười tươi."
+    },
+    {
+      "id": "funny-small-o037-c007",
+      "text": "Góc quầy vừa có tín hiệu. Mong bạn gặp toàn chuyện vui."
+    },
+    {
+      "id": "funny-small-o037-c008",
+      "text": "Góc quầy vừa có tín hiệu. Chúc bạn nhẹ việc nặng vui."
+    },
+    {
+      "id": "funny-small-o037-c009",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn bạn đã mang niềm vui tới."
+    },
+    {
+      "id": "funny-small-o037-c010",
+      "text": "Góc quầy vừa có tín hiệu. Mong bạn cười đều mỗi buổi."
+    },
+    {
+      "id": "funny-small-o037-c011",
+      "text": "Góc quầy vừa có tín hiệu. Chúc nụ cười luôn đúng hẹn."
+    },
+    {
+      "id": "funny-small-o037-c012",
+      "text": "Góc quầy vừa có tín hiệu. Gửi bạn chút duyên mang về."
+    },
+    {
+      "id": "funny-small-o037-c013",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn bạn đã bật vui."
+    },
+    {
+      "id": "funny-small-o037-c014",
+      "text": "Góc quầy vừa có tín hiệu. Chúc bạn thong thả mà cười."
+    },
+    {
+      "id": "funny-small-o037-c015",
+      "text": "Góc quầy vừa có tín hiệu. Mong ngày vui không rớt sóng."
+    },
+    {
+      "id": "funny-small-o037-c016",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn lần ghé vui ghê."
+    },
+    {
+      "id": "funny-small-o037-c017",
+      "text": "Góc quầy vừa có tín hiệu. Chúc bạn đón tin vui sớm."
+    },
+    {
+      "id": "funny-small-o037-c018",
+      "text": "Góc quầy vừa có tín hiệu. Gửi bạn nụ cười bỏ túi."
+    },
+    {
+      "id": "funny-small-o037-c019",
+      "text": "Góc quầy vừa có tín hiệu. Mong niềm vui luôn đúng chỗ."
+    },
+    {
+      "id": "funny-small-o037-c020",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn bạn ghé thật khéo."
+    },
+    {
+      "id": "funny-small-o037-c021",
+      "text": "Góc quầy vừa có tín hiệu. Chúc bạn vui không lệch nhịp."
+    },
+    {
+      "id": "funny-small-o037-c022",
+      "text": "Góc quầy vừa có tín hiệu. Mong hôm nay cười vừa đủ."
+    },
+    {
+      "id": "funny-small-o037-c023",
+      "text": "Góc quầy vừa có tín hiệu. Gửi bạn lời chúc có duyên."
+    },
+    {
+      "id": "funny-small-o037-c024",
+      "text": "Góc quầy vừa có tín hiệu. Chúc bạn tỉnh táo mà vui."
+    },
+    {
+      "id": "funny-small-o037-c025",
+      "text": "Góc quầy vừa có tín hiệu. Cảm ơn bạn vì phút vui."
+    },
+    {
+      "id": "funny-small-o038-c001",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn bạn đã tiếp vui."
+    },
+    {
+      "id": "funny-small-o038-c002",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc bạn cười không cần nhắc."
+    },
+    {
+      "id": "funny-small-o038-c003",
+      "text": "Ngày vui vừa cắm đúng ổ. Mong bạn vui đúng lịch nhé."
+    },
+    {
+      "id": "funny-small-o038-c004",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn lượt ghé có duyên."
+    },
+    {
+      "id": "funny-small-o038-c005",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc ngày của bạn thêm nhiều niềm vui."
+    },
+    {
+      "id": "funny-small-o038-c006",
+      "text": "Ngày vui vừa cắm đúng ổ. Gửi bạn một vé cười tươi."
+    },
+    {
+      "id": "funny-small-o038-c007",
+      "text": "Ngày vui vừa cắm đúng ổ. Mong bạn gặp toàn chuyện vui."
+    },
+    {
+      "id": "funny-small-o038-c008",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc bạn nhẹ việc nặng vui."
+    },
+    {
+      "id": "funny-small-o038-c009",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn bạn đã mang niềm vui tới."
+    },
+    {
+      "id": "funny-small-o038-c010",
+      "text": "Ngày vui vừa cắm đúng ổ. Mong bạn cười đều mỗi buổi."
+    },
+    {
+      "id": "funny-small-o038-c011",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc nụ cười luôn đúng hẹn."
+    },
+    {
+      "id": "funny-small-o038-c012",
+      "text": "Ngày vui vừa cắm đúng ổ. Gửi bạn chút duyên mang về."
+    },
+    {
+      "id": "funny-small-o038-c013",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn bạn đã bật vui."
+    },
+    {
+      "id": "funny-small-o038-c014",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc bạn thong thả mà cười."
+    },
+    {
+      "id": "funny-small-o038-c015",
+      "text": "Ngày vui vừa cắm đúng ổ. Mong ngày vui không rớt sóng."
+    },
+    {
+      "id": "funny-small-o038-c016",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn lần ghé vui ghê."
+    },
+    {
+      "id": "funny-small-o038-c017",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc bạn đón tin vui sớm."
+    },
+    {
+      "id": "funny-small-o038-c018",
+      "text": "Ngày vui vừa cắm đúng ổ. Gửi bạn nụ cười bỏ túi."
+    },
+    {
+      "id": "funny-small-o038-c019",
+      "text": "Ngày vui vừa cắm đúng ổ. Mong niềm vui luôn đúng chỗ."
+    },
+    {
+      "id": "funny-small-o038-c020",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn bạn ghé thật khéo."
+    },
+    {
+      "id": "funny-small-o038-c021",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc bạn vui không lệch nhịp."
+    },
+    {
+      "id": "funny-small-o038-c022",
+      "text": "Ngày vui vừa cắm đúng ổ. Mong hôm nay cười vừa đủ."
+    },
+    {
+      "id": "funny-small-o038-c023",
+      "text": "Ngày vui vừa cắm đúng ổ. Gửi bạn lời chúc có duyên."
+    },
+    {
+      "id": "funny-small-o038-c024",
+      "text": "Ngày vui vừa cắm đúng ổ. Chúc bạn tỉnh táo mà vui."
+    },
+    {
+      "id": "funny-small-o038-c025",
+      "text": "Ngày vui vừa cắm đúng ổ. Cảm ơn bạn vì phút vui."
+    },
+    {
+      "id": "funny-small-o039-c001",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn bạn đã tiếp vui."
+    },
+    {
+      "id": "funny-small-o039-c002",
+      "text": "Chiếc ví đang giữ phong độ. Chúc bạn cười không cần nhắc."
+    },
+    {
+      "id": "funny-small-o039-c003",
+      "text": "Chiếc ví đang giữ phong độ. Mong bạn vui đúng lịch nhé."
+    },
+    {
+      "id": "funny-small-o039-c004",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn lượt ghé có duyên."
+    },
+    {
+      "id": "funny-small-o039-c005",
+      "text": "Chiếc ví đang giữ phong độ. Chúc ngày của bạn thêm nhiều niềm vui."
+    },
+    {
+      "id": "funny-small-o039-c006",
+      "text": "Chiếc ví đang giữ phong độ. Gửi bạn một vé cười tươi."
+    },
+    {
+      "id": "funny-small-o039-c007",
+      "text": "Chiếc ví đang giữ phong độ. Mong bạn gặp toàn chuyện vui."
+    },
+    {
+      "id": "funny-small-o039-c008",
+      "text": "Chiếc ví đang giữ phong độ. Chúc bạn nhẹ việc nặng vui."
+    },
+    {
+      "id": "funny-small-o039-c009",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn bạn đã mang niềm vui tới."
+    },
+    {
+      "id": "funny-small-o039-c010",
+      "text": "Chiếc ví đang giữ phong độ. Mong bạn cười đều mỗi buổi."
+    },
+    {
+      "id": "funny-small-o039-c011",
+      "text": "Chiếc ví đang giữ phong độ. Chúc nụ cười luôn đúng hẹn."
+    },
+    {
+      "id": "funny-small-o039-c012",
+      "text": "Chiếc ví đang giữ phong độ. Gửi bạn chút duyên mang về."
+    },
+    {
+      "id": "funny-small-o039-c013",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn bạn đã bật vui."
+    },
+    {
+      "id": "funny-small-o039-c014",
+      "text": "Chiếc ví đang giữ phong độ. Chúc bạn thong thả mà cười."
+    },
+    {
+      "id": "funny-small-o039-c015",
+      "text": "Chiếc ví đang giữ phong độ. Mong ngày vui không rớt sóng."
+    },
+    {
+      "id": "funny-small-o039-c016",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn lần ghé vui ghê."
+    },
+    {
+      "id": "funny-small-o039-c017",
+      "text": "Chiếc ví đang giữ phong độ. Chúc bạn đón tin vui sớm."
+    },
+    {
+      "id": "funny-small-o039-c018",
+      "text": "Chiếc ví đang giữ phong độ. Gửi bạn nụ cười bỏ túi."
+    },
+    {
+      "id": "funny-small-o039-c019",
+      "text": "Chiếc ví đang giữ phong độ. Mong niềm vui luôn đúng chỗ."
+    },
+    {
+      "id": "funny-small-o039-c020",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn bạn ghé thật khéo."
+    },
+    {
+      "id": "funny-small-o039-c021",
+      "text": "Chiếc ví đang giữ phong độ. Chúc bạn vui không lệch nhịp."
+    },
+    {
+      "id": "funny-small-o039-c022",
+      "text": "Chiếc ví đang giữ phong độ. Mong hôm nay cười vừa đủ."
+    },
+    {
+      "id": "funny-small-o039-c023",
+      "text": "Chiếc ví đang giữ phong độ. Gửi bạn lời chúc có duyên."
+    },
+    {
+      "id": "funny-small-o039-c024",
+      "text": "Chiếc ví đang giữ phong độ. Chúc bạn tỉnh táo mà vui."
+    },
+    {
+      "id": "funny-small-o039-c025",
+      "text": "Chiếc ví đang giữ phong độ. Cảm ơn bạn vì phút vui."
+    },
+    {
+      "id": "funny-small-o040-c001",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn bạn đã tiếp vui."
+    },
+    {
+      "id": "funny-small-o040-c002",
+      "text": "Quầy vừa có phút lên hương. Chúc bạn cười không cần nhắc."
+    },
+    {
+      "id": "funny-small-o040-c003",
+      "text": "Quầy vừa có phút lên hương. Mong bạn vui đúng lịch nhé."
+    },
+    {
+      "id": "funny-small-o040-c004",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn lượt ghé có duyên."
+    },
+    {
+      "id": "funny-small-o040-c005",
+      "text": "Quầy vừa có phút lên hương. Chúc ngày của bạn thêm nhiều niềm vui."
+    },
+    {
+      "id": "funny-small-o040-c006",
+      "text": "Quầy vừa có phút lên hương. Gửi bạn một vé cười tươi."
+    },
+    {
+      "id": "funny-small-o040-c007",
+      "text": "Quầy vừa có phút lên hương. Mong bạn gặp toàn chuyện vui."
+    },
+    {
+      "id": "funny-small-o040-c008",
+      "text": "Quầy vừa có phút lên hương. Chúc bạn nhẹ việc nặng vui."
+    },
+    {
+      "id": "funny-small-o040-c009",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn bạn đã mang niềm vui tới."
+    },
+    {
+      "id": "funny-small-o040-c010",
+      "text": "Quầy vừa có phút lên hương. Mong bạn cười đều mỗi buổi."
+    },
+    {
+      "id": "funny-small-o040-c011",
+      "text": "Quầy vừa có phút lên hương. Chúc nụ cười luôn đúng hẹn."
+    },
+    {
+      "id": "funny-small-o040-c012",
+      "text": "Quầy vừa có phút lên hương. Gửi bạn chút duyên mang về."
+    },
+    {
+      "id": "funny-small-o040-c013",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn bạn đã bật vui."
+    },
+    {
+      "id": "funny-small-o040-c014",
+      "text": "Quầy vừa có phút lên hương. Chúc bạn thong thả mà cười."
+    },
+    {
+      "id": "funny-small-o040-c015",
+      "text": "Quầy vừa có phút lên hương. Mong ngày vui không rớt sóng."
+    },
+    {
+      "id": "funny-small-o040-c016",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn lần ghé vui ghê."
+    },
+    {
+      "id": "funny-small-o040-c017",
+      "text": "Quầy vừa có phút lên hương. Chúc bạn đón tin vui sớm."
+    },
+    {
+      "id": "funny-small-o040-c018",
+      "text": "Quầy vừa có phút lên hương. Gửi bạn nụ cười bỏ túi."
+    },
+    {
+      "id": "funny-small-o040-c019",
+      "text": "Quầy vừa có phút lên hương. Mong niềm vui luôn đúng chỗ."
+    },
+    {
+      "id": "funny-small-o040-c020",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn bạn ghé thật khéo."
+    },
+    {
+      "id": "funny-small-o040-c021",
+      "text": "Quầy vừa có phút lên hương. Chúc bạn vui không lệch nhịp."
+    },
+    {
+      "id": "funny-small-o040-c022",
+      "text": "Quầy vừa có phút lên hương. Mong hôm nay cười vừa đủ."
+    },
+    {
+      "id": "funny-small-o040-c023",
+      "text": "Quầy vừa có phút lên hương. Gửi bạn lời chúc có duyên."
+    },
+    {
+      "id": "funny-small-o040-c024",
+      "text": "Quầy vừa có phút lên hương. Chúc bạn tỉnh táo mà vui."
+    },
+    {
+      "id": "funny-small-o040-c025",
+      "text": "Quầy vừa có phút lên hương. Cảm ơn bạn vì phút vui."
+    }
+  ]
+}

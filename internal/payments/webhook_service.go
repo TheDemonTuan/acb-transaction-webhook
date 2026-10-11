@@ -2,11 +2,12 @@ package payments
 
 import (
 	"context"
-	"database/sql"
 	"errors"
+	"time"
 
 	payos "github.com/payOSHQ/payos-lib-golang/v2"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
 var ErrWebhookUnavailable = errors.New("payment webhook temporarily unavailable")
@@ -53,6 +54,10 @@ func (s *Service) HandleWebhook(ctx context.Context, body map[string]any) (resul
 	if data == nil {
 		return ErrInvalidWebhook
 	}
+	if recAt, ok := telemetry.PaymentReceivedAt(ctx); ok {
+		telemetry.RecordPaymentStage(telemetry.PaymentProviderPayOS, telemetry.PaymentStageVerify, time.Since(recAt))
+	}
+	commitStart := time.Now()
 	// Count verified callbacks through their commit and post-commit hints so
 	// quiesce cannot report drained while an inbox/financial write is active.
 	if err := s.beginPaymentRequest(ctx); err != nil {
@@ -61,6 +66,7 @@ func (s *Service) HandleWebhook(ctx context.Context, body map[string]any) (resul
 	defer s.endPaymentRequest()
 	defer func() {
 		if resultErr == nil {
+			telemetry.RecordPaymentStage(telemetry.PaymentProviderPayOS, telemetry.PaymentStageCommit, time.Since(commitStart))
 			s.recordActivity(ctx, "WEBHOOK")
 		}
 	}()
@@ -93,16 +99,7 @@ func (s *Service) HandleWebhook(ctx context.Context, body map[string]any) (resul
 		AccountNumber: data.AccountNumber, VirtualAccountNumber: virtualAccount,
 		Source: "REALTIME", VerifiedCallback: &callback,
 	}
-	order, err := s.store.PaymentOrderByCode(ctx, data.OrderCode)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return ErrWebhookUnavailable
-	}
-	var result storage.SettlementResult
-	if err == nil && (order.Status == "CANCELLED" || order.Status == "EXPIRED") {
-		result, err = s.confirmWebhookPayment(ctx, order, data, in)
-	} else {
-		result, err = s.store.SettlePayment(ctx, in)
-	}
+	result, err := s.store.SettlePayment(ctx, in)
 	if err != nil {
 		return ErrWebhookUnavailable
 	}

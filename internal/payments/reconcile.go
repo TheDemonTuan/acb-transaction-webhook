@@ -569,6 +569,25 @@ func (s *Service) settleVerifiedLink(ctx context.Context, order storage.PaymentO
 	var result storage.SettlementResult
 	var event *storage.EventNotification
 	matched := false
+	var earliestReceived time.Time
+
+	for _, item := range items {
+		callback, decodeErr := decodeStoredCallback(item)
+		if decodeErr != nil || !callbackMatchesSettlement(callback, input) {
+			continue
+		}
+		var parsedTime time.Time
+		var parseErr error
+		if parsedTime, parseErr = time.Parse(time.RFC3339Nano, item.ReceivedAt); parseErr != nil {
+			parsedTime, parseErr = time.Parse(time.RFC3339, item.ReceivedAt)
+		}
+		if parseErr == nil && !parsedTime.IsZero() {
+			if earliestReceived.IsZero() || parsedTime.Before(earliestReceived) {
+				earliestReceived = parsedTime
+			}
+		}
+	}
+
 	for _, item := range items {
 		callback, decodeErr := decodeStoredCallback(item)
 		if decodeErr != nil || !callbackMatchesSettlement(callback, input) {
@@ -576,6 +595,21 @@ func (s *Service) settleVerifiedLink(ctx context.Context, order storage.PaymentO
 		}
 		matched = true
 		input.InboxHash = item.PayloadHash
+
+		if !earliestReceived.IsZero() {
+			age := time.Since(earliestReceived)
+			if age >= 0 && age <= 30*time.Second {
+				input.Source = "REALTIME"
+				input.DetectedAt = earliestReceived
+			} else {
+				input.Source = "CATCH_UP"
+				input.DetectedAt = time.Time{}
+			}
+		} else {
+			input.Source = "CATCH_UP"
+			input.DetectedAt = time.Time{}
+		}
+
 		result, err = s.store.SettlePayment(ctx, input)
 		if err != nil || result.ReviewReason != "" {
 			return result, err
@@ -591,6 +625,8 @@ func (s *Service) settleVerifiedLink(ctx context.Context, order storage.PaymentO
 	if len(items) > 0 {
 		return storage.SettlementResult{}, &storage.SettlementReviewError{Reason: "PAYMENT_DETAILS_PENDING"}
 	}
+	input.Source = "CATCH_UP"
+	input.DetectedAt = time.Time{}
 	return s.store.SettlePayment(ctx, input)
 }
 
@@ -613,46 +649,4 @@ func (s *Service) publishSettlement(result storage.SettlementResult) {
 	if result.Event != nil && s.onCommit != nil {
 		s.onCommit(*result.Event)
 	}
-}
-
-func (s *Service) confirmWebhookPayment(ctx context.Context, order storage.PaymentOrder, data *payos.WebhookData, input storage.SettlementInput) (storage.SettlementResult, error) {
-	if err := s.beginPaymentRequest(ctx); err != nil {
-		return storage.SettlementResult{}, err
-	}
-	defer s.endPaymentRequest()
-	claimedOrder, claimed, err := s.store.ClaimPaymentOrder(ctx, order.ID, time.Now())
-	if err != nil {
-		return storage.SettlementResult{}, err
-	}
-	if claimedOrder.Status == "PAID" {
-		return s.store.SettlePayment(ctx, input)
-	}
-	if !claimed {
-		return storage.SettlementResult{}, ErrPaymentUnavailable
-	}
-	order = claimedOrder
-	link, err := s.getClaimedLink(ctx, order)
-	if err != nil {
-		_ = s.finishReconcile(ctx, order, s.failureUpdate(order, err, "PAYMENT_DETAILS_PENDING"))
-		return storage.SettlementResult{}, err
-	}
-	verified, err := verifiedLinkSettlement(order, link)
-	if err != nil || !callbackMatchesSettlement(data, verified) {
-		if input.VerifiedCallback != nil {
-			callback := *input.VerifiedCallback
-			callback.Reason = "PAYMENT_DETAILS_PENDING"
-			hash, saveErr := s.store.SaveVerifiedPaymentCallback(ctx, callback)
-			if saveErr == nil {
-				_ = s.finishReconcile(ctx, order, s.failureUpdate(order, nil, "PAYMENT_DETAILS_PENDING"))
-			}
-			return storage.SettlementResult{Order: order, ReviewReason: callback.Reason, InboxHash: hash}, saveErr
-		}
-		return storage.SettlementResult{}, &storage.SettlementReviewError{Reason: "PAYMENT_DETAILS_PENDING"}
-	}
-	input.VerifiedGet = verified.VerifiedGet
-	result, err := s.store.SettlePayment(ctx, input)
-	if err == nil {
-		_ = s.finishReconcile(ctx, order, storage.PaymentOrderUpdate{})
-	}
-	return result, err
 }

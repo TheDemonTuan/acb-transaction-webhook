@@ -24,8 +24,9 @@ test.describe('Payment configuration, QR, server-side transactions and detail', 
     const download = page.getByRole('link', { name: 'Tải ảnh QR', exact: true });
     await expect(download).toHaveAttribute('href', /^data:image\/png/);
     await expect(download).toHaveAttribute('download', 'payment-url-qr.png');
-    await page.getByPlaceholder('Ví dụ: ACB_Coffee_Free').fill('Regression WiFi');
-    await page.getByPlaceholder('Để trống nếu mạng không cần mật khẩu').fill('wifi-fixture-password');
+    const wifiForm = page.locator('form').filter({ has: page.getByRole('button', { name: 'Lưu cấu hình WiFi', exact: true }) });
+    await wifiForm.locator('input[type="text"]').nth(0).fill('Regression WiFi');
+    await wifiForm.locator('input[type="text"]').nth(1).fill('wifi-fixture-password');
     await page.getByRole('button', { name: 'Lưu cấu hình WiFi', exact: true }).click();
     await page.goto('/transactions');
     const cashier = page.getByRole('region', { name: 'Thu ngân', exact: true });

@@ -27,6 +27,11 @@ func (s *Store) RecordPaymentActivity(ctx context.Context, channel, kind string)
 		return errors.New("invalid payment activity")
 	}
 	key := paymentActivityKey(channel, kind)
+	// Metadata shares the financial writer admission order. Taking a pool
+	// connection before this mutex can let concurrent callback activity fill
+	// every slot while the financial writer waits to persist its outcome.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO system_events(id,incident_key,event_type,state,details_json,created_at) VALUES(?,?,?,'OK','{}',?) ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at`, key, key, "PAYOS_"+kind, now())
 	return err
 }

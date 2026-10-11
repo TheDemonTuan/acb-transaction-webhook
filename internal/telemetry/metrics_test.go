@@ -116,3 +116,51 @@ func TestTelemetrySnapshotRuntimeContract(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordPaymentStage(t *testing.T) {
+	reg := NewRegistry()
+
+	// Invalid provider / stage should be rejected
+	reg.RecordPaymentStage("INVALID", "verify", 10*time.Millisecond)
+	reg.RecordPaymentStage("PAYOS", "invalid_stage", 10*time.Millisecond)
+	report := reg.PaymentStageReport()
+	if len(report) != 0 {
+		t.Fatalf("expected empty report for invalid inputs, got %+v", report)
+	}
+
+	// Valid providers and stages
+	for i := 1; i <= 100; i++ {
+		reg.RecordPaymentStage(PaymentProviderPayOS, PaymentStageVerify, time.Duration(i)*time.Millisecond)
+		reg.RecordPaymentStage(PaymentProviderPayOS, PaymentStageCommit, time.Duration(i*2)*time.Millisecond)
+		reg.RecordPaymentStage(PaymentProviderPayOS, PaymentStageAck, time.Duration(i*3)*time.Millisecond)
+		reg.RecordPaymentStage(PaymentProviderSePayTelegram, PaymentStageVerify, time.Duration(i)*time.Millisecond)
+		reg.RecordPaymentStage(PaymentProviderSePayNative, PaymentStageCommit, time.Duration(i)*time.Millisecond)
+	}
+
+	snap := reg.FullSnapshot()
+	payosVerify, ok := snap.PaymentStages["PAYOS:verify"]
+	if !ok || payosVerify.Count != 100 {
+		t.Fatalf("unexpected PAYOS:verify metric: %+v", payosVerify)
+	}
+	if payosVerify.P95Ms < 94 || payosVerify.P95Ms > 96 {
+		t.Fatalf("expected P95 around 95ms, got %f", payosVerify.P95Ms)
+	}
+	if payosVerify.P99Ms < 98 || payosVerify.P99Ms > 100 {
+		t.Fatalf("expected P99 around 99ms, got %f", payosVerify.P99Ms)
+	}
+
+	// Cap at 1000 samples
+	for range 1500 {
+		reg.RecordPaymentStage(PaymentProviderPayOS, PaymentStageVerify, 50*time.Millisecond)
+	}
+	reg.mu.RLock()
+	samplesLen := len(reg.paymentStageSamples["PAYOS:verify"])
+	totalCount := reg.paymentStageCounts["PAYOS:verify"]
+	reg.mu.RUnlock()
+	if samplesLen != 1000 {
+		t.Fatalf("expected 1000 samples cap, got %d", samplesLen)
+	}
+	if totalCount != 1600 {
+		t.Fatalf("expected totalCount 1600, got %d", totalCount)
+	}
+}

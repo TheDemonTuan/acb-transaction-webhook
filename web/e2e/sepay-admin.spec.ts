@@ -13,10 +13,10 @@ const transferPayload = (accountNumber = '0000000000') => {
   }
   return raw + crc.toString(16).toUpperCase().padStart(4, '0');
 };
-const blank: SePayAdminFields = { mode: 'disabled', storeKey: '', storeName: '', bankCode: '', bankName: '', accountNumber: '', notificationAccountNumber: '', accountName: '', qrPayload: '', botId: '', chatId: '', senderBotId: '', topicId: '0', activationAt: '', receiverVerified: false, sourceSeparated: false };
+const blank: SePayAdminFields = { mode: 'disabled', storeKey: '', storeName: '', bankCode: '', bankName: '', accountNumber: '', notificationAccountNumber: '', accountName: '', qrPayload: '', botId: '', chatId: '', senderBotId: '', topicId: '0', activationAt: '', receiverVerified: false, sourceSeparated: false, activeTransport: 'telegram', nativeMode: 'disabled', nativeSubAccount: '', nativeReferenceVerified: false };
 
 async function fixture(page: Page, role = 'OWNER') {
-  let config: SePayAdminConfig = { revision: 0, config: { ...blank }, hasBotToken: false, hasWebhookSecret: false, lastMessageAt: null, reviewCount: 0 };
+  let config: SePayAdminConfig = { revision: 0, config: { ...blank }, hasBotToken: false, hasWebhookSecret: false, hasNativeWebhookSecret: false, lastMessageAt: null, lastWebhookAt: null, reviewCount: 0 };
   const saves: SePayAdminConfigInput[] = [];
   let reads = 0;
   let registrations = 0;
@@ -38,7 +38,7 @@ async function fixture(page: Page, role = 'OWNER') {
     if (failSave) return route.fulfill({ status: 502, json: { error: input.botToken } });
     if (conflict) return route.fulfill({ status: 409, json: { error: 'SEPAY_REVISION_CONFLICT' } });
     expect(input.revision).toBe(config.revision);
-    config = { ...config, revision: config.revision + 1, config: input.config, hasBotToken: config.hasBotToken || Boolean(input.botToken), hasWebhookSecret: true };
+    config = { ...config, revision: config.revision + 1, config: input.config, hasBotToken: config.hasBotToken || Boolean(input.botToken), hasWebhookSecret: true, hasNativeWebhookSecret: config.hasNativeWebhookSecret || Boolean(input.nativeWebhookSecret) };
     return route.fulfill({ json: config });
   });
   await page.route(/\/api\/v1\/sepay-store\/telegram\/(?:register|status)$/, route => {
@@ -77,7 +77,7 @@ test('owner decodes locally without BarcodeDetector, saves exact payload and str
   expect(api.saves[0].config.botId).toBe('9007199254740993');
   expect(api.saves[0].config.mode).toBe('active');
   expect(JSON.stringify(api.saves[0])).not.toContain('data:image');
-  expect(Object.keys(api.saves[0]).sort()).toEqual(['botToken', 'config', 'revision']);
+  expect(Object.keys(api.saves[0]).sort()).toEqual(['botToken', 'config', 'nativeWebhookSecret', 'revision']);
   await expect(field(page, 'botToken')).toHaveValue('');
   await section(page).getByRole('button', { name: 'Đăng ký webhook Telegram' }).click();
   await expect(page.getByTestId('sepay-telegram-diagnostics')).toBeVisible();
@@ -268,4 +268,44 @@ for (const role of ['OPERATOR', 'VIEWER']) test(`${role} cannot fetch owner conf
   await expect(section(page).getByRole('button', { name: 'Đăng ký webhook Telegram' })).toHaveCount(0);
   expect(api.reads).toBe(0);
   expect(api.saves).toEqual([]);
+});
+
+test('native-only owner observes before choosing authority and keeps HMAC secret write-only', async ({ page }) => {
+  const api = await fixture(page);
+  await page.goto('/admin/connection');
+  await upload(page, transferPayload());
+  for (const [name, value] of Object.entries({ storeKey: 'fixture-store', storeName: 'Fixture Store', bankName: 'Vietcombank', accountName: 'FIXTURE RECEIVER' })) await field(page, name).fill(value);
+  await field(page, 'activeTransport').selectOption('native');
+  await field(page, 'nativeMode').selectOption('observe');
+  await field(page, 'nativeSubAccount').fill('STOREVA');
+  const secret = ' 01234567890123456789012345678901 ';
+  await field(page, 'nativeWebhookSecret').fill(secret);
+  await expect(field(page, 'nativeWebhookSecret')).toHaveAttribute('type', 'password');
+  await section(page).getByRole('button', { name: 'Lưu chế độ kiểm tra', exact: true }).click();
+  await expect.poll(() => api.saves.length).toBe(1);
+  expect(api.saves[0].config).toMatchObject({ mode: 'observe', activeTransport: 'native', nativeMode: 'observe', nativeSubAccount: 'STOREVA', botId: '', chatId: '', senderBotId: '' });
+  expect(api.saves[0].nativeWebhookSecret).toBe(secret);
+  await expect(field(page, 'nativeWebhookSecret')).toHaveValue('');
+  await expect(section(page)).not.toContainText(secret);
+  await field(page, 'nativeMode').selectOption('active');
+  await field(page, 'receiverVerified').check();
+  await field(page, 'sourceSeparated').check();
+  await field(page, 'nativeReferenceVerified').check();
+  await section(page).getByRole('button', { name: 'Lưu & bật SePay', exact: true }).click();
+  await expect.poll(() => api.saves.length).toBe(2);
+  expect(api.saves[1].config).toMatchObject({ mode: 'active', activeTransport: 'native', nativeMode: 'active', nativeReferenceVerified: true });
+  expect(api.saves[1].nativeWebhookSecret).toBe('');
+  await field(page, 'nativeSubAccount').fill('ANOTHERSTORE');
+  await expect(field(page, 'sourceSeparated')).not.toBeChecked();
+  await expect(field(page, 'nativeReferenceVerified')).not.toBeChecked();
+  await field(page, 'receiverVerified').check();
+  await field(page, 'sourceSeparated').check();
+  await field(page, 'nativeReferenceVerified').check();
+  await upload(page, transferPayload('1111111111'));
+  await expect(field(page, 'accountNumber')).toHaveValue('1111111111');
+  await expect(field(page, 'receiverVerified')).not.toBeChecked();
+  await expect(field(page, 'sourceSeparated')).not.toBeChecked();
+  await expect(field(page, 'nativeReferenceVerified')).not.toBeChecked();
+  expect(await page.evaluate(() => JSON.stringify([localStorage, sessionStorage]))).not.toContain(secret);
+  expect(api.registrations).toBe(0);
 });

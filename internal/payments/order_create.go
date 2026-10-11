@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -159,6 +160,23 @@ func (s *Service) CreateOrder(ctx context.Context, amountVnd int64, origin, idem
 		persisted, err = s.store.PaymentOrder(persistCtx, order.ID)
 	}
 	if err != nil {
+		failureClass := "storage"
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			failureClass = "deadline"
+		case errors.Is(err, context.Canceled):
+			failureClass = "canceled"
+		case errors.Is(err, sql.ErrConnDone):
+			failureClass = "connection_closed"
+		case errors.Is(err, sql.ErrTxDone):
+			failureClass = "transaction_closed"
+		}
+		sqliteCode := 0
+		var coded interface{ Code() int }
+		if errors.As(err, &coded) {
+			sqliteCode = coded.Code()
+		}
+		slog.Error("payment storage operation failed", "operation", "complete_create", "failureClass", failureClass, "sqliteCode", sqliteCode)
 		return order, true, ErrPaymentUnavailable
 	}
 	return persisted, true, nil

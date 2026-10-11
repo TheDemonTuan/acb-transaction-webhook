@@ -696,7 +696,7 @@ export const CashierTerminal: React.FC = () => {
                                 ? 'SePay Store'
                                 : tx.provider === 'PAYOS'
                                 ? `payOS · ${tx.orderCode ?? ''}`
-                                : tx.bank ?? 'ACB'}
+                                : tx.bank || 'Ngân hàng chưa xác định'}
                             </span>
                             {isVeryRecent && (
                               <span className="text-[9px] font-bold text-white bg-emerald-600 px-2 py-0.5 rounded-full animate-pulse">

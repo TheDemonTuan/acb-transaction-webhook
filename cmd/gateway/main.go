@@ -307,14 +307,19 @@ func main() {
 	if cfg.RuntimeRole == config.RuntimeRoleGateway {
 		logger.Info("starting gateway in HTTP-only mode with worker RPC", "workerRPCURL", cfg.WorkerRPCURL)
 		workerClient := workerrpc.NewClient(cfg.WorkerRPCURL, cfg.WorkerInternalToken)
+		dispatcherSignal := workerrpc.NewWakeSignal(workerClient.WakeDispatcher, 2*time.Second)
+		go dispatcherSignal.Run(ctx)
+		reconcileSignal := workerrpc.NewWakeSignal(workerClient.WakePaymentReconciler, 2*time.Second)
+		go reconcileSignal.Run(ctx)
+
 		server = httpapi.New(cfg, store).
 			WithEventHub(hub).
 			WithNotificationTester(workerClient).
 			WithProviderReader(workerClient).
-			WithWakeDispatcher(workerClient.WakeDispatcher).
+			WithWakeDispatcher(dispatcherSignal.Wake).
 			WithWorkerProber(workerClient)
 		service := payments.NewManagedService(cfg, store, server.PaymentCommitNotifier()).
-			WithReconcileWake(workerClient.WakePaymentReconciler)
+			WithReconcileWake(reconcileSignal.Wake)
 		server.WithPayments(service)
 		server.WithSePay(sepay.NewService(sepayConfig, store, server.PaymentCommitNotifier()))
 		if cfg.WorkerRealtimeEnabled {
@@ -390,11 +395,13 @@ func main() {
 		server = httpapi.New(cfg, store).
 			WithEventHub(hub).
 			WithBarkSender(barkSender).
-			WithNotificationRegistry(notificationRegistry).
-			WithWakeDispatcher(func(ctx context.Context) error {
-				dispatcher.Wake()
-				return nil
-			})
+			WithNotificationRegistry(notificationRegistry)
+		dispatcherSignal := workerrpc.NewWakeSignal(func(ctx context.Context) error {
+			dispatcher.Wake()
+			return nil
+		}, 2*time.Second)
+		go dispatcherSignal.Run(ctx)
+		server.WithWakeDispatcher(dispatcherSignal.Wake)
 		service := payments.NewManagedService(cfg, store, server.PaymentCommitNotifier())
 		server.WithPayments(service)
 		server.WithSePay(sepay.NewService(sepayConfig, store, server.PaymentCommitNotifier()))

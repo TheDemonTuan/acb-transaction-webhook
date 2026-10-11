@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"errors"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,11 +16,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/bark"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/maintenance"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/notification"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/payments"
@@ -292,37 +290,5 @@ func TestWorkerService_TestNotificationChannelDeliversKienlongPayload(t *testing
 	}
 	if !strings.Contains(string(sender.deliveredPayload), `"bank":"KienlongBank"`) || !strings.Contains(string(sender.deliveredPayload), `"provider":"PAYOS"`) {
 		t.Fatalf("delivered payload missing provider/bank metadata: %s", string(sender.deliveredPayload))
-	}
-}
-
-func TestWorkerPaymentNotifier_RealtimeHubAndDispatcherWaked(t *testing.T) {
-	hub := eventhub.New()
-	_, ch, cancel := hub.Subscribe()
-	defer cancel()
-
-	waker := &mockWaker{}
-	notifier := newWorkerPaymentNotifier(waker, hub)
-
-	event := storage.EventNotification{
-		JournalSeq:    101,
-		Epoch:         "ep1",
-		EventType:     "bank.transaction.credit",
-		TransactionID: "txn_test",
-		Payload:       []byte(`{"amount":50000}`),
-		CreatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	notifier(event)
-
-	select {
-	case received := <-ch:
-		if received.Seq != 101 || received.AggregateID != "txn_test" || string(received.Payload) != `{"amount":50000}` {
-			t.Fatalf("unexpected event received: %+v", received)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for published realtime event")
-	}
-
-	if waker.wakeCount != 1 {
-		t.Fatalf("expected dispatcher wake count 1, got %d", waker.wakeCount)
 	}
 }

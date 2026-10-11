@@ -42,6 +42,7 @@ type SettlementInput struct {
 	AccountNumber        string
 	VirtualAccountNumber string
 	Source               string
+	DetectedAt           time.Time
 	InboxHash            string
 	VerifiedCallback     *VerifiedPaymentCallback
 	VerifiedGet          *SettlementEvidence
@@ -218,7 +219,11 @@ func (s *Store) SettlePayment(ctx context.Context, in SettlementInput) (Settleme
 		if _, err := tx.ExecContext(ctx, `UPDATE payment_orders SET status='PAID',payment_link_id=?,account_number=?,transaction_id=?,paid_at=?,updated_at=?,last_error_code=NULL,next_reconcile_at=NULL WHERE id=?`, in.PaymentLinkID, account, txnID, iso, createdAt, order.ID); err != nil {
 			return err
 		}
-		data := map[string]any{"bank": "KienlongBank", "provider": "PAYOS", "orderCode": strconv.FormatInt(order.OrderCode, 10), "paymentOrigin": order.Origin, "paymentLinkId": in.PaymentLinkID, "transactionId": txnID, "transactionNumber": in.Reference, "credit": strconv.FormatInt(in.AmountVnd, 10), "debit": "0", "currency": "VND", "transactionDate": iso, "transactionDay": day, "datePrecision": "datetime", "source": in.Source, "description": description, "detectedAt": createdAt}
+		detectedAtStr := createdAt
+		if !in.DetectedAt.IsZero() {
+			detectedAtStr = in.DetectedAt.UTC().Format(time.RFC3339Nano)
+		}
+		data := map[string]any{"bank": "KienlongBank", "provider": "PAYOS", "orderCode": strconv.FormatInt(order.OrderCode, 10), "paymentOrigin": order.Origin, "paymentLinkId": in.PaymentLinkID, "transactionId": txnID, "transactionNumber": in.Reference, "credit": strconv.FormatInt(in.AmountVnd, 10), "debit": "0", "currency": "VND", "transactionDate": iso, "transactionDay": day, "datePrecision": "datetime", "source": in.Source, "description": description, "detectedAt": detectedAtStr}
 		res.Event, err = s.emitTransactionEventTx(ctx, tx, txnID, "bank.transaction.credit", "payos:"+namespace, semanticKey, data, createdAt)
 		if err != nil {
 			return err

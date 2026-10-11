@@ -1,605 +1,78 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TransactionAudioEngine } from '../src/features/voice-announcements/transaction-audio-engine';
-import * as apiModule from '../src/api';
+import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
+import { voiceRoute } from '../src/features/voice-announcements/announcement-plan';
 
-describe('TransactionAudioEngine public fallback & template propagation', () => {
-  let prevWindow: any;
+class NativeAudio extends EventTarget {
+  static owners: NativeAudio[] = [];
+  static failPrepare = false;
+  src = ''; volume = 1; playbackRate = 1; preload = '';
+  stopped = false; play = vi.fn(async () => {
+    this.dispatchEvent(new Event('playing')); this.dispatchEvent(new Event('playing'));
+    queueMicrotask(() => this.dispatchEvent(new Event('ended')));
+  });
+  constructor() { super(); NativeAudio.owners.push(this); }
+  pause() { this.stopped = true; }
+  removeAttribute() { this.src = ''; }
+  load() {
+    if (this.src) queueMicrotask(() => this.dispatchEvent(new Event(NativeAudio.failPrepare ? 'error' : 'canplay')));
+  }
+}
+const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), chimeEnabled: false, funEnabled: false };
 
+describe('transaction audio explicit profile ownership', () => {
   beforeEach(() => {
-    prevWindow = (globalThis as any).window;
+    NativeAudio.owners = []; NativeAudio.failPrepare = false;
+    vi.stubGlobal('window', { Audio: NativeAudio, speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() } });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })));
   });
-
-  afterEach(() => {
-    (globalThis as any).window = prevWindow;
-    vi.restoreAllMocks();
-  });
-
-  it('in public mode: uses local Vietnamese voice first when available', async () => {
-    class MockUtterance {
-      text: string;
-      lang = 'vi-VN';
-      voice: any = null;
-      onstart: any = null;
-      onend: any = null;
-      constructor(text: string) {
-        this.text = text;
-      }
-    }
-
-    const mockSynth = {
-      paused: false,
-      speaking: false,
-      getVoices: () => [
-        {
-          default: true,
-          lang: 'vi-VN',
-          name: 'Microsoft Hoai My',
-          voiceURI: 'vi-vn-hoaimy',
-        },
-      ],
-      speak: vi.fn((utt: any) => {
-        setTimeout(() => {
-          utt.onstart?.(new Event('start'));
-          utt.onend?.(new Event('end'));
-        }, 10);
-      }),
-      cancel: vi.fn(),
-      resume: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    };
-
-    (globalThis as any).window = {
-      speechSynthesis: mockSynth,
-      SpeechSynthesisUtterance: MockUtterance,
-      AudioContext: class {
-        state = 'running';
-        destination = {};
-        createGain() {
-          return { connect: vi.fn() };
-        }
-        resume = vi.fn().mockResolvedValue(undefined);
-      },
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  it('requires confirmed server profile before preparation or playback', async () => {
     const engine = new TransactionAudioEngine({ isPublic: true });
-
-    await engine.speak({
-      text: 'Đa tạ quý khách vì năm trăm nghìn đồng.',
-      transactionId: 'tx_local_first',
-      rate: 1.25,
-    });
-
-    expect(mockSynth.speak).toHaveBeenCalledTimes(1);
-    expect(apiAudioSpy).not.toHaveBeenCalled();
+    await expect(engine.speak({ text: '', transactionId: 'tx' })).rejects.toThrow('VOICE_PROFILE_UNAVAILABLE');
+    expect(NativeAudio.owners).toHaveLength(0);
+    engine.dispose();
   });
-
-  it('in public mode: safely falls back to online TTS when no local Vietnamese voice installed', async () => {
-    class MockUtterance {
-      text: string;
-      constructor(text: string) {
-        this.text = text;
-      }
-    }
-
-    const mockSynth = {
-      paused: false,
-      speaking: false,
-      getVoices: () => [
-        // Only English voice installed
-        {
-          default: true,
-          lang: 'en-US',
-          name: 'Microsoft David',
-          voiceURI: 'en-us-david',
-        },
-      ],
-      speak: vi.fn(),
-      cancel: vi.fn(),
-      resume: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    };
-
-    let playBufferCalled = false;
-    class MockAudioBufferSource {
-      buffer: any = null;
-      onended: any = null;
-      connect = vi.fn();
-      start = vi.fn(() => {
-        playBufferCalled = true;
-        setTimeout(() => this.onended?.(), 10);
-      });
-    }
-
-    class MockAudioContext {
-      state = 'running';
-      currentTime = 0;
-      destination = {};
-      createGain() {
-        return {
-          connect: vi.fn(),
-          gain: { setValueAtTime: vi.fn() },
-        };
-      }
-      createBufferSource() {
-        return new MockAudioBufferSource();
-      }
-      decodeAudioData() {
-        return Promise.resolve({ duration: 1.5 });
-      }
-      resume = vi.fn().mockResolvedValue(undefined);
-    }
-
-    (globalThis as any).window = {
-      speechSynthesis: mockSynth,
-      SpeechSynthesisUtterance: MockUtterance,
-      AudioContext: MockAudioContext,
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio').mockResolvedValue({
-      data: new ArrayBuffer(8),
-      provider: 'edge',
-      voice: 'vi-VN-HoaiMyNeural',
-      fallback: false,
-      cached: true,
-    });
-
-    const engine = new TransactionAudioEngine({ isPublic: true });
-
-    await engine.speak({
-      text: 'Đa tạ quý khách vì năm trăm nghìn đồng.',
-      transactionId: 'tx_online_fallback_123',
-      rate: 1.25,
-      pitch: 1.0,
-      template: 'Đa tạ quý khách vì {amount}.',
-    });
-
-    expect(mockSynth.speak).not.toHaveBeenCalled();
-    expect(apiAudioSpy).toHaveBeenCalledTimes(1);
-    expect(apiAudioSpy).toHaveBeenCalledWith(
-      '/voice/transactions/tx_online_fallback_123',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          includeDescription: false,
-          template: 'Đa tạ quý khách vì {amount}.',
-          voiceId: undefined,
-          rate: 1.25,
-          pitch: 1.0,
-        }),
-      })
-    );
-    expect(playBufferCalled).toBe(true);
+  it('prefetch really prepares media and speak consumes it without a second request', async () => {
+    const engine = new TransactionAudioEngine({ isPublic: true }); engine.setProfile(profile);
+    const onStart = vi.fn();
+    const message = { text: '', amountVnd: '50000', transactionId: 'tx', onStart };
+    const controller = new AbortController();
+    await engine.prefetch(message, controller.signal);
+    expect(NativeAudio.owners).toHaveLength(1);
+    expect(NativeAudio.owners[0].play).not.toHaveBeenCalled();
+    await engine.speak(message);
+    expect(NativeAudio.owners).toHaveLength(1);
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(NativeAudio.owners[0].stopped).toBe(true);
+    engine.dispose();
   });
-
-  it('in public mode: safely falls back to online TTS on Nghe thử (isTest) when no local Vietnamese voice installed', async () => {
-    class MockUtterance {
-      text: string;
-      constructor(text: string) {
-        this.text = text;
-      }
-    }
-
-    const mockSynth = {
-      paused: false,
-      speaking: false,
-      getVoices: () => [
-        // Only English voice installed
-        {
-          default: true,
-          lang: 'en-US',
-          name: 'Microsoft David',
-          voiceURI: 'en-us-david',
-        },
-      ],
-      speak: vi.fn(),
-      cancel: vi.fn(),
-      resume: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    };
-
-    let playBufferCalled = false;
-    class MockAudioBufferSource {
-      buffer: any = null;
-      onended: any = null;
-      connect = vi.fn();
-      start = vi.fn(() => {
-        playBufferCalled = true;
-        setTimeout(() => this.onended?.(), 10);
-      });
-    }
-
-    class MockAudioContext {
-      state = 'running';
-      currentTime = 0;
-      destination = {};
-      createGain() {
-        return {
-          connect: vi.fn(),
-          gain: { setValueAtTime: vi.fn() },
-        };
-      }
-      createBufferSource() {
-        return new MockAudioBufferSource();
-      }
-      decodeAudioData() {
-        return Promise.resolve({ duration: 1.5 });
-      }
-      resume = vi.fn().mockResolvedValue(undefined);
-    }
-
-    (globalThis as any).window = {
-      speechSynthesis: mockSynth,
-      SpeechSynthesisUtterance: MockUtterance,
-      AudioContext: MockAudioContext,
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio').mockResolvedValue({
-      data: new ArrayBuffer(8),
-      provider: 'edge',
-      voice: 'vi-VN-HoaiMyNeural',
-      fallback: false,
-      cached: true,
-    });
-
-    const engine = new TransactionAudioEngine({ isPublic: true });
-
-    await engine.speak({
-      text: 'Đa tạ quý khách vì năm trăm nghìn đồng.',
-      isTest: true,
-      rate: 1.25,
-      pitch: 1.0,
-      template: 'Đa tạ quý khách vì {amount}.',
-    });
-
-    expect(mockSynth.speak).not.toHaveBeenCalled();
-    expect(apiAudioSpy).toHaveBeenCalledTimes(1);
-    expect(apiAudioSpy).toHaveBeenCalledWith(
-      '/voice/test',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          voiceId: 'vi-VN-HoaiMyNeural',
-          rate: 1.25,
-          pitch: 1.0,
-          template: 'Đa tạ quý khách vì {amount}.',
-          includeDescription: undefined,
-        }),
-      })
-    );
-    expect(playBufferCalled).toBe(true);
+  it('binds native query to snapshot revision and never retries or falls back on Edge failure', async () => {
+    NativeAudio.failPrepare = true;
+    const onProfileChanged = vi.fn();
+    const engine = new TransactionAudioEngine({ isPublic: true, onProfileChanged }); engine.setProfile(profile);
+    await expect(engine.speak({ text: '', amountVnd: '50000', transactionId: 'tx' })).rejects.toThrow('AUDIO_PREPARATION_FAILED');
+    expect(NativeAudio.owners).toHaveLength(1);
+    expect(NativeAudio.owners[0].stopped).toBe(true);
+    expect(window.speechSynthesis.speak).not.toHaveBeenCalled();
+    expect(onProfileChanged).toHaveBeenCalledTimes(1);
+    engine.dispose();
   });
-
-  it('in public mode with Audio constructor: progressively streams audio via HTMLAudioElement without full buffer download', async () => {
-    let playCalled = false;
-    let playingListener: any = null;
-    let endedListener: any = null;
-    let constructedUrl = '';
-
-    class MockAudio {
-      src: string;
-      volume = 1;
-      constructor(src: string) {
-        this.src = src;
-        constructedUrl = src;
-      }
-      addEventListener(event: string, cb: any) {
-        if (event === 'playing') playingListener = cb;
-        if (event === 'ended') endedListener = cb;
-      }
-      removeEventListener() {}
-      play() {
-        playCalled = true;
-        setTimeout(() => {
-          playingListener?.();
-          setTimeout(() => {
-            endedListener?.();
-          }, 10);
-        }, 10);
-        return Promise.resolve();
-      }
-      pause() {}
-      removeAttribute() {}
-      load() {}
-    }
-
-    const mockSynth = {
-      paused: false,
-      speaking: false,
-      getVoices: () => [],
-      speak: vi.fn(),
-      cancel: vi.fn(),
-    };
-
-    (globalThis as any).window = {
-      Audio: MockAudio,
-      speechSynthesis: mockSynth,
-      SpeechSynthesisUtterance: class {},
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
-    const engine = new TransactionAudioEngine({ isPublic: true });
-
-    let startedTelemetry: any = null;
-    await engine.speak({
-      text: 'Đa tạ quý khách vì năm trăm nghìn đồng.',
-      transactionId: 'tx_progressive_stream',
-      rate: 1.25,
-      pitch: 1.0,
-      telemetry: {
-        detectedAt: '2026-09-19T20:00:00.000Z',
-        sseReceivedAt: Date.now() - 50,
-      },
-      onStart: (t) => {
-        startedTelemetry = t;
-      },
-    });
-
-    expect(playCalled).toBe(true);
-    expect(constructedUrl).toContain('/api/public/v1/voice/transactions/tx_progressive_stream/stream');
-    expect(constructedUrl).toContain('rate=1.25');
-    expect(apiAudioSpy).not.toHaveBeenCalled();
-    expect(startedTelemetry).not.toBeNull();
-    expect(startedTelemetry.speechStartedAt).toBeGreaterThan(0);
+  it('aborts prefetched native owner when profile changes, and dispose is idempotent', async () => {
+    const engine = new TransactionAudioEngine({ isPublic: true }); engine.setProfile(profile);
+    const next = { text: '', amountVnd: '50000', transactionId: 'tx' };
+    await engine.prefetch(next, new AbortController().signal);
+    engine.setProfile({ ...profile, revision: 2, edgeVoice: 'vi-VN-NamMinhNeural', synthesisKey: 'b'.repeat(64) });
+    await Promise.resolve();
+    expect(NativeAudio.owners[0].src).toBe('');
+    engine.dispose(); engine.dispose();
+    await expect(engine.speak(next)).rejects.toThrow('VOICE_DISPOSED');
   });
-
-  it('duplicate playing events invoke onStart and telemetry exactly once', async () => {
-    let playingListener: any = null;
-    let endedListener: any = null;
-
-    class MockAudio {
-      src: string;
-      volume = 1;
-      constructor(src: string) {
-        this.src = src;
-      }
-      addEventListener(event: string, cb: any) {
-        if (event === 'playing') playingListener = cb;
-        if (event === 'ended') endedListener = cb;
-      }
-      removeEventListener() {}
-      play() {
-        setTimeout(() => {
-          playingListener?.();
-          // Duplicate playing event
-          playingListener?.();
-          setTimeout(() => {
-            endedListener?.();
-          }, 10);
-        }, 10);
-        return Promise.resolve();
-      }
-      pause() {}
-      removeAttribute() {}
-      load() {}
-    }
-
-    (globalThis as any).window = {
-      Audio: MockAudio,
-      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
-      SpeechSynthesisUtterance: class {},
-    };
-
-    const onStartSpy = vi.fn();
-    const engine = new TransactionAudioEngine({ isPublic: true });
-
-    await engine.speak({
-      text: 'Thử nghiệm duplicate playing',
-      transactionId: 'tx_duplicate_playing',
-      onStart: onStartSpy,
-    });
-
-    expect(onStartSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it('initial failure prior to playing event falls back to buffered audio', async () => {
-    let errorListener: any = null;
-
-    class FailingAudio {
-      src: string;
-      volume = 1;
-      constructor(src: string) {
-        this.src = src;
-      }
-      addEventListener(event: string, cb: any) {
-        if (event === 'error') errorListener = cb;
-      }
-      removeEventListener() {}
-      play() {
-        setTimeout(() => {
-          errorListener?.();
-        }, 10);
-        return Promise.resolve();
-      }
-      pause() {}
-      removeAttribute() {}
-      load() {}
-    }
-
-    class MockAudioContext {
-      state = 'running';
-      destination = {};
-      createGain() {
-        return { connect: vi.fn(), gain: { setValueAtTime: vi.fn() } };
-      }
-      createBufferSource() {
-        return {
-          buffer: null,
-          connect: vi.fn(),
-          start: vi.fn(function (this: any) {
-            setTimeout(() => this.onended?.(), 10);
-          }),
-        };
-      }
-      decodeAudioData() {
-        return Promise.resolve({ duration: 1.0 });
-      }
-      resume = vi.fn().mockResolvedValue(undefined);
-    }
-
-    (globalThis as any).window = {
-      Audio: FailingAudio,
-      AudioContext: MockAudioContext,
-      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
-      SpeechSynthesisUtterance: class {},
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio').mockResolvedValue({
-      data: new ArrayBuffer(8),
-      provider: 'edge',
-      voice: 'vi-VN-HoaiMyNeural',
-      fallback: false,
-      cached: true,
-    });
-
-    const engine = new TransactionAudioEngine({ isPublic: false });
-
-    await engine.speak({
-      text: 'Test fallback on initial error',
-      transactionId: 'tx_initial_fail',
-    });
-
-    // Failing prior to playback starts must invoke buffered fallback
-    expect(apiAudioSpy).toHaveBeenCalledTimes(1);
-    expect(apiAudioSpy).toHaveBeenCalledWith(
-      '/voice/transactions/tx_initial_fail',
-      expect.anything()
-    );
-  });
-
-  it('does not start decoded audio after cancellation', async () => {
-    const { promise: decoded, resolve: finishDecode } = (Promise as PromiseConstructor & {
-      withResolvers<T>(): { promise: Promise<T>; resolve(value: T): void };
-    }).withResolvers<any>();
-    const start = vi.fn();
-    const decode = vi.fn(() => decoded);
-    class FailingAudio {
-      addEventListener(event: string, handler: () => void) {
-        if (event === 'error') queueMicrotask(handler);
-      }
-      removeEventListener() {}
-      play() { return Promise.resolve(); }
-      pause() {}
-      removeAttribute() {}
-      load() {}
-    }
-    class AudioContextFixture {
-      state = 'running';
-      destination = {};
-      createGain() { return { connect: vi.fn(), gain: { setValueAtTime: vi.fn() } }; }
-      createBufferSource() { return { connect: vi.fn(), start }; }
-      decodeAudioData() { return decode(); }
-    }
-    (globalThis as any).window = { Audio: FailingAudio, AudioContext: AudioContextFixture };
-    vi.spyOn(apiModule, 'apiAudio').mockResolvedValue({ data: new ArrayBuffer(8) } as any);
-    const engine = new TransactionAudioEngine({ isPublic: false });
-    const speaking = engine.speak({ text: 'transaction', transactionId: 'decode_cancel' });
-    await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
-    engine.cancel();
-    finishDecode({ duration: 1 });
-    await expect(speaking).rejects.toThrow('VOICE_CANCELLED');
-    expect(start).not.toHaveBeenCalled();
-  });
-
-  it('mid-stream failure after playing event terminates without falling back to buffered replay', async () => {
-    let playingListener: any = null;
-    let errorListener: any = null;
-
-    class MidstreamFailingAudio {
-      src: string;
-      volume = 1;
-      constructor(src: string) {
-        this.src = src;
-      }
-      addEventListener(event: string, cb: any) {
-        if (event === 'playing') playingListener = cb;
-        if (event === 'error') errorListener = cb;
-      }
-      removeEventListener() {}
-      play() {
-        setTimeout(() => {
-          // First starts playing
-          playingListener?.();
-          setTimeout(() => {
-            // Then mid-stream error occurs
-            errorListener?.();
-          }, 10);
-        }, 10);
-        return Promise.resolve();
-      }
-      pause() {}
-      removeAttribute() {}
-      load() {}
-    }
-
-    (globalThis as any).window = {
-      Audio: MidstreamFailingAudio,
-      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
-      SpeechSynthesisUtterance: class {},
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
-    const engine = new TransactionAudioEngine({ isPublic: false });
-
-    await expect(engine.speak({
-      text: 'Test no duplicate on midstream error',
-      transactionId: 'tx_midstream_fail',
-    })).rejects.toMatchObject({ playbackStarted: true });
-
-    // Mid-stream failure must NOT fall back to buffered replay (prevents hearing audio twice)
-    expect(apiAudioSpy).not.toHaveBeenCalled();
-  });
-
-  it('summary audio requests populate streamUrl with query parameters', async () => {
-    let capturedStreamUrl = '';
-    let playingListener: any = null;
-    let endedListener: any = null;
-
-    class MockAudio {
-      src: string;
-      volume = 1;
-      constructor(src: string) {
-        this.src = src;
-        capturedStreamUrl = src;
-      }
-      addEventListener(event: string, cb: any) {
-        if (event === 'playing') playingListener = cb;
-        if (event === 'ended') endedListener = cb;
-      }
-      removeEventListener() {}
-      play() {
-        setTimeout(() => {
-          playingListener?.();
-          setTimeout(() => endedListener?.(), 10);
-        }, 10);
-        return Promise.resolve();
-      }
-      pause() {}
-      removeAttribute() {}
-      load() {}
-    }
-
-    (globalThis as any).window = {
-      Audio: MockAudio,
-      speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() },
-      SpeechSynthesisUtterance: class {},
-    };
-
-    const apiAudioSpy = vi.spyOn(apiModule, 'apiAudio');
-    const engine = new TransactionAudioEngine({ isPublic: false });
-
-    await engine.speak({
-      text: 'Phát tổng hợp 2 giao dịch',
-      summaryTransactionIds: ['tx_sum_1', 'tx_sum_2'],
-      rate: 1.2,
-      pitch: 1.0,
-    });
-
-    expect(capturedStreamUrl).toContain('/api/v1/voice/transactions/summary/stream');
-    expect(capturedStreamUrl).toContain('transactionIds=tx_sum_1%2Ctx_sum_2');
-    expect(apiAudioSpy).not.toHaveBeenCalled();
+  it('never invents public replay route or sends client voice/text/amount overrides', () => {
+    const replay = voiceRoute({ text: 'ignored', isReplay: true, transactionId: 't/x', phraseId: 'cute-small-o001-c001' }, true, profile, 'full');
+    expect(replay.streamUrl).toContain('/voice/transactions/t%2Fx/stream?profileRevision=1');
+    expect(replay.streamUrl).not.toContain('/replay');
+    expect(replay.body).toEqual({ profileRevision: 1, phraseId: 'cute-small-o001-c001', part: 'full' });
+    expect(voiceRoute({ text: '', transactionId: 'tx', phraseId: 'old' }, true, profile, 'amount').body.phraseId).toBeUndefined();
   });
 });

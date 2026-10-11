@@ -1,0 +1,507 @@
+{
+  "id": "cute-large-b05",
+  "styleId": "cute",
+  "bandId": "large",
+  "recipes": [
+    {
+      "id": "cute-large-o021-c001",
+      "text": "Một vòm vui đang xanh lá. Xin cảm ơn bạn chân thành."
+    },
+    {
+      "id": "cute-large-o021-c002",
+      "text": "Một vòm vui đang xanh lá. Chúc bạn nhiều ngày rạng rỡ."
+    },
+    {
+      "id": "cute-large-o021-c003",
+      "text": "Một vòm vui đang xanh lá. Mong bạn đón thêm điều lành."
+    },
+    {
+      "id": "cute-large-o021-c004",
+      "text": "Một vòm vui đang xanh lá. Gửi bạn lòng tri ân sâu."
+    },
+    {
+      "id": "cute-large-o021-c005",
+      "text": "Một vòm vui đang xanh lá. Chúc bạn trọn buổi an vui."
+    },
+    {
+      "id": "cute-large-o021-c006",
+      "text": "Một vòm vui đang xanh lá. Cảm ơn sự đồng hành quý."
+    },
+    {
+      "id": "cute-large-o021-c007",
+      "text": "Một vòm vui đang xanh lá. Mong bạn giữ lòng thư thái."
+    },
+    {
+      "id": "cute-large-o021-c008",
+      "text": "Một vòm vui đang xanh lá. Chúc bạn luôn đầy hứng khởi."
+    },
+    {
+      "id": "cute-large-o021-c009",
+      "text": "Một vòm vui đang xanh lá. Gửi bạn ngàn lời tốt đẹp."
+    },
+    {
+      "id": "cute-large-o021-c010",
+      "text": "Một vòm vui đang xanh lá. Cảm ơn bạn vì niềm tin."
+    },
+    {
+      "id": "cute-large-o021-c011",
+      "text": "Một vòm vui đang xanh lá. Chúc ngày của bạn bừng sáng."
+    },
+    {
+      "id": "cute-large-o021-c012",
+      "text": "Một vòm vui đang xanh lá. Mong bạn luôn được bình an."
+    },
+    {
+      "id": "cute-large-o021-c013",
+      "text": "Một vòm vui đang xanh lá. Gửi bạn lời chúc ấm lòng."
+    },
+    {
+      "id": "cute-large-o021-c014",
+      "text": "Một vòm vui đang xanh lá. Cảm ơn bạn đã trân trọng."
+    },
+    {
+      "id": "cute-large-o021-c015",
+      "text": "Một vòm vui đang xanh lá. Chúc bạn thêm phút thanh thản."
+    },
+    {
+      "id": "cute-large-o021-c016",
+      "text": "Một vòm vui đang xanh lá. Mong bạn có ngày trọn vẹn."
+    },
+    {
+      "id": "cute-large-o021-c017",
+      "text": "Một vòm vui đang xanh lá. Gửi bạn niềm vui lan tỏa."
+    },
+    {
+      "id": "cute-large-o021-c018",
+      "text": "Một vòm vui đang xanh lá. Cảm ơn sự ủng hộ này."
+    },
+    {
+      "id": "cute-large-o021-c019",
+      "text": "Một vòm vui đang xanh lá. Chúc bạn một hành trình đẹp."
+    },
+    {
+      "id": "cute-large-o021-c020",
+      "text": "Một vòm vui đang xanh lá. Mong bạn luôn gặp điều hay."
+    },
+    {
+      "id": "cute-large-o021-c021",
+      "text": "Một vòm vui đang xanh lá. Gửi bạn một lời cảm mến."
+    },
+    {
+      "id": "cute-large-o021-c022",
+      "text": "Một vòm vui đang xanh lá. Cảm ơn bạn bằng cả lòng."
+    },
+    {
+      "id": "cute-large-o021-c023",
+      "text": "Một vòm vui đang xanh lá. Chúc bạn nhiều phút hân hoan."
+    },
+    {
+      "id": "cute-large-o021-c024",
+      "text": "Một vòm vui đang xanh lá. Mong hôm nay thật sáng trong."
+    },
+    {
+      "id": "cute-large-o021-c025",
+      "text": "Một vòm vui đang xanh lá. Gửi bạn lời chúc an hòa."
+    },
+    {
+      "id": "cute-large-o022-c001",
+      "text": "Ngày thêm một khoảng đáng yêu. Xin cảm ơn bạn chân thành."
+    },
+    {
+      "id": "cute-large-o022-c002",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc bạn nhiều ngày rạng rỡ."
+    },
+    {
+      "id": "cute-large-o022-c003",
+      "text": "Ngày thêm một khoảng đáng yêu. Mong bạn đón thêm điều lành."
+    },
+    {
+      "id": "cute-large-o022-c004",
+      "text": "Ngày thêm một khoảng đáng yêu. Gửi bạn lòng tri ân sâu."
+    },
+    {
+      "id": "cute-large-o022-c005",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc bạn trọn buổi an vui."
+    },
+    {
+      "id": "cute-large-o022-c006",
+      "text": "Ngày thêm một khoảng đáng yêu. Cảm ơn sự đồng hành quý."
+    },
+    {
+      "id": "cute-large-o022-c007",
+      "text": "Ngày thêm một khoảng đáng yêu. Mong bạn giữ lòng thư thái."
+    },
+    {
+      "id": "cute-large-o022-c008",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc bạn luôn đầy hứng khởi."
+    },
+    {
+      "id": "cute-large-o022-c009",
+      "text": "Ngày thêm một khoảng đáng yêu. Gửi bạn ngàn lời tốt đẹp."
+    },
+    {
+      "id": "cute-large-o022-c010",
+      "text": "Ngày thêm một khoảng đáng yêu. Cảm ơn bạn vì niềm tin."
+    },
+    {
+      "id": "cute-large-o022-c011",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc ngày của bạn bừng sáng."
+    },
+    {
+      "id": "cute-large-o022-c012",
+      "text": "Ngày thêm một khoảng đáng yêu. Mong bạn luôn được bình an."
+    },
+    {
+      "id": "cute-large-o022-c013",
+      "text": "Ngày thêm một khoảng đáng yêu. Gửi bạn lời chúc ấm lòng."
+    },
+    {
+      "id": "cute-large-o022-c014",
+      "text": "Ngày thêm một khoảng đáng yêu. Cảm ơn bạn đã trân trọng."
+    },
+    {
+      "id": "cute-large-o022-c015",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc bạn thêm phút thanh thản."
+    },
+    {
+      "id": "cute-large-o022-c016",
+      "text": "Ngày thêm một khoảng đáng yêu. Mong bạn có ngày trọn vẹn."
+    },
+    {
+      "id": "cute-large-o022-c017",
+      "text": "Ngày thêm một khoảng đáng yêu. Gửi bạn niềm vui lan tỏa."
+    },
+    {
+      "id": "cute-large-o022-c018",
+      "text": "Ngày thêm một khoảng đáng yêu. Cảm ơn sự ủng hộ này."
+    },
+    {
+      "id": "cute-large-o022-c019",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc bạn một hành trình đẹp."
+    },
+    {
+      "id": "cute-large-o022-c020",
+      "text": "Ngày thêm một khoảng đáng yêu. Mong bạn luôn gặp điều hay."
+    },
+    {
+      "id": "cute-large-o022-c021",
+      "text": "Ngày thêm một khoảng đáng yêu. Gửi bạn một lời cảm mến."
+    },
+    {
+      "id": "cute-large-o022-c022",
+      "text": "Ngày thêm một khoảng đáng yêu. Cảm ơn bạn bằng cả lòng."
+    },
+    {
+      "id": "cute-large-o022-c023",
+      "text": "Ngày thêm một khoảng đáng yêu. Chúc bạn nhiều phút hân hoan."
+    },
+    {
+      "id": "cute-large-o022-c024",
+      "text": "Ngày thêm một khoảng đáng yêu. Mong hôm nay thật sáng trong."
+    },
+    {
+      "id": "cute-large-o022-c025",
+      "text": "Ngày thêm một khoảng đáng yêu. Gửi bạn lời chúc an hòa."
+    },
+    {
+      "id": "cute-large-o023-c001",
+      "text": "Một luồng ấm áp vừa lan. Xin cảm ơn bạn chân thành."
+    },
+    {
+      "id": "cute-large-o023-c002",
+      "text": "Một luồng ấm áp vừa lan. Chúc bạn nhiều ngày rạng rỡ."
+    },
+    {
+      "id": "cute-large-o023-c003",
+      "text": "Một luồng ấm áp vừa lan. Mong bạn đón thêm điều lành."
+    },
+    {
+      "id": "cute-large-o023-c004",
+      "text": "Một luồng ấm áp vừa lan. Gửi bạn lòng tri ân sâu."
+    },
+    {
+      "id": "cute-large-o023-c005",
+      "text": "Một luồng ấm áp vừa lan. Chúc bạn trọn buổi an vui."
+    },
+    {
+      "id": "cute-large-o023-c006",
+      "text": "Một luồng ấm áp vừa lan. Cảm ơn sự đồng hành quý."
+    },
+    {
+      "id": "cute-large-o023-c007",
+      "text": "Một luồng ấm áp vừa lan. Mong bạn giữ lòng thư thái."
+    },
+    {
+      "id": "cute-large-o023-c008",
+      "text": "Một luồng ấm áp vừa lan. Chúc bạn luôn đầy hứng khởi."
+    },
+    {
+      "id": "cute-large-o023-c009",
+      "text": "Một luồng ấm áp vừa lan. Gửi bạn ngàn lời tốt đẹp."
+    },
+    {
+      "id": "cute-large-o023-c010",
+      "text": "Một luồng ấm áp vừa lan. Cảm ơn bạn vì niềm tin."
+    },
+    {
+      "id": "cute-large-o023-c011",
+      "text": "Một luồng ấm áp vừa lan. Chúc ngày của bạn bừng sáng."
+    },
+    {
+      "id": "cute-large-o023-c012",
+      "text": "Một luồng ấm áp vừa lan. Mong bạn luôn được bình an."
+    },
+    {
+      "id": "cute-large-o023-c013",
+      "text": "Một luồng ấm áp vừa lan. Gửi bạn lời chúc ấm lòng."
+    },
+    {
+      "id": "cute-large-o023-c014",
+      "text": "Một luồng ấm áp vừa lan. Cảm ơn bạn đã trân trọng."
+    },
+    {
+      "id": "cute-large-o023-c015",
+      "text": "Một luồng ấm áp vừa lan. Chúc bạn thêm phút thanh thản."
+    },
+    {
+      "id": "cute-large-o023-c016",
+      "text": "Một luồng ấm áp vừa lan. Mong bạn có ngày trọn vẹn."
+    },
+    {
+      "id": "cute-large-o023-c017",
+      "text": "Một luồng ấm áp vừa lan. Gửi bạn niềm vui lan tỏa."
+    },
+    {
+      "id": "cute-large-o023-c018",
+      "text": "Một luồng ấm áp vừa lan. Cảm ơn sự ủng hộ này."
+    },
+    {
+      "id": "cute-large-o023-c019",
+      "text": "Một luồng ấm áp vừa lan. Chúc bạn một hành trình đẹp."
+    },
+    {
+      "id": "cute-large-o023-c020",
+      "text": "Một luồng ấm áp vừa lan. Mong bạn luôn gặp điều hay."
+    },
+    {
+      "id": "cute-large-o023-c021",
+      "text": "Một luồng ấm áp vừa lan. Gửi bạn một lời cảm mến."
+    },
+    {
+      "id": "cute-large-o023-c022",
+      "text": "Một luồng ấm áp vừa lan. Cảm ơn bạn bằng cả lòng."
+    },
+    {
+      "id": "cute-large-o023-c023",
+      "text": "Một luồng ấm áp vừa lan. Chúc bạn nhiều phút hân hoan."
+    },
+    {
+      "id": "cute-large-o023-c024",
+      "text": "Một luồng ấm áp vừa lan. Mong hôm nay thật sáng trong."
+    },
+    {
+      "id": "cute-large-o023-c025",
+      "text": "Một luồng ấm áp vừa lan. Gửi bạn lời chúc an hòa."
+    },
+    {
+      "id": "cute-large-o024-c001",
+      "text": "Quầy hôm nay thêm sức sống. Xin cảm ơn bạn chân thành."
+    },
+    {
+      "id": "cute-large-o024-c002",
+      "text": "Quầy hôm nay thêm sức sống. Chúc bạn nhiều ngày rạng rỡ."
+    },
+    {
+      "id": "cute-large-o024-c003",
+      "text": "Quầy hôm nay thêm sức sống. Mong bạn đón thêm điều lành."
+    },
+    {
+      "id": "cute-large-o024-c004",
+      "text": "Quầy hôm nay thêm sức sống. Gửi bạn lòng tri ân sâu."
+    },
+    {
+      "id": "cute-large-o024-c005",
+      "text": "Quầy hôm nay thêm sức sống. Chúc bạn trọn buổi an vui."
+    },
+    {
+      "id": "cute-large-o024-c006",
+      "text": "Quầy hôm nay thêm sức sống. Cảm ơn sự đồng hành quý."
+    },
+    {
+      "id": "cute-large-o024-c007",
+      "text": "Quầy hôm nay thêm sức sống. Mong bạn giữ lòng thư thái."
+    },
+    {
+      "id": "cute-large-o024-c008",
+      "text": "Quầy hôm nay thêm sức sống. Chúc bạn luôn đầy hứng khởi."
+    },
+    {
+      "id": "cute-large-o024-c009",
+      "text": "Quầy hôm nay thêm sức sống. Gửi bạn ngàn lời tốt đẹp."
+    },
+    {
+      "id": "cute-large-o024-c010",
+      "text": "Quầy hôm nay thêm sức sống. Cảm ơn bạn vì niềm tin."
+    },
+    {
+      "id": "cute-large-o024-c011",
+      "text": "Quầy hôm nay thêm sức sống. Chúc ngày của bạn bừng sáng."
+    },
+    {
+      "id": "cute-large-o024-c012",
+      "text": "Quầy hôm nay thêm sức sống. Mong bạn luôn được bình an."
+    },
+    {
+      "id": "cute-large-o024-c013",
+      "text": "Quầy hôm nay thêm sức sống. Gửi bạn lời chúc ấm lòng."
+    },
+    {
+      "id": "cute-large-o024-c014",
+      "text": "Quầy hôm nay thêm sức sống. Cảm ơn bạn đã trân trọng."
+    },
+    {
+      "id": "cute-large-o024-c015",
+      "text": "Quầy hôm nay thêm sức sống. Chúc bạn thêm phút thanh thản."
+    },
+    {
+      "id": "cute-large-o024-c016",
+      "text": "Quầy hôm nay thêm sức sống. Mong bạn có ngày trọn vẹn."
+    },
+    {
+      "id": "cute-large-o024-c017",
+      "text": "Quầy hôm nay thêm sức sống. Gửi bạn niềm vui lan tỏa."
+    },
+    {
+      "id": "cute-large-o024-c018",
+      "text": "Quầy hôm nay thêm sức sống. Cảm ơn sự ủng hộ này."
+    },
+    {
+      "id": "cute-large-o024-c019",
+      "text": "Quầy hôm nay thêm sức sống. Chúc bạn một hành trình đẹp."
+    },
+    {
+      "id": "cute-large-o024-c020",
+      "text": "Quầy hôm nay thêm sức sống. Mong bạn luôn gặp điều hay."
+    },
+    {
+      "id": "cute-large-o024-c021",
+      "text": "Quầy hôm nay thêm sức sống. Gửi bạn một lời cảm mến."
+    },
+    {
+      "id": "cute-large-o024-c022",
+      "text": "Quầy hôm nay thêm sức sống. Cảm ơn bạn bằng cả lòng."
+    },
+    {
+      "id": "cute-large-o024-c023",
+      "text": "Quầy hôm nay thêm sức sống. Chúc bạn nhiều phút hân hoan."
+    },
+    {
+      "id": "cute-large-o024-c024",
+      "text": "Quầy hôm nay thêm sức sống. Mong hôm nay thật sáng trong."
+    },
+    {
+      "id": "cute-large-o024-c025",
+      "text": "Quầy hôm nay thêm sức sống. Gửi bạn lời chúc an hòa."
+    },
+    {
+      "id": "cute-large-o025-c001",
+      "text": "Niềm vui vừa nở thành hoa. Xin cảm ơn bạn chân thành."
+    },
+    {
+      "id": "cute-large-o025-c002",
+      "text": "Niềm vui vừa nở thành hoa. Chúc bạn nhiều ngày rạng rỡ."
+    },
+    {
+      "id": "cute-large-o025-c003",
+      "text": "Niềm vui vừa nở thành hoa. Mong bạn đón thêm điều lành."
+    },
+    {
+      "id": "cute-large-o025-c004",
+      "text": "Niềm vui vừa nở thành hoa. Gửi bạn lòng tri ân sâu."
+    },
+    {
+      "id": "cute-large-o025-c005",
+      "text": "Niềm vui vừa nở thành hoa. Chúc bạn trọn buổi an vui."
+    },
+    {
+      "id": "cute-large-o025-c006",
+      "text": "Niềm vui vừa nở thành hoa. Cảm ơn sự đồng hành quý."
+    },
+    {
+      "id": "cute-large-o025-c007",
+      "text": "Niềm vui vừa nở thành hoa. Mong bạn giữ lòng thư thái."
+    },
+    {
+      "id": "cute-large-o025-c008",
+      "text": "Niềm vui vừa nở thành hoa. Chúc bạn luôn đầy hứng khởi."
+    },
+    {
+      "id": "cute-large-o025-c009",
+      "text": "Niềm vui vừa nở thành hoa. Gửi bạn ngàn lời tốt đẹp."
+    },
+    {
+      "id": "cute-large-o025-c010",
+      "text": "Niềm vui vừa nở thành hoa. Cảm ơn bạn vì niềm tin."
+    },
+    {
+      "id": "cute-large-o025-c011",
+      "text": "Niềm vui vừa nở thành hoa. Chúc ngày của bạn bừng sáng."
+    },
+    {
+      "id": "cute-large-o025-c012",
+      "text": "Niềm vui vừa nở thành hoa. Mong bạn luôn được bình an."
+    },
+    {
+      "id": "cute-large-o025-c013",
+      "text": "Niềm vui vừa nở thành hoa. Gửi bạn lời chúc ấm lòng."
+    },
+    {
+      "id": "cute-large-o025-c014",
+      "text": "Niềm vui vừa nở thành hoa. Cảm ơn bạn đã trân trọng."
+    },
+    {
+      "id": "cute-large-o025-c015",
+      "text": "Niềm vui vừa nở thành hoa. Chúc bạn thêm phút thanh thản."
+    },
+    {
+      "id": "cute-large-o025-c016",
+      "text": "Niềm vui vừa nở thành hoa. Mong bạn có ngày trọn vẹn."
+    },
+    {
+      "id": "cute-large-o025-c017",
+      "text": "Niềm vui vừa nở thành hoa. Gửi bạn niềm vui lan tỏa."
+    },
+    {
+      "id": "cute-large-o025-c018",
+      "text": "Niềm vui vừa nở thành hoa. Cảm ơn sự ủng hộ này."
+    },
+    {
+      "id": "cute-large-o025-c019",
+      "text": "Niềm vui vừa nở thành hoa. Chúc bạn một hành trình đẹp."
+    },
+    {
+      "id": "cute-large-o025-c020",
+      "text": "Niềm vui vừa nở thành hoa. Mong bạn luôn gặp điều hay."
+    },
+    {
+      "id": "cute-large-o025-c021",
+      "text": "Niềm vui vừa nở thành hoa. Gửi bạn một lời cảm mến."
+    },
+    {
+      "id": "cute-large-o025-c022",
+      "text": "Niềm vui vừa nở thành hoa. Cảm ơn bạn bằng cả lòng."
+    },
+    {
+      "id": "cute-large-o025-c023",
+      "text": "Niềm vui vừa nở thành hoa. Chúc bạn nhiều phút hân hoan."
+    },
+    {
+      "id": "cute-large-o025-c024",
+      "text": "Niềm vui vừa nở thành hoa. Mong hôm nay thật sáng trong."
+    },
+    {
+      "id": "cute-large-o025-c025",
+      "text": "Niềm vui vừa nở thành hoa. Gửi bạn lời chúc an hòa."
+    }
+  ]
+}

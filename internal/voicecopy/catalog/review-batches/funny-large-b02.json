@@ -1,0 +1,507 @@
+{
+  "id": "funny-large-b02",
+  "styleId": "funny",
+  "bandId": "large",
+  "recipes": [
+    {
+      "id": "funny-large-o006-c001",
+      "text": "Quầy có màn reo vừa phải. Cảm ơn bạn làm ngày vui."
+    },
+    {
+      "id": "funny-large-o006-c002",
+      "text": "Quầy có màn reo vừa phải. Chúc bạn cười đẹp cả ngày."
+    },
+    {
+      "id": "funny-large-o006-c003",
+      "text": "Quầy có màn reo vừa phải. Mong niềm vui luôn chạy tốt."
+    },
+    {
+      "id": "funny-large-o006-c004",
+      "text": "Quầy có màn reo vừa phải. Gửi bạn một tràng cười hiền."
+    },
+    {
+      "id": "funny-large-o006-c005",
+      "text": "Quầy có màn reo vừa phải. Chúc ngày này thật có duyên."
+    },
+    {
+      "id": "funny-large-o006-c006",
+      "text": "Quầy có màn reo vừa phải. Cảm ơn bạn đã mang thêm niềm vui."
+    },
+    {
+      "id": "funny-large-o006-c007",
+      "text": "Quầy có màn reo vừa phải. Mong mọi việc thêm trôi chảy."
+    },
+    {
+      "id": "funny-large-o006-c008",
+      "text": "Quầy có màn reo vừa phải. Chúc bạn tươi mà không vội."
+    },
+    {
+      "id": "funny-large-o006-c009",
+      "text": "Quầy có màn reo vừa phải. Gửi bạn tiếng vui vừa đủ."
+    },
+    {
+      "id": "funny-large-o006-c010",
+      "text": "Quầy có màn reo vừa phải. Cảm ơn lần ghé đầy vui."
+    },
+    {
+      "id": "funny-large-o006-c011",
+      "text": "Quầy có màn reo vừa phải. Chúc bạn thảnh thơi đúng điệu."
+    },
+    {
+      "id": "funny-large-o006-c012",
+      "text": "Quầy có màn reo vừa phải. Mong ngày đẹp không trễ hẹn."
+    },
+    {
+      "id": "funny-large-o006-c013",
+      "text": "Quầy có màn reo vừa phải. Gửi bạn niềm vui đúng tông."
+    },
+    {
+      "id": "funny-large-o006-c014",
+      "text": "Quầy có màn reo vừa phải. Cảm ơn bạn đã tô sắc cho ngày."
+    },
+    {
+      "id": "funny-large-o006-c015",
+      "text": "Quầy có màn reo vừa phải. Chúc bạn nhiều buổi cười tươi."
+    },
+    {
+      "id": "funny-large-o006-c016",
+      "text": "Quầy có màn reo vừa phải. Mong bạn giữ nhịp vui bền."
+    },
+    {
+      "id": "funny-large-o006-c017",
+      "text": "Quầy có màn reo vừa phải. Gửi bạn lời chúc sáng rõ."
+    },
+    {
+      "id": "funny-large-o006-c018",
+      "text": "Quầy có màn reo vừa phải. Cảm ơn bạn đã góp vui."
+    },
+    {
+      "id": "funny-large-o006-c019",
+      "text": "Quầy có màn reo vừa phải. Chúc bạn một ngày mượt mà."
+    },
+    {
+      "id": "funny-large-o006-c020",
+      "text": "Quầy có màn reo vừa phải. Mong tin tốt luôn tìm tới."
+    },
+    {
+      "id": "funny-large-o006-c021",
+      "text": "Quầy có màn reo vừa phải. Gửi bạn một lượt vui lành."
+    },
+    {
+      "id": "funny-large-o006-c022",
+      "text": "Quầy có màn reo vừa phải. Cảm ơn bạn giữ ngày tươi."
+    },
+    {
+      "id": "funny-large-o006-c023",
+      "text": "Quầy có màn reo vừa phải. Chúc bạn luôn vui thanh lịch."
+    },
+    {
+      "id": "funny-large-o006-c024",
+      "text": "Quầy có màn reo vừa phải. Mong mọi bước đều nhẹ nhõm."
+    },
+    {
+      "id": "funny-large-o006-c025",
+      "text": "Quầy có màn reo vừa phải. Gửi bạn nụ cười lâu bền."
+    },
+    {
+      "id": "funny-large-o007-c001",
+      "text": "Niềm vui vừa bắt trúng nhịp. Cảm ơn bạn làm ngày vui."
+    },
+    {
+      "id": "funny-large-o007-c002",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc bạn cười đẹp cả ngày."
+    },
+    {
+      "id": "funny-large-o007-c003",
+      "text": "Niềm vui vừa bắt trúng nhịp. Mong niềm vui luôn chạy tốt."
+    },
+    {
+      "id": "funny-large-o007-c004",
+      "text": "Niềm vui vừa bắt trúng nhịp. Gửi bạn một tràng cười hiền."
+    },
+    {
+      "id": "funny-large-o007-c005",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc ngày này thật có duyên."
+    },
+    {
+      "id": "funny-large-o007-c006",
+      "text": "Niềm vui vừa bắt trúng nhịp. Cảm ơn bạn đã mang thêm niềm vui."
+    },
+    {
+      "id": "funny-large-o007-c007",
+      "text": "Niềm vui vừa bắt trúng nhịp. Mong mọi việc thêm trôi chảy."
+    },
+    {
+      "id": "funny-large-o007-c008",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc bạn tươi mà không vội."
+    },
+    {
+      "id": "funny-large-o007-c009",
+      "text": "Niềm vui vừa bắt trúng nhịp. Gửi bạn tiếng vui vừa đủ."
+    },
+    {
+      "id": "funny-large-o007-c010",
+      "text": "Niềm vui vừa bắt trúng nhịp. Cảm ơn lần ghé đầy vui."
+    },
+    {
+      "id": "funny-large-o007-c011",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc bạn thảnh thơi đúng điệu."
+    },
+    {
+      "id": "funny-large-o007-c012",
+      "text": "Niềm vui vừa bắt trúng nhịp. Mong ngày đẹp không trễ hẹn."
+    },
+    {
+      "id": "funny-large-o007-c013",
+      "text": "Niềm vui vừa bắt trúng nhịp. Gửi bạn niềm vui đúng tông."
+    },
+    {
+      "id": "funny-large-o007-c014",
+      "text": "Niềm vui vừa bắt trúng nhịp. Cảm ơn bạn đã tô sắc cho ngày."
+    },
+    {
+      "id": "funny-large-o007-c015",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc bạn nhiều buổi cười tươi."
+    },
+    {
+      "id": "funny-large-o007-c016",
+      "text": "Niềm vui vừa bắt trúng nhịp. Mong bạn giữ nhịp vui bền."
+    },
+    {
+      "id": "funny-large-o007-c017",
+      "text": "Niềm vui vừa bắt trúng nhịp. Gửi bạn lời chúc sáng rõ."
+    },
+    {
+      "id": "funny-large-o007-c018",
+      "text": "Niềm vui vừa bắt trúng nhịp. Cảm ơn bạn đã góp vui."
+    },
+    {
+      "id": "funny-large-o007-c019",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc bạn một ngày mượt mà."
+    },
+    {
+      "id": "funny-large-o007-c020",
+      "text": "Niềm vui vừa bắt trúng nhịp. Mong tin tốt luôn tìm tới."
+    },
+    {
+      "id": "funny-large-o007-c021",
+      "text": "Niềm vui vừa bắt trúng nhịp. Gửi bạn một lượt vui lành."
+    },
+    {
+      "id": "funny-large-o007-c022",
+      "text": "Niềm vui vừa bắt trúng nhịp. Cảm ơn bạn giữ ngày tươi."
+    },
+    {
+      "id": "funny-large-o007-c023",
+      "text": "Niềm vui vừa bắt trúng nhịp. Chúc bạn luôn vui thanh lịch."
+    },
+    {
+      "id": "funny-large-o007-c024",
+      "text": "Niềm vui vừa bắt trúng nhịp. Mong mọi bước đều nhẹ nhõm."
+    },
+    {
+      "id": "funny-large-o007-c025",
+      "text": "Niềm vui vừa bắt trúng nhịp. Gửi bạn nụ cười lâu bền."
+    },
+    {
+      "id": "funny-large-o008-c001",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Cảm ơn bạn làm ngày vui."
+    },
+    {
+      "id": "funny-large-o008-c002",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc bạn cười đẹp cả ngày."
+    },
+    {
+      "id": "funny-large-o008-c003",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Mong niềm vui luôn chạy tốt."
+    },
+    {
+      "id": "funny-large-o008-c004",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Gửi bạn một tràng cười hiền."
+    },
+    {
+      "id": "funny-large-o008-c005",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc ngày này thật có duyên."
+    },
+    {
+      "id": "funny-large-o008-c006",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Cảm ơn bạn đã mang thêm niềm vui."
+    },
+    {
+      "id": "funny-large-o008-c007",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Mong mọi việc thêm trôi chảy."
+    },
+    {
+      "id": "funny-large-o008-c008",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc bạn tươi mà không vội."
+    },
+    {
+      "id": "funny-large-o008-c009",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Gửi bạn tiếng vui vừa đủ."
+    },
+    {
+      "id": "funny-large-o008-c010",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Cảm ơn lần ghé đầy vui."
+    },
+    {
+      "id": "funny-large-o008-c011",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc bạn thảnh thơi đúng điệu."
+    },
+    {
+      "id": "funny-large-o008-c012",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Mong ngày đẹp không trễ hẹn."
+    },
+    {
+      "id": "funny-large-o008-c013",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Gửi bạn niềm vui đúng tông."
+    },
+    {
+      "id": "funny-large-o008-c014",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Cảm ơn bạn đã tô sắc cho ngày."
+    },
+    {
+      "id": "funny-large-o008-c015",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc bạn nhiều buổi cười tươi."
+    },
+    {
+      "id": "funny-large-o008-c016",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Mong bạn giữ nhịp vui bền."
+    },
+    {
+      "id": "funny-large-o008-c017",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Gửi bạn lời chúc sáng rõ."
+    },
+    {
+      "id": "funny-large-o008-c018",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Cảm ơn bạn đã góp vui."
+    },
+    {
+      "id": "funny-large-o008-c019",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc bạn một ngày mượt mà."
+    },
+    {
+      "id": "funny-large-o008-c020",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Mong tin tốt luôn tìm tới."
+    },
+    {
+      "id": "funny-large-o008-c021",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Gửi bạn một lượt vui lành."
+    },
+    {
+      "id": "funny-large-o008-c022",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Cảm ơn bạn giữ ngày tươi."
+    },
+    {
+      "id": "funny-large-o008-c023",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Chúc bạn luôn vui thanh lịch."
+    },
+    {
+      "id": "funny-large-o008-c024",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Mong mọi bước đều nhẹ nhõm."
+    },
+    {
+      "id": "funny-large-o008-c025",
+      "text": "Chiếc ví vẫn giữ bình tĩnh. Gửi bạn nụ cười lâu bền."
+    },
+    {
+      "id": "funny-large-o009-c001",
+      "text": "Ngày thường vừa có phá cách. Cảm ơn bạn làm ngày vui."
+    },
+    {
+      "id": "funny-large-o009-c002",
+      "text": "Ngày thường vừa có phá cách. Chúc bạn cười đẹp cả ngày."
+    },
+    {
+      "id": "funny-large-o009-c003",
+      "text": "Ngày thường vừa có phá cách. Mong niềm vui luôn chạy tốt."
+    },
+    {
+      "id": "funny-large-o009-c004",
+      "text": "Ngày thường vừa có phá cách. Gửi bạn một tràng cười hiền."
+    },
+    {
+      "id": "funny-large-o009-c005",
+      "text": "Ngày thường vừa có phá cách. Chúc ngày này thật có duyên."
+    },
+    {
+      "id": "funny-large-o009-c006",
+      "text": "Ngày thường vừa có phá cách. Cảm ơn bạn đã mang thêm niềm vui."
+    },
+    {
+      "id": "funny-large-o009-c007",
+      "text": "Ngày thường vừa có phá cách. Mong mọi việc thêm trôi chảy."
+    },
+    {
+      "id": "funny-large-o009-c008",
+      "text": "Ngày thường vừa có phá cách. Chúc bạn tươi mà không vội."
+    },
+    {
+      "id": "funny-large-o009-c009",
+      "text": "Ngày thường vừa có phá cách. Gửi bạn tiếng vui vừa đủ."
+    },
+    {
+      "id": "funny-large-o009-c010",
+      "text": "Ngày thường vừa có phá cách. Cảm ơn lần ghé đầy vui."
+    },
+    {
+      "id": "funny-large-o009-c011",
+      "text": "Ngày thường vừa có phá cách. Chúc bạn thảnh thơi đúng điệu."
+    },
+    {
+      "id": "funny-large-o009-c012",
+      "text": "Ngày thường vừa có phá cách. Mong ngày đẹp không trễ hẹn."
+    },
+    {
+      "id": "funny-large-o009-c013",
+      "text": "Ngày thường vừa có phá cách. Gửi bạn niềm vui đúng tông."
+    },
+    {
+      "id": "funny-large-o009-c014",
+      "text": "Ngày thường vừa có phá cách. Cảm ơn bạn đã tô sắc cho ngày."
+    },
+    {
+      "id": "funny-large-o009-c015",
+      "text": "Ngày thường vừa có phá cách. Chúc bạn nhiều buổi cười tươi."
+    },
+    {
+      "id": "funny-large-o009-c016",
+      "text": "Ngày thường vừa có phá cách. Mong bạn giữ nhịp vui bền."
+    },
+    {
+      "id": "funny-large-o009-c017",
+      "text": "Ngày thường vừa có phá cách. Gửi bạn lời chúc sáng rõ."
+    },
+    {
+      "id": "funny-large-o009-c018",
+      "text": "Ngày thường vừa có phá cách. Cảm ơn bạn đã góp vui."
+    },
+    {
+      "id": "funny-large-o009-c019",
+      "text": "Ngày thường vừa có phá cách. Chúc bạn một ngày mượt mà."
+    },
+    {
+      "id": "funny-large-o009-c020",
+      "text": "Ngày thường vừa có phá cách. Mong tin tốt luôn tìm tới."
+    },
+    {
+      "id": "funny-large-o009-c021",
+      "text": "Ngày thường vừa có phá cách. Gửi bạn một lượt vui lành."
+    },
+    {
+      "id": "funny-large-o009-c022",
+      "text": "Ngày thường vừa có phá cách. Cảm ơn bạn giữ ngày tươi."
+    },
+    {
+      "id": "funny-large-o009-c023",
+      "text": "Ngày thường vừa có phá cách. Chúc bạn luôn vui thanh lịch."
+    },
+    {
+      "id": "funny-large-o009-c024",
+      "text": "Ngày thường vừa có phá cách. Mong mọi bước đều nhẹ nhõm."
+    },
+    {
+      "id": "funny-large-o009-c025",
+      "text": "Ngày thường vừa có phá cách. Gửi bạn nụ cười lâu bền."
+    },
+    {
+      "id": "funny-large-o010-c001",
+      "text": "Nụ cười đang dẫn chương trình. Cảm ơn bạn làm ngày vui."
+    },
+    {
+      "id": "funny-large-o010-c002",
+      "text": "Nụ cười đang dẫn chương trình. Chúc bạn cười đẹp cả ngày."
+    },
+    {
+      "id": "funny-large-o010-c003",
+      "text": "Nụ cười đang dẫn chương trình. Mong niềm vui luôn chạy tốt."
+    },
+    {
+      "id": "funny-large-o010-c004",
+      "text": "Nụ cười đang dẫn chương trình. Gửi bạn một tràng cười hiền."
+    },
+    {
+      "id": "funny-large-o010-c005",
+      "text": "Nụ cười đang dẫn chương trình. Chúc ngày này thật có duyên."
+    },
+    {
+      "id": "funny-large-o010-c006",
+      "text": "Nụ cười đang dẫn chương trình. Cảm ơn bạn đã mang thêm niềm vui."
+    },
+    {
+      "id": "funny-large-o010-c007",
+      "text": "Nụ cười đang dẫn chương trình. Mong mọi việc thêm trôi chảy."
+    },
+    {
+      "id": "funny-large-o010-c008",
+      "text": "Nụ cười đang dẫn chương trình. Chúc bạn tươi mà không vội."
+    },
+    {
+      "id": "funny-large-o010-c009",
+      "text": "Nụ cười đang dẫn chương trình. Gửi bạn tiếng vui vừa đủ."
+    },
+    {
+      "id": "funny-large-o010-c010",
+      "text": "Nụ cười đang dẫn chương trình. Cảm ơn lần ghé đầy vui."
+    },
+    {
+      "id": "funny-large-o010-c011",
+      "text": "Nụ cười đang dẫn chương trình. Chúc bạn thảnh thơi đúng điệu."
+    },
+    {
+      "id": "funny-large-o010-c012",
+      "text": "Nụ cười đang dẫn chương trình. Mong ngày đẹp không trễ hẹn."
+    },
+    {
+      "id": "funny-large-o010-c013",
+      "text": "Nụ cười đang dẫn chương trình. Gửi bạn niềm vui đúng tông."
+    },
+    {
+      "id": "funny-large-o010-c014",
+      "text": "Nụ cười đang dẫn chương trình. Cảm ơn bạn đã tô sắc cho ngày."
+    },
+    {
+      "id": "funny-large-o010-c015",
+      "text": "Nụ cười đang dẫn chương trình. Chúc bạn nhiều buổi cười tươi."
+    },
+    {
+      "id": "funny-large-o010-c016",
+      "text": "Nụ cười đang dẫn chương trình. Mong bạn giữ nhịp vui bền."
+    },
+    {
+      "id": "funny-large-o010-c017",
+      "text": "Nụ cười đang dẫn chương trình. Gửi bạn lời chúc sáng rõ."
+    },
+    {
+      "id": "funny-large-o010-c018",
+      "text": "Nụ cười đang dẫn chương trình. Cảm ơn bạn đã góp vui."
+    },
+    {
+      "id": "funny-large-o010-c019",
+      "text": "Nụ cười đang dẫn chương trình. Chúc bạn một ngày mượt mà."
+    },
+    {
+      "id": "funny-large-o010-c020",
+      "text": "Nụ cười đang dẫn chương trình. Mong tin tốt luôn tìm tới."
+    },
+    {
+      "id": "funny-large-o010-c021",
+      "text": "Nụ cười đang dẫn chương trình. Gửi bạn một lượt vui lành."
+    },
+    {
+      "id": "funny-large-o010-c022",
+      "text": "Nụ cười đang dẫn chương trình. Cảm ơn bạn giữ ngày tươi."
+    },
+    {
+      "id": "funny-large-o010-c023",
+      "text": "Nụ cười đang dẫn chương trình. Chúc bạn luôn vui thanh lịch."
+    },
+    {
+      "id": "funny-large-o010-c024",
+      "text": "Nụ cười đang dẫn chương trình. Mong mọi bước đều nhẹ nhõm."
+    },
+    {
+      "id": "funny-large-o010-c025",
+      "text": "Nụ cười đang dẫn chương trình. Gửi bạn nụ cười lâu bền."
+    }
+  ]
+}

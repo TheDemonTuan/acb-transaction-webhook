@@ -2,110 +2,365 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
+	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 var ErrVoiceSettingsConflict = errors.New("voice settings revision conflict: modified by another operator")
 
-type VoiceSettings struct {
-	Revision       int64  `json:"revision"`
-	ProviderMode   string `json:"providerMode"` // ONLINE_AUTO, EDGE_ONLY, BROWSER_ONLY
-	EdgeVoice      string `json:"edgeVoice"`    // vi-VN-HoaiMyNeural, vi-VN-NamMinhNeural
-	OnlineFallback bool   `json:"onlineFallback"`
-	UpdatedAt      string `json:"updatedAt"`
+const (
+	CatalogVersionV1        = "v1"
+	ColdRequestTimeoutMs    = 8000
+	ProviderModeEdgeOnly    = "EDGE_ONLY"
+	ProviderModeBrowserOnly = "BROWSER_ONLY"
+	EdgeVoiceHoaiMy         = "vi-VN-HoaiMyNeural"
+	EdgeVoiceNamMinh        = "vi-VN-NamMinhNeural"
+)
+
+type AmountBand struct {
+	ID      string  `json:"id"`
+	FromVND string  `json:"fromVnd"`
+	ToVND   *string `json:"toVnd"`
+	StyleID string  `json:"styleId"`
 }
 
-var DefaultVoiceSettings = VoiceSettings{
-	Revision:       1,
-	ProviderMode:   "ONLINE_AUTO",
-	EdgeVoice:      "vi-VN-HoaiMyNeural",
-	OnlineFallback: true,
-	UpdatedAt:      "2026-09-12T00:00:00Z",
+type VoiceProfile struct {
+	Revision             int64        `json:"revision"`
+	ProviderMode         string       `json:"providerMode"`
+	EdgeVoice            string       `json:"edgeVoice"`
+	Rate                 float64      `json:"rate"`
+	PitchHz              int          `json:"pitchHz"`
+	AmountBands          []AmountBand `json:"amountBands"`
+	ChimeEnabled         bool         `json:"chimeEnabled"`
+	LoadingSoundEnabled  bool         `json:"loadingSoundEnabled"`
+	FunEnabled           bool         `json:"funEnabled"`
+	IncludeDescription   bool         `json:"includeDescription"`
+	CustomTemplate       string       `json:"customTemplate"`
+	CatalogVersion       string       `json:"catalogVersion"`
+	SynthesisKey         string       `json:"synthesisKey"`
+	ColdRequestTimeoutMs int          `json:"coldRequestTimeoutMs"`
+	UpdatedAt            string       `json:"updatedAt"`
 }
 
-func (s *Store) GetVoiceSettings(ctx context.Context) (VoiceSettings, error) {
+type VoiceSettingsInput struct {
+	Revision            int64        `json:"revision"`
+	ProviderMode        string       `json:"providerMode"`
+	EdgeVoice           string       `json:"edgeVoice"`
+	Rate                float64      `json:"rate"`
+	PitchHz             int          `json:"pitchHz"`
+	AmountBands         []AmountBand `json:"amountBands"`
+	ChimeEnabled        bool         `json:"chimeEnabled"`
+	LoadingSoundEnabled bool         `json:"loadingSoundEnabled"`
+	FunEnabled          bool         `json:"funEnabled"`
+	IncludeDescription  bool         `json:"includeDescription"`
+	CustomTemplate      string       `json:"customTemplate"`
+}
+
+func defaultAmountBands() []AmountBand {
+	to50k := "50000"
+	to200k := "200000"
+	to1m := "1000000"
+	return []AmountBand{
+		{ID: "small", FromVND: "1", ToVND: &to50k, StyleID: "classic"},
+		{ID: "medium", FromVND: "50000", ToVND: &to200k, StyleID: "classic"},
+		{ID: "large", FromVND: "200000", ToVND: &to1m, StyleID: "classic"},
+		{ID: "celebrate", FromVND: "1000000", ToVND: nil, StyleID: "classic"},
+	}
+}
+
+func ComputeSynthesisKey(edgeVoice string, rate float64, pitchHz int) string {
+	raw := fmt.Sprintf("edge|%s|%.2f|%d|money-vi-v1|pack-schema-1", edgeVoice, rate, pitchHz)
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
+}
+
+var DefaultVoiceProfile = VoiceProfile{
+	Revision:             1,
+	ProviderMode:         ProviderModeEdgeOnly,
+	EdgeVoice:            EdgeVoiceHoaiMy,
+	Rate:                 1.25,
+	PitchHz:              0,
+	AmountBands:          defaultAmountBands(),
+	ChimeEnabled:         true,
+	LoadingSoundEnabled:  false,
+	FunEnabled:           true,
+	IncludeDescription:   false,
+	CustomTemplate:       "",
+	CatalogVersion:       CatalogVersionV1,
+	SynthesisKey:         ComputeSynthesisKey(EdgeVoiceHoaiMy, 1.25, 0),
+	ColdRequestTimeoutMs: ColdRequestTimeoutMs,
+	UpdatedAt:            "2026-10-11T00:00:00Z",
+}
+
+var placeholderRegex = regexp.MustCompile(`\{([^}]+)\}`)
+
+func ValidateVoiceProfileInput(in *VoiceSettingsInput) error {
+	// Normalize ONLINE_AUTO to EDGE_ONLY
+	if in.ProviderMode == "ONLINE_AUTO" {
+		in.ProviderMode = ProviderModeEdgeOnly
+	}
+	if in.ProviderMode != ProviderModeEdgeOnly && in.ProviderMode != ProviderModeBrowserOnly {
+		return errors.New("invalid providerMode: must be EDGE_ONLY or BROWSER_ONLY")
+	}
+	if in.EdgeVoice != EdgeVoiceHoaiMy && in.EdgeVoice != EdgeVoiceNamMinh {
+		return errors.New("invalid edgeVoice: must be vi-VN-HoaiMyNeural or vi-VN-NamMinhNeural")
+	}
+
+	if in.Rate < 0.75 || in.Rate > 2.00 {
+		return errors.New("invalid rate: must be between 0.75 and 2.00")
+	}
+	if math.Abs(in.Rate-math.Round(in.Rate*100)/100) > 1e-6 {
+		return errors.New("invalid rate: maximum two decimal places allowed")
+	}
+
+	if in.PitchHz < -50 || in.PitchHz > 50 {
+		return errors.New("invalid pitchHz: must be between -50 and 50")
+	}
+
+	if in.CustomTemplate != "" {
+		if utf8.RuneCountInString(in.CustomTemplate) > 120 {
+			return errors.New("customTemplate exceeds 120 runes")
+		}
+		matches := placeholderRegex.FindAllStringSubmatch(in.CustomTemplate, -1)
+		amountCount := 0
+		for _, m := range matches {
+			placeholder := m[1]
+			switch placeholder {
+			case "amount", "amount_raw":
+				amountCount++
+			case "description":
+				// allowed
+			default:
+				return fmt.Errorf("unknown placeholder {%s} in customTemplate", placeholder)
+			}
+		}
+		if amountCount != 1 {
+			return errors.New("customTemplate must contain exactly one {amount} or {amount_raw}")
+		}
+	}
+
+	if len(in.AmountBands) != 4 {
+		return errors.New("amountBands must have exactly 4 bands")
+	}
+
+	expectedIDs := []string{"small", "medium", "large", "celebrate"}
+	validStyles := map[string]bool{"classic": true, "cute": true, "funny": true, "custom": true}
+
+	var prevToVal int64 = 0
+	for i, band := range in.AmountBands {
+		if band.ID != expectedIDs[i] {
+			return fmt.Errorf("band %d must have id %q, got %q", i, expectedIDs[i], band.ID)
+		}
+		if !validStyles[band.StyleID] {
+			return fmt.Errorf("invalid styleId %q for band %s", band.StyleID, band.ID)
+		}
+
+		fromVal, err := strconv.ParseInt(band.FromVND, 10, 64)
+		if err != nil || fromVal <= 0 || fromVal > 9007199254740991 {
+			return fmt.Errorf("invalid fromVnd %q for band %s", band.FromVND, band.ID)
+		}
+
+		if i == 0 {
+			if fromVal != 1 {
+				return errors.New("small band fromVnd must be '1'")
+			}
+		} else {
+			if fromVal != prevToVal {
+				return fmt.Errorf("band %s fromVnd %d does not match previous toVnd %d", band.ID, fromVal, prevToVal)
+			}
+		}
+
+		if i == 3 {
+			if band.ToVND != nil {
+				return errors.New("celebrate band toVnd must be null")
+			}
+		} else {
+			if band.ToVND == nil {
+				return fmt.Errorf("band %s toVnd must not be null", band.ID)
+			}
+			toVal, err := strconv.ParseInt(*band.ToVND, 10, 64)
+			if err != nil || toVal <= fromVal || toVal > 9007199254740991 {
+				return fmt.Errorf("invalid toVnd %q for band %s (must be > %d)", *band.ToVND, band.ID, fromVal)
+			}
+			prevToVal = toVal
+		}
+	}
+
+	return nil
+}
+
+func (s *Store) GetVoiceProfile(ctx context.Context) (VoiceProfile, error) {
 	var (
-		revision          int64
-		providerMode      string
-		edgeVoice         string
-		onlineFallbackInt int
-		updatedAt         string
+		revision        int64
+		providerMode    string
+		edgeVoice       string
+		rate            float64
+		pitchHz         int
+		amountBandsJSON string
+		chimeEnabledInt int
+		loadingSoundInt int
+		funEnabledInt   int
+		includeDescInt  int
+		customTemplate  string
+		updatedAt       string
 	)
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT revision, provider_mode, edge_voice, online_fallback, updated_at
+		SELECT revision, provider_mode, edge_voice, rate, pitch_hz, amount_bands_json,
+		       chime_enabled, loading_sound_enabled, fun_enabled, include_description,
+		       custom_template, updated_at
 		FROM voice_settings
 		WHERE id = 'singleton'
-	`).Scan(&revision, &providerMode, &edgeVoice, &onlineFallbackInt, &updatedAt)
+	`).Scan(
+		&revision, &providerMode, &edgeVoice, &rate, &pitchHz, &amountBandsJSON,
+		&chimeEnabledInt, &loadingSoundInt, &funEnabledInt, &includeDescInt,
+		&customTemplate, &updatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return DefaultVoiceSettings, nil
+			profile := DefaultVoiceProfile
+			profile.AmountBands = defaultAmountBands()
+			return profile, nil
 		}
-		return VoiceSettings{}, fmt.Errorf("get voice settings: %w", err)
+		return VoiceProfile{}, fmt.Errorf("get voice profile: %w", err)
 	}
 
-	return VoiceSettings{
-		Revision:       revision,
-		ProviderMode:   providerMode,
-		EdgeVoice:      edgeVoice,
-		OnlineFallback: onlineFallbackInt == 1,
-		UpdatedAt:      updatedAt,
+	// Normalize provider mode if migration hasn't run or legacy value read
+	if providerMode == "ONLINE_AUTO" {
+		providerMode = ProviderModeEdgeOnly
+	}
+
+	var bands []AmountBand
+	if err := json.Unmarshal([]byte(amountBandsJSON), &bands); err != nil || len(bands) != 4 {
+		bands = defaultAmountBands()
+	}
+
+	return VoiceProfile{
+		Revision:             revision,
+		ProviderMode:         providerMode,
+		EdgeVoice:            edgeVoice,
+		Rate:                 rate,
+		PitchHz:              pitchHz,
+		AmountBands:          bands,
+		ChimeEnabled:         chimeEnabledInt == 1,
+		LoadingSoundEnabled:  loadingSoundInt == 1,
+		FunEnabled:           funEnabledInt == 1,
+		IncludeDescription:   includeDescInt == 1,
+		CustomTemplate:       customTemplate,
+		CatalogVersion:       CatalogVersionV1,
+		SynthesisKey:         ComputeSynthesisKey(edgeVoice, rate, pitchHz),
+		ColdRequestTimeoutMs: ColdRequestTimeoutMs,
+		UpdatedAt:            updatedAt,
 	}, nil
 }
 
-func (s *Store) SaveVoiceSettings(ctx context.Context, settings VoiceSettings) (VoiceSettings, error) {
+func (s *Store) SaveVoiceProfile(ctx context.Context, input VoiceSettingsInput) (VoiceProfile, error) {
 	if err := s.CheckMutationAllowed(ctx); err != nil {
-		return VoiceSettings{}, err
+		return VoiceProfile{}, err
 	}
-	if settings.ProviderMode != "ONLINE_AUTO" && settings.ProviderMode != "EDGE_ONLY" && settings.ProviderMode != "BROWSER_ONLY" {
-		return VoiceSettings{}, errors.New("invalid providerMode: must be ONLINE_AUTO, EDGE_ONLY, or BROWSER_ONLY")
+	if err := ValidateVoiceProfileInput(&input); err != nil {
+		return VoiceProfile{}, fmt.Errorf("invalid voice settings: %w", err)
 	}
-	if settings.EdgeVoice != "vi-VN-HoaiMyNeural" && settings.EdgeVoice != "vi-VN-NamMinhNeural" {
-		return VoiceSettings{}, errors.New("invalid edgeVoice: must be vi-VN-HoaiMyNeural or vi-VN-NamMinhNeural")
+
+	bandsBytes, err := json.Marshal(input.AmountBands)
+	if err != nil {
+		return VoiceProfile{}, fmt.Errorf("serialize amount bands: %w", err)
 	}
+	bandsJSON := string(bandsBytes)
 
 	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
-	onlineFallbackInt := 0
-	if settings.OnlineFallback {
-		onlineFallbackInt = 1
+	chimeInt := 0
+	if input.ChimeEnabled {
+		chimeInt = 1
+	}
+	loadingInt := 0
+	if input.LoadingSoundEnabled {
+		loadingInt = 1
+	}
+	funInt := 0
+	if input.FunEnabled {
+		funInt = 1
+	}
+	includeDescInt := 0
+	if input.IncludeDescription {
+		includeDescInt = 1
 	}
 
-	newRevision := settings.Revision + 1
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		var currentRev int64
-		err := tx.QueryRowContext(ctx, `SELECT revision FROM voice_settings WHERE id = 'singleton'`).Scan(&currentRev)
+	newRevision := input.Revision + 1
+
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		var currentRevision int64
+		err := tx.QueryRowContext(ctx, `SELECT revision FROM voice_settings WHERE id = 'singleton'`).Scan(&currentRevision)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				// Insert initial record
+				// Insert default singleton if not present
 				_, insertErr := tx.ExecContext(ctx, `
-					INSERT INTO voice_settings(id, revision, provider_mode, edge_voice, online_fallback, updated_at)
-					VALUES('singleton', ?, ?, ?, ?, ?)
-				`, newRevision, settings.ProviderMode, settings.EdgeVoice, onlineFallbackInt, nowStr)
+					INSERT INTO voice_settings (
+						id, revision, provider_mode, edge_voice, rate, pitch_hz, amount_bands_json,
+						chime_enabled, loading_sound_enabled, fun_enabled, include_description,
+						custom_template, online_fallback, updated_at
+					) VALUES ('singleton', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+				`, newRevision, input.ProviderMode, input.EdgeVoice, input.Rate, input.PitchHz, bandsJSON,
+					chimeInt, loadingInt, funInt, includeDescInt, input.CustomTemplate, nowStr)
 				return insertErr
 			}
 			return err
 		}
 
-		if currentRev != settings.Revision {
+		if currentRevision != input.Revision {
 			return ErrVoiceSettingsConflict
 		}
 
-		_, updateErr := tx.ExecContext(ctx, `
+		res, updateErr := tx.ExecContext(ctx, `
 			UPDATE voice_settings
-			SET revision = ?, provider_mode = ?, edge_voice = ?, online_fallback = ?, updated_at = ?
+			SET revision = ?, provider_mode = ?, edge_voice = ?, rate = ?, pitch_hz = ?,
+			    amount_bands_json = ?, chime_enabled = ?, loading_sound_enabled = ?,
+			    fun_enabled = ?, include_description = ?, custom_template = ?,
+			    online_fallback = 0, updated_at = ?
 			WHERE id = 'singleton' AND revision = ?
-		`, newRevision, settings.ProviderMode, settings.EdgeVoice, onlineFallbackInt, nowStr, settings.Revision)
-		return updateErr
+		`, newRevision, input.ProviderMode, input.EdgeVoice, input.Rate, input.PitchHz, bandsJSON,
+			chimeInt, loadingInt, funInt, includeDescInt, input.CustomTemplate, nowStr, input.Revision)
+		if updateErr != nil {
+			return updateErr
+		}
+		rows, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if rows == 0 {
+			return ErrVoiceSettingsConflict
+		}
+		return nil
 	})
 
 	if err != nil {
-		return VoiceSettings{}, err
+		return VoiceProfile{}, err
 	}
 
-	settings.Revision = newRevision
-	settings.UpdatedAt = nowStr
-	return settings, nil
+	return VoiceProfile{
+		Revision:             newRevision,
+		ProviderMode:         input.ProviderMode,
+		EdgeVoice:            input.EdgeVoice,
+		Rate:                 input.Rate,
+		PitchHz:              input.PitchHz,
+		AmountBands:          input.AmountBands,
+		ChimeEnabled:         input.ChimeEnabled,
+		LoadingSoundEnabled:  input.LoadingSoundEnabled,
+		FunEnabled:           input.FunEnabled,
+		IncludeDescription:   input.IncludeDescription,
+		CustomTemplate:       input.CustomTemplate,
+		CatalogVersion:       CatalogVersionV1,
+		SynthesisKey:         ComputeSynthesisKey(input.EdgeVoice, input.Rate, input.PitchHz),
+		ColdRequestTimeoutMs: ColdRequestTimeoutMs,
+		UpdatedAt:            nowStr,
+	}, nil
 }

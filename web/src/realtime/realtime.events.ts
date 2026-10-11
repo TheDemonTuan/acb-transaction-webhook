@@ -6,6 +6,7 @@ export const REALTIME_EVENT_TYPES = [
   'notification.changed',
   'delivery.changed',
   'audit.created',
+  'voice.settings.changed',
   'stream.heartbeat',
   'stream_error',
 ] as const;

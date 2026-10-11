@@ -1,12 +1,35 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 
 type VoiceFixtureWindow = Window & {
   __activeEventSource?: EventSource;
   __spokenUtterances: Array<{ text: string; lang: string; volume: number; rate: number }>;
 };
 
+const spokenAnnouncements = (page: Page) => page.evaluate(() =>
+  (window as VoiceFixtureWindow).__spokenUtterances.filter(utterance => utterance.text.trim().length > 0));
+
+async function expectTestAmount(page: Page) {
+  await expect.poll(async () => (await spokenAnnouncements(page)).map(utterance => utterance.text))
+    .toEqual([expect.stringContaining('năm trăm nghìn đồng')]);
+  const [announcement] = await spokenAnnouncements(page);
+  expect(announcement.lang).toBe('vi-VN');
+  expect(announcement.rate).toBe(DEFAULT_VOICE_PROFILE.rate);
+  expect(announcement.volume).toBe(1);
+  return announcement;
+}
+
 test.describe('Voice Announcements & Realtime Features', () => {
   test.beforeEach(async ({ page }) => {
+    // Deterministic browser-mode lifecycle fixture, not evidence for Edge audio.
+    await page.route(/\/api\/(?:public\/)?v1\/voice\/profile$/, (route) => route.fulfill({
+      contentType: 'application/json', body: JSON.stringify({ ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY',
+        synthesisKey: 'a'.repeat(64), funEnabled: false, chimeEnabled: false }),
+    }));
+    await page.addInitScript(() => {
+      localStorage.setItem('acb.voice.settings.v1', JSON.stringify({ schemaVersion: 2, enabled: false, volume: 1,
+        announceWhenHidden: true, browserVoiceURI: 'urn:moz-tts:speechd:vi-VN' }));
+    });
     await page.addInitScript(() => {
       (window as any).__spokenUtterances = [];
 
@@ -18,6 +41,7 @@ test.describe('Voice Announcements & Realtime Features', () => {
         pitch = 1;
         voice: any = null;
         onend: any = null;
+        onstart: ((event: Event) => void) | null = null;
         onerror: any = null;
         constructor(text: string) {
           this.text = text;
@@ -45,9 +69,10 @@ test.describe('Voice Announcements & Realtime Features', () => {
             volume: utterance.volume,
             rate: utterance.rate,
           });
-          setTimeout(() => {
+          queueMicrotask(() => {
+            utterance.onstart?.(new Event('start'));
             utterance.onend?.(new Event('end'));
-          }, 40);
+          });
         },
         cancel: () => {},
         pause: () => {},
@@ -77,24 +102,20 @@ test.describe('Voice Announcements & Realtime Features', () => {
 
   test('opens voice settings sheet and plays test voice', async ({ page }) => {
     await page.goto('/transactions');
-    await expect(page.getByRole('heading', { name: 'Giao dịch' })).toBeVisible();
+    await expect(page.getByRole('tabpanel', { name: 'Quầy thu ngân', exact: true })).toBeVisible();
 
     const voiceSettingsBtn = page.getByRole('button', { name: 'Tùy chỉnh giọng đọc' });
     await expect(voiceSettingsBtn).toBeVisible();
     await voiceSettingsBtn.click();
 
     await expect(page.getByRole('heading', { name: 'Cài đặt đọc giao dịch' })).toBeVisible();
-    await expect(page.getByText('Tự động đọc số tiền ngay khi giao dịch được ghi nhận')).toBeVisible();
+    await expect(page.getByText('Giọng hiệu lực:', { exact: false })).toBeVisible();
 
     const testBtn = page.getByRole('button', { name: 'Nghe thử' });
     await expect(testBtn).toBeVisible();
-    await testBtn.click({ force: true });
+    await testBtn.click();
 
-    await page.waitForFunction(() => (window as any).__spokenUtterances.length > 0);
-    const spoken = await page.evaluate(() => (window as any).__spokenUtterances);
-    expect(spoken.length).toBeGreaterThanOrEqual(1);
-    expect(spoken[0].text).toContain('năm trăm nghìn đồng');
-    expect(spoken[0].lang).toBe('vi-VN');
+    await expectTestAmount(page);
   });
 
   test('announces independent KienlongBank orders once each while replay, stale and CATCH_UP stay silent', async ({
@@ -144,14 +165,21 @@ test.describe('Voice Announcements & Realtime Features', () => {
     // 1. Enable voice announcement
     await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc' }).click();
     await expect(page.getByRole('heading', { name: 'Cài đặt đọc giao dịch' })).toBeVisible();
-    await page.getByRole('switch', { name: 'Bật đọc giao dịch' }).click({ force: true });
-    await page.getByRole('button', { name: 'Đóng' }).click({ force: true });
+    const voiceSwitch = page.getByRole('switch', { name: 'Bật đọc giao dịch' });
+    await voiceSwitch.click();
+    await expect(voiceSwitch).toHaveAttribute('aria-checked', 'true');
+    await page.getByRole('button', { name: 'Đóng' }).click();
     await expect(page.getByRole('heading', { name: 'Cài đặt đọc giao dịch' })).toHaveCount(0);
 
-    // Clear test utterances
-    await page.evaluate(() => {
-      (window as any).__spokenUtterances = [];
-    });
+    const historyTab = page.getByRole('tab', { name: /Lịch sử giao dịch/ });
+    await historyTab.click();
+    const history = page.getByRole('tabpanel', { name: 'Lịch sử giao dịch', exact: true });
+    await expect(history).toBeVisible();
+    await expect(history.getByText('NGUYEN VAN A CHUYEN TIEN REALTIME', { exact: true })).toBeVisible();
+    expect(await spokenAnnouncements(page)).toEqual([]);
+
+    // The unlock utterance is not a transaction announcement.
+    const requestsBeforeCredit = historyRequests;
 
     // 2. Dispatch genuine bank.transaction.credit SSE event
     await page.evaluate(() => {
@@ -178,28 +206,17 @@ test.describe('Voice Announcements & Realtime Features', () => {
       es.dispatchEvent(event);
     });
 
-    // 3. Assert speechSynthesis spoke the natural Vietnamese phrase after burst collection
-    await page.waitForFunction(
-      () =>
-        (window as any).__spokenUtterances.length > 0 &&
-        (window as any).__spokenUtterances.some((u: any) =>
-          u.text.includes('năm trăm nghìn đồng')
-        ),
-      { timeout: 5000 }
-    );
+    // Wait for the actual amount, not the blank utterance used to unlock audio.
+    await expectTestAmount(page);
 
-    const spokenFirst = await page.evaluate(() => (window as any).__spokenUtterances);
-    expect(spokenFirst.length).toBe(1);
-    expect(spokenFirst[0].text.match(/năm trăm nghìn đồng/g)).toHaveLength(1);
-    expect(spokenFirst[0].lang).toBe('vi-VN');
-
-    // 4. Assert transaction immediately appeared in the transaction list
-    await expect(page.getByText('NGUYEN VAN A CHUYEN TIEN REALTIME')).toBeVisible();
-    await expect(page.getByText('KienlongBank', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('ACB', { exact: true }).first()).toBeVisible();
-    expect(historyRequests).toBeGreaterThanOrEqual(2);
+    // The authoritative history refetch retains committed rows without speaking them.
+    await expect.poll(() => historyRequests).toBeGreaterThan(requestsBeforeCredit);
+    await expect(history.getByText('NGUYEN VAN A CHUYEN TIEN REALTIME', { exact: true })).toBeVisible();
+    await expect(history.getByText('KienlongBank', { exact: true })).toHaveCount(3);
+    await expect(history.getByText('ACB', { exact: true })).toBeVisible();
 
     // 5. Replay the same committed transaction under a different SSE event ID.
+    const requestsBeforeReplay = historyRequests;
     await page.evaluate(() => {
       const es = (window as any).__activeEventSource;
       const event = new MessageEvent('bank.transaction.credit', {
@@ -222,12 +239,11 @@ test.describe('Voice Announcements & Realtime Features', () => {
       es.dispatchEvent(event);
     });
 
-    // Wait 1 second and assert speech count stayed at 1 (no duplicate announcement!)
-    await page.waitForTimeout(1000);
-    const spokenAfterReplay = await page.evaluate(() => (window as any).__spokenUtterances);
-    expect(spokenAfterReplay.length).toBe(1);
+    await expect.poll(() => historyRequests).toBeGreaterThan(requestsBeforeReplay);
+    expect(await spokenAnnouncements(page)).toHaveLength(1);
 
     // 6. Stale event suppression verification: event older than 150 seconds should be ignored for speech
+    const requestsBeforeStale = historyRequests;
     await page.evaluate(() => {
       const es = (window as any).__activeEventSource;
       const staleTime = new Date(Date.now() - 150_000).toISOString();
@@ -251,12 +267,11 @@ test.describe('Voice Announcements & Realtime Features', () => {
       es.dispatchEvent(event);
     });
 
-    // Wait 1 second and assert stale event did NOT trigger voice
-    await page.waitForTimeout(1000);
-    const spokenAfterStale = await page.evaluate(() => (window as any).__spokenUtterances);
-    expect(spokenAfterStale.length).toBe(1);
+    await expect.poll(() => historyRequests).toBeGreaterThan(requestsBeforeStale);
+    expect(await spokenAnnouncements(page)).toHaveLength(1);
 
     // Historical ACB and recovered payOS credits update history, never speech.
+    const requestsBeforeCatchUp = historyRequests;
     await page.evaluate(() => {
       // Installed by the EventSource fixture in beforeEach.
       const testWindow = window as VoiceFixtureWindow;
@@ -282,16 +297,13 @@ test.describe('Voice Announcements & Realtime Features', () => {
         }));
       }
     });
-    await page.waitForTimeout(1000);
-    expect(await page.evaluate(() => {
-      // Installed by the speech fixture in beforeEach.
-      const testWindow = window as VoiceFixtureWindow;
-      return testWindow.__spokenUtterances.length;
-    })).toBe(1);
-    await expect(page.getByText('LỊCH SỬ ACB KHÔNG ĐỌC')).toBeVisible();
-    await expect(page.getByText('LỊCH SỬ KienlongBank KHÔNG ĐỌC')).toBeVisible();
+    await expect.poll(() => historyRequests).toBeGreaterThan(requestsBeforeCatchUp);
+    expect(await spokenAnnouncements(page)).toHaveLength(1);
+    await expect(history.getByText('LỊCH SỬ ACB KHÔNG ĐỌC', { exact: true })).toBeVisible();
+    await expect(history.getByText('LỊCH SỬ KienlongBank KHÔNG ĐỌC', { exact: true })).toBeVisible();
 
     // A different committed order for the same amount must still be announced.
+    const requestsBeforeSecondOrder = historyRequests;
     await page.evaluate(() => {
       // Installed by the EventSource fixture in beforeEach.
       const testWindow = window as VoiceFixtureWindow;
@@ -308,29 +320,46 @@ test.describe('Voice Announcements & Realtime Features', () => {
         lastEventId: 'ep1:888006',
       }));
     });
-    await expect.poll(() => page.evaluate(() => {
-      // Installed by the speech fixture in beforeEach.
-      const testWindow = window as VoiceFixtureWindow;
-      return testWindow.__spokenUtterances.length;
-    })).toBe(2);
-    await expect(page.getByText('KHÁCH THỨ HAI CÙNG SỐ TIỀN')).toBeVisible();
+    await expect.poll(async () => (await spokenAnnouncements(page)).map(utterance => utterance.text))
+      .toEqual([expect.stringContaining('năm trăm nghìn đồng'), expect.stringContaining('năm trăm nghìn đồng')]);
+    await expect.poll(() => historyRequests).toBeGreaterThan(requestsBeforeSecondOrder);
+    const announcements = await spokenAnnouncements(page);
+    expect(announcements).toHaveLength(2);
+    for (const announcement of announcements) {
+      expect(announcement.text.match(/năm trăm nghìn đồng/g)).toHaveLength(1);
+      expect(announcement.lang).toBe('vi-VN');
+    }
+    await expect(history.getByText('KHÁCH THỨ HAI CÙNG SỐ TIỀN', { exact: true })).toBeVisible();
   });
 
-  test('custom announcement template formats phrase correctly', async ({ page }) => {
+  test('unsaved template draft does not override confirmed profile', async ({ page }) => {
+    const confirmedTemplate = 'Cấu hình đã lưu: {amount}.';
+    const draftTemplate = 'Bản nháp chưa lưu: {amount}.';
+    await page.route(/\/api\/(?:public\/)?v1\/voice\/profile$/, route => route.fulfill({
+      json: { ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY', synthesisKey: 'a'.repeat(64),
+        chimeEnabled: false, funEnabled: true, customTemplate: confirmedTemplate,
+        amountBands: DEFAULT_VOICE_PROFILE.amountBands.map(band => ({ ...band, styleId: 'custom' })) },
+    }));
+    await page.route(/\/api\/v1\/status$/, async route => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...await response.json(), userRole: 'OWNER' } });
+    });
+    const saves: string[] = [];
+    page.on('request', request => {
+      if (new URL(request.url()).pathname === '/api/v1/voice/settings' && request.method() === 'PUT') saves.push(request.url());
+    });
+
     await page.goto('/transactions');
     await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc' }).click();
-    await expect(page.getByRole('heading', { name: 'Cài đặt đọc giao dịch' })).toBeVisible();
+    const templateInput = page.getByPlaceholder('Ví dụ: Đã nhận {amount} từ khách quý.');
+    await expect(templateInput).toHaveValue(confirmedTemplate);
+    await templateInput.fill(draftTemplate);
+    await page.getByRole('button', { name: 'Nghe thử' }).click();
 
-    const templateInput = page.getByPlaceholder('Ví dụ: Đa tạ quý khách vì {amount}.');
-    if (await templateInput.isVisible()) {
-      await templateInput.fill('Cảm ơn bạn đã gửi {amount}.');
-    }
-
-    const testBtn = page.getByRole('button', { name: 'Nghe thử' });
-    await testBtn.click({ force: true });
-
-    await page.waitForFunction(() => (window as any).__spokenUtterances.length > 0);
-    const spoken = await page.evaluate(() => (window as any).__spokenUtterances);
-    expect(spoken[spoken.length - 1].text).toContain('năm trăm nghìn đồng');
+    const announcement = await expectTestAmount(page);
+    expect(announcement.text).toContain('Cấu hình đã lưu:');
+    expect(announcement.text).not.toContain('Bản nháp chưa lưu:');
+    await expect(templateInput).toHaveValue(draftTemplate);
+    expect(saves).toEqual([]);
   });
 });

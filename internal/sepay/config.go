@@ -35,6 +35,11 @@ type Config struct {
 	TopicID                   int64     `json:"topicId"`
 	WebhookSecret             string    `json:"webhookSecret"`
 	ActivationAt              time.Time `json:"activationAt"`
+	ActiveTransport           string    `json:"activeTransport"`
+	NativeMode                string    `json:"nativeMode"`
+	NativeSubAccount          string    `json:"nativeSubAccount"`
+	NativeReferenceVerified   bool      `json:"nativeReferenceVerified"`
+	NativeWebhookSecret       string    `json:"nativeWebhookSecret"`
 }
 
 var (
@@ -56,12 +61,12 @@ func (cfg Config) effectiveNotificationAccountNumber() string {
 // An absent configuration is disabled; a malformed supplied file is not.
 func ParseConfig(raw string) (Config, error) {
 	if strings.TrimSpace(raw) == "" {
-		return Config{Mode: ModeDisabled}, nil
+		return Config{Mode: ModeDisabled, ActiveTransport: "telegram", NativeMode: ModeDisabled}, nil
 	}
 	if !utf8.ValidString(raw) {
 		return Config{}, fmt.Errorf("sepay config: invalid JSON")
 	}
-	var cfg Config
+	cfg := Config{ActiveTransport: "telegram", NativeMode: ModeDisabled}
 	fields := map[string]any{
 		"mode": &cfg.Mode, "storeKey": &cfg.StoreKey, "storeName": &cfg.StoreName,
 		"bankCode": &cfg.BankCode, "bankName": &cfg.BankName,
@@ -70,6 +75,9 @@ func ParseConfig(raw string) (Config, error) {
 		"qrPayload":                 &cfg.QRPayload, "botId": &cfg.BotID, "chatId": &cfg.ChatID,
 		"senderBotId": &cfg.SenderBotID, "topicId": &cfg.TopicID,
 		"webhookSecret": &cfg.WebhookSecret, "activationAt": &cfg.ActivationAt,
+		"activeTransport": &cfg.ActiveTransport, "nativeMode": &cfg.NativeMode,
+		"nativeSubAccount": &cfg.NativeSubAccount, "nativeReferenceVerified": &cfg.NativeReferenceVerified,
+		"nativeWebhookSecret": &cfg.NativeWebhookSecret,
 	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	first, err := decoder.Token()
@@ -117,13 +125,19 @@ func ParseConfig(raw string) (Config, error) {
 	if cfg.NotificationAccountNumber != "" && (len(cfg.NotificationAccountNumber) > 200 || !accountPattern.MatchString(cfg.NotificationAccountNumber)) {
 		return Config{}, fmt.Errorf("sepay config: invalid notificationAccountNumber")
 	}
+	if cfg.ActiveTransport != "telegram" && cfg.ActiveTransport != "native" { return Config{}, fmt.Errorf("sepay config: invalid activeTransport") }
+	if cfg.NativeMode != ModeDisabled && cfg.NativeMode != ModeObserve && cfg.NativeMode != ModeActive { return Config{}, fmt.Errorf("sepay config: invalid nativeMode") }
+	if cfg.NativeWebhookSecret != "" && (len(cfg.NativeWebhookSecret) < 32 || len(cfg.NativeWebhookSecret) > 256) { return Config{}, fmt.Errorf("sepay config: invalid nativeWebhookSecret") }
+	if cfg.NativeMode != ModeDisabled && cfg.NativeWebhookSecret == "" { return Config{}, fmt.Errorf("sepay config: missing nativeWebhookSecret") }
+	if cfg.NativeMode == ModeActive && (cfg.ActiveTransport != "native" || cfg.Mode != ModeActive) { return Config{}, fmt.Errorf("sepay config: invalid nativeMode authority") }
+	if len(cfg.NativeSubAccount) > 200 || strings.ContainsAny(cfg.NativeSubAccount, "\r\n\x00") { return Config{}, fmt.Errorf("sepay config: invalid nativeSubAccount") }
 	if cfg.Mode == ModeDisabled {
-		return Config{Mode: ModeDisabled}, nil
+		return cfg, nil
 	}
 	if cfg.Mode != ModeObserve && cfg.Mode != ModeActive {
 		return Config{}, fmt.Errorf("sepay config: mode must be disabled, observe, or active")
 	}
-	for _, field := range []string{"storeKey", "storeName", "bankCode", "bankName", "accountNumber", "accountName", "qrPayload", "botId", "chatId", "senderBotId", "topicId", "webhookSecret", "activationAt"} {
+	for _, field := range []string{"storeKey", "storeName", "bankCode", "bankName", "accountNumber", "accountName", "qrPayload", "activationAt"} {
 		if !seen[field] {
 			return Config{}, fmt.Errorf("sepay config: missing %s", field)
 		}
@@ -142,21 +156,17 @@ func ParseConfig(raw string) (Config, error) {
 	if !accountPattern.MatchString(cfg.AccountNumber) {
 		return Config{}, fmt.Errorf("sepay config: invalid accountNumber")
 	}
-	if cfg.BotID <= 0 {
-		return Config{}, fmt.Errorf("sepay config: botId must be positive")
-	}
-	if cfg.ChatID >= 0 {
-		return Config{}, fmt.Errorf("sepay config: chatId must be a negative group ID")
-	}
-	if cfg.SenderBotID <= 0 {
-		return Config{}, fmt.Errorf("sepay config: senderBotId must be positive")
-	}
-	if cfg.TopicID < 0 {
-		return Config{}, fmt.Errorf("sepay config: topicId must be zero or positive")
-	}
-	secret, err := base64.RawURLEncoding.Strict().DecodeString(cfg.WebhookSecret)
-	if err != nil || len(secret) != 32 || base64.RawURLEncoding.EncodeToString(secret) != cfg.WebhookSecret {
-		return Config{}, fmt.Errorf("sepay config: webhookSecret must encode 32 bytes as unpadded base64url")
+	telegramConfigured := cfg.ActiveTransport == "telegram" || cfg.BotID != 0 || cfg.ChatID != 0 || cfg.SenderBotID != 0
+	if telegramConfigured {
+		for _, field := range []string{"botId", "chatId", "senderBotId", "topicId", "webhookSecret"} {
+			if !seen[field] { return Config{}, fmt.Errorf("sepay config: missing %s", field) }
+		}
+		if cfg.BotID <= 0 { return Config{}, fmt.Errorf("sepay config: botId must be positive") }
+		if cfg.ChatID >= 0 { return Config{}, fmt.Errorf("sepay config: chatId must be a negative group ID") }
+		if cfg.SenderBotID <= 0 { return Config{}, fmt.Errorf("sepay config: senderBotId must be positive") }
+		if cfg.TopicID < 0 { return Config{}, fmt.Errorf("sepay config: topicId must be zero or positive") }
+		secret, err := base64.RawURLEncoding.Strict().DecodeString(cfg.WebhookSecret)
+		if err != nil || len(secret) != 32 || base64.RawURLEncoding.EncodeToString(secret) != cfg.WebhookSecret { return Config{}, fmt.Errorf("sepay config: webhookSecret must encode 32 bytes as unpadded base64url") }
 	}
 	payload := strings.TrimSpace(cfg.QRPayload)
 	if payload == "" || len(cfg.QRPayload) > 4096 {

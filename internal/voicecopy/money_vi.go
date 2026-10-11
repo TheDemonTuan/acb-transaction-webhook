@@ -1,7 +1,6 @@
 package voicecopy
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -58,8 +57,7 @@ func SpeakVND(amount int64) string {
 	if amount <= 0 {
 		return "không đồng"
 	}
-
-	// Break amount into groups of 3 digits
+	// Break amount into groups of 3 digits from right to left
 	var groups []int
 	val := amount
 	for val > 0 {
@@ -67,40 +65,50 @@ func SpeakVND(amount int64) string {
 		val /= 1000
 	}
 
-	scaleUnits := []string{"", "nghìn", "triệu", "tỷ"}
+	// Pad groups to a multiple of 3 so each block has 3 groups (đơn vị, nghìn, triệu)
+	for len(groups)%3 != 0 {
+		groups = append(groups, 0)
+	}
 
+	numBlocks := len(groups) / 3
 	var resultParts []string
-	for i := len(groups) - 1; i >= 0; i-- {
-		groupVal := groups[i]
-		if groupVal == 0 {
+	hasHigherOverall := false
+
+	for b := numBlocks - 1; b >= 0; b-- {
+		g2 := groups[b*3+2] // triệu
+		g1 := groups[b*3+1] // nghìn
+		g0 := groups[b*3+0] // đơn vị
+
+		blockHasVal := (g2 > 0 || g1 > 0 || g0 > 0)
+		if !blockHasVal {
 			continue
 		}
 
-		hasHigher := (i < len(groups)-1)
-		groupWords := readThreeDigits(groupVal, hasHigher)
-		if len(groupWords) == 0 {
-			continue
+		if g2 > 0 {
+			w := readThreeDigits(g2, hasHigherOverall)
+			resultParts = append(resultParts, w...)
+			resultParts = append(resultParts, "triệu")
+			hasHigherOverall = true
 		}
 
-		scale := ""
-		if i < len(scaleUnits) {
-			scale = scaleUnits[i]
-		} else {
-			// For extremely large numbers (> 10^12)
-			tyCount := i / 3
-			rem := i % 3
-			if rem > 0 && rem < len(scaleUnits) {
-				scale = fmt.Sprintf("%s %s", scaleUnits[rem], strings.Repeat("tỷ ", tyCount))
-			} else {
-				scale = strings.TrimSpace(strings.Repeat("tỷ ", tyCount))
+		if g1 > 0 {
+			w := readThreeDigits(g1, hasHigherOverall)
+			resultParts = append(resultParts, w...)
+			resultParts = append(resultParts, "nghìn")
+			hasHigherOverall = true
+		}
+
+		if g0 > 0 {
+			w := readThreeDigits(g0, hasHigherOverall)
+			resultParts = append(resultParts, w...)
+			hasHigherOverall = true
+		}
+
+		if b > 0 {
+			for range b {
+				resultParts = append(resultParts, "tỷ")
 			}
 		}
-
-		part := strings.Join(groupWords, " ")
-		if scale != "" {
-			part = part + " " + scale
-		}
-		resultParts = append(resultParts, part)
 	}
 
 	if len(resultParts) == 0 {

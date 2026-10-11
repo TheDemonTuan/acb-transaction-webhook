@@ -1,0 +1,507 @@
+{
+  "id": "funny-medium-b09",
+  "styleId": "funny",
+  "bandId": "medium",
+  "recipes": [
+    {
+      "id": "funny-medium-o041-c001",
+      "text": "Quầy có tin vui tại chỗ. Cảm ơn bạn đã thêm duyên."
+    },
+    {
+      "id": "funny-medium-o041-c002",
+      "text": "Quầy có tin vui tại chỗ. Chúc bạn vui đều cả buổi."
+    },
+    {
+      "id": "funny-medium-o041-c003",
+      "text": "Quầy có tin vui tại chỗ. Mong bạn giữ sóng vui khỏe."
+    },
+    {
+      "id": "funny-medium-o041-c004",
+      "text": "Quầy có tin vui tại chỗ. Gửi bạn một nhịp cười tươi."
+    },
+    {
+      "id": "funny-medium-o041-c005",
+      "text": "Quầy có tin vui tại chỗ. Chúc ngày hôm nay dễ mến."
+    },
+    {
+      "id": "funny-medium-o041-c006",
+      "text": "Quầy có tin vui tại chỗ. Cảm ơn bạn đã ghé chung vui."
+    },
+    {
+      "id": "funny-medium-o041-c007",
+      "text": "Quầy có tin vui tại chỗ. Mong việc trôi như tiếng cười."
+    },
+    {
+      "id": "funny-medium-o041-c008",
+      "text": "Quầy có tin vui tại chỗ. Chúc bạn gặp toàn cảnh đẹp."
+    },
+    {
+      "id": "funny-medium-o041-c009",
+      "text": "Quầy có tin vui tại chỗ. Gửi bạn niềm vui không vội."
+    },
+    {
+      "id": "funny-medium-o041-c010",
+      "text": "Quầy có tin vui tại chỗ. Cảm ơn bạn đã cùng cười."
+    },
+    {
+      "id": "funny-medium-o041-c011",
+      "text": "Quầy có tin vui tại chỗ. Chúc bạn một chiều tỉnh táo."
+    },
+    {
+      "id": "funny-medium-o041-c012",
+      "text": "Quầy có tin vui tại chỗ. Mong hôm nay có thêm nhiều tiếng cười."
+    },
+    {
+      "id": "funny-medium-o041-c013",
+      "text": "Quầy có tin vui tại chỗ. Gửi bạn nụ cười đúng lúc."
+    },
+    {
+      "id": "funny-medium-o041-c014",
+      "text": "Quầy có tin vui tại chỗ. Cảm ơn lượt ghé tươi tỉnh."
+    },
+    {
+      "id": "funny-medium-o041-c015",
+      "text": "Quầy có tin vui tại chỗ. Chúc bạn vui thật tự nhiên."
+    },
+    {
+      "id": "funny-medium-o041-c016",
+      "text": "Quầy có tin vui tại chỗ. Mong hứng khởi luôn đầy pin."
+    },
+    {
+      "id": "funny-medium-o041-c017",
+      "text": "Quầy có tin vui tại chỗ. Gửi bạn lời chúc thật duyên."
+    },
+    {
+      "id": "funny-medium-o041-c018",
+      "text": "Quầy có tin vui tại chỗ. Cảm ơn bạn cho ngày sáng."
+    },
+    {
+      "id": "funny-medium-o041-c019",
+      "text": "Quầy có tin vui tại chỗ. Chúc bạn thư thái mà tươi."
+    },
+    {
+      "id": "funny-medium-o041-c020",
+      "text": "Quầy có tin vui tại chỗ. Mong tin vui tới đúng giờ."
+    },
+    {
+      "id": "funny-medium-o041-c021",
+      "text": "Quầy có tin vui tại chỗ. Gửi bạn một phút nhẹ đầu."
+    },
+    {
+      "id": "funny-medium-o041-c022",
+      "text": "Quầy có tin vui tại chỗ. Cảm ơn bạn đã tiếp thêm hứng khởi."
+    },
+    {
+      "id": "funny-medium-o041-c023",
+      "text": "Quầy có tin vui tại chỗ. Chúc bạn cười tươi đúng nhịp."
+    },
+    {
+      "id": "funny-medium-o041-c024",
+      "text": "Quầy có tin vui tại chỗ. Mong ngày của bạn chạy mượt."
+    },
+    {
+      "id": "funny-medium-o041-c025",
+      "text": "Quầy có tin vui tại chỗ. Gửi bạn tiếng cười lành mạnh."
+    },
+    {
+      "id": "funny-medium-o042-c001",
+      "text": "Nụ cười vừa bật đèn pha. Cảm ơn bạn đã thêm duyên."
+    },
+    {
+      "id": "funny-medium-o042-c002",
+      "text": "Nụ cười vừa bật đèn pha. Chúc bạn vui đều cả buổi."
+    },
+    {
+      "id": "funny-medium-o042-c003",
+      "text": "Nụ cười vừa bật đèn pha. Mong bạn giữ sóng vui khỏe."
+    },
+    {
+      "id": "funny-medium-o042-c004",
+      "text": "Nụ cười vừa bật đèn pha. Gửi bạn một nhịp cười tươi."
+    },
+    {
+      "id": "funny-medium-o042-c005",
+      "text": "Nụ cười vừa bật đèn pha. Chúc ngày hôm nay dễ mến."
+    },
+    {
+      "id": "funny-medium-o042-c006",
+      "text": "Nụ cười vừa bật đèn pha. Cảm ơn bạn đã ghé chung vui."
+    },
+    {
+      "id": "funny-medium-o042-c007",
+      "text": "Nụ cười vừa bật đèn pha. Mong việc trôi như tiếng cười."
+    },
+    {
+      "id": "funny-medium-o042-c008",
+      "text": "Nụ cười vừa bật đèn pha. Chúc bạn gặp toàn cảnh đẹp."
+    },
+    {
+      "id": "funny-medium-o042-c009",
+      "text": "Nụ cười vừa bật đèn pha. Gửi bạn niềm vui không vội."
+    },
+    {
+      "id": "funny-medium-o042-c010",
+      "text": "Nụ cười vừa bật đèn pha. Cảm ơn bạn đã cùng cười."
+    },
+    {
+      "id": "funny-medium-o042-c011",
+      "text": "Nụ cười vừa bật đèn pha. Chúc bạn một chiều tỉnh táo."
+    },
+    {
+      "id": "funny-medium-o042-c012",
+      "text": "Nụ cười vừa bật đèn pha. Mong hôm nay có thêm nhiều tiếng cười."
+    },
+    {
+      "id": "funny-medium-o042-c013",
+      "text": "Nụ cười vừa bật đèn pha. Gửi bạn nụ cười đúng lúc."
+    },
+    {
+      "id": "funny-medium-o042-c014",
+      "text": "Nụ cười vừa bật đèn pha. Cảm ơn lượt ghé tươi tỉnh."
+    },
+    {
+      "id": "funny-medium-o042-c015",
+      "text": "Nụ cười vừa bật đèn pha. Chúc bạn vui thật tự nhiên."
+    },
+    {
+      "id": "funny-medium-o042-c016",
+      "text": "Nụ cười vừa bật đèn pha. Mong hứng khởi luôn đầy pin."
+    },
+    {
+      "id": "funny-medium-o042-c017",
+      "text": "Nụ cười vừa bật đèn pha. Gửi bạn lời chúc thật duyên."
+    },
+    {
+      "id": "funny-medium-o042-c018",
+      "text": "Nụ cười vừa bật đèn pha. Cảm ơn bạn cho ngày sáng."
+    },
+    {
+      "id": "funny-medium-o042-c019",
+      "text": "Nụ cười vừa bật đèn pha. Chúc bạn thư thái mà tươi."
+    },
+    {
+      "id": "funny-medium-o042-c020",
+      "text": "Nụ cười vừa bật đèn pha. Mong tin vui tới đúng giờ."
+    },
+    {
+      "id": "funny-medium-o042-c021",
+      "text": "Nụ cười vừa bật đèn pha. Gửi bạn một phút nhẹ đầu."
+    },
+    {
+      "id": "funny-medium-o042-c022",
+      "text": "Nụ cười vừa bật đèn pha. Cảm ơn bạn đã tiếp thêm hứng khởi."
+    },
+    {
+      "id": "funny-medium-o042-c023",
+      "text": "Nụ cười vừa bật đèn pha. Chúc bạn cười tươi đúng nhịp."
+    },
+    {
+      "id": "funny-medium-o042-c024",
+      "text": "Nụ cười vừa bật đèn pha. Mong ngày của bạn chạy mượt."
+    },
+    {
+      "id": "funny-medium-o042-c025",
+      "text": "Nụ cười vừa bật đèn pha. Gửi bạn tiếng cười lành mạnh."
+    },
+    {
+      "id": "funny-medium-o043-c001",
+      "text": "Ngày thêm một lượt tươi tỉnh. Cảm ơn bạn đã thêm duyên."
+    },
+    {
+      "id": "funny-medium-o043-c002",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc bạn vui đều cả buổi."
+    },
+    {
+      "id": "funny-medium-o043-c003",
+      "text": "Ngày thêm một lượt tươi tỉnh. Mong bạn giữ sóng vui khỏe."
+    },
+    {
+      "id": "funny-medium-o043-c004",
+      "text": "Ngày thêm một lượt tươi tỉnh. Gửi bạn một nhịp cười tươi."
+    },
+    {
+      "id": "funny-medium-o043-c005",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc ngày hôm nay dễ mến."
+    },
+    {
+      "id": "funny-medium-o043-c006",
+      "text": "Ngày thêm một lượt tươi tỉnh. Cảm ơn bạn đã ghé chung vui."
+    },
+    {
+      "id": "funny-medium-o043-c007",
+      "text": "Ngày thêm một lượt tươi tỉnh. Mong việc trôi như tiếng cười."
+    },
+    {
+      "id": "funny-medium-o043-c008",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc bạn gặp toàn cảnh đẹp."
+    },
+    {
+      "id": "funny-medium-o043-c009",
+      "text": "Ngày thêm một lượt tươi tỉnh. Gửi bạn niềm vui không vội."
+    },
+    {
+      "id": "funny-medium-o043-c010",
+      "text": "Ngày thêm một lượt tươi tỉnh. Cảm ơn bạn đã cùng cười."
+    },
+    {
+      "id": "funny-medium-o043-c011",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc bạn một chiều tỉnh táo."
+    },
+    {
+      "id": "funny-medium-o043-c012",
+      "text": "Ngày thêm một lượt tươi tỉnh. Mong hôm nay có thêm nhiều tiếng cười."
+    },
+    {
+      "id": "funny-medium-o043-c013",
+      "text": "Ngày thêm một lượt tươi tỉnh. Gửi bạn nụ cười đúng lúc."
+    },
+    {
+      "id": "funny-medium-o043-c014",
+      "text": "Ngày thêm một lượt tươi tỉnh. Cảm ơn lượt ghé tươi tỉnh."
+    },
+    {
+      "id": "funny-medium-o043-c015",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc bạn vui thật tự nhiên."
+    },
+    {
+      "id": "funny-medium-o043-c016",
+      "text": "Ngày thêm một lượt tươi tỉnh. Mong hứng khởi luôn đầy pin."
+    },
+    {
+      "id": "funny-medium-o043-c017",
+      "text": "Ngày thêm một lượt tươi tỉnh. Gửi bạn lời chúc thật duyên."
+    },
+    {
+      "id": "funny-medium-o043-c018",
+      "text": "Ngày thêm một lượt tươi tỉnh. Cảm ơn bạn cho ngày sáng."
+    },
+    {
+      "id": "funny-medium-o043-c019",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc bạn thư thái mà tươi."
+    },
+    {
+      "id": "funny-medium-o043-c020",
+      "text": "Ngày thêm một lượt tươi tỉnh. Mong tin vui tới đúng giờ."
+    },
+    {
+      "id": "funny-medium-o043-c021",
+      "text": "Ngày thêm một lượt tươi tỉnh. Gửi bạn một phút nhẹ đầu."
+    },
+    {
+      "id": "funny-medium-o043-c022",
+      "text": "Ngày thêm một lượt tươi tỉnh. Cảm ơn bạn đã tiếp thêm hứng khởi."
+    },
+    {
+      "id": "funny-medium-o043-c023",
+      "text": "Ngày thêm một lượt tươi tỉnh. Chúc bạn cười tươi đúng nhịp."
+    },
+    {
+      "id": "funny-medium-o043-c024",
+      "text": "Ngày thêm một lượt tươi tỉnh. Mong ngày của bạn chạy mượt."
+    },
+    {
+      "id": "funny-medium-o043-c025",
+      "text": "Ngày thêm một lượt tươi tỉnh. Gửi bạn tiếng cười lành mạnh."
+    },
+    {
+      "id": "funny-medium-o044-c001",
+      "text": "Chiếc chuông vừa nhận tin tốt. Cảm ơn bạn đã thêm duyên."
+    },
+    {
+      "id": "funny-medium-o044-c002",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc bạn vui đều cả buổi."
+    },
+    {
+      "id": "funny-medium-o044-c003",
+      "text": "Chiếc chuông vừa nhận tin tốt. Mong bạn giữ sóng vui khỏe."
+    },
+    {
+      "id": "funny-medium-o044-c004",
+      "text": "Chiếc chuông vừa nhận tin tốt. Gửi bạn một nhịp cười tươi."
+    },
+    {
+      "id": "funny-medium-o044-c005",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc ngày hôm nay dễ mến."
+    },
+    {
+      "id": "funny-medium-o044-c006",
+      "text": "Chiếc chuông vừa nhận tin tốt. Cảm ơn bạn đã ghé chung vui."
+    },
+    {
+      "id": "funny-medium-o044-c007",
+      "text": "Chiếc chuông vừa nhận tin tốt. Mong việc trôi như tiếng cười."
+    },
+    {
+      "id": "funny-medium-o044-c008",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc bạn gặp toàn cảnh đẹp."
+    },
+    {
+      "id": "funny-medium-o044-c009",
+      "text": "Chiếc chuông vừa nhận tin tốt. Gửi bạn niềm vui không vội."
+    },
+    {
+      "id": "funny-medium-o044-c010",
+      "text": "Chiếc chuông vừa nhận tin tốt. Cảm ơn bạn đã cùng cười."
+    },
+    {
+      "id": "funny-medium-o044-c011",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc bạn một chiều tỉnh táo."
+    },
+    {
+      "id": "funny-medium-o044-c012",
+      "text": "Chiếc chuông vừa nhận tin tốt. Mong hôm nay có thêm nhiều tiếng cười."
+    },
+    {
+      "id": "funny-medium-o044-c013",
+      "text": "Chiếc chuông vừa nhận tin tốt. Gửi bạn nụ cười đúng lúc."
+    },
+    {
+      "id": "funny-medium-o044-c014",
+      "text": "Chiếc chuông vừa nhận tin tốt. Cảm ơn lượt ghé tươi tỉnh."
+    },
+    {
+      "id": "funny-medium-o044-c015",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc bạn vui thật tự nhiên."
+    },
+    {
+      "id": "funny-medium-o044-c016",
+      "text": "Chiếc chuông vừa nhận tin tốt. Mong hứng khởi luôn đầy pin."
+    },
+    {
+      "id": "funny-medium-o044-c017",
+      "text": "Chiếc chuông vừa nhận tin tốt. Gửi bạn lời chúc thật duyên."
+    },
+    {
+      "id": "funny-medium-o044-c018",
+      "text": "Chiếc chuông vừa nhận tin tốt. Cảm ơn bạn cho ngày sáng."
+    },
+    {
+      "id": "funny-medium-o044-c019",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc bạn thư thái mà tươi."
+    },
+    {
+      "id": "funny-medium-o044-c020",
+      "text": "Chiếc chuông vừa nhận tin tốt. Mong tin vui tới đúng giờ."
+    },
+    {
+      "id": "funny-medium-o044-c021",
+      "text": "Chiếc chuông vừa nhận tin tốt. Gửi bạn một phút nhẹ đầu."
+    },
+    {
+      "id": "funny-medium-o044-c022",
+      "text": "Chiếc chuông vừa nhận tin tốt. Cảm ơn bạn đã tiếp thêm hứng khởi."
+    },
+    {
+      "id": "funny-medium-o044-c023",
+      "text": "Chiếc chuông vừa nhận tin tốt. Chúc bạn cười tươi đúng nhịp."
+    },
+    {
+      "id": "funny-medium-o044-c024",
+      "text": "Chiếc chuông vừa nhận tin tốt. Mong ngày của bạn chạy mượt."
+    },
+    {
+      "id": "funny-medium-o044-c025",
+      "text": "Chiếc chuông vừa nhận tin tốt. Gửi bạn tiếng cười lành mạnh."
+    },
+    {
+      "id": "funny-medium-o045-c001",
+      "text": "Niềm vui đang ở hàng đầu. Cảm ơn bạn đã thêm duyên."
+    },
+    {
+      "id": "funny-medium-o045-c002",
+      "text": "Niềm vui đang ở hàng đầu. Chúc bạn vui đều cả buổi."
+    },
+    {
+      "id": "funny-medium-o045-c003",
+      "text": "Niềm vui đang ở hàng đầu. Mong bạn giữ sóng vui khỏe."
+    },
+    {
+      "id": "funny-medium-o045-c004",
+      "text": "Niềm vui đang ở hàng đầu. Gửi bạn một nhịp cười tươi."
+    },
+    {
+      "id": "funny-medium-o045-c005",
+      "text": "Niềm vui đang ở hàng đầu. Chúc ngày hôm nay dễ mến."
+    },
+    {
+      "id": "funny-medium-o045-c006",
+      "text": "Niềm vui đang ở hàng đầu. Cảm ơn bạn đã ghé chung vui."
+    },
+    {
+      "id": "funny-medium-o045-c007",
+      "text": "Niềm vui đang ở hàng đầu. Mong việc trôi như tiếng cười."
+    },
+    {
+      "id": "funny-medium-o045-c008",
+      "text": "Niềm vui đang ở hàng đầu. Chúc bạn gặp toàn cảnh đẹp."
+    },
+    {
+      "id": "funny-medium-o045-c009",
+      "text": "Niềm vui đang ở hàng đầu. Gửi bạn niềm vui không vội."
+    },
+    {
+      "id": "funny-medium-o045-c010",
+      "text": "Niềm vui đang ở hàng đầu. Cảm ơn bạn đã cùng cười."
+    },
+    {
+      "id": "funny-medium-o045-c011",
+      "text": "Niềm vui đang ở hàng đầu. Chúc bạn một chiều tỉnh táo."
+    },
+    {
+      "id": "funny-medium-o045-c012",
+      "text": "Niềm vui đang ở hàng đầu. Mong hôm nay có thêm nhiều tiếng cười."
+    },
+    {
+      "id": "funny-medium-o045-c013",
+      "text": "Niềm vui đang ở hàng đầu. Gửi bạn nụ cười đúng lúc."
+    },
+    {
+      "id": "funny-medium-o045-c014",
+      "text": "Niềm vui đang ở hàng đầu. Cảm ơn lượt ghé tươi tỉnh."
+    },
+    {
+      "id": "funny-medium-o045-c015",
+      "text": "Niềm vui đang ở hàng đầu. Chúc bạn vui thật tự nhiên."
+    },
+    {
+      "id": "funny-medium-o045-c016",
+      "text": "Niềm vui đang ở hàng đầu. Mong hứng khởi luôn đầy pin."
+    },
+    {
+      "id": "funny-medium-o045-c017",
+      "text": "Niềm vui đang ở hàng đầu. Gửi bạn lời chúc thật duyên."
+    },
+    {
+      "id": "funny-medium-o045-c018",
+      "text": "Niềm vui đang ở hàng đầu. Cảm ơn bạn cho ngày sáng."
+    },
+    {
+      "id": "funny-medium-o045-c019",
+      "text": "Niềm vui đang ở hàng đầu. Chúc bạn thư thái mà tươi."
+    },
+    {
+      "id": "funny-medium-o045-c020",
+      "text": "Niềm vui đang ở hàng đầu. Mong tin vui tới đúng giờ."
+    },
+    {
+      "id": "funny-medium-o045-c021",
+      "text": "Niềm vui đang ở hàng đầu. Gửi bạn một phút nhẹ đầu."
+    },
+    {
+      "id": "funny-medium-o045-c022",
+      "text": "Niềm vui đang ở hàng đầu. Cảm ơn bạn đã tiếp thêm hứng khởi."
+    },
+    {
+      "id": "funny-medium-o045-c023",
+      "text": "Niềm vui đang ở hàng đầu. Chúc bạn cười tươi đúng nhịp."
+    },
+    {
+      "id": "funny-medium-o045-c024",
+      "text": "Niềm vui đang ở hàng đầu. Mong ngày của bạn chạy mượt."
+    },
+    {
+      "id": "funny-medium-o045-c025",
+      "text": "Niềm vui đang ở hàng đầu. Gửi bạn tiếng cười lành mạnh."
+    }
+  ]
+}

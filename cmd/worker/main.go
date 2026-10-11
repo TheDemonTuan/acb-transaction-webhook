@@ -46,6 +46,7 @@ type workerService struct {
 	barkPublicURL        string
 	coordinator          *workerstate.Coordinator
 	maintRunner          *maintenance.Runner
+	publisher            *realtimestream.JournalPublisher
 }
 
 func (w *workerService) WakePaymentReconciler(ctx context.Context) error {
@@ -62,6 +63,9 @@ func (w *workerService) WakePaymentReconciler(ctx context.Context) error {
 func (w *workerService) WakeDispatcher(ctx context.Context) error {
 	if w.dispatcher == nil {
 		return fmt.Errorf("dispatcher not initialized")
+	}
+	if w.publisher != nil {
+		w.publisher.Wake()
 	}
 	w.dispatcher.Wake()
 	return nil
@@ -245,10 +249,10 @@ func (w *workerService) Resume(ctx context.Context) error {
 	return nil
 }
 
-func newWorkerPaymentNotifier(waker interface{ Wake() }, hub *eventhub.Hub) func(storage.EventNotification) {
+func newWorkerPaymentNotifier(waker interface{ Wake() }, publisher interface{ Wake() }) func(storage.EventNotification) {
 	return func(event storage.EventNotification) {
-		if hub != nil {
-			hub.Publish(eventhub.Event{Seq: event.JournalSeq, Epoch: event.Epoch, EventType: event.EventType, AggregateID: event.TransactionID, Payload: event.Payload, CreatedAt: event.CreatedAt, CommittedAt: event.CommittedAt})
+		if publisher != nil {
+			publisher.Wake()
 		}
 		if waker != nil {
 			waker.Wake()
@@ -481,7 +485,18 @@ func main() {
 	}()
 
 	workerRealtimeHub := eventhub.New()
-	paymentService := payments.NewManagedService(cfg, store, newWorkerPaymentNotifier(dispatcher, workerRealtimeHub))
+	journalPublisher := realtimestream.NewJournalPublisher(store, workerRealtimeHub)
+	if err := journalPublisher.Init(workerCtx); err != nil {
+		logger.Error("journal publisher init failed", "error", err)
+		os.Exit(1)
+	}
+	workerWg.Add(1)
+	go func() {
+		defer workerWg.Done()
+		journalPublisher.Run(workerCtx)
+	}()
+
+	paymentService := payments.NewManagedService(cfg, store, newWorkerPaymentNotifier(dispatcher, journalPublisher))
 	paymentsRunning.Store(true)
 	workerWg.Add(1)
 	go func() {
@@ -515,6 +530,7 @@ func main() {
 		barkPublicURL:        cfg.BarkPublicURL,
 		coordinator:          coordinator,
 		maintRunner:          maintRunner,
+		publisher:            journalPublisher,
 	}
 
 	rpcServer, err := workerrpc.NewServer(ws, cfg.WorkerInternalToken, workerrpc.WithServerTimeout(45*time.Second))

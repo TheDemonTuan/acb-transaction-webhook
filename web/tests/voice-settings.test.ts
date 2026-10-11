@@ -1,68 +1,36 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import {
-  DEFAULT_VOICE_SETTINGS,
-  loadVoiceSettings,
-  saveVoiceSettings,
-} from '../src/features/voice-announcements/voice-settings';
-import { DEFAULT_ANNOUNCEMENT_TEMPLATE } from '../src/features/voice-announcements/voice-copy';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_VOICE_SETTINGS, loadVoiceSettings, saveVoiceSettings } from '../src/features/voice-announcements/voice-settings';
 
-describe('voice-settings', () => {
-  let store: Record<string, string> = {};
-
+describe('device voice preferences', () => {
+  let store: Record<string, string>;
   beforeEach(() => {
     store = {};
-    (globalThis as any).window = {
-      localStorage: {
-        getItem: (k: string) => store[k] ?? null,
-        setItem: (k: string, v: string) => {
-          store[k] = v;
-        },
-        removeItem: (k: string) => {
-          delete store[k];
-        },
-      },
-    };
+    vi.stubGlobal('window', { localStorage: { getItem: (key: string) => store[key] ?? null,
+      setItem: (key: string, value: string) => { store[key] = value; } } });
   });
-
-  it('loads default settings when empty', () => {
-    const settings = loadVoiceSettings();
-    expect(settings.enabled).toBe(false);
-    expect(settings.volume).toBe(1);
-    expect(settings.rate).toBe(1.25);
-    expect(settings.includeDescription).toBe(false);
-    expect(settings.announcementTemplate).toBe(DEFAULT_ANNOUNCEMENT_TEMPLATE);
-  });
-
-  it('saves and reloads modified settings including template', () => {
-    saveVoiceSettings({
-      enabled: true,
-      volume: 0.8,
-      rate: 1.5,
-      includeDescription: true,
-      announcementTemplate: 'Đã nhận {amount_raw} VND.',
-    });
+  afterEach(() => vi.unstubAllGlobals());
+  it('defaults to disabled and never stores a server voice/rate/template locally', () => {
+    expect(loadVoiceSettings()).toEqual(DEFAULT_VOICE_SETTINGS);
+    saveVoiceSettings({ enabled: true, volume: 0.8, browserVoiceURI: 'selected-vi' });
     const loaded = loadVoiceSettings();
-    expect(loaded.enabled).toBe(true);
-    expect(loaded.volume).toBe(0.8);
-    expect(loaded.rate).toBe(1.5);
-    expect(loaded.includeDescription).toBe(true);
-    expect(loaded.announcementTemplate).toBe('Đã nhận {amount_raw} VND.');
+    expect(loaded).toMatchObject({ enabled: true, volume: 0.8, browserVoiceURI: 'selected-vi', schemaVersion: 2 });
+    expect(loaded).not.toHaveProperty('rate');
+    expect(loaded).not.toHaveProperty('voiceURI');
   });
-
-  it('clamps invalid values to 0.75x - 2.0x for rate', () => {
-    saveVoiceSettings({ volume: 5, rate: 0.1 });
-    const loaded = loadVoiceSettings();
-    expect(loaded.volume).toBe(1); // clamped max 1
-    expect(loaded.rate).toBe(0.75); // clamped min 0.75
-
-    saveVoiceSettings({ rate: 3.5 });
-    const loadedHigh = loadVoiceSettings();
-    expect(loadedHigh.rate).toBe(2); // clamped max 2
+  it('preserves mute volume zero and clamps bounds', () => {
+    expect(saveVoiceSettings({ volume: 0 }).volume).toBe(0);
+    expect(saveVoiceSettings({ volume: 5 }).volume).toBe(1);
+    expect(saveVoiceSettings({ volume: -1 }).volume).toBe(0);
   });
-
-  it('restores default template when blank string provided', () => {
-    saveVoiceSettings({ announcementTemplate: '   ' });
-    const loaded = loadVoiceSettings();
-    expect(loaded.announcementTemplate).toBe(DEFAULT_ANNOUNCEMENT_TEMPLATE);
+  it('keeps a single legacy snapshot without applying or importing old config', () => {
+    store['acb.voice.settings.v1'] = JSON.stringify({ enabled: true, volume: 0, announceWhenHidden: false,
+      voiceURI: 'old-edge', rate: 2, pitch: 1.2, announcementTemplate: 'Nhận {amount}', includeDescription: true });
+    const migrated = loadVoiceSettings();
+    expect(migrated).toMatchObject({ schemaVersion: 2, enabled: true, volume: 0, announceWhenHidden: false,
+      legacySnapshot: { voiceURI: 'old-edge', rate: 2, pitch: 1.2, announcementTemplate: 'Nhận {amount}', includeDescription: true } });
+    expect(migrated.browserVoiceURI).toBeUndefined();
+    expect(JSON.parse(store['acb.voice.settings.v1'])).not.toHaveProperty('rate');
+    saveVoiceSettings({ legacySnapshot: undefined });
+    expect(loadVoiceSettings().legacySnapshot).toBeUndefined();
   });
 });

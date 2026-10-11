@@ -175,10 +175,10 @@ func TestDeploymentControl_MutationGuards(t *testing.T) {
 		t.Errorf("CreateEndpoint: expected ErrMutationGateLocked, got %v", err)
 	}
 
-	// SaveVoiceSettings must fail while locked.
-	_, err = store.SaveVoiceSettings(ctx, storage.VoiceSettings{ProviderMode: "ONLINE_AUTO", EdgeVoice: "vi-VN-HoaiMyNeural"})
+	// SaveVoiceProfile must fail while locked.
+	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{ProviderMode: "EDGE_ONLY", EdgeVoice: "vi-VN-HoaiMyNeural", Rate: 1.25, AmountBands: storage.DefaultVoiceProfile.AmountBands})
 	if !errors.Is(err, storage.ErrMutationGateLocked) {
-		t.Errorf("SaveVoiceSettings: expected ErrMutationGateLocked, got %v", err)
+		t.Errorf("SaveVoiceProfile: expected ErrMutationGateLocked, got %v", err)
 	}
 
 	// CreateBarkChannel must fail while locked.

@@ -5,6 +5,16 @@ import (
 	"sync"
 	"time"
 )
+const (
+	PaymentProviderPayOS         = "PAYOS"
+	PaymentProviderSePayTelegram = "SEPAY_TELEGRAM"
+	PaymentProviderSePayNative   = "SEPAY_NATIVE"
+
+	PaymentStageVerify = "verify"
+	PaymentStageCommit = "commit"
+	PaymentStageAck    = "ack"
+)
+
 
 type RealtimeMetricsReport struct {
 	ConnectedClients  int64                         `json:"connectedClients"`
@@ -42,6 +52,8 @@ type Registry struct {
 	fallbackTimes        []time.Time
 	commitGatewaySamples []float64
 	commitBrowserSamples []float64
+	paymentStageSamples  map[string][]float64
+	paymentStageCounts   map[string]int
 
 	// Notification backlog telemetry
 	notifTotalPending      int
@@ -99,6 +111,8 @@ func NewRegistry() *Registry {
 		commitGatewaySamples:   make([]float64, 0, 1000),
 		commitBrowserSamples:   make([]float64, 0, 1000),
 		fallbackTimes:          make([]time.Time, 0, 64),
+		paymentStageSamples:    make(map[string][]float64),
+		paymentStageCounts:     make(map[string]int),
 	}
 }
 
@@ -215,6 +229,8 @@ func (r *Registry) RecordCommitToGateway(d time.Duration) {
 	r.commitGatewaySamples = append(r.commitGatewaySamples, float64(d.Microseconds())/1000.0)
 }
 
+// RecordCommitToBrowserSSE records latency from financial commit to server SSE write/flush.
+// Note: This measures server-side flush completion, not browser arrival.
 func (r *Registry) RecordCommitToBrowserSSE(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -223,6 +239,45 @@ func (r *Registry) RecordCommitToBrowserSSE(d time.Duration) {
 	}
 	r.commitBrowserSamples = append(r.commitBrowserSamples, float64(d.Microseconds())/1000.0)
 }
+func (r *Registry) RecordPaymentStage(provider, stage string, elapsed time.Duration) {
+	if provider != PaymentProviderPayOS && provider != PaymentProviderSePayTelegram && provider != PaymentProviderSePayNative {
+		return
+	}
+	if stage != PaymentStageVerify && stage != PaymentStageCommit && stage != PaymentStageAck {
+		return
+	}
+	ms := float64(elapsed.Microseconds()) / 1000.0
+	key := provider + ":" + stage
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	samples := r.paymentStageSamples[key]
+	if len(samples) >= 1000 {
+		samples = samples[1:]
+	}
+	r.paymentStageSamples[key] = append(samples, ms)
+	r.paymentStageCounts[key]++
+}
+
+func RecordPaymentStage(provider, stage string, elapsed time.Duration) {
+	Default.RecordPaymentStage(provider, stage, elapsed)
+}
+
+func (r *Registry) PaymentStageReport() map[string]PaymentStageMetric {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	res := make(map[string]PaymentStageMetric, len(r.paymentStageSamples))
+	for k, samples := range r.paymentStageSamples {
+		res[k] = PaymentStageMetric{
+			Count: r.paymentStageCounts[k],
+			P95Ms: calcP95(samples),
+			P99Ms: calcP99(samples),
+		}
+	}
+	return res
+}
+
 
 // Notification backlog telemetry
 
@@ -483,6 +538,15 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		RestoreDrillAgeDays:     r.restoreDrillAgeDays,
 	}
 
+	stageTele := make(map[string]PaymentStageMetric, len(r.paymentStageSamples))
+	for k, samples := range r.paymentStageSamples {
+		stageTele[k] = PaymentStageMetric{
+			Count: r.paymentStageCounts[k],
+			P95Ms: calcP95(samples),
+			P99Ms: calcP99(samples),
+		}
+	}
+
 	return TelemetrySnapshot{
 		CapturedAt:       now,
 		Realtime:         rtTele,
@@ -491,6 +555,7 @@ func (r *Registry) FullSnapshot() TelemetrySnapshot {
 		Singleton:        singleTele,
 		Deployment:       deptTele,
 		BackupAndRestore: backupTele,
+		PaymentStages:    stageTele,
 	}
 }
 
@@ -502,5 +567,16 @@ func calcP95(samples []float64) float64 {
 	copy(cp, samples)
 	sort.Float64s(cp)
 	idx := int(float64(len(cp)-1) * 0.95)
+	return cp[idx]
+}
+
+func calcP99(samples []float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	cp := make([]float64, len(samples))
+	copy(cp, samples)
+	sort.Float64s(cp)
+	idx := int(float64(len(cp)-1) * 0.99)
 	return cp[idx]
 }

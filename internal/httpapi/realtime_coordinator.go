@@ -18,11 +18,12 @@ type RealtimeCoordinator struct {
 	reconcileNow chan struct{}
 	interval     time.Duration
 
-	mu      sync.RWMutex
-	lastSeq int64
-	done    chan struct{}
+	mu        sync.RWMutex
+	lastSeq   int64
+	done      chan struct{}
+	readyCh   chan struct{}
+	readyOnce sync.Once
 }
-
 func NewRealtimeCoordinator(server *Server, interval time.Duration) *RealtimeCoordinator {
 	if interval <= 0 {
 		interval = time.Second
@@ -34,6 +35,7 @@ func NewRealtimeCoordinator(server *Server, interval time.Duration) *RealtimeCoo
 		interval:     interval,
 		lastSeq:      -1,
 		done:         make(chan struct{}),
+		readyCh:      make(chan struct{}),
 	}
 }
 
@@ -71,6 +73,19 @@ func (c *RealtimeCoordinator) LastSeq() int64 {
 	return c.lastSeq
 }
 
+func (c *RealtimeCoordinator) WaitReady(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	select {
+	case <-c.readyCh:
+		return nil
+	case <-c.done:
+		return context.Canceled
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func (c *RealtimeCoordinator) Run(ctx context.Context) {
 	if c == nil {
 		return
@@ -83,6 +98,7 @@ func (c *RealtimeCoordinator) Run(ctx context.Context) {
 		lastSeq, err := c.server.store.GetMaxJournalSeq(ctx, realtimeEpoch)
 		if err == nil {
 			c.setLastSeq(lastSeq)
+			c.readyOnce.Do(func() { close(c.readyCh) })
 			break
 		}
 		slog.Warn("failed to initialize realtime coordinator", "error", err)

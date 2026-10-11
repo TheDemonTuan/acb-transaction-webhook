@@ -473,6 +473,7 @@ export class RealtimeClient {
       type,
       data,
       receivedAt: Date.now(),
+      receivedMonotonicAt: typeof performance !== 'undefined' ? performance.now() : 0,
     };
 
     const specific = this.listeners.get(type);

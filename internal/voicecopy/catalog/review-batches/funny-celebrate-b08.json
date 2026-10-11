@@ -1,0 +1,507 @@
+{
+  "id": "funny-celebrate-b08",
+  "styleId": "funny",
+  "bandId": "celebrate",
+  "recipes": [
+    {
+      "id": "funny-celebrate-o036-c001",
+      "text": "Quầy vừa có pha đáng nhớ. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o036-c002",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o036-c003",
+      "text": "Quầy vừa có pha đáng nhớ. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o036-c004",
+      "text": "Quầy vừa có pha đáng nhớ. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o036-c005",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o036-c006",
+      "text": "Quầy vừa có pha đáng nhớ. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o036-c007",
+      "text": "Quầy vừa có pha đáng nhớ. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o036-c008",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o036-c009",
+      "text": "Quầy vừa có pha đáng nhớ. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o036-c010",
+      "text": "Quầy vừa có pha đáng nhớ. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o036-c011",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o036-c012",
+      "text": "Quầy vừa có pha đáng nhớ. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o036-c013",
+      "text": "Quầy vừa có pha đáng nhớ. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o036-c014",
+      "text": "Quầy vừa có pha đáng nhớ. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o036-c015",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o036-c016",
+      "text": "Quầy vừa có pha đáng nhớ. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o036-c017",
+      "text": "Quầy vừa có pha đáng nhớ. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o036-c018",
+      "text": "Quầy vừa có pha đáng nhớ. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o036-c019",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o036-c020",
+      "text": "Quầy vừa có pha đáng nhớ. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o036-c021",
+      "text": "Quầy vừa có pha đáng nhớ. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o036-c022",
+      "text": "Quầy vừa có pha đáng nhớ. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o036-c023",
+      "text": "Quầy vừa có pha đáng nhớ. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o036-c024",
+      "text": "Quầy vừa có pha đáng nhớ. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o036-c025",
+      "text": "Quầy vừa có pha đáng nhớ. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o037-c001",
+      "text": "Niềm vui đang đứng giữa sân. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o037-c002",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o037-c003",
+      "text": "Niềm vui đang đứng giữa sân. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o037-c004",
+      "text": "Niềm vui đang đứng giữa sân. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o037-c005",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o037-c006",
+      "text": "Niềm vui đang đứng giữa sân. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o037-c007",
+      "text": "Niềm vui đang đứng giữa sân. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o037-c008",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o037-c009",
+      "text": "Niềm vui đang đứng giữa sân. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o037-c010",
+      "text": "Niềm vui đang đứng giữa sân. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o037-c011",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o037-c012",
+      "text": "Niềm vui đang đứng giữa sân. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o037-c013",
+      "text": "Niềm vui đang đứng giữa sân. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o037-c014",
+      "text": "Niềm vui đang đứng giữa sân. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o037-c015",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o037-c016",
+      "text": "Niềm vui đang đứng giữa sân. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o037-c017",
+      "text": "Niềm vui đang đứng giữa sân. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o037-c018",
+      "text": "Niềm vui đang đứng giữa sân. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o037-c019",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o037-c020",
+      "text": "Niềm vui đang đứng giữa sân. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o037-c021",
+      "text": "Niềm vui đang đứng giữa sân. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o037-c022",
+      "text": "Niềm vui đang đứng giữa sân. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o037-c023",
+      "text": "Niềm vui đang đứng giữa sân. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o037-c024",
+      "text": "Niềm vui đang đứng giữa sân. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o037-c025",
+      "text": "Niềm vui đang đứng giữa sân. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o038-c001",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o038-c002",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o038-c003",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o038-c004",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o038-c005",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o038-c006",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o038-c007",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o038-c008",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o038-c009",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o038-c010",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o038-c011",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o038-c012",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o038-c013",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o038-c014",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o038-c015",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o038-c016",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o038-c017",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o038-c018",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o038-c019",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o038-c020",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o038-c021",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o038-c022",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o038-c023",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o038-c024",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o038-c025",
+      "text": "Chiếc ví còn nguyên điềm tĩnh. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o039-c001",
+      "text": "Ngày vừa lên trang nổi bật. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o039-c002",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o039-c003",
+      "text": "Ngày vừa lên trang nổi bật. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o039-c004",
+      "text": "Ngày vừa lên trang nổi bật. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o039-c005",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o039-c006",
+      "text": "Ngày vừa lên trang nổi bật. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o039-c007",
+      "text": "Ngày vừa lên trang nổi bật. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o039-c008",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o039-c009",
+      "text": "Ngày vừa lên trang nổi bật. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o039-c010",
+      "text": "Ngày vừa lên trang nổi bật. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o039-c011",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o039-c012",
+      "text": "Ngày vừa lên trang nổi bật. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o039-c013",
+      "text": "Ngày vừa lên trang nổi bật. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o039-c014",
+      "text": "Ngày vừa lên trang nổi bật. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o039-c015",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o039-c016",
+      "text": "Ngày vừa lên trang nổi bật. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o039-c017",
+      "text": "Ngày vừa lên trang nổi bật. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o039-c018",
+      "text": "Ngày vừa lên trang nổi bật. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o039-c019",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o039-c020",
+      "text": "Ngày vừa lên trang nổi bật. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o039-c021",
+      "text": "Ngày vừa lên trang nổi bật. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o039-c022",
+      "text": "Ngày vừa lên trang nổi bật. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o039-c023",
+      "text": "Ngày vừa lên trang nổi bật. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o039-c024",
+      "text": "Ngày vừa lên trang nổi bật. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o039-c025",
+      "text": "Ngày vừa lên trang nổi bật. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o040-c001",
+      "text": "Nụ cười vừa bước ra sáng. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o040-c002",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o040-c003",
+      "text": "Nụ cười vừa bước ra sáng. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o040-c004",
+      "text": "Nụ cười vừa bước ra sáng. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o040-c005",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o040-c006",
+      "text": "Nụ cười vừa bước ra sáng. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o040-c007",
+      "text": "Nụ cười vừa bước ra sáng. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o040-c008",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o040-c009",
+      "text": "Nụ cười vừa bước ra sáng. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o040-c010",
+      "text": "Nụ cười vừa bước ra sáng. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o040-c011",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o040-c012",
+      "text": "Nụ cười vừa bước ra sáng. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o040-c013",
+      "text": "Nụ cười vừa bước ra sáng. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o040-c014",
+      "text": "Nụ cười vừa bước ra sáng. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o040-c015",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o040-c016",
+      "text": "Nụ cười vừa bước ra sáng. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o040-c017",
+      "text": "Nụ cười vừa bước ra sáng. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o040-c018",
+      "text": "Nụ cười vừa bước ra sáng. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o040-c019",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o040-c020",
+      "text": "Nụ cười vừa bước ra sáng. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o040-c021",
+      "text": "Nụ cười vừa bước ra sáng. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o040-c022",
+      "text": "Nụ cười vừa bước ra sáng. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o040-c023",
+      "text": "Nụ cười vừa bước ra sáng. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o040-c024",
+      "text": "Nụ cười vừa bước ra sáng. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o040-c025",
+      "text": "Nụ cười vừa bước ra sáng. Gửi bạn niềm vui vừa vặn."
+    }
+  ]
+}

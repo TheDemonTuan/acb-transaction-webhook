@@ -56,3 +56,13 @@ var SePayStoreSQL string
 //
 //go:embed 018_sepay_managed_config.sql
 var SePayManagedConfigSQL string
+
+// VoiceProfileSQL embeds schema version 19 voice profile and audio settings.
+//
+//go:embed 019_voice_profile.sql
+var VoiceProfileSQL string
+
+// SePayNativeSQL embeds schema version 20 native webhook evidence.
+//
+//go:embed 020_sepay_native.sql
+var SePayNativeSQL string

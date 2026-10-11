@@ -22,6 +22,11 @@ func sepayAdminError(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "SEPAY_REVISION_CONFLICT"
 	case errors.Is(err, storage.ErrSePayReceiverMismatch):
 		status, code = http.StatusConflict, "SEPAY_RECEIVER_IMMUTABLE"
+	case errors.Is(err, storage.ErrSePayStoreKeyImmutable):
+		status, code = http.StatusConflict, "SEPAY_STORE_KEY_IMMUTABLE"
+	case errors.Is(err, storage.ErrSePayReferenceUnverified):
+		status, code = http.StatusBadRequest, "INVALID_SEPAY_CONFIG"
+		field = &sepay.FieldError{Field: "nativeReferenceVerified"}
 	case errors.Is(err, sepay.ErrTelegramTokenRequired):
 		status, code = http.StatusBadRequest, "TELEGRAM_TOKEN_REQUIRED"
 	case errors.Is(err, sepay.ErrTelegramConfigRequired):
@@ -82,7 +87,11 @@ func (s *Server) saveSePayAdminConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields, ok := value.(map[string]any)
-	if !ok || len(fields) != 3 || fields["revision"] == nil || fields["config"] == nil || fields["botToken"] == nil {
+	if !ok || fields["revision"] == nil || fields["config"] == nil || fields["botToken"] == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_SEPAY_CONFIG")
+		return
+	}
+	if len(fields) != 3 && (len(fields) != 4 || fields["nativeWebhookSecret"] == nil) {
 		writeError(w, http.StatusBadRequest, "INVALID_SEPAY_CONFIG")
 		return
 	}
@@ -97,12 +106,12 @@ func (s *Server) saveSePayAdminConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch key {
-		case "mode", "storeKey", "storeName", "bankCode", "bankName", "accountNumber", "notificationAccountNumber", "accountName", "qrPayload", "botId", "chatId", "senderBotId", "topicId", "activationAt":
+		case "mode", "storeKey", "storeName", "bankCode", "bankName", "accountNumber", "notificationAccountNumber", "accountName", "qrPayload", "botId", "chatId", "senderBotId", "topicId", "activationAt", "activeTransport", "nativeMode", "nativeSubAccount":
 			if _, ok := val.(string); !ok {
 				writeError(w, http.StatusBadRequest, "INVALID_SEPAY_CONFIG")
 				return
 			}
-		case "receiverVerified", "sourceSeparated":
+		case "receiverVerified", "sourceSeparated", "nativeReferenceVerified":
 			if _, ok := val.(bool); !ok {
 				writeError(w, http.StatusBadRequest, "INVALID_SEPAY_CONFIG")
 				return
@@ -117,9 +126,10 @@ func (s *Server) saveSePayAdminConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Revision int64             `json:"revision"`
-		Config   sepay.AdminFields `json:"config"`
-		BotToken string            `json:"botToken"`
+		Revision            int64             `json:"revision"`
+		Config              sepay.AdminFields `json:"config"`
+		BotToken            string            `json:"botToken"`
+		NativeWebhookSecret string            `json:"nativeWebhookSecret"`
 	}
 	existing, err := s.sepay.AdminConfig(r.Context())
 	if err != nil {
@@ -141,12 +151,12 @@ func (s *Server) saveSePayAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if nextNotificationAccount == "" {
 		nextNotificationAccount = body.Config.AccountNumber
 	}
-	if body.Config.Mode == sepay.ModeActive && nextNotificationAccount != oldNotificationAccount && configFields["sourceSeparated"] != true {
+	if body.Config.Mode == sepay.ModeActive && (nextNotificationAccount != oldNotificationAccount || body.Config.NativeSubAccount != existing.Config.NativeSubAccount || body.Config.BankName != existing.Config.BankName || body.Config.ActiveTransport != existing.Config.ActiveTransport) && configFields["sourceSeparated"] != true {
 		// A partial update must not silently inherit an old source-isolation attestation.
 		sepayAdminError(w, &sepay.FieldError{Field: "sourceSeparated"})
 		return
 	}
-	result, err := s.sepay.SaveAdminConfig(r.Context(), body.Revision, body.Config, body.BotToken, paymentProviderActor(r))
+	result, err := s.sepay.SaveAdminConfig(r.Context(), body.Revision, body.Config, body.BotToken, body.NativeWebhookSecret, paymentProviderActor(r))
 	if err != nil {
 		sepayAdminError(w, err)
 		return

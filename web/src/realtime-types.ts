@@ -8,7 +8,7 @@ export type Status = {
   uptimeSeconds: number;
   userRole?: 'OWNER' | 'OPERATOR' | 'VIEWER';
   payments: PaymentProviderState;
-  sepay: { mode: string; lastMessageAt: string | null; reviewCount: number };
+  sepay: { mode: string; lastMessageAt: string | null; lastWebhookAt?: string | null; reviewCount: number };
   storage: { status: string };
   webhooks: { pending: number; deadLetter: number };
   notifications?: {
@@ -19,7 +19,8 @@ export type Status = {
 
 export type SePayReview = {
   storeKey: string;
-  messageId: string;
+  transport: 'telegram' | 'native';
+  sourceId: string;
   reason: string;
   receivedAt: string;
 };

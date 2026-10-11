@@ -44,7 +44,7 @@ describe('queries and mutations with centralized CSRF', () => {
 
   it('fetches sanitized SePay reviews with a private no-store GET and encoded cursor', async () => {
     const params = { cursor: 'opaque/cursor+value=', limit: 20 };
-    const review = { storeKey: 'store', messageId: '9007199254740993', reason: 'INVALID_AMOUNT', receivedAt: '2026-10-10T12:00:00Z' };
+    const review = { storeKey: 'store', transport: 'native', sourceId: 'store:9007199254740993', reason: 'INVALID_AMOUNT', receivedAt: '2026-10-10T12:00:00Z' };
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [review] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
