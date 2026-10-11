@@ -62,7 +62,7 @@ docker run -d \
   -e "TTS_PORT=8081" \
   -e "TTS_REQUIRE_AUTH=true" \
   -e "TTS_INTERNAL_TOKEN_FILE=/run/secrets/tts_internal_token" \
-  -e "PIPER_WORKERS=${PIPER_WORKERS:-2}" \
+  -e "PIPER_WORKERS=${PIPER_WORKERS:-1}" \
   "$image_ref"
 
 echo "Waiting for tts-gateway container to become ready..."
@@ -184,7 +184,7 @@ try:
     health_connection.request("GET", "/health")
     health_data = json.loads(health_connection.getresponse().read())
     health_connection.close()
-    expected_workers = int(os.environ.get("PIPER_WORKERS", "2"))
+    expected_workers = int(os.environ.get("PIPER_WORKERS", "1"))
     assert health_data["primary"] == "piper" and health_data["piper"]["available"], "Piper not ready"
     assert health_data["piper"]["workerCount"] == expected_workers, f"Expected {expected_workers} workers, got {health_data['piper'].get('workerCount')}"
     buffered()
@@ -214,7 +214,7 @@ try:
         assert before - worker_pids(), "Disconnected inference worker was not killed/reaped"
         for pid in worker_pids():
             os.kill(int(pid), signal.SIGCONT)
-        assert len(worker_pids()) <= 2, "Unbounded inference workers"
+        assert len(worker_pids()) <= expected_workers, "Unbounded inference workers"
         buffered()
         buffered()
     # Exercise maximum accepted text on both slots under production caps.

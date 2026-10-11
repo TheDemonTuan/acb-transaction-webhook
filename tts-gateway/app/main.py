@@ -173,6 +173,34 @@ def synthesis_parameters(req):
     return text, voice, rate, pitch, key
 
 
+@asynccontextmanager
+async def preheaders_disconnect_guard(request):
+    """Cancel admission/inference before StreamingResponse owns ASGI receive."""
+    if request is None:
+        yield
+        return
+    owner = asyncio.current_task()
+    stop = asyncio.Event()
+
+    async def watch():
+        while not stop.is_set():
+            if await request.is_disconnected():
+                owner.cancel()
+                return
+            try:
+                await asyncio.wait_for(stop.wait(), 0.025)
+            except TimeoutError:
+                pass
+
+    watcher = asyncio.create_task(watch())
+    try:
+        yield
+    finally:
+        with anyio.CancelScope(shield=True):
+            stop.set()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+
 class OwnedStreamingResponse(StreamingResponse):
     """Own cleanup even when ASGI disconnects before iterating the first byte."""
     def __init__(self, iterator, cleanup, deadline, **kwargs):
@@ -228,11 +256,12 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
                     await admission.unregister_waiter()
 
         try:
-            candidate = admission.acquire_slot(remaining(deadline))
-            await candidate.__aenter__()
-            slot = candidate
-            generator = piper_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
-            first = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
+            async with preheaders_disconnect_guard(request):
+                candidate = admission.acquire_slot(remaining(deadline))
+                await candidate.__aenter__()
+                slot = candidate
+                generator = piper_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
+                first = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
             if not first or len(first) > MAX_AUDIO_BYTES:
                 raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
 
@@ -301,11 +330,12 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
                 await admission.unregister_waiter()
 
     try:
-        candidate = admission.acquire_slot(remaining(deadline))
-        await candidate.__aenter__()
-        slot = candidate
-        generator = edge_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch)
-        first = await asyncio.wait_for(anext(generator), min(config.edge_stream_initial_timeout, remaining(deadline)))
+        async with preheaders_disconnect_guard(request):
+            candidate = admission.acquire_slot(remaining(deadline))
+            await candidate.__aenter__()
+            slot = candidate
+            generator = edge_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch)
+            first = await asyncio.wait_for(anext(generator), min(config.edge_stream_initial_timeout, remaining(deadline)))
         if not first or len(first) > MAX_AUDIO_BYTES:
             raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
 
