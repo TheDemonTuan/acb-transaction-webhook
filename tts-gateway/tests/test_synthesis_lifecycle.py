@@ -15,9 +15,10 @@ async def reset_state():
         cache._current_bytes = 0
 
 @pytest.mark.asyncio
-async def test_admission_overload_cap_19_requests(monkeypatch):
-    """19 distinct requests: 2 active + 16 waiting -> 19th gets 503 TTS_OVERLOADED."""
+async def test_admission_overload_cap_matches_configured_workers(monkeypatch):
+    """Configured active slots plus sixteen waiting; the next request is rejected."""
     block_event = asyncio.Event()
+    capacity = admission.max_active + admission.max_waiting
 
     async def mock_stream(text, voice="vi-VN-HoaiMyNeural", rate="+0%", pitch="+0Hz"):
         await block_event.wait()
@@ -28,21 +29,21 @@ async def test_admission_overload_cap_19_requests(monkeypatch):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         tasks = []
-        for i in range(18):
-            # 18 distinct texts to avoid singleflight deduplication
+        for i in range(capacity):
+            # Distinct texts avoid singleflight deduplication.
             t = asyncio.create_task(
                 client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": f"distinct phrase {i}", "cacheable": False}})
             )
             tasks.append(t)
 
-        # Give small time for all 18 tasks to register (2 active + 16 waiting)
+        # Give tasks time to register at the configured cap.
         await asyncio.sleep(0.05)
 
-        assert admission.active_count == 2
-        assert admission.waiting_count == 16
+        assert admission.active_count == admission.max_active
+        assert admission.waiting_count == admission.max_waiting
 
-        # 19th request should immediately get 503 TTS_OVERLOADED
-        resp19 = await client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "distinct phrase 19", "cacheable": False}})
+        # One more distinct request must immediately get 503 TTS_OVERLOADED.
+        resp19 = await client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", "text": "distinct overflow phrase", "cacheable": False})
         assert resp19.status_code == 503
         assert resp19.headers.get("Retry-After") == "1"
         assert "TTS_OVERLOADED" in resp19.json().get("detail", "")

@@ -62,6 +62,7 @@ docker run -d \
   -e "TTS_PORT=8081" \
   -e "TTS_REQUIRE_AUTH=true" \
   -e "TTS_INTERNAL_TOKEN_FILE=/run/secrets/tts_internal_token" \
+  -e "PIPER_WORKERS=${PIPER_WORKERS:-2}" \
   "$image_ref"
 
 echo "Waiting for tts-gateway container to become ready..."
@@ -183,7 +184,9 @@ try:
     health_connection.request("GET", "/health")
     health_data = json.loads(health_connection.getresponse().read())
     health_connection.close()
+    expected_workers = int(os.environ.get("PIPER_WORKERS", "2"))
     assert health_data["primary"] == "piper" and health_data["piper"]["available"], "Piper not ready"
+    assert health_data["piper"]["workerCount"] == expected_workers, f"Expected {expected_workers} workers, got {health_data['piper'].get('workerCount')}"
     buffered()
     connection, response = request("/synthesize/stream", CORE)
     assert mpeg_frame(response.read(LIMIT + 1)), "Stream is not real MPEG"

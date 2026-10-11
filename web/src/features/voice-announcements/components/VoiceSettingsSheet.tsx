@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVoiceAnnouncements } from '../VoiceAnnouncementProvider';
 import { isVoiceCancellation } from '../voice-engine';
 import { VoiceTestButton } from './VoiceTestButton';
+import { exportVoiceTelemetry } from '../voice-telemetry';
 import {
   saveVoiceSettingsServer,
   DEFAULT_AMOUNT_BANDS,
@@ -29,6 +30,17 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
   const [serverSaveSuccess, setServerSaveSuccess] = useState(false);
   const [isSavingServer, setIsSavingServer] = useState(false);
 
+
+  const handleDownloadTelemetry = () => {
+    const data = exportVoiceTelemetry();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `voice-telemetry-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   const statusQuery = useQuery({ queryKey: queryKeys.status, queryFn: fetchStatus });
   const isOwnerOrOperator =
     statusQuery.data?.userRole === 'OWNER' || statusQuery.data?.userRole === 'OPERATOR';
@@ -524,28 +536,58 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
 
               {/* Latency Telemetry Breakdown */}
               {lastTelemetry && (
-                <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-200/80 text-xs text-stone-600 space-y-1">
-                  <span className="font-semibold text-stone-700 block">Độ trễ phát âm gần nhất:</span>
+                <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-200/80 text-xs text-stone-600 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-stone-700 block">Độ trễ phát âm gần nhất:</span>
+                    <button
+                      type="button"
+                      onClick={handleDownloadTelemetry}
+                      className="text-[11px] font-medium text-stone-600 hover:text-stone-900 bg-white border border-stone-200 px-2 py-0.5 rounded cursor-pointer transition shadow-xs"
+                    >
+                      Tải JSON đo
+                    </button>
+                  </div>
                   <div className="grid grid-cols-3 gap-2 text-stone-500 pt-1">
                     <div>
-                      <span className="block text-[10px] uppercase text-stone-400">Ngân hàng → SSE</span>
+                      <span className="block text-[10px] uppercase text-stone-400">SSE → Chờ hàng đợi</span>
                       <span className="font-mono text-stone-700 font-medium">
-                        {lastTelemetry.detectedToSseMs != null ? `${lastTelemetry.detectedToSseMs}ms` : 'N/A'}
+                        {lastTelemetry.sseToQueueMs != null ? `${Math.round(lastTelemetry.sseToQueueMs)}ms` : 'N/A'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-stone-400">Hàng đợi → Bắt đầu</span>
+                      <span className="font-mono text-stone-700 font-medium">
+                        {lastTelemetry.queueToSpeakMs != null ? `${Math.round(lastTelemetry.queueToSpeakMs)}ms` : 'N/A'}
                       </span>
                     </div>
                     <div>
                       <span className="block text-[10px] uppercase text-stone-400">SSE → Phát âm</span>
                       <span className="font-mono text-stone-700 font-medium">
-                        {lastTelemetry.sseToSpeakMs != null ? `${lastTelemetry.sseToSpeakMs}ms` : 'N/A'}
+                        {lastTelemetry.sseToSpeakMs != null ? `${Math.round(lastTelemetry.sseToSpeakMs)}ms` : 'N/A'}
                       </span>
                     </div>
                     <div>
-                      <span className="block text-[10px] uppercase text-stone-400">Tổng cộng</span>
+                      <span className="block text-[10px] uppercase text-stone-400">SSE → Đọc số tiền</span>
                       <span className="font-mono text-stone-700 font-medium">
-                        {lastTelemetry.totalLatencyMs != null ? `${lastTelemetry.totalLatencyMs}ms` : 'N/A'}
+                        {lastTelemetry.sseToAmountMs != null ? `${Math.round(lastTelemetry.sseToAmountMs)}ms` : 'N/A'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-stone-400">Đường âm thanh</span>
+                      <span className="font-mono text-stone-700 font-medium">
+                        {lastTelemetry.audioPath ?? 'N/A'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] uppercase text-stone-400">Kết quả</span>
+                      <span className="font-mono text-stone-700 font-medium capitalize">
+                        {lastTelemetry.outcome ?? 'completed'}
                       </span>
                     </div>
                   </div>
+                  <p className="text-[10px] text-stone-400 italic pt-1">
+                    Lưu ý: Không đo được độ trễ ngân hàng từ clock thiết bị.
+                  </p>
                 </div>
               )}
             </>

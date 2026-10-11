@@ -84,7 +84,7 @@ export class BrowserSpeechEngine implements VoiceEngine {
     utterance.rate = message.profile!.rate;
     utterance.pitch = 1 + message.profile!.pitchHz / 50;
     const { promise, resolve, reject } = Promise.withResolvers<void>();
-    let settled = false, started = false, tailStarted = false;
+    let settled = false, started = false, tailStarted = false, amountBoundaryStarted = false;
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true; clearTimeout(timer);
@@ -99,7 +99,11 @@ export class BrowserSpeechEngine implements VoiceEngine {
       started = true; this.audioReady = true; this.currentStatus = 'ready';
       const now = performance.now();
       if (message.telemetry) {
-        message.telemetry.speechStartedAt = Date.now(); message.telemetry.speechStartedMonotonicAt = now;
+        message.telemetry.speechStartedAt = Date.now();
+        message.telemetry.speechStartedMonotonicAt = now;
+        message.telemetry.audioPath = 'browser';
+        message.telemetry.startEvidence = 'speech-onstart';
+        message.telemetry.amountEvidence = 'unavailable';
         if (message.telemetry.receivedMonotonicAt !== undefined) message.telemetry.sseToSpeakMs = now - message.telemetry.receivedMonotonicAt;
         if (message.queuedMonotonicAt !== undefined) message.telemetry.queueToSpeakMs = now - message.queuedMonotonicAt;
       }
@@ -109,14 +113,37 @@ export class BrowserSpeechEngine implements VoiceEngine {
     utterance.onboundary = (event) => {
       const tailIndex = message.recipe?.tail ? message.text.indexOf(message.recipe.tail) : -1;
       if (!tailStarted && message.recipe && tailIndex >= 0 && event.charIndex >= tailIndex) {
-        tailStarted = true; message.onTailStart?.(message.recipe.id);
+        tailStarted = true;
+        message.onTailStart?.(message.recipe.id);
+      }
+      if (!amountBoundaryStarted && message.telemetry && message.text) {
+        const numMatch = /\b(một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười|linh|không)\b/i.exec(message.text);
+        if (numMatch && event.charIndex >= numMatch.index) {
+          amountBoundaryStarted = true;
+          const bNow = performance.now();
+          message.telemetry.amountStartedMonotonicAt = bNow;
+          if (message.telemetry.receivedMonotonicAt !== undefined) {
+            message.telemetry.sseToAmountMs = bNow - message.telemetry.receivedMonotonicAt;
+          }
+          message.telemetry.amountEvidence = 'speech-boundary';
+        }
       }
     };
     utterance.onend = () => {
       if (!tailStarted && message.recipe) message.onTailStart?.(message.recipe.id);
+      if (message.telemetry) {
+        message.telemetry.speechEndedMonotonicAt = performance.now();
+        message.telemetry.outcome = 'completed';
+      }
       finish();
     };
-    utterance.onerror = (event) => { this.currentStatus = 'error'; finish(new Error(`BROWSER_SPEECH_ERROR: ${event.error}`)); };
+    utterance.onerror = (event) => {
+      this.currentStatus = 'error';
+      if (message.telemetry) {
+        message.telemetry.outcome = 'failed';
+      }
+      finish(new Error(`BROWSER_SPEECH_ERROR: ${event.error}`));
+    };
     try { if (synth.paused) synth.resume(); synth.speak(utterance); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     return promise;
   }

@@ -1,11 +1,12 @@
 import { getCsrfToken, parseApiError } from '../../api';
 import type { VoiceProfile } from './voice-profile';
-import type { VoiceMessage } from './voice-engine';
+import type { VoiceMessage, VoiceTelemetry } from './voice-engine';
 import { AudioAssets } from './audio-assets';
 import { loadVoiceCatalog, readBounded, throwIfAborted } from './voice-catalog';
 import { formatAnnouncementTemplate, RecentPhraseRing, selectAnnouncementRecipe, type AnnouncementRecipe } from './voice-copy';
 import { speakVnd } from './money-to-vietnamese';
 import { BrowserSpeechEngine } from './browser-speech-engine';
+import { prepareStreamPlayback, type StreamPlayback } from './stream-playback';
 
 interface PlanCommon {
   profile: Readonly<VoiceProfile>;
@@ -15,11 +16,21 @@ interface PlanCommon {
   volume: number;
   message: VoiceMessage;
   release: () => void;
+  audioPath?: VoiceTelemetry['audioPath'];
+  amountOffsetMs?: number | null;
+  amountEvidence?: VoiceTelemetry['amountEvidence'];
 }
+export interface PreparedSegment {
+  buffer: AudioBuffer;
+  role: 'full' | 'prefix' | 'amount' | 'currency' | 'tail';
+  clipId?: string;
+  speechStartMs?: number;
+  amountStartMs?: number | null;
+}
+
 export type PreparedAnnouncement = PlanCommon & (
-  | { kind: 'buffers'; amountBuffer: AudioBuffer; tailBuffers: AudioBuffer[];
-      tail?: { ready: Promise<AudioBuffer | undefined>; abort: () => void } }
-  | { kind: 'stream'; streamUrl: string; audioElement: HTMLAudioElement }
+  | { kind: 'buffers'; segments: PreparedSegment[] }
+  | { kind: 'stream'; streamUrl: string; audioElement: HTMLAudioElement; completed?: Promise<void> }
   | { kind: 'browser'; text: string; voiceURI: string }
 );
 export interface PreparationOptions {
@@ -120,20 +131,22 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
   const owner = {};
   let objectURL: string | undefined;
   let native: HTMLAudioElement | undefined;
+  let transport: StreamPlayback | undefined;
   let tailController: AbortController | undefined;
   let released = false;
   const release = () => {
     if (released) return;
     released = true; options.assets.release(owner); options.recent.release(owner); tailController?.abort();
+    transport?.release();
     if (native) { native.pause(); native.removeAttribute('src'); native.load(); }
     if (objectURL) URL.revokeObjectURL(objectURL);
     signal.removeEventListener('abort', release);
   };
   signal.addEventListener('abort', release, { once: true });
   try {
-    const catalog = profile.funEnabled && !message.omitFun ? await loadVoiceCatalog(profile.catalogVersion, options.isPublic, signal) : null;
+    const catalog = profile.funEnabled ? await loadVoiceCatalog(profile.catalogVersion, options.isPublic, signal) : null;
     throwIfAborted(signal);
-    if (!message.recipe && !message.omitFun && message.amountVnd) {
+    if (!message.recipe && message.amountVnd) {
       message.recipe = selectAnnouncementRecipe({ transactionId: message.transactionId || 'voice-test', amountVnd: message.amountVnd,
         profileRevision: profile.revision, catalogVersion: profile.catalogVersion, recentPhraseIds: options.recent.snapshot(), profile, catalog });
       message.phraseId = message.recipe?.id;
@@ -141,8 +154,8 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
     const amount = message.amountVnd;
     if (amount !== undefined && (!/^[1-9][0-9]*$/.test(amount) || BigInt(amount) > 9007199254740991n)) throw new Error('VOICE_INVALID_AMOUNT');
     const band = amount ? profile.amountBands.find((b) => BigInt(amount) >= BigInt(b.fromVnd) && (b.toVnd === null || BigInt(amount) < BigInt(b.toVnd))) : undefined;
-    const custom = band?.styleId === 'custom' && profile.funEnabled && !message.omitFun;
-    const amountOnly = message.omitFun || !profile.funEnabled || (!message.recipe && !custom);
+    const custom = band?.styleId === 'custom' && profile.funEnabled;
+    const amountOnly = !profile.funEnabled || (!message.recipe && !custom);
     if (!amountOnly && message.recipe) options.recent.reserve(owner, message.recipe.id);
     if (amount) {
       message.text = amountOnly ? `Đã nhận ${speakVnd(amount)}.` : custom
@@ -155,7 +168,7 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
       transactionId: message.transactionId, volume: Math.max(0, Math.min(1, message.volume ?? 1)), message, release };
     if (profile.providerMode === 'BROWSER_ONLY') {
       await options.browser.prefetch({ ...message, profile }, signal);
-      return { ...common, kind: 'browser', text: message.text, voiceURI: message.voiceURI || '' };
+      return { ...common, kind: 'browser', text: message.text, voiceURI: message.voiceURI || '', audioPath: 'browser' };
     }
     const context = options.context;
     const manifest = !custom && !profile.includeDescription && amount && !message.summaryTransactionIds
@@ -171,15 +184,18 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
       const buffer = await options.assets.getDecoded(clip, profile, context, owner, signal);
       if (buffer) {
         options.onStatus?.('ready', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế' : undefined);
-        const plan: PreparedAnnouncement = { ...common, kind: 'buffers', amountBuffer: buffer, tailBuffers: [] };
+        const segments: PreparedSegment[] = [{
+          buffer,
+          role: 'amount',
+          clipId: clip.clipId,
+          speechStartMs: clip.speechStartMs ?? 0,
+          amountStartMs: clip.amountStartMs ?? (clip.kind === 'amount' ? 400 : 0),
+        }];
         if (!classicId && !amountOnly && message.recipe) {
-          // Whole-tail mode remains active until fragment listening is approved.
-          tailController = new AbortController();
-          const ready = coldBuffer(message, profile, 'tail', options, tailController.signal, owner)
-            .then((value) => !tailController?.signal.aborted && !released ? value : undefined).catch(() => undefined);
-          plan.tail = { ready, abort: () => tailController?.abort() };
+          const tailBuffer = await coldBuffer(message, profile, 'tail', options, signal, owner);
+          segments.push({ buffer: tailBuffer, role: 'tail', clipId: message.recipe.id });
         }
-        return plan;
+        return { ...common, kind: 'buffers', segments, audioPath: 'decoded-pack' };
       }
     }
     if (clip && (amountOnly || classicId) && typeof window !== 'undefined' && window.Audio) {
@@ -187,28 +203,56 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
       objectURL = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
       native = await prepareNative(objectURL, signal, 8000);
       options.onStatus?.('ready');
-      return { ...common, kind: 'stream', streamUrl: objectURL, audioElement: native };
+      return { ...common, kind: 'stream', streamUrl: objectURL, audioElement: native, audioPath: 'compressed-pack' };
     }
     options.onStatus?.('cold', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế · tổng hợp cùng giọng tại máy chủ' : 'Chưa có bộ âm thanh cho cấu hình này');
     const part = amountOnly ? 'amount' : 'full';
     // Choose one cold transport before requesting. Never resynthesize after failure.
     if (typeof window !== 'undefined' && window.Audio) {
       const route = voiceRoute(message, options.isPublic, profile, part);
-      native = await prepareNative(route.streamUrl, signal, profile.coldRequestTimeoutMs);
-      return { ...common, kind: 'stream', streamUrl: route.streamUrl, audioElement: native };
+      transport = await prepareStreamPlayback(route.streamUrl, profile, signal, new window.Audio());
+      native = transport.audio;
+      return { ...common, kind: 'stream', streamUrl: route.streamUrl, audioElement: native, completed: transport.completed, audioPath: 'cold-stream' };
     }
     const buffer = await coldBuffer(message, profile, part, options, signal, owner);
-    return { ...common, kind: 'buffers', amountBuffer: buffer, tailBuffers: [] };
+    return { ...common, kind: 'buffers', segments: [{ buffer, role: 'full' }], audioPath: 'cold-buffer' };
   } catch (error) { release(); throw error; }
 }
 
-export function markSpeechStarted(message: VoiceMessage): void {
+export function markSpeechStarted(
+  message: VoiceMessage,
+  options?: {
+    startEvidence?: 'audio-clock' | 'media-playing' | 'speech-onstart';
+    amountOffsetMs?: number | null;
+    amountEvidence?: 'reviewed-offset' | 'segment-boundary' | 'speech-boundary' | 'unavailable';
+    audioPath?: 'decoded-pack' | 'compressed-pack' | 'network-pack' | 'cold-stream' | 'cold-buffer' | 'browser';
+    monotonicNow?: number;
+  }
+): void {
   if (message.telemetry) {
-    const now = performance.now();
+    const now = options?.monotonicNow ?? performance.now();
     message.telemetry.speechStartedAt = Date.now();
     message.telemetry.speechStartedMonotonicAt = now;
-    if (message.telemetry.receivedMonotonicAt !== undefined) message.telemetry.sseToSpeakMs = now - message.telemetry.receivedMonotonicAt;
-    if (message.queuedMonotonicAt !== undefined) message.telemetry.queueToSpeakMs = now - message.queuedMonotonicAt;
+    if (options?.audioPath) message.telemetry.audioPath = options.audioPath;
+    if (options?.startEvidence) message.telemetry.startEvidence = options.startEvidence;
+    if (message.telemetry.receivedMonotonicAt !== undefined) {
+      message.telemetry.sseToSpeakMs = now - message.telemetry.receivedMonotonicAt;
+    }
+    if (message.queuedMonotonicAt !== undefined) {
+      message.telemetry.queueToSpeakMs = now - message.queuedMonotonicAt;
+    }
+    if (options?.amountOffsetMs != null && options.amountOffsetMs >= 0) {
+      const amountMonotonic = now + options.amountOffsetMs;
+      message.telemetry.amountStartedMonotonicAt = amountMonotonic;
+      if (message.telemetry.receivedMonotonicAt !== undefined) {
+        message.telemetry.sseToAmountMs = amountMonotonic - message.telemetry.receivedMonotonicAt;
+      }
+      message.telemetry.amountEvidence = options.amountEvidence ?? 'reviewed-offset';
+    } else if (options?.amountEvidence) {
+      message.telemetry.amountEvidence = options.amountEvidence;
+    } else {
+      message.telemetry.amountEvidence = 'unavailable';
+    }
   }
   message.onStart?.(message.telemetry);
 }
@@ -233,7 +277,7 @@ export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSign
         if (error) reject(Object.assign(error instanceof Error ? error : new Error(String(error)), { playbackStarted: started }));
         else resolve();
       };
-      const playing = () => { if (!started) { started = true; markSpeechStarted(plan.message); if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id); } };
+      const playing = () => { if (!started) { started = true; markSpeechStarted(plan.message, { startEvidence: 'media-playing', audioPath: plan.audioPath ?? 'cold-stream' }); if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id); } };
       // Native whole-phrase audio has no word-boundary event: completion is the
       // conservative evidence that the tail was heard, never a guessed timestamp.
       const ended = () => { if (plan.recipe && plan.recipe.styleId !== 'classic') plan.message.onTailStart?.(plan.recipe.id); finish(); };
@@ -242,6 +286,7 @@ export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSign
       const timer = setTimeout(() => finish(new Error('AUDIO_PLAYBACK_TIMEOUT')), 120000);
       signal.addEventListener('abort', aborted, { once: true });
       audio.addEventListener('playing', playing); audio.addEventListener('ended', ended); audio.addEventListener('error', failed);
+      void plan.completed?.catch((error) => { audio.pause(); finish(error); });
       if (signal.aborted) { aborted(); return; }
       try { void audio.play().catch(finish); } catch (error) { finish(error); }
     });
@@ -276,36 +321,43 @@ export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSign
     };
     try {
       if (signal.aborted) { aborted(); return; }
-      let tailScheduled = false;
-      schedule(plan.amountBuffer, () => {
-        if (settled) return;
-        if (plan.tail && !tailScheduled) { plan.tail.abort(); finish(); }
-        else if (!plan.tail && plan.tailBuffers.length === 0) {
-          if (plan.recipe && plan.recipe.styleId !== 'classic') plan.message.onTailStart?.(plan.recipe.id);
-          finish();
+      let amountStartCursor: number | null = null;
+      let tailStartCursor: number | null = null;
+      for (let i = 0; i < plan.segments.length; i++) {
+        const seg = plan.segments[i];
+        if (seg.role === 'amount' && amountStartCursor === null) {
+          amountStartCursor = cursor;
         }
-      });
-      const amountEnd = cursor;
-      const markTail = () => {
+        if (seg.role === 'tail' && tailStartCursor === null) {
+          tailStartCursor = cursor;
+        }
+        const isLast = i === plan.segments.length - 1;
+        schedule(seg.buffer, isLast ? () => finish() : () => {});
+      }
+      if (tailStartCursor !== null && plan.recipe) {
         timers.push(setTimeout(() => {
           if (!settled && !signal.aborted && plan.recipe) plan.message.onTailStart?.(plan.recipe.id);
-        }, Math.max(0, (amountEnd - context.currentTime) * 1000)));
-      };
-      for (let i = 0; i < plan.tailBuffers.length; i++) {
-        schedule(plan.tailBuffers[i], i === plan.tailBuffers.length - 1 ? () => finish() : () => {});
+        }, Math.max(0, (tailStartCursor - context.currentTime) * 1000)));
       }
-      if (plan.tailBuffers.length) markTail();
-      if (plan.tail) void plan.tail.ready.then((buffer) => {
-        // Schedule on the same audio clock before the core ends. End callbacks
-        // only release lifecycle; they never introduce an MP3 stitching gap.
-        if (!buffer || settled || signal.aborted || context.currentTime >= amountEnd) return;
-        tailScheduled = true;
-        schedule(buffer, () => finish());
-        markTail();
-      });
       timers.push(setTimeout(() => {
         if (settled || signal.aborted) return;
-        started = true; markSpeechStarted(plan.message);
+        started = true;
+        let clockMonotonic = performance.now();
+        if (typeof context.getOutputTimestamp === 'function') {
+          try {
+            const ts = context.getOutputTimestamp();
+            if (ts && ts.performanceTime != null && ts.contextTime != null) {
+              clockMonotonic = ts.performanceTime + (startAt - ts.contextTime) * 1000;
+            }
+          } catch {}
+        }
+        markSpeechStarted(plan.message, {
+          startEvidence: 'audio-clock',
+          audioPath: plan.audioPath ?? 'decoded-pack',
+          amountOffsetMs: plan.amountOffsetMs,
+          amountEvidence: plan.amountEvidence,
+          monotonicNow: clockMonotonic,
+        });
         if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id);
       }, Math.max(0, (startAt - context.currentTime) * 1000)));
     } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }

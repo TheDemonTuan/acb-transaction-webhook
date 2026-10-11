@@ -24,7 +24,7 @@ import urllib.request
 import zlib
 
 
-GLOBAL_CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; script-src 'self' https://static.cloudflareinsights.com; script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'; script-src-attr 'none'; connect-src 'self' ws: wss: https://cloudflareinsights.com; img-src 'self' data: blob: https:; font-src 'self' data:; style-src 'self' 'unsafe-inline'"
+GLOBAL_CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; script-src 'self' https://static.cloudflareinsights.com; script-src-elem 'self' https://static.cloudflareinsights.com 'unsafe-inline'; script-src-attr 'none'; connect-src 'self' ws: wss: https://cloudflareinsights.com; img-src 'self' data: blob: https:; media-src 'self' blob: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'"
 ACCESS_HOST = "thedemontuan.cloudflareaccess.com"
 TIMEOUT = 15
 MAX_BODY = 25 * 1024 * 1024

@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TTS Gateway", version="2.0.0", lifespan=lifespan)
 
 edge_provider = EdgeTTSProvider()
-piper_provider = PiperTTSProvider()
+piper_provider = PiperTTSProvider(worker_count=config.piper_workers)
 edge_circuit = CircuitBreaker(
     failure_threshold=config.edge_circuit_failure_threshold,
     reset_timeout=config.edge_circuit_reset_timeout,
@@ -60,7 +60,7 @@ cache = TTSCache(
     ttl_seconds=config.cache_ttl_seconds,
 )
 admission = AdmissionController(
-    max_active=2,
+    max_active=config.piper_workers,
     max_waiting=16,
     max_total_waiters=64,
 )
@@ -129,7 +129,12 @@ async def health():
         status="ok" if piper_provider.available else "degraded",
         primary="piper",
         edge=ProviderHealth(available=edge_circuit.can_attempt()),
-        piper=ProviderHealth(available=piper_provider.available),
+        piper=ProviderHealth(
+            available=piper_provider.available,
+            workerCount=piper_provider.worker_count,
+            activeWorkers=piper_provider.active_count,
+            idleWorkers=piper_provider.idle_count,
+        ),
     )
 
 @app.get("/voices", response_model=List[VoiceItem])
@@ -197,15 +202,79 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
         if cached:
             return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
     if req.provider_mode == "PIPER_ONLY":
+        if piper_provider._closed:
+            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
+
         deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
-        # CPU inference is singleflight and completes before headers; disconnects
-        # cannot leave background inference consuming a released admission slot.
-        response = await synthesize(req, x_internal_tts_token, request)
-        async def chunks():
-            for offset in range(0, len(response.body), 16384):
-                yield response.body[offset:offset + 16384]
-        iterator = chunks()
-        return OwnedStreamingResponse(iterator, iterator.aclose, deadline, media_type="audio/mpeg", headers=dict(response.headers))
+        await admission.register_waiter()
+        slot = None
+        generator = None
+        transferred = False
+        cleaned = False
+
+        async def cleanup():
+            nonlocal cleaned
+            if cleaned:
+                return
+            cleaned = True
+            try:
+                if generator is not None:
+                    await generator.aclose()
+            finally:
+                try:
+                    if slot is not None:
+                        await slot.__aexit__(None, None, None)
+                finally:
+                    await admission.unregister_waiter()
+
+        try:
+            candidate = admission.acquire_slot(remaining(deadline))
+            await candidate.__aenter__()
+            slot = candidate
+            generator = piper_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
+            first = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
+            if not first or len(first) > MAX_AUDIO_BYTES:
+                raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
+
+            async def stream_and_tee():
+                collected = bytearray() if req.cacheable else None
+                total = 0
+                chunk = first
+                try:
+                    while True:
+                        remaining(deadline)
+                        total += len(chunk)
+                        if total > MAX_AUDIO_BYTES:
+                            raise RuntimeError("TTS_AUDIO_TOO_LARGE")
+                        if collected is not None:
+                            collected.extend(chunk)
+                        yield chunk
+                        try:
+                            chunk = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
+                        except StopAsyncIteration:
+                            break
+                    remaining(deadline)
+                    if collected is not None:
+                        await cache.set(key, bytes(collected), "piper", voice)
+                finally:
+                    if collected is not None:
+                        collected.clear()
+                    with anyio.CancelScope(shield=True):
+                        await cleanup()
+
+            response = OwnedStreamingResponse(stream_and_tee(), cleanup, deadline, media_type="audio/mpeg", headers=audio_headers(voice))
+            transferred = True
+            return response
+        except TimeoutError:
+            raise timeout_error() from None
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
+        finally:
+            if not transferred:
+                with anyio.CancelScope(shield=True):
+                    await cleanup()
     if not edge_circuit.can_attempt():
         raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
 

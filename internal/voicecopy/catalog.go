@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -345,6 +346,12 @@ type AudioInputAmount struct {
 	Classic  map[string]string `json:"classic"`
 }
 
+type AudioInputOptions struct {
+	Amounts               []int64
+	PreloadAmounts        []int64
+	IncludeNumberSegments bool
+}
+
 type AudioInputs struct {
 	SchemaVersion    int                         `json:"schemaVersion"`
 	SynthesisKey     string                      `json:"synthesisKey"`
@@ -355,10 +362,14 @@ type AudioInputs struct {
 	CatalogVersion   string                      `json:"catalogVersion"`
 	Clips            []AudioInputClip            `json:"clips"`
 	Amounts          map[string]AudioInputAmount `json:"amounts"`
+	PreloadClipIDs   []string                    `json:"preloadClipIds"`
+	NumberSegments   map[string]string           `json:"numberSegments,omitempty"`
+	NumberPrefix     *string                     `json:"numberPrefix,omitempty"`
+	NumberSuffix     *string                     `json:"numberSuffix,omitempty"`
 }
 
 // ExportAudioInputs uses the production Go formatter; no Python money formatter is needed.
-func ExportAudioInputs(profile AudioInputProfile) (AudioInputs, error) {
+func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (AudioInputs, error) {
 	provider := "edge"
 	switch profile.VoiceID {
 	case "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural":
@@ -385,10 +396,40 @@ func ExportAudioInputs(profile AudioInputProfile) (AudioInputs, error) {
 	if err != nil {
 		return AudioInputs{}, err
 	}
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s|pack-schema-1", provider, profile.VoiceID, rateText, profile.PitchHz, FormatterVersion)))
-	result := AudioInputs{SchemaVersion: 1, SynthesisKey: hex.EncodeToString(hash[:]), VoiceID: profile.VoiceID, Rate: profile.Rate, PitchHz: profile.PitchHz, FormatterVersion: FormatterVersion, CatalogVersion: CatalogVersion, Amounts: make(map[string]AudioInputAmount, 20)}
-	amounts := [...]int64{1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000, 750000, 1000000, 2000000, 5000000}
-	for _, amount := range amounts {
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s|pack-schema-2", provider, profile.VoiceID, rateText, profile.PitchHz, FormatterVersion)))
+	result := AudioInputs{
+		SchemaVersion:    2,
+		SynthesisKey:     hex.EncodeToString(hash[:]),
+		VoiceID:          profile.VoiceID,
+		Rate:             profile.Rate,
+		PitchHz:          profile.PitchHz,
+		FormatterVersion: FormatterVersion,
+		CatalogVersion:   CatalogVersion,
+		Amounts:          make(map[string]AudioInputAmount),
+		PreloadClipIDs:   make([]string, 0, 14),
+	}
+
+	baseAmounts := []int64{1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000, 750000, 1000000, 2000000, 5000000}
+	amountSet := make(map[int64]bool, len(baseAmounts)+len(options.Amounts))
+	for _, a := range baseAmounts {
+		amountSet[a] = true
+	}
+	for _, a := range options.Amounts {
+		if a <= 0 || a > CatalogMaxAmount {
+			return AudioInputs{}, errors.New("invalid audio input amount")
+		}
+		// Keep the required base set and retain extra amounts in caller ranking order.
+		if !amountSet[a] && len(amountSet) < 128 {
+			amountSet[a] = true
+		}
+	}
+	selectedAmounts := make([]int64, 0, len(amountSet))
+	for a := range amountSet {
+		selectedAmounts = append(selectedAmounts, a)
+	}
+	slices.Sort(selectedAmounts)
+
+	for _, amount := range selectedAmounts {
 		key := strconv.FormatInt(amount, 10)
 		entry := AudioInputAmount{Standard: "amount-" + key, Classic: make(map[string]string, 6)}
 		result.Clips = append(result.Clips, AudioInputClip{entry.Standard, "amount", StandardAnnouncement(amount)})
@@ -399,9 +440,93 @@ func ExportAudioInputs(profile AudioInputProfile) (AudioInputs, error) {
 		}
 		result.Amounts[key] = entry
 	}
+
 	for _, fragment := range catalog.Fragments {
 		result.Clips = append(result.Clips, AudioInputClip{fragment.ID, "tail-fragment", fragment.Text})
 	}
+
+	preloadAmounts := options.PreloadAmounts
+	if len(preloadAmounts) == 0 {
+		preloadAmounts = []int64{20000, 50000, 100000, 200000, 500000, 1000000}
+	}
+	if len(preloadAmounts) > 6 {
+		preloadAmounts = preloadAmounts[:6]
+	}
+	seenPreloads := make(map[int64]bool, len(preloadAmounts))
+	for _, a := range preloadAmounts {
+		if !amountSet[a] {
+			return AudioInputs{}, errors.New("preload amount is not in the retained pack")
+		}
+		if !seenPreloads[a] {
+			result.PreloadClipIDs = append(result.PreloadClipIDs, "amount-"+strconv.FormatInt(a, 10))
+			seenPreloads[a] = true
+		}
+	}
+	seenGroup := make(map[string]bool)
+	for _, fragment := range catalog.Fragments {
+		grp := fragment.StyleID + ":" + fragment.BandID
+		if !seenGroup[grp] {
+			seenGroup[grp] = true
+			result.PreloadClipIDs = append(result.PreloadClipIDs, fragment.ID)
+			if len(seenGroup) == 8 {
+				break
+			}
+		}
+	}
+
+	if options.IncludeNumberSegments {
+		qaAmounts := []int64{
+			1, 5, 10, 15, 21, 24, 25, 101, 105, 1001, 10005, 49999, 50000, 99999, 100001, 199999, 200000, 999999, 1000000, 1000001, 1010005, 1000000000, 1000000000000, 9007199254740991,
+			1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 75000, 100000, 105000, 127000, 150000, 201000, 215000, 251000, 300000, 368500, 500000, 750000, 1005000, 1015000, 2000000, 5000000, 1000000001,
+		}
+		partCounts := make(map[string]int)
+		for _, a := range selectedAmounts {
+			for _, p := range SpeakVNDParts(a) {
+				partCounts[p]++
+			}
+		}
+		for _, a := range qaAmounts {
+			for _, p := range SpeakVNDParts(a) {
+				if _, ok := partCounts[p]; !ok {
+					partCounts[p] = 1
+				}
+			}
+		}
+
+		type partFreq struct {
+			part  string
+			count int
+		}
+		var rankedParts []partFreq
+		for p, c := range partCounts {
+			rankedParts = append(rankedParts, partFreq{p, c})
+		}
+		slices.SortFunc(rankedParts, func(a, b partFreq) int {
+			if a.count != b.count {
+				return b.count - a.count
+			}
+			return strings.Compare(a.part, b.part)
+		})
+		if len(rankedParts) > 128 {
+			rankedParts = rankedParts[:128]
+		}
+
+		result.NumberSegments = make(map[string]string, len(rankedParts))
+		for _, item := range rankedParts {
+			h := sha256.Sum256([]byte(item.part))
+			cid := "number-" + hex.EncodeToString(h[:])
+			result.NumberSegments[item.part] = cid
+			result.Clips = append(result.Clips, AudioInputClip{ClipID: cid, Kind: "amount-segment", Transcript: item.part})
+		}
+
+		prefixID := "amount-prefix"
+		suffixID := "amount-suffix"
+		result.NumberPrefix = &prefixID
+		result.NumberSuffix = &suffixID
+		result.Clips = append(result.Clips, AudioInputClip{ClipID: prefixID, Kind: "amount-prefix", Transcript: "Đã nhận"})
+		result.Clips = append(result.Clips, AudioInputClip{ClipID: suffixID, Kind: "amount-suffix", Transcript: "đồng."})
+	}
+
 	return result, nil
 }
 

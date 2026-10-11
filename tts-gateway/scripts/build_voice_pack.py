@@ -23,10 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.assets import (
     HASH, MAX_CLIP_BYTES, MAX_MANIFEST_BYTES, MAX_PACK_BYTES,
     InvalidPack, canonical_json, parse_json, read_bounded, read_clip,
+    manifest_inputs, read_quality_evidence, validate_quality_evidence,
     validate_clip_metadata, validate_inputs, validate_manifest,
 )
 
-APPROVED_AMOUNTS = {
+BASE_APPROVED_AMOUNTS = {
     "1000", "2000", "5000", "10000", "15000", "20000", "25000", "30000",
     "40000", "50000", "75000", "100000", "150000", "200000", "300000",
     "500000", "750000", "1000000", "2000000", "5000000",
@@ -35,14 +36,16 @@ APPROVED_AMOUNTS = {
 
 def load_inputs(path):
     data = validate_inputs(parse_json(read_bounded(Path(path), MAX_MANIFEST_BYTES)))
-    if set(data["amounts"]) != APPROVED_AMOUNTS:
-        raise InvalidPack("Initial pack must contain the twenty approved amounts")
+    actual_amounts = set(data["amounts"])
+    if not (BASE_APPROVED_AMOUNTS <= actual_amounts):
+        raise InvalidPack("Initial pack must contain at least the twenty base approved amounts")
+    if len(actual_amounts) > 128:
+        raise InvalidPack("Pack amounts cannot exceed 128")
     if any(set(mapping["classic"]) != {f"classic-{i:03d}" for i in range(1, 7)} for mapping in data["amounts"].values()):
         raise InvalidPack("Initial pack must contain all six classic phrases per amount")
     if sum(clip["kind"] == "tail-fragment" for clip in data["clips"]) != 600:
         raise InvalidPack("Initial pack must contain all 600 catalog fragments")
     return data
-
 
 def require_rights(path):
     if path is None:
@@ -74,22 +77,31 @@ def run_media(arguments):
     return result
 
 
-def loudness(path):
-    result = run_media(["ffmpeg", "-nostdin", "-hide_banner", "-i", str(path), "-af", "loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"])
+def _measure_loudness(path, filter_chain):
+    result = run_media(["ffmpeg", "-nostdin", "-hide_banner", "-i", str(path), "-af", filter_chain, "-f", "null", "-"])
     start = result.stderr.rfind("{")
     if start < 0:
-        raise InvalidPack("Missing loudness measurements")
+        return None
     try:
-        # FFmpeg 7 writes final muxer/progress lines after the loudnorm object.
-        # Parse exactly one JSON object, not the surrounding diagnostic stream.
         measured, _ = json.JSONDecoder().raw_decode(result.stderr[start:])
         for field in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset"):
             if not math.isfinite(float(measured[field])):
-                raise ValueError("Non-finite loudness measurement")
+                return None
         return measured
-    except (ValueError, TypeError, KeyError) as exc:
-        raise InvalidPack("Invalid loudness measurements: " + result.stderr[-2000:]) from exc
+    except (ValueError, TypeError, KeyError):
+        return None
 
+
+def loudness(path):
+    measured = _measure_loudness(path, "loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json")
+    if measured is not None:
+        return measured
+    # For short speech clips (<1s), loudnorm returns -inf. Loop the speech
+    # buffer to provide sufficient window for BS.1770 measurement without changing spectral content.
+    measured = _measure_loudness(path, "aloop=loop=5:size=192000,loudnorm=I=-18:TP=-1.5:LRA=11:print_format=json")
+    if measured is not None:
+        return measured
+    raise InvalidPack("Invalid loudness measurements: could not obtain finite loudness measurements")
 
 def audio_metadata(path):
     result = run_media(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)])
@@ -159,6 +171,7 @@ def verify_pack(root, directory, inspect_audio=True):
     manifest = validate_manifest(parse_json(raw))
     if directory.name != manifest["synthesisKey"]:
         raise InvalidPack("Manifest/profile directory mismatch")
+    read_quality_evidence(directory, manifest)
     for clip in manifest["clips"]:
         read_clip(root, clip)
         if inspect_audio and audio_metadata(root / "clips" / (clip["sha256"] + ".mp3")) != clip["durationMs"]:
@@ -170,14 +183,14 @@ def verify_output(root, inputs=None):
     if inputs is not None:
         directories = [root / inputs["synthesisKey"]]
     else:
-        directories = sorted(path for path in root.iterdir() if HASH.fullmatch(path.name) and path.is_dir()) if root.is_dir() else []
+        directories = sorted(path for path in root.iterdir() if HASH.fullmatch(path.name) and path.is_dir() and (path / "manifest.json").exists()) if root.is_dir() else []
     if not directories:
         raise InvalidPack("No published packs to verify")
     for directory in directories:
         manifest = verify_pack(root, directory)
         if inputs is not None:
             expected = {key: value for key, value in inputs.items() if key != "clips"}
-            actual = {key: value for key, value in manifest.items() if key not in ("clips", "packVersion")}
+            actual = {key: value for key, value in manifest.items() if key not in ("clips", "packVersion", "composition", "qualityEvidenceSha256")}
             transcripts = [{key: clip[key] for key in ("clipId", "kind", "transcript")} for clip in manifest["clips"]]
             if expected != actual or transcripts != inputs["clips"]:
                 raise InvalidPack("Pack does not match exact input transcripts/profile")
@@ -240,7 +253,7 @@ async def build(inputs, root):
             with tempfile.TemporaryDirectory(prefix="voice-pack-") as temp:
                 audio, duration = await asyncio.to_thread(normalize_audio, bytes(chunks), Path(temp))
             digest = hashlib.sha256(audio).hexdigest()
-            metadata = dict(clip, durationMs=duration, sampleRate=24000, bytes=len(audio), sha256=digest)
+            metadata = dict(clip, durationMs=duration, sampleRate=24000, bytes=len(audio), sha256=digest, speechStartMs=None, amountStartMs=None)
             async with progress_lock:
                 total = sum(item["bytes"] for item in completed.values()) + len(audio)
                 if total > MAX_PACK_BYTES:
@@ -276,14 +289,66 @@ async def build(inputs, root):
             with anyio.CancelScope(shield=True):
                 await provider.close()
     manifest = dict(inputs, clips=[completed[clip["clipId"]] for clip in inputs["clips"]])
+    manifest["composition"] = {"tail": "whole", "numbers": "whole"}
     manifest["packVersion"] = hashlib.sha256(canonical_json(manifest)).hexdigest()
-    validate_manifest(manifest)
     body = canonical_json(manifest)
     if len(body) > MAX_MANIFEST_BYTES:
         raise InvalidPack("Manifest exceeds 1MiB")
-    atomic_write(directory / "manifest.json", body)
+    atomic_write(directory / "manifest.candidate.json", body)
     checkpoint.unlink(missing_ok=True)
-    print(f"Built {inputs['synthesisKey']}: {len(manifest['clips'])} clips; listening/release gates still required")
+    print(f"Built candidate for {inputs['synthesisKey']}: {len(manifest['clips'])} clips; publish requires --publish and --quality-evidence")
+
+
+def publish(inputs, root, quality_evidence_path):
+    if not quality_evidence_path:
+        raise InvalidPack("--quality-evidence required for --publish")
+    validate_inputs(inputs)
+    evidence = parse_json(read_bounded(quality_evidence_path, MAX_MANIFEST_BYTES))
+    if not isinstance(evidence, dict):
+        raise InvalidPack("Invalid quality evidence")
+    evidence_hash = hashlib.sha256(canonical_json(evidence)).hexdigest()
+    directory = root / inputs["synthesisKey"]
+    if (directory / "manifest.json").exists():
+        existing = verify_pack(root, directory)
+        if manifest_inputs(existing) != inputs or existing["qualityEvidenceSha256"] != evidence_hash:
+            raise InvalidPack("Published packs are immutable; use a separate output image")
+        validate_quality_evidence(evidence, existing)
+        return
+    candidate = parse_json(read_bounded(directory / "manifest.candidate.json", MAX_MANIFEST_BYTES))
+    if manifest_inputs(candidate) != inputs:
+        raise InvalidPack("Candidate does not match exact input transcripts/profile")
+    reviews = evidence.get("clips")
+    if not isinstance(reviews, list) or len(reviews) != len(candidate["clips"]):
+        raise InvalidPack("Quality clip review must cover the exact clip set")
+    clips_evidence = {}
+    for review in reviews:
+        if not isinstance(review, dict) or not isinstance(review.get("clipId"), str) or review["clipId"] in clips_evidence:
+            raise InvalidPack("Invalid/duplicate quality clip review")
+        clips_evidence[review["clipId"]] = review
+    published_clips = []
+    for clip in candidate["clips"]:
+        review = clips_evidence.get(clip["clipId"])
+        if review is None or review.get("sha256") != clip["sha256"]:
+            raise InvalidPack("Quality clip review must match every candidate hash")
+        published_clips.append(dict(clip, speechStartMs=review.get("speechStartMs"), amountStartMs=review.get("amountStartMs")))
+    manifest = dict(candidate, clips=published_clips)
+    manifest["composition"] = {"tail": evidence.get("tailMode"), "numbers": evidence.get("numberMode")}
+    manifest["qualityEvidenceSha256"] = evidence_hash
+    unsigned = {k: v for k, v in manifest.items() if k != "packVersion"}
+    manifest["packVersion"] = hashlib.sha256(canonical_json(unsigned)).hexdigest()
+    validate_manifest(manifest)
+    validate_quality_evidence(evidence, manifest)
+    for clip in manifest["clips"]:
+        read_clip(root, clip)
+        if audio_metadata(root / "clips" / (clip["sha256"] + ".mp3")) != clip["durationMs"]:
+            raise InvalidPack("Duration metadata mismatch")
+    body = canonical_json(manifest)
+    if len(body) > MAX_MANIFEST_BYTES:
+        raise InvalidPack("Manifest exceeds 1MiB")
+    atomic_write(directory / "quality.json", canonical_json(evidence))
+    # The manifest is the commit point; candidates are never runtime-visible.
+    atomic_write(directory / "manifest.json", body)
+    print(f"Published {inputs['synthesisKey']} pack (version {manifest['packVersion'][:16]}...) with reviewed quality evidence")
 
 def failure_details(error):
     if isinstance(error, BaseExceptionGroup):
@@ -297,6 +362,8 @@ def main():
     parser.add_argument("--inputs", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--publish", action="store_true")
+    parser.add_argument("--quality-evidence", type=Path)
     parser.add_argument("--rights-evidence", type=Path)
     parser.add_argument("--model-card", type=Path)
     args = parser.parse_args()
@@ -306,6 +373,16 @@ def main():
             if not shutil.which("ffprobe"):
                 raise InvalidPack("ffprobe required in build environment")
             verify_output(args.output, inputs)
+        elif args.publish:
+            if inputs is None:
+                raise InvalidPack("--inputs required for --publish")
+            if inputs["voiceId"] == "vi-VN-vais1000-medium":
+                require_piper_license(args.model_card)
+            else:
+                require_rights(args.rights_evidence)
+            if not shutil.which("ffprobe"):
+                raise InvalidPack("ffprobe required in build environment")
+            publish(inputs, args.output, args.quality_evidence)
         else:
             if inputs is None:
                 raise InvalidPack("--inputs required for generation")

@@ -87,13 +87,13 @@ export class TransactionAudioEngine implements VoiceEngine {
     const start = context.currentTime;
     const level = Math.min(1, volume);
     let end = start;
-    for (const [frequency, offset, duration] of [[880, 0, 0.4], [1320, 0.22, 0.48]]) {
+    for (const [frequency, offset, duration] of [[880, 0, 0.15], [1320, 0.10, 0.15]]) {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = 'sine'; oscillator.frequency.setValueAtTime(frequency, start + offset);
       gain.gain.setValueAtTime(0.0001, start + offset);
-      gain.gain.exponentialRampToValueAtTime(0.42 * level, start + offset + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.12 * level, start + offset + duration * 0.45);
+      gain.gain.exponentialRampToValueAtTime(0.075 * level, start + offset + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.02 * level, start + offset + duration * 0.5);
       gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration);
       oscillator.connect(gain); gain.connect(context.destination);
       const node = { oscillator, gain };
@@ -149,9 +149,27 @@ export class TransactionAudioEngine implements VoiceEngine {
     this.currentController = controller;
     let plan: PreparedAnnouncement | undefined;
     try {
-      // Preparation begins before the chime, so the first await never delays it.
-      const chimeEnd = message.chime && profile.chimeEnabled ? this.playChime(message.volume) : 0;
+      if (message.telemetry) {
+        message.telemetry.preparationStartedMonotonicAt = performance.now();
+      }
+      let chimeEnd = 0;
+      if (message.chime && profile.chimeEnabled) {
+        if (message.telemetry) {
+          const cNow = performance.now();
+          message.telemetry.chimeStartedMonotonicAt = cNow;
+          if (message.telemetry.receivedMonotonicAt !== undefined) {
+            message.telemetry.sseToChimeMs = cNow - message.telemetry.receivedMonotonicAt;
+          }
+        }
+        chimeEnd = this.playChime(message.volume);
+      }
       plan = await preparation;
+      if (message.telemetry) {
+        message.telemetry.audioReadyMonotonicAt = performance.now();
+        if (message.telemetry.chimeStartedMonotonicAt !== undefined) {
+          message.telemetry.chimeEndedMonotonicAt = performance.now();
+        }
+      }
       if (controller.signal.aborted) throw new Error('VOICE_CANCELLED');
       const onTailStart = message.onTailStart;
       plan.message.onTailStart = (id) => { this.recent.started(id); onTailStart?.(id); };

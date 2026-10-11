@@ -120,11 +120,11 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile := voicecopy.AudioInputProfile{VoiceID: "vi-VN-NamMinhNeural", Rate: 1.25, PitchHz: 0}
-	inputs, err := voicecopy.ExportAudioInputs(profile)
+	inputs, err := voicecopy.ExportAudioInputs(profile, voicecopy.AudioInputOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputs.SchemaVersion != 1 || inputs.FormatterVersion != "money-vi-v1" || inputs.CatalogVersion != "v1" || len(inputs.Clips) != 740 || len(inputs.Amounts) != 20 {
+	if inputs.SchemaVersion != 2 || inputs.FormatterVersion != "money-vi-v1" || inputs.CatalogVersion != "v1" || len(inputs.Amounts) < 20 {
 		t.Fatalf("unexpected input metadata/counts")
 	}
 	seen := map[string]voicecopy.AudioInputClip{}
@@ -136,7 +136,7 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 		seen[clip.ClipID] = clip
 		kinds[clip.Kind]++
 	}
-	if kinds["amount"] != 20 || kinds["classic"] != 120 || kinds["tail-fragment"] != 600 {
+	if kinds["amount"] < 20 || kinds["classic"] < 120 || kinds["tail-fragment"] != 600 {
 		t.Fatalf("wrong kinds: %v", kinds)
 	}
 	entry := inputs.Amounts["500000"]
@@ -150,23 +150,57 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 			t.Fatalf("classic transcript changed: %s", phrase.ID)
 		}
 	}
-	other, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: "vi-VN-HoaiMyNeural", Rate: 1.25, PitchHz: 0})
+	other, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: "vi-VN-HoaiMyNeural", Rate: 1.25, PitchHz: 0}, voicecopy.AudioInputOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if inputs.SynthesisKey == other.SynthesisKey {
 		t.Fatal("different voices share synthesis key")
 	}
-	piper, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 0})
+	piper, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 0}, voicecopy.AudioInputOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if piper.VoiceID != storage.VoiceIDPiperVais1000 || piper.SynthesisKey != storage.ComputeSynthesisKey(storage.VoiceIDPiperVais1000, 1.25, 0) ||
-		piper.SchemaVersion != 1 || len(piper.Clips) != 740 || !reflect.DeepEqual(piper.Clips, inputs.Clips) || !reflect.DeepEqual(piper.Amounts, inputs.Amounts) {
-		t.Fatal("Piper pack must export the same exact 740 Go transcripts under its own synthesis key")
+		piper.SchemaVersion != 2 || !reflect.DeepEqual(piper.Clips, inputs.Clips) || !reflect.DeepEqual(piper.Amounts, inputs.Amounts) {
+		t.Fatal("Piper pack must export the same exact Go transcripts under its own synthesis key")
 	}
-	if _, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 1}); err == nil {
+	if _, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 1}, voicecopy.AudioInputOptions{}); err == nil {
 		t.Fatal("Piper pitch override accepted")
+	}
+}
+
+func TestAudioInputAmountCapPreservesBaseAndRanking(t *testing.T) {
+	profile := voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25}
+	base, err := voicecopy.ExportAudioInputs(profile, voicecopy.AudioInputOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranked := []int64{9007199254740991}
+	for value := int64(1); value <= 150; value++ {
+		ranked = append(ranked, value)
+	}
+	pack, err := voicecopy.ExportAudioInputs(profile, voicecopy.AudioInputOptions{Amounts: ranked, PreloadAmounts: []int64{9007199254740991, 1, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pack.Amounts) != 128 || pack.Amounts["9007199254740991"].Standard == "" || pack.Amounts["150"].Standard != "" {
+		t.Fatal("amount cap did not preserve highest-ranked extra amounts")
+	}
+	for amount := range base.Amounts {
+		if pack.Amounts[amount].Standard == "" || len(pack.Amounts[amount].Classic) != 6 {
+			t.Fatalf("required base amount %s lost at cap", amount)
+		}
+	}
+	seen := map[string]bool{}
+	for _, id := range pack.PreloadClipIDs {
+		if seen[id] {
+			t.Fatalf("duplicate preload %s", id)
+		}
+		seen[id] = true
+	}
+	if _, err := voicecopy.ExportAudioInputs(profile, voicecopy.AudioInputOptions{PreloadAmounts: []int64{123}}); err == nil {
+		t.Fatal("unretained preload was accepted")
 	}
 }
 

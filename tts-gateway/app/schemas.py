@@ -1,5 +1,5 @@
 """Data models and schemas for fixed-provider TTS."""
-from typing import Literal
+from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 PIPER_VOICE = "vi-VN-vais1000-medium"
@@ -36,7 +36,9 @@ class VoiceItem(BaseModel):
 
 class ProviderHealth(BaseModel):
     available: bool
-
+    workerCount: Optional[int] = None
+    activeWorkers: Optional[int] = None
+    idleWorkers: Optional[int] = None
 
 class HealthResponse(BaseModel):
     status: str

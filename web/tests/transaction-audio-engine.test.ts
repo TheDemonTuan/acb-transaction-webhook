@@ -19,12 +19,20 @@ class NativeAudio extends EventTarget {
   }
 }
 const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), chimeEnabled: false, funEnabled: false };
+function stubAudioResponse(chosenProfile = profile) {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('/stream?')
+    ? new Response(new Uint8Array([1, 2, 3]), { headers: {
+      'X-Voice-Revision': String(chosenProfile.revision), 'X-Voice-Synthesis-Key': chosenProfile.synthesisKey,
+      'X-TTS-Voice': chosenProfile.voiceId,
+      'X-TTS-Provider': chosenProfile.providerMode === 'PIPER_ONLY' ? 'piper' : 'edge',
+    } }) : new Response('', { status: 404 })));
+}
 
 describe('transaction audio explicit profile ownership', () => {
   beforeEach(() => {
     NativeAudio.owners = []; NativeAudio.failPrepare = false;
     vi.stubGlobal('window', { Audio: NativeAudio, speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() } });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })));
+    stubAudioResponse();
   });
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
   it('requires confirmed server profile before preparation or playback', async () => {
@@ -40,11 +48,11 @@ describe('transaction audio explicit profile ownership', () => {
     const controller = new AbortController();
     await engine.prefetch(message, controller.signal);
     expect(NativeAudio.owners).toHaveLength(1);
-    expect(NativeAudio.owners[0].src).toContain('/voice/transactions/tx/stream?profileRevision=1');
     expect(NativeAudio.owners[0].play).not.toHaveBeenCalled();
     await engine.speak(message);
     expect(NativeAudio.owners).toHaveLength(1);
     expect(onStart).toHaveBeenCalledTimes(1);
+    expect(NativeAudio.owners[0].play).toHaveBeenCalledTimes(1);
     expect(NativeAudio.owners[0].stopped).toBe(true);
     engine.dispose();
   });
@@ -53,6 +61,7 @@ describe('transaction audio explicit profile ownership', () => {
     { ...profile, providerMode: 'EDGE_ONLY' as const, voiceId: 'vi-VN-NamMinhNeural' },
   ])('never retries or changes provider after $providerMode native preparation fails', async (chosenProfile) => {
     NativeAudio.failPrepare = true;
+    stubAudioResponse(chosenProfile);
     const onProfileChanged = vi.fn();
     const engine = new TransactionAudioEngine({ isPublic: true, onProfileChanged }); engine.setProfile(chosenProfile);
     await expect(engine.speak({ text: '', amountVnd: '50000', transactionId: 'tx' })).rejects.toThrow('AUDIO_PREPARATION_FAILED');

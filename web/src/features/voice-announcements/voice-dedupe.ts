@@ -103,6 +103,10 @@ export class VoiceDedupe {
       this.reservedKeys.delete(k);
       this.skippedKeys.add(k);
     });
+    if (this.skippedKeys.size > MAX_ENTRIES * 1.5) {
+      const arr = Array.from(this.skippedKeys).slice(-MAX_ENTRIES);
+      this.skippedKeys = new Set(arr);
+    }
   }
 
   // Legacy convenience method

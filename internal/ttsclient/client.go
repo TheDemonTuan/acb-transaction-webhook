@@ -253,6 +253,10 @@ func (c *Client) SynthesizeStream(ctx context.Context, req SynthesizeRequest) (*
 		_ = body.Close()
 		return nil, err
 	}
+	if n == 0 {
+		_ = body.Close()
+		return nil, ErrSynthesisFailed
+	}
 	provider := resp.Header.Get("X-TTS-Provider")
 	return &StreamResult{
 		Reader:            io.MultiReader(bytes.NewReader(buf[:n]), body),
@@ -284,6 +288,9 @@ func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) (*Synthe
 	audioData, err := io.ReadAll(body)
 	if err != nil {
 		return nil, err
+	}
+	if len(audioData) == 0 {
+		return nil, ErrSynthesisFailed
 	}
 	provider := resp.Header.Get("X-TTS-Provider")
 	return &SynthesizeResult{

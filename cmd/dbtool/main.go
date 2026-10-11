@@ -28,7 +28,10 @@ func main() {
 	payOSCutoverFlag := flag.Bool("payos-cutover", false, "retire legacy ACB runtime state under a deployment lease")
 	paymentCountsFlag := flag.Bool("payment-counts", false, "print read-only payment issuance counts and journal watermark as JSON")
 	readonlyFlag := flag.Bool("readonly", false, "open SQLite database in read-only mode")
-
+	voiceAmountDistFlag := flag.Bool("voice-amount-distribution", false, "export voice amount distribution as JSON")
+	fromFlag := flag.String("from", "", "RFC3339 UTC start timestamp for distribution")
+	toFlag := flag.String("to", "", "RFC3339 UTC end timestamp for distribution")
+	outputFlag := flag.String("output", "", "destination path for JSON output")
 	ownerFlag := flag.String("owner", "", "lease owner identifier")
 	leaseTokenFlag := flag.String("lease-token", "", "lease token for release, renewal or payOS cutover")
 	leaseDurationFlag := flag.Duration("lease-duration", 2*time.Minute, "duration of lease")
@@ -61,6 +64,7 @@ func main() {
 		*migrateFlag, *checkFlag, *backupToFlag != "", *schemaVersionFlag,
 		*gateStatusFlag, *gateAcquireFlag, *gateReleaseFlag,
 		*gateRenewFlag, *gateCheckFlag, *schemaCompatFlag, *payOSCutoverFlag, *paymentCountsFlag,
+		*voiceAmountDistFlag,
 	} {
 		if selected {
 			actionCount++
@@ -73,6 +77,53 @@ func main() {
 	if *payOSCutoverFlag && *leaseTokenFlag == "" {
 		logger.Error("lease-token is required for payOS cutover")
 		os.Exit(2)
+	}
+	if *voiceAmountDistFlag {
+		if *fromFlag == "" || *toFlag == "" || *outputFlag == "" {
+			logger.Error("-from, -to and -output are required for -voice-amount-distribution")
+			os.Exit(2)
+		}
+		fromTime, err := time.Parse(time.RFC3339, *fromFlag)
+		if err != nil {
+			logger.Error("invalid -from timestamp (must be RFC3339 UTC)", "error", err)
+			os.Exit(2)
+		}
+		toTime, err := time.Parse(time.RFC3339, *toFlag)
+		if err != nil {
+			logger.Error("invalid -to timestamp (must be RFC3339 UTC)", "error", err)
+			os.Exit(2)
+		}
+
+		ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		distStore, err := storage.OpenWithOptions(ctxTimeout, dbPath, storage.OpenOptions{
+			RunMigrations: false,
+			ReadOnly:      true,
+		})
+		if err != nil {
+			logger.Error("open db failed", "error", err)
+			os.Exit(1)
+		}
+		defer distStore.Close()
+
+		dist, err := distStore.ReadVoiceAmountDistribution(ctxTimeout, fromTime, toTime)
+		if err != nil {
+			logger.Error("read voice amount distribution failed", "error", err)
+			os.Exit(1)
+		}
+
+		data, err := json.MarshalIndent(dist, "", "  ")
+		if err != nil {
+			logger.Error("encode voice amount distribution failed", "error", err)
+			os.Exit(1)
+		}
+
+		if err := os.WriteFile(*outputFlag, append(data, '\n'), 0o644); err != nil {
+			logger.Error("write distribution file failed", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// If --migrate is set or no action is selected, run migration.

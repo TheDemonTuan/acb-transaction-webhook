@@ -4,6 +4,7 @@ import { TransactionAudioEngine } from './transaction-audio-engine';
 import { MultiTabLeader } from './multi-tab-leader';
 import { VoiceDedupe } from './voice-dedupe';
 import type { VoiceEngine, VoiceInfo, VoiceMessage, VoiceTelemetry } from './voice-engine';
+import { recordVoiceTelemetry } from './voice-telemetry';
 import { VoiceQueue } from './voice-queue';
 import { loadVoiceSettings, saveVoiceSettings, type VoiceSettings } from './voice-settings';
 import { fetchVoiceProfile, type VoiceProfile } from './voice-profile';
@@ -146,14 +147,36 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     const message: VoiceMessage = { text: '', amountVnd: amount.toString(), description: data.description,
       volume: settings.volume, voiceURI: settings.browserVoiceURI, transactionId: data.transactionId, chime: true, telemetry,
       onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
-      onSuccess: () => { dedupe.commit(keys); setPendingCount(active.queue.getPendingCount()); },
+      onSuccess: () => {
+        dedupe.commit(keys);
+        setPendingCount(active.queue.getPendingCount());
+        if (telemetry) {
+          telemetry.outcome = 'completed';
+          telemetry.speechEndedMonotonicAt = performance.now();
+          recordVoiceTelemetry(telemetry);
+          setLastTelemetry({ ...telemetry });
+        }
+      },
       onError: (error) => {
-        const started = error && typeof error === 'object' && 'playbackStarted' in error && error.playbackStarted;
+        const started = Boolean(error && typeof error === 'object' && 'playbackStarted' in error && (error as { playbackStarted?: unknown }).playbackStarted);
         const reason = error instanceof Error ? error.message : 'VOICE_UNAVAILABLE';
         if (started) dedupe.commit(keys);
         else if (reason === 'QUEUE_OVERFLOW' || reason === 'EXPIRED_AGE' || reason === 'VOICE_CANCELLED') dedupe.markSkipped(keys, reason);
         else dedupe.release(keys);
         noteSkipped(data.transactionId, reason); setPendingCount(active.queue.getPendingCount());
+        if (telemetry) {
+          telemetry.outcome = started
+            ? 'interrupted'
+            : reason === 'QUEUE_OVERFLOW'
+            ? 'overflow'
+            : reason === 'EXPIRED_AGE'
+            ? 'expired'
+            : reason === 'VOICE_CANCELLED'
+            ? 'cancelled'
+            : 'failed';
+          recordVoiceTelemetry(telemetry);
+          setLastTelemetry({ ...telemetry });
+        }
       } };
     active.queue.enqueue(message); setPendingCount(active.queue.getPendingCount());
   }, [settings, isLeader, dedupe, noteSkipped]);
@@ -162,7 +185,31 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     const active = ownerRef.current;
     if (!active || !profileRef.current) throw new Error('VOICE_PROFILE_UNAVAILABLE');
     if (settings.volume === 0) return;
-    await active.queue.speak({ text: '', amountVnd: '500000', isTest: true, volume: settings.volume, voiceURI: settings.browserVoiceURI });
+    const telemetry: VoiceTelemetry = {
+      isTest: true,
+      queuedAt: Date.now(),
+    };
+    await active.queue.speak({
+      text: '',
+      amountVnd: '500000',
+      isTest: true,
+      volume: settings.volume,
+      voiceURI: settings.browserVoiceURI,
+      telemetry,
+      onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
+      onSuccess: () => {
+        telemetry.outcome = 'completed';
+        telemetry.speechEndedMonotonicAt = performance.now();
+        recordVoiceTelemetry(telemetry);
+        setLastTelemetry({ ...telemetry });
+      },
+      onError: (error) => {
+        const started = Boolean(error && typeof error === 'object' && 'playbackStarted' in error && (error as { playbackStarted?: unknown }).playbackStarted);
+        telemetry.outcome = started ? 'interrupted' : 'failed';
+        recordVoiceTelemetry(telemetry);
+        setLastTelemetry({ ...telemetry });
+      },
+    });
   }, [settings.volume, settings.browserVoiceURI]);
   const replayVoice = useCallback(async (transactionId: string) => {
     const active = ownerRef.current;
@@ -172,8 +219,33 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     if (ownerRef.current !== active || active.queue.getCancellationGeneration() !== generation) throw new Error('VOICE_CANCELLED');
     if (!Number.isSafeInteger(transaction.credit) || transaction.credit <= 0) throw new Error('VOICE_INVALID_AMOUNT');
     if (settings.volume === 0) return;
-    await active.queue.speak({ text: '', amountVnd: String(transaction.credit), description: transaction.description,
-      transactionId, isReplay: true, volume: settings.volume, voiceURI: settings.browserVoiceURI });
+    const telemetry: VoiceTelemetry = {
+      isReplay: true,
+      queuedAt: Date.now(),
+    };
+    await active.queue.speak({
+      text: '',
+      amountVnd: String(transaction.credit),
+      description: transaction.description,
+      transactionId,
+      isReplay: true,
+      volume: settings.volume,
+      voiceURI: settings.browserVoiceURI,
+      telemetry,
+      onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
+      onSuccess: () => {
+        telemetry.outcome = 'completed';
+        telemetry.speechEndedMonotonicAt = performance.now();
+        recordVoiceTelemetry(telemetry);
+        setLastTelemetry({ ...telemetry });
+      },
+      onError: (error) => {
+        const started = Boolean(error && typeof error === 'object' && 'playbackStarted' in error && (error as { playbackStarted?: unknown }).playbackStarted);
+        telemetry.outcome = started ? 'interrupted' : 'failed';
+        recordVoiceTelemetry(telemetry);
+        setLastTelemetry({ ...telemetry });
+      },
+    });
   }, [settings.volume, settings.browserVoiceURI]);
   const unlockAudio = useCallback(async () => {
     const active = ownerRef.current;

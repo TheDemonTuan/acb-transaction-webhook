@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 import app.main as gateway
 from app.assets import (
     AssetStore, InvalidPack, MAX_CLIP_BYTES, MAX_MANIFEST_BYTES, MAX_PACK_BYTES,
-    canonical_json, parse_json, synthesis_key, validate_manifest,
+    canonical_json, manifest_inputs, parse_json, synthesis_key, validate_manifest,
 )
 from app.config import config
 
@@ -24,18 +24,41 @@ def sign_manifest(manifest):
 def publish(root, voice="vi-VN-NamMinhNeural", rate=1.25, pitch=0):
     key = synthesis_key(voice, rate, pitch)
     digest = hashlib.sha256(AUDIO).hexdigest()
+    evidence = {
+        "schemaVersion": 1,
+        "decision": "approved",
+        "synthesisKey": key,
+        "inputHash": "a" * 64,
+        "reviewer": "synthetic unit fixture (not release evidence)",
+        "reviewedAt": "2026-10-12T00:00:00Z",
+        "candidateDecisions": {"tail": "rejected", "numbers": "rejected"},
+        "tailMode": "whole", "numberMode": "whole",
+        "heardClipIds": ["amount-500000"], "heardRecipePairIds": [], "rejectedClipIds": [], "joinFailures": [],
+        "amountAccuracy": {"correct": 50, "total": 50}, "readabilityMedian": 4, "naturalnessMedian": 4,
+        "selectedRate": rate, "sampleSetSha256": "a" * 64,
+        "clips": [{"clipId": "amount-500000", "sha256": digest, "speechStartMs": None, "amountStartMs": None}],
+    }
+    evidence_hash = hashlib.sha256(canonical_json(evidence)).hexdigest()
     manifest = sign_manifest({
-        "schemaVersion": 1, "synthesisKey": key, "voiceId": voice,
+        "schemaVersion": 2, "synthesisKey": key, "voiceId": voice,
         "rate": rate, "pitchHz": pitch, "formatterVersion": "money-vi-v1",
-        "catalogVersion": "v1", "clips": [{
+        "catalogVersion": "v1", "qualityEvidenceSha256": evidence_hash,
+        "preloadClipIds": ["amount-500000"],
+        "composition": {"tail": "whole", "numbers": "whole"},
+        "clips": [{
             "clipId": "amount-500000", "kind": "amount",
             "transcript": "Đã nhận năm trăm nghìn đồng.",
             "durationMs": 2000, "sampleRate": 24000,
             "bytes": len(AUDIO), "sha256": digest,
+            "speechStartMs": None, "amountStartMs": None,
         }], "amounts": {"500000": {"standard": "amount-500000", "classic": {}}},
     })
-    (root / key).mkdir(parents=True)
+    evidence["inputHash"] = hashlib.sha256(canonical_json(manifest_inputs(manifest))).hexdigest()
+    manifest["qualityEvidenceSha256"] = hashlib.sha256(canonical_json(evidence)).hexdigest()
+    sign_manifest(manifest)
+    (root / key).mkdir(parents=True, exist_ok=True)
     (root / "clips").mkdir(exist_ok=True)
+    (root / key / "quality.json").write_bytes(canonical_json(evidence))
     (root / key / "manifest.json").write_bytes(canonical_json(manifest))
     (root / "clips" / (digest + ".mp3")).write_bytes(AUDIO)
     return key, digest, manifest
@@ -92,7 +115,7 @@ def test_unlisted_content_addressed_file_is_not_published(tmp_path):
         AssetStore(tmp_path).clip(digest)
 
 
-@pytest.mark.parametrize("damage", ["hash", "profile", "clip", "missing", "oversize", "duplicate-key"])
+@pytest.mark.parametrize("damage", ["hash", "profile", "clip", "missing", "oversize", "duplicate-key", "missing-review", "empty-review", "unheard"])
 def test_corrupt_pack_is_entirely_unavailable(tmp_path, damage):
     key, digest, manifest = publish(tmp_path)
     path = tmp_path / key / "manifest.json"
@@ -109,6 +132,17 @@ def test_corrupt_pack_is_entirely_unavailable(tmp_path, damage):
         clip.unlink()
     elif damage == "oversize":
         path.write_bytes(b" " * (MAX_MANIFEST_BYTES + 1))
+    elif damage in ("missing-review", "empty-review", "unheard"):
+        quality_path = tmp_path / key / "quality.json"
+        if damage == "missing-review":
+            quality_path.unlink()
+        else:
+            evidence = parse_json(quality_path.read_bytes())
+            evidence["clips" if damage == "empty-review" else "heardClipIds"] = []
+            quality_path.write_bytes(canonical_json(evidence))
+            # Even a correctly re-signed corrupt attestation must not authorize audio.
+            manifest["qualityEvidenceSha256"] = hashlib.sha256(canonical_json(evidence)).hexdigest()
+            path.write_bytes(canonical_json(sign_manifest(manifest)))
     else:
         path.write_bytes(b'{"schemaVersion":1,"schemaVersion":1}')
     store = AssetStore(tmp_path)
@@ -144,6 +178,7 @@ def test_total_pack_limit(tmp_path):
     _, _, manifest = publish(tmp_path)
     original = manifest["clips"][0]
     manifest["clips"] = [dict(original, clipId=f"amount-{index}", bytes=MAX_CLIP_BYTES) for index in range(MAX_PACK_BYTES // MAX_CLIP_BYTES + 1)]
+    manifest["preloadClipIds"] = ["amount-0"]
     manifest["amounts"] = {"1": {"standard": "amount-0", "classic": {}}}
     with pytest.raises(InvalidPack, match="Pack exceeds"):
         validate_manifest(sign_manifest(manifest))
@@ -164,7 +199,7 @@ def test_symlink_asset_not_served(tmp_path):
 
 
 def test_canonical_hash_and_exact_synthesis_key():
-    canonical = "edge|vi-VN-NamMinhNeural|1.25|0|money-vi-v1|pack-schema-1"
+    canonical = "edge|vi-VN-NamMinhNeural|1.25|0|money-vi-v1|pack-schema-2"
     assert synthesis_key("vi-VN-NamMinhNeural", 1.25, 0) == hashlib.sha256(canonical.encode()).hexdigest()
     assert canonical_json({"z": "đồng", "a": 1}) == '{"a":1,"z":"đồng"}'.encode()
     assert canonical_json({"rate": 1.0}) == b'{"rate":1}'

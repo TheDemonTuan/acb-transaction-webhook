@@ -30,7 +30,7 @@ describe('prepared audio timeline', () => {
     vi.useFakeTimers();
     const f = fixture(), onTailStart = vi.fn(), onStart = vi.fn();
     const plan: PreparedAnnouncement = { kind: 'buffers', profile: DEFAULT_VOICE_PROFILE, volume: 1, recipe,
-      amountBuffer: buffer(2), tailBuffers: [buffer(1), buffer(0.5)], message: { text: '', onStart, onTailStart }, release: vi.fn() };
+      segments: [{ buffer: buffer(2), role: 'amount' }, { buffer: buffer(1), role: 'tail' }, { buffer: buffer(0.5), role: 'tail' }], message: { text: '', onStart, onTailStart }, release: vi.fn() };
     const pending = playPrepared(plan, new AbortController().signal, f.options, 10.25);
     expect(f.starts).toEqual([10.25, 12.25, 13.25]);
     expect(f.sources.every((source) => source.playbackRate.value === 1)).toBe(true);
@@ -42,31 +42,30 @@ describe('prepared audio timeline', () => {
     f.sources.at(-1)!.onended!(); await pending;
     expect(f.sources.every((source) => vi.mocked(source.disconnect).mock.calls.length === 1)).toBe(true);
   });
-  it('schedules ready cold whole-tail before core end and drops late tail without rereading amount', async () => {
+  it('schedules ordered segments on timeline and triggers onTailStart when tail begins', async () => {
     vi.useFakeTimers();
-    const f = fixture(), onTailStart = vi.fn(), abortTail = vi.fn();
-    const tail = Promise.withResolvers<AudioBuffer | undefined>();
-    const plan: PreparedAnnouncement = { kind: 'buffers', profile: DEFAULT_VOICE_PROFILE, volume: 1, recipe,
-      amountBuffer: buffer(2), tailBuffers: [], tail: { ready: tail.promise, abort: abortTail },
-      message: { text: '', onTailStart }, release: vi.fn() };
-    const pending = playPrepared(plan, new AbortController().signal, f.options);
-    tail.resolve(buffer(1)); await Promise.resolve();
+    const f = fixture(), onTailStart = vi.fn();
+    const plan: PreparedAnnouncement = {
+      kind: 'buffers', profile: DEFAULT_VOICE_PROFILE, volume: 1, recipe,
+      segments: [
+        { buffer: buffer(2), role: 'amount' },
+        { buffer: buffer(1), role: 'tail', clipId: recipe.id },
+      ],
+      message: { text: '', onTailStart },
+      release: vi.fn(),
+    };
+    const pending = playPrepared(plan, new AbortController().signal, f.options, 10);
     expect(f.starts).toEqual([10, 12]);
-    f.sources[0].onended!();
-    f.sources[1].onended!(); await pending;
-    const late = fixture(), delayed = Promise.withResolvers<AudioBuffer | undefined>();
-    const lateAbort = vi.fn();
-    const next = playPrepared({ ...plan, tail: { ready: delayed.promise, abort: lateAbort } }, new AbortController().signal, late.options);
-    late.context.currentTime = 12;
-    late.sources[0].onended!(); await next;
-    delayed.resolve(buffer(1)); await Promise.resolve();
-    expect(late.starts).toEqual([10]); expect(lateAbort).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(onTailStart).toHaveBeenCalledWith(recipe.id);
+    f.sources[1].onended!();
+    await pending;
   });
   it('cancel stops all nodes and settles once without late start or tail callbacks', async () => {
     vi.useFakeTimers();
     const f = fixture(), onStart = vi.fn(), onTailStart = vi.fn(), controller = new AbortController();
     const plan: PreparedAnnouncement = { kind: 'buffers', profile: DEFAULT_VOICE_PROFILE, volume: 1, recipe,
-      amountBuffer: buffer(2), tailBuffers: [buffer(1)], message: { text: '', onStart, onTailStart }, release: vi.fn() };
+      segments: [{ buffer: buffer(2), role: 'amount' }, { buffer: buffer(1), role: 'tail' }], message: { text: '', onStart, onTailStart }, release: vi.fn() };
     const pending = playPrepared(plan, controller.signal, f.options, 10.25);
     controller.abort();
     await expect(pending).rejects.toMatchObject({ message: 'VOICE_CANCELLED', playbackStarted: false });
@@ -157,7 +156,8 @@ describe('server-provider audio preparation', () => {
       template: 'Đã nhận {amount}. Cảm ơn quý khách.' };
     const transcript = kind === 'classic' ? 'Đã nhận một nghìn đồng. Cảm ơn quý khách.' : 'Đã nhận một nghìn đồng.';
     const clip = { clipId: 'exact', kind, transcript, durationMs: 1000, sampleRate: 24000, bytes: 3, sha256: 'c'.repeat(64) };
-    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue({ schemaVersion: 1, packVersion: 'd'.repeat(64),
+    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue({ schemaVersion: 2, packVersion: 'd'.repeat(64),
+      preloadClipIds: [], composition: { tail: 'whole', numbers: 'whole' }, qualityEvidenceSha256: 'e'.repeat(64), numberSegments: {},
       synthesisKey: chosen.synthesisKey, voiceId: chosen.voiceId, rate: chosen.rate, pitchHz: 0,
       formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [clip],
       amounts: { '1000': { standard: 'exact', classic: { 'classic-1': 'exact' } } } });
@@ -179,7 +179,8 @@ describe('server-provider audio preparation', () => {
     const core = { clipId: 'core', kind: 'amount' as const, transcript: 'Đã nhận một nghìn đồng.',
       durationMs: 1000, sampleRate: 24000, bytes: 3, sha256: 'c'.repeat(64) };
     const fragments = recipe.fragmentIds.map((clipId) => ({ ...core, clipId, kind: 'tail-fragment' as const }));
-    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue({ schemaVersion: 1, packVersion: 'd'.repeat(64),
+    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue({ schemaVersion: 2, packVersion: 'd'.repeat(64),
+      preloadClipIds: [], composition: { tail: 'whole', numbers: 'whole' }, qualityEvidenceSha256: 'e'.repeat(64), numberSegments: {},
       synthesisKey: chosen.synthesisKey, voiceId: chosen.voiceId, rate: chosen.rate, pitchHz: 0,
       formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [core, ...fragments],
       amounts: { '1000': { standard: 'core', classic: {} } } });
@@ -191,8 +192,9 @@ describe('server-provider audio preparation', () => {
       chosen, new AbortController().signal, f.options);
     expect(plan.kind).toBe('buffers');
     if (plan.kind !== 'buffers') throw new Error('Expected prepared amount buffer');
-    expect(plan.tailBuffers).toEqual([]);
-    expect(await plan.tail!.ready).toBe(decoded);
+    expect(plan.segments).toHaveLength(2);
+    expect(plan.segments[0].role).toBe('amount');
+    expect(plan.segments[1].role).toBe('tail');
     expect(getDecoded).toHaveBeenCalledTimes(1);
     expect(getDecoded.mock.calls[0][0].clipId).toBe('core');
     expect(fetcher).toHaveBeenCalledTimes(1);

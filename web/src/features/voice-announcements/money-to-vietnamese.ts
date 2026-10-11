@@ -49,20 +49,19 @@ function readThreeDigits(n: number, hasHigherGroup: boolean): string[] {
 }
 
 /**
- * Converts a VND amount (number, bigint or string) into natural spoken Vietnamese text.
- * Aligned with Go internal/voicecopy/money_vi.go algorithm.
+ * Breaks a VND amount into spoken 3-digit groups with scale suffixes.
+ * For positive amounts, `${speakVndParts(amount).join(' ')} đồng` === speakVnd(amount).
  */
-export function speakVnd(rawAmount: string | number | bigint): string {
+export function speakVndParts(rawAmount: string | number | bigint): string[] {
   let str = typeof rawAmount === 'string' ? rawAmount.trim() : rawAmount.toString();
   str = str.replace(/[^\d]/g, '');
 
   if (!str || /^0+$/.test(str)) {
-    return 'không đồng';
+    return [];
   }
 
   str = str.replace(/^0+/, '');
 
-  // Split into 3-digit groups from right to left
   const groups: number[] = [];
   while (str.length > 0) {
     const chunk = str.length > 3 ? str.slice(-3) : str;
@@ -75,7 +74,7 @@ export function speakVnd(rawAmount: string | number | bigint): string {
   }
 
   const numBlocks = groups.length / 3;
-  const resultParts: string[] = [];
+  const parts: string[] = [];
   let hasHigherOverall = false;
 
   for (let b = numBlocks - 1; b >= 0; b--) {
@@ -83,37 +82,52 @@ export function speakVnd(rawAmount: string | number | bigint): string {
     const g1 = groups[b * 3 + 1]; // nghìn
     const g0 = groups[b * 3 + 0]; // đơn vị
 
-    const blockHasVal = g2 > 0 || g1 > 0 || g0 > 0;
-    if (!blockHasVal) continue;
+    if (g2 === 0 && g1 === 0 && g0 === 0) continue;
+
+    const blockParts: string[] = [];
 
     if (g2 > 0) {
       const w = readThreeDigits(g2, hasHigherOverall);
-      resultParts.push(...w, 'triệu');
+      w.push('triệu');
+      blockParts.push(w.join(' '));
       hasHigherOverall = true;
     }
 
     if (g1 > 0) {
       const w = readThreeDigits(g1, hasHigherOverall);
-      resultParts.push(...w, 'nghìn');
+      w.push('nghìn');
+      blockParts.push(w.join(' '));
       hasHigherOverall = true;
     }
 
     if (g0 > 0) {
       const w = readThreeDigits(g0, hasHigherOverall);
-      resultParts.push(...w);
+      blockParts.push(w.join(' '));
       hasHigherOverall = true;
     }
 
-    if (b > 0) {
+    if (b > 0 && blockParts.length > 0) {
+      let tys = '';
       for (let k = 0; k < b; k++) {
-        resultParts.push('tỷ');
+        tys += ' tỷ';
       }
+      blockParts[blockParts.length - 1] += tys;
     }
+
+    parts.push(...blockParts);
   }
 
-  if (resultParts.length === 0) {
+  return parts;
+}
+
+/**
+ * Converts a VND amount (number, bigint or string) into natural spoken Vietnamese text.
+ * Aligned with Go internal/voicecopy/money_vi.go algorithm.
+ */
+export function speakVnd(rawAmount: string | number | bigint): string {
+  const parts = speakVndParts(rawAmount);
+  if (parts.length === 0) {
     return 'không đồng';
   }
-
-  return `${resultParts.join(' ')} đồng`;
+  return `${parts.join(' ')} đồng`;
 }

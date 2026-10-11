@@ -39,11 +39,6 @@ export class VoiceQueue {
       message.onError?.(new Error('QUEUE_OVERFLOW')); return 'overflow';
     }
     this.queue.push(message);
-    if (this.queue.length >= 3) {
-      for (const pending of this.queue) {
-        if (pending !== this.prefetchedItem) pending.omitFun = true;
-      }
-    }
     if (!this.currentItem) void this.processNext();
     else this.triggerPrefetch();
     return 'queued';
