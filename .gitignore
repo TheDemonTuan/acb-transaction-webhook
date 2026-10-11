@@ -16,7 +16,7 @@ web/playwright-report/
 *.db
 *.db-shm
 *.db-wal
-PLAN_ACB_WEB_MONITOR_SERVICE_PRODUCTION.md
+web/.wrangler/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -26,4 +26,10 @@ deploy/.deploy-state
 deploy/.intentional-stop-*
 deploy/.active-slot
 deploy/.previous-slot
+/gateway.exe
+/worker.exe
+/payment-*.local.json
+/voice-inputs.local.json
+/voice-profile.local.json
+/voicepacks.local/
 

@@ -55,7 +55,7 @@ def trusted(path, directory=False):
 def scope(config):
     routers = {'acb-deny-internal', 'acb-public-deny-private', 'acb-public-sse-router',
                'acb-public-api-router', 'acb-api-router', 'acb-deploy-gateway',
-               'acb-payos-webhook-router', 'acb-sepay-telegram-router',
+               'acb-payos-webhook-router', 'acb-sepay-telegram-router', 'acb-sepay-native-router',
                'acb-public-payments-router', 'acb-admin-payments-router'}
     if not isinstance(config, dict) or set(config) != {'http'}:
         raise PublishError('Only ACB HTTP topology may be published')

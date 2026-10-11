@@ -1,9 +1,8 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient } from '../shared/api/query-client';
 import { RealtimeProvider } from '../realtime/RealtimeProvider';
 import { VoiceAnnouncementProvider } from '../features/voice-announcements/VoiceAnnouncementProvider';
-import { TransactionAudioEngine } from '../features/voice-announcements/transaction-audio-engine';
 import { RealtimeDomainBridge } from '../realtime/RealtimeDomainBridge';
 import { isPublicViewerHost } from './runtime-mode';
 
@@ -14,8 +13,6 @@ export const AppProviders: React.FC<{ children: React.ReactNode }> = ({ children
     queryClient.invalidateQueries({ refetchType: 'active' });
   };
 
-  const engine = useMemo(() => new TransactionAudioEngine({ isPublic }), [isPublic]);
-
   if (isPublic) {
     return (
       <QueryClientProvider client={queryClient}>
@@ -24,7 +21,7 @@ export const AppProviders: React.FC<{ children: React.ReactNode }> = ({ children
           onInitialState={refreshSnapshot}
           onResetState={refreshSnapshot}
         >
-          <VoiceAnnouncementProvider engine={engine}>
+          <VoiceAnnouncementProvider>
             <RealtimeDomainBridge />
             {children}
           </VoiceAnnouncementProvider>
@@ -36,7 +33,7 @@ export const AppProviders: React.FC<{ children: React.ReactNode }> = ({ children
   return (
     <QueryClientProvider client={queryClient}>
       <RealtimeProvider onInitialState={refreshSnapshot} onResetState={refreshSnapshot}>
-        <VoiceAnnouncementProvider engine={engine}>
+        <VoiceAnnouncementProvider>
           <RealtimeDomainBridge />
           {children}
         </VoiceAnnouncementProvider>

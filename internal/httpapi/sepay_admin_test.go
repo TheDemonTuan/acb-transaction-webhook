@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -147,6 +148,7 @@ func TestSePayAdminNotificationAccountRequiresFreshAttestationAndStaysPrivate(t 
 	}
 	// Exercise an existing client's JSON contract with the optional field absent.
 	legacyBody := strings.Replace(string(body), `"notificationAccountNumber":"",`, "", 1)
+	activatedAfter := time.Now().UTC()
 	w := paymentRequest(handler, "PUT", "/api/v1/sepay-store/config", legacyBody, "", true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("active setup: %d %s", w.Code, w.Body.String())
@@ -154,6 +156,11 @@ func TestSePayAdminNotificationAccountRequiresFreshAttestationAndStaysPrivate(t 
 	var saved sepay.AdminSnapshot
 	if err := json.Unmarshal(w.Body.Bytes(), &saved); err != nil || saved.Config.NotificationAccountNumber != "" || !strings.Contains(w.Body.String(), `"notificationAccountNumber":""`) {
 		t.Fatalf("absent legacy override not empty: %v", err)
+	}
+	initialActivation := saved.Config.ActivationAt
+	activation, err := time.Parse(time.RFC3339Nano, initialActivation)
+	if err != nil || activation.Before(activatedAfter) {
+		t.Fatalf("new authority did not receive a fresh activation boundary: %s %v", initialActivation, err)
 	}
 	for _, config := range []string{
 		`{"mode":"active","notificationAccountNumber":"2210112002"}`,
@@ -165,7 +172,7 @@ func TestSePayAdminNotificationAccountRequiresFreshAttestationAndStaysPrivate(t 
 		}
 	}
 	w = paymentRequest(handler, "PUT", "/api/v1/sepay-store/config", `{"revision":1,"config":{"mode":"active","notificationAccountNumber":"2210112002","sourceSeparated":true,"activationAt":"2026-09-01T00:00:00Z"},"botToken":""}`, "", true)
-	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &saved) != nil || saved.Config.NotificationAccountNumber != "2210112002" || saved.Config.AccountNumber != fields.AccountNumber || saved.Config.ActivationAt != fields.ActivationAt {
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &saved) != nil || saved.Config.NotificationAccountNumber != "2210112002" || saved.Config.AccountNumber != fields.AccountNumber || saved.Config.ActivationAt != initialActivation {
 		t.Fatalf("attested override save changed VA/cutoff: %d %s", w.Code, w.Body.String())
 	}
 	private := paymentRequest(handler, "GET", "/api/v1/sepay-store/config", "", "", false)
@@ -191,7 +198,9 @@ func TestSePayAdminNotificationAccountRequiresFreshAttestationAndStaysPrivate(t 
 	for i, tc := range []struct{ account, bank string }{{"2210112002", "Test Bank"}, {"2210112003", "Test Bank"}, {"2210112002", "test bank"}} {
 		envelope := sepayWebhookEnvelope(t, int64(i+1), int64(i+1), "NOTIFICATION_ACCOUNT_"+tc.account+tc.bank)
 		message := envelope["message"].(map[string]any)
-		message["date"] = int64(1791603000)
+		message["date"] = time.Now().Unix()
+		transactionAt := activation.Add(time.Second).In(time.FixedZone("VN", 7*3600)).Format("2006-01-02 15:04:05")
+		message["text"] = strings.Replace(message["text"].(string), "time=2026-10-10 10:05:00", "time="+transactionAt, 1)
 		message["text"] = strings.Replace(message["text"].(string), "VA123456", tc.account, 1)
 		message["text"] = strings.Replace(message["text"].(string), "bank=Test Bank", "bank="+tc.bank, 1)
 		if response := sepayWebhookPost(handler, snapshot.Config().WebhookSecret, sepayWebhookBody(t, envelope)); response.Code != http.StatusOK {
@@ -210,7 +219,47 @@ func TestSePayAdminNotificationAccountRequiresFreshAttestationAndStaysPrivate(t 
 		t.Fatal("clearing effective account inherited old attestation")
 	}
 	w = paymentRequest(handler, "PUT", "/api/v1/sepay-store/config", `{"revision":2,"config":{"mode":"active","notificationAccountNumber":"","sourceSeparated":true,"activationAt":""},"botToken":""}`, "", true)
-	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &saved) != nil || saved.Config.NotificationAccountNumber != "" || saved.Config.ActivationAt != fields.ActivationAt {
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &saved) != nil || saved.Config.NotificationAccountNumber != "" || saved.Config.ActivationAt != initialActivation {
 		t.Fatalf("empty override did not restore legacy matching/cutoff: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSePayAdminNativeConfigFieldsAndSecretRedaction(t *testing.T) {
+	f := managedHTTPFixture(t)
+	draft := `{"revision":0,"config":{"mode":"disabled","activeTransport":"native","nativeMode":"disabled","nativeSubAccount":"SUB01"},"botToken":"","nativeWebhookSecret":"01234567890123456789012345678901"}`
+	w := paymentRequest(f.handler, "PUT", "/api/v1/sepay-store/config", draft, "", true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("native draft save failed: %d %s", w.Code, w.Body.String())
+	}
+	var res sepay.AdminSnapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.HasNativeWebhookSecret || res.Config.ActiveTransport != "native" || res.Config.NativeSubAccount != "SUB01" {
+		t.Fatalf("native admin response unexpected: %+v", res)
+	}
+	if strings.Contains(w.Body.String(), "01234567890123456789012345678901") {
+		t.Fatal("native webhook secret leaked in admin response")
+	}
+}
+
+func TestSePayNativeAdminSecretValidationAndCursor400(t *testing.T) {
+	f := managedHTTPFixture(t)
+	for _, body := range []string{
+		`{"revision":0,"config":{"mode":"disabled"},"botToken":"","nativeWebhookSecret":null}`,
+		`{"revision":0,"config":{"mode":"disabled"},"botToken":"","nativeWebhookSecret":"too-short"}`,
+		`{"revision":0,"config":{"mode":"disabled","nativeReferenceVerified":"true"},"botToken":""}`,
+		`{"revision":0,"config":{"mode":"disabled","nativeWebhookSecret":"not-editable-in-config"},"botToken":""}`,
+	} {
+		if response := paymentRequest(f.handler,"PUT","/api/v1/sepay-store/config",body,"",true); response.Code != 400 { t.Fatalf("invalid native admin body accepted %d %s",response.Code,response.Body.String()) }
+	}
+	for _, tuple := range []string{
+		`[2.5,"2026-10-10T12:00:00Z","native","store:1"]`,
+		`[2,"2026-10-10T12:00:00Z","native",""]`,
+		`[2,"2026-10-10T12:00:00Z","native","store:0"]`,
+		`[2,"2026-10-10T12:00:00Z","telegram","900001:01"]`,
+	} {
+		cursor := base64.RawURLEncoding.EncodeToString([]byte(tuple))
+		if response := paymentRequest(f.handler,"GET","/api/v1/sepay-reviews?cursor="+cursor,"","",false); response.Code != 400 { t.Fatalf("invalid native cursor status %d",response.Code) }
 	}
 }

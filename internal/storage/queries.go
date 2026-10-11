@@ -195,7 +195,7 @@ func (s *Store) ListTransactionsFiltered(ctx context.Context, filter Transaction
 			t.first_seen_at,
 			COALESCE(t.ingest_source, 'REALTIME'),
 			c.bank_code,
-			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' WHEN sr.transaction_id IS NOT NULL THEN 'SEPAY' ELSE '' END,
+			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' WHEN (sr.transaction_id IS NOT NULL OR EXISTS (SELECT 1 FROM sepay_native_inbox sni WHERE sni.transaction_id = t.id)) THEN 'SEPAY' ELSE '' END,
 			COALESCE(CAST(po.order_code AS TEXT), '')
 		FROM transactions t
 		JOIN connections c ON c.id = t.connection_id
@@ -278,7 +278,7 @@ func (s *Store) GetTransactionByID(ctx context.Context, id string) (*Transaction
 			t.first_seen_at,
 			COALESCE(t.ingest_source, 'REALTIME'),
 			c.bank_code,
-			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' WHEN sr.transaction_id IS NOT NULL THEN 'SEPAY' ELSE '' END,
+			CASE WHEN po.id IS NOT NULL THEN 'PAYOS' WHEN (sr.transaction_id IS NOT NULL OR EXISTS (SELECT 1 FROM sepay_native_inbox sni WHERE sni.transaction_id = t.id)) THEN 'SEPAY' ELSE '' END,
 			COALESCE(CAST(po.order_code AS TEXT), '')
 		FROM transactions t
 		JOIN connections c ON c.id = t.connection_id

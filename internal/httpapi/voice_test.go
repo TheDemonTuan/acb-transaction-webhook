@@ -15,6 +15,7 @@ import (
 	"github.com/thedemontuan/acb-transaction-webhook/internal/config"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/ttsclient"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/voicecopy"
 )
 
 func setupTestVoiceServer(t *testing.T) (*Server, *storage.Store, *httptest.Server, *http.Cookie, string) {
@@ -77,12 +78,32 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var settings storage.VoiceSettings
+	var settings storage.VoiceProfile
 	if err := json.Unmarshal(w.Body.Bytes(), &settings); err != nil {
 		t.Fatalf("unmarshal settings: %v", err)
 	}
-	if settings.Revision != 1 || settings.ProviderMode != "ONLINE_AUTO" {
+	if settings.Revision != 1 || settings.ProviderMode != "EDGE_ONLY" {
 		t.Errorf("unexpected settings: %+v", settings)
+	}
+
+	// Also verify GET /api/v1/voice/profile and GET /api/public/v1/voice/profile
+	profReq := httptest.NewRequest(http.MethodGet, "/api/v1/voice/profile", nil)
+	profW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(profW, profReq)
+	if profW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for voice profile, got %d", profW.Code)
+	}
+	var prof storage.VoiceProfile
+	_ = json.Unmarshal(profW.Body.Bytes(), &prof)
+	if prof.SynthesisKey == "" || prof.CatalogVersion != "v1" {
+		t.Fatalf("invalid profile payload: %+v", prof)
+	}
+
+	pubProfReq := httptest.NewRequest(http.MethodGet, "/api/public/v1/voice/profile", nil)
+	pubProfW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(pubProfW, pubProfReq)
+	if pubProfW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for public voice profile, got %d", pubProfW.Code)
 	}
 
 	// 2. PUT /api/v1/voice/settings
@@ -99,7 +120,7 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	if putW.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", putW.Code, putW.Body.String())
 	}
-	var updated storage.VoiceSettings
+	var updated storage.VoiceProfile
 	_ = json.Unmarshal(putW.Body.Bytes(), &updated)
 	if updated.Revision != 2 || updated.EdgeVoice != "vi-VN-NamMinhNeural" {
 		t.Errorf("unexpected updated settings: %+v", updated)
@@ -111,8 +132,33 @@ func TestVoiceTestEndpoint(t *testing.T) {
 	defer store.Close()
 	defer mockTTS.Close()
 
-	req := prepareAuthedRequest(
+	// 1. Client override rejected with 400 VOICE_OVERRIDE_NOT_ALLOWED
+	badReq := prepareAuthedRequest(
 		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader([]byte(`{"voiceId":"vi-VN-HoaiMyNeural"}`))),
+		cookie,
+		token,
+	)
+	badW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badW, badReq)
+	if badW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d: %s", badW.Code, badW.Body.String())
+	}
+
+	// 2. Stale revision rejected with 409 VOICE_PROFILE_CHANGED
+	staleReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader([]byte(`{"profileRevision":999}`))),
+		cookie,
+		token,
+	)
+	staleW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(staleW, staleReq)
+	if staleW.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for stale revision, got %d: %s", staleW.Code, staleW.Body.String())
+	}
+
+	// 3. Valid test request without overrides succeeds with 200
+	req := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader([]byte(`{"profileRevision":1}`))),
 		cookie,
 		token,
 	)
@@ -125,6 +171,12 @@ func TestVoiceTestEndpoint(t *testing.T) {
 	if w.Header().Get("Content-Type") != "audio/mpeg" {
 		t.Errorf("expected Content-Type audio/mpeg, got %s", w.Header().Get("Content-Type"))
 	}
+	if w.Header().Get("X-Voice-Revision") != "1" {
+		t.Errorf("expected X-Voice-Revision 1, got %s", w.Header().Get("X-Voice-Revision"))
+	}
+	if w.Header().Get("X-Voice-Synthesis-Key") == "" {
+		t.Errorf("expected X-Voice-Synthesis-Key header")
+	}
 	if w.Body.String() != "mock_mp3_data" {
 		t.Errorf("unexpected audio body: %q", w.Body.String())
 	}
@@ -135,11 +187,23 @@ func TestPublicVoiceTestEndpoint(t *testing.T) {
 	defer store.Close()
 	defer mockTTS.Close()
 
-	// Public endpoint requires NO cookie and NO CSRF token
-	req := httptest.NewRequest(
+	// 1. Override rejected with 400
+	badReq := httptest.NewRequest(
 		http.MethodPost,
 		"/api/public/v1/voice/test",
 		bytes.NewReader([]byte(`{"voiceId":"vi-VN-NamMinhNeural","rate":1.25,"pitch":1.1}`)),
+	)
+	badW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badW, badReq)
+	if badW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d", badW.Code)
+	}
+
+	// 2. Public test without overrides succeeds with 200
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/public/v1/voice/test",
+		bytes.NewReader([]byte(`{}`)),
 	)
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
@@ -184,9 +248,21 @@ func TestVoiceStreamingAndTelemetry(t *testing.T) {
 	}
 	rtTxnID := rtRes.NewEvents[0].TransactionID
 
-	// 1. GET /api/v1/voice/transactions/{id}/stream
-	reqGet := prepareAuthedRequest(
+	// 1a. Override query param rejected with 400
+	reqBad := prepareAuthedRequest(
 		httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/voice/transactions/"+rtTxnID+"/stream?rate=1.25&voiceId=vi-VN-NamMinhNeural", nil),
+		cookie,
+		token,
+	)
+	wBad := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wBad, reqBad)
+	if wBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d", wBad.Code)
+	}
+
+	// 1b. GET /api/v1/voice/transactions/{id}/stream without overrides
+	reqGet := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodGet, "http://example.test/api/v1/voice/transactions/"+rtTxnID+"/stream", nil),
 		cookie,
 		token,
 	)
@@ -423,14 +499,39 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&tokenResp)
 	token := tokenResp.Token
 
-	// 1. Test endpoint with numeric rate 1.25 -> "+25%"
-	reqBody, _ := json.Marshal(map[string]any{
-		"voiceId": "vi-VN-HoaiMyNeural",
-		"rate":    1.25,
-		"pitch":   1.1,
+	// 1. Client override rejected with 400 VOICE_OVERRIDE_NOT_ALLOWED
+	badReqBody, _ := json.Marshal(map[string]any{
+		"rate":  1.25,
+		"pitch": 1.1,
 	})
+	badTestReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader(badReqBody)),
+		cookie,
+		token,
+	)
+	badTestW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badTestW, badTestReq)
+	if badTestW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d: %s", badTestW.Code, badTestW.Body.String())
+	}
+
+	// 2. Configure profile with rate 1.25 and pitchHz 5
+	prof, _ := store.GetVoiceProfile(ctx)
+	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
+		Revision:     prof.Revision,
+		ProviderMode: "EDGE_ONLY",
+		EdgeVoice:    "vi-VN-HoaiMyNeural",
+		Rate:         1.25,
+		PitchHz:      5,
+		AmountBands:  prof.AmountBands,
+		ChimeEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+
 	testReq := prepareAuthedRequest(
-		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader(reqBody)),
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader([]byte(`{}`))),
 		cookie,
 		token,
 	)
@@ -445,11 +546,8 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	if lastTTSReq.Pitch != "+5Hz" {
 		t.Errorf("expected pitch +5Hz, got %q", lastTTSReq.Pitch)
 	}
-	if !lastTTSReq.Cacheable {
-		t.Errorf("expected Cacheable=true when rate/pitch specified")
-	}
 
-	// 2. Synthesize transaction audio with string rate "+30%"
+	// 3. Synthesize transaction audio with slowed profile rate 0.8 -> "-20%"
 	connID := "conn_rate_pitch_test"
 	_, _ = store.DB().ExecContext(ctx, `
 		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
@@ -464,36 +562,22 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	}
 	txnID := rtRes.NewEvents[0].TransactionID
 
-	txBody, _ := json.Marshal(map[string]any{
-		"rate":  "+30%",
-		"pitch": "+0Hz",
+	prof, _ = store.GetVoiceProfile(ctx)
+	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
+		Revision:     prof.Revision,
+		ProviderMode: "EDGE_ONLY",
+		EdgeVoice:    "vi-VN-HoaiMyNeural",
+		Rate:         0.80,
+		PitchHz:      0,
+		AmountBands:  prof.AmountBands,
+		ChimeEnabled: true,
 	})
-	txReq := prepareAuthedRequest(
-		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader(txBody)),
-		cookie,
-		token,
-	)
-	txW := httptest.NewRecorder()
-	server.Handler().ServeHTTP(txW, txReq)
-	if txW.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", txW.Code, txW.Body.String())
-	}
-	if lastTTSReq.Rate != "+30%" {
-		t.Errorf("expected rate +30%%, got %q", lastTTSReq.Rate)
-	}
-	if lastTTSReq.Pitch != "+0Hz" {
-		t.Errorf("expected pitch +0Hz, got %q", lastTTSReq.Pitch)
-	}
-	if !lastTTSReq.Cacheable {
-		t.Errorf("expected transaction audio Cacheable=true when rate/pitch specified")
+	if err != nil {
+		t.Fatalf("save slow profile: %v", err)
 	}
 
-	// 3. Synthesize transaction audio with slowed rate 0.8 -> "-20%"
-	txBodySlow, _ := json.Marshal(map[string]any{
-		"rate": 0.8,
-	})
 	txReqSlow := prepareAuthedRequest(
-		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader(txBodySlow)),
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader([]byte(`{}`))),
 		cookie,
 		token,
 	)
@@ -505,8 +589,8 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	if lastTTSReq.Rate != "-20%" {
 		t.Errorf("expected rate -20%%, got %q", lastTTSReq.Rate)
 	}
-	if !lastTTSReq.Cacheable {
-		t.Errorf("expected transaction audio Cacheable=true when slowed rate specified")
+	if lastTTSReq.Pitch != "+0Hz" {
+		t.Errorf("expected pitch +0Hz, got %q", lastTTSReq.Pitch)
 	}
 }
 
@@ -550,12 +634,43 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 	_ = json.NewDecoder(csrfRec.Result().Body).Decode(&tokenResp)
 	token := tokenResp.Token
 
-	// 1. /voice/test with custom template
+	// 1. Template override in body rejected with 400 VOICE_OVERRIDE_NOT_ALLOWED
 	testBody, _ := json.Marshal(map[string]any{
 		"template": "Cảm ơn quý khách đã gửi {amount}.",
 	})
-	testReq := prepareAuthedRequest(
+	badTestReq := prepareAuthedRequest(
 		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader(testBody)),
+		cookie,
+		token,
+	)
+	badTestW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badTestW, badTestReq)
+	if badTestW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d: %s", badTestW.Code, badTestW.Body.String())
+	}
+
+	// 2. Configure custom template in profile
+	prof, _ := store.GetVoiceProfile(ctx)
+	for i := range prof.AmountBands {
+		prof.AmountBands[i].StyleID = "custom"
+	}
+	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
+		Revision:       prof.Revision,
+		ProviderMode:   "EDGE_ONLY",
+		EdgeVoice:      prof.EdgeVoice,
+		Rate:           prof.Rate,
+		PitchHz:        prof.PitchHz,
+		AmountBands:    prof.AmountBands,
+		CustomTemplate: "Cảm ơn quý khách đã gửi {amount}.",
+		FunEnabled:     true,
+		ChimeEnabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("save custom template: %v", err)
+	}
+
+	testReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", bytes.NewReader([]byte(`{}`))),
 		cookie,
 		token,
 	)
@@ -569,7 +684,7 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 		t.Errorf("expected test text %q, got %q", expectedTest, lastTTSReq.Text)
 	}
 
-	// 2. /voice/transactions/{id} with custom template
+	// 3. /voice/transactions/{id} with configured custom template
 	connID := "conn_tpl_test"
 	_, _ = store.DB().ExecContext(ctx, `
 		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
@@ -584,11 +699,8 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 	}
 	txnID := rtRes.NewEvents[0].TransactionID
 
-	txBody, _ := json.Marshal(map[string]any{
-		"template": "Đã nhận {amount_raw} VND ({amount}).",
-	})
 	txReq := prepareAuthedRequest(
-		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader(txBody)),
+		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader([]byte(`{}`))),
 		cookie,
 		token,
 	)
@@ -597,28 +709,9 @@ func TestVoiceTemplateCustomization(t *testing.T) {
 	if txW.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", txW.Code, txW.Body.String())
 	}
-	expectedTx := "Đã nhận 1000000 VND (một triệu đồng)."
+	expectedTx := "Cảm ơn quý khách đã gửi một triệu đồng."
 	if lastTTSReq.Text != expectedTx {
 		t.Errorf("expected transaction text %q, got %q", expectedTx, lastTTSReq.Text)
-	}
-
-	// 3. /voice/transactions/{id}/replay with custom template
-	replayBody, _ := json.Marshal(map[string]any{
-		"template": "Phát lại: nhận {amount}.",
-	})
-	replayReq := prepareAuthedRequest(
-		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID+"/replay", bytes.NewReader(replayBody)),
-		cookie,
-		token,
-	)
-	replayW := httptest.NewRecorder()
-	server.Handler().ServeHTTP(replayW, replayReq)
-	if replayW.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", replayW.Code, replayW.Body.String())
-	}
-	expectedReplay := "Phát lại: nhận một triệu đồng."
-	if lastTTSReq.Text != expectedReplay {
-		t.Errorf("expected replay text %q, got %q", expectedReplay, lastTTSReq.Text)
 	}
 }
 
@@ -666,10 +759,8 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	}
 	freshTxnID := rtRes.NewEvents[0].TransactionID
 
-	// Call unauthenticated public endpoint
-	pubBody, _ := json.Marshal(map[string]any{
-		"rate": 1.25,
-	})
+	// 1. Call unauthenticated public endpoint without overrides
+	pubBody, _ := json.Marshal(map[string]any{})
 	pubReq := httptest.NewRequest(http.MethodPost, "/api/public/v1/voice/transactions/"+freshTxnID, bytes.NewReader(pubBody))
 	pubW := httptest.NewRecorder()
 	server.Handler().ServeHTTP(pubW, pubReq)
@@ -680,28 +771,23 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	if pubW.Header().Get("Content-Type") != "audio/mpeg" {
 		t.Errorf("expected Content-Type audio/mpeg, got %s", pubW.Header().Get("Content-Type"))
 	}
-	expectedDefault := "Đa tạ quý khách vì hai trăm năm mươi nghìn đồng."
-	if lastTTSReq.Text != expectedDefault {
-		t.Errorf("expected default text %q, got %q", expectedDefault, lastTTSReq.Text)
+	if !strings.Contains(lastTTSReq.Text, voicecopy.SpeakVND(250000)) {
+		t.Errorf("public audio did not preserve DB credit amount: %q", lastTTSReq.Text)
 	}
 	if !lastTTSReq.Cacheable {
 		t.Errorf("expected Cacheable=true on public voice synthesis")
 	}
 
-	// 2. Anti-abuse: arbitrary template without amount placeholder safely falls back to default template
+	// 2. Anti-abuse: client override rejected with 400 VOICE_OVERRIDE_NOT_ALLOWED
 	abuseBody, _ := json.Marshal(map[string]any{
 		"template": "Hacker text with no amount token",
 	})
 	abuseReq := httptest.NewRequest(http.MethodPost, "/api/public/v1/voice/transactions/"+freshTxnID, bytes.NewReader(abuseBody))
 	abuseW := httptest.NewRecorder()
 	server.Handler().ServeHTTP(abuseW, abuseReq)
-	if abuseW.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", abuseW.Code)
+	if abuseW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d", abuseW.Code)
 	}
-	if lastTTSReq.Text != expectedDefault {
-		t.Errorf("unsafe template must fallback to default template, got %q", lastTTSReq.Text)
-	}
-
 	// 3. Non-realtime source rejected with 422
 	cuRes, err := seedHistoricalTransactions(ctx, store, connID, "123456", []historicalTransactionFixture{
 		{Number: "TXN_PUB_CU", Credit: 500000, Debit: 0, TransactionAt: "12/09/2026 10:00:00", EffectiveAt: "12/09/2026", Description: "Historical"},
@@ -724,42 +810,6 @@ func TestPublicVoiceSynthesisFallback(t *testing.T) {
 	server.Handler().ServeHTTP(badW, badReq)
 	if badW.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for missing transaction, got %d", badW.Code)
-	}
-}
-
-func TestVoiceRateAndPitchClamping(t *testing.T) {
-	// Rate clamping: -50% to +100%
-	if r := formatTTSRate("+300%"); r != "+100%" {
-		t.Errorf("expected +100%%, got %q", r)
-	}
-	if r := formatTTSRate("-90%"); r != "-50%" {
-		t.Errorf("expected -50%%, got %q", r)
-	}
-	if r := formatTTSRate(3.0); r != "+100%" {
-		t.Errorf("expected +100%%, got %q", r)
-	}
-	if r := formatTTSRate(0.2); r != "-50%" {
-		t.Errorf("expected -50%%, got %q", r)
-	}
-	if r := formatTTSRate(1.25); r != "+25%" {
-		t.Errorf("expected +25%%, got %q", r)
-	}
-
-	// Pitch clamping: -50Hz/50% to +50Hz/50%
-	if p := formatTTSPitch("+100Hz"); p != "+50Hz" {
-		t.Errorf("expected +50Hz, got %q", p)
-	}
-	if p := formatTTSPitch("-90Hz"); p != "-50Hz" {
-		t.Errorf("expected -50Hz, got %q", p)
-	}
-	if p := formatTTSPitch("+100%"); p != "+50%" {
-		t.Errorf("expected +50%%, got %q", p)
-	}
-	if p := formatTTSPitch("-80%"); p != "-50%" {
-		t.Errorf("expected -50%%, got %q", p)
-	}
-	if p := formatTTSPitch(2.5); p != "+50Hz" {
-		t.Errorf("expected +50Hz, got %q", p)
 	}
 }
 
@@ -817,11 +867,26 @@ func TestVoiceSummaryStreamGETWithQueryParams(t *testing.T) {
 	txID1 := rtRes.NewEvents[0].TransactionID
 	txID2 := rtRes.NewEvents[1].TransactionID
 
-	// GET /voice/transactions/summary/stream with query parameters
+	// 1. GET with overrides rejected with 400 VOICE_OVERRIDE_NOT_ALLOWED
+	qBad := url.Values{}
+	qBad.Set("transactionIds", fmt.Sprintf("%s,%s", txID1, txID2))
+	qBad.Set("rate", "+200%")
+	qBad.Set("pitch", "+80Hz")
+	badURL := "http://example.test/api/v1/voice/transactions/summary/stream?" + qBad.Encode()
+	badReq := prepareAuthedRequest(
+		httptest.NewRequest(http.MethodGet, badURL, nil),
+		cookie,
+		token,
+	)
+	badW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badW, badReq)
+	if badW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for override, got %d", badW.Code)
+	}
+
+	// 2. GET /voice/transactions/summary/stream without overrides returns 200
 	q := url.Values{}
 	q.Set("transactionIds", fmt.Sprintf("%s,%s", txID1, txID2))
-	q.Set("rate", "+200%")
-	q.Set("pitch", "+80Hz")
 	summaryURL := "http://example.test/api/v1/voice/transactions/summary/stream?" + q.Encode()
 	req := prepareAuthedRequest(
 		httptest.NewRequest(http.MethodGet, summaryURL, nil),
@@ -836,25 +901,5 @@ func TestVoiceSummaryStreamGETWithQueryParams(t *testing.T) {
 	}
 	if w.Header().Get("Content-Type") != "audio/mpeg" {
 		t.Errorf("expected Content-Type audio/mpeg, got %s", w.Header().Get("Content-Type"))
-	}
-	// Verify rate and pitch clamped
-	if lastTTSReq.Rate != "+100%" {
-		t.Errorf("expected clamped rate +100%%, got %q", lastTTSReq.Rate)
-	}
-	if lastTTSReq.Pitch != "+50Hz" {
-		t.Errorf("expected clamped pitch +50Hz, got %q", lastTTSReq.Pitch)
-	}
-
-	// GET with txIds alias
-	summaryURL2 := fmt.Sprintf("http://example.test/api/v1/voice/transactions/summary/stream?txIds=%s,%s", txID1, txID2)
-	req2 := prepareAuthedRequest(
-		httptest.NewRequest(http.MethodGet, summaryURL2, nil),
-		cookie,
-		token,
-	)
-	w2 := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("expected 200 from txIds summary stream, got %d: %s", w2.Code, w2.Body.String())
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -56,9 +55,10 @@ func TestPublicSePayStoreConfig(t *testing.T) {
 				want["accountName"] = fixture.AccountName
 				want["qrPayload"] = fixture.QRPayload
 			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("DTO fields do not match public contract: got=%v want=%v", got, want)
+			for key, value := range want {
+				if got[key] != value { t.Fatalf("public receiver field %s=%v want %v", key, got[key], value) }
 			}
+			if got["lastWebhookAt"] != nil { t.Fatal("native timestamp invented without any observation") }
 			for _, private := range []string{fixture.StoreKey, fixture.BankName, fixture.WebhookSecret, fixture.NotificationAccountNumber, "notificationAccountNumber", "900001", "900002", "-100900003", "activationAt", "topicId"} {
 				if strings.Contains(w.Body.String(), private) {
 					t.Fatal("public response leaked private configuration")
@@ -155,11 +155,14 @@ func TestSePayReviewsAndStatusPermissionsPrivacyAndPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, item := range projection.Items {
-			if len(item) != 4 || item["storeKey"] != cfg.StoreKey || item["reason"] != "INVALID_TEMPLATE" || item["receivedAt"] == nil {
+			if item["storeKey"] != cfg.StoreKey || item["transport"] != "telegram" || item["reason"] != "INVALID_TEMPLATE" || item["receivedAt"] == nil {
 				t.Fatalf("unsafe projection: %v", item)
 			}
-			if _, ok := item["messageId"].(string); !ok {
-				t.Fatal("message ID not a lossless string")
+			if _, ok := item["sourceId"].(string); !ok {
+				t.Fatal("source identity not a lossless string")
+			}
+			for _, field := range []string{"payload", "rawPayload", "payloadEnvelope", "accountNumber", "reference", "botToken", "webhookSecret", "nativeWebhookSecret"} {
+				if _, exposed := item[field]; exposed { t.Fatalf("review exposed private field %s",field) }
 			}
 		}
 		next := paymentRequest(handler, "GET", "/api/v1/sepay-reviews?limit=2&cursor="+page.NextCursor, "", "", false)
@@ -167,7 +170,7 @@ func TestSePayReviewsAndStatusPermissionsPrivacyAndPagination(t *testing.T) {
 		if err := json.Unmarshal(next.Body.Bytes(), &tail); err != nil || next.Code != 200 || len(tail.Items) != 1 || tail.NextCursor != "" {
 			t.Fatalf("tail failed: %d %s err=%v", next.Code, next.Body.String(), err)
 		}
-		if tail.Items[0].MessageID == page.Items[0].MessageID || tail.Items[0].MessageID == page.Items[1].MessageID {
+		if tail.Items[0].SourceID == page.Items[0].SourceID || tail.Items[0].SourceID == page.Items[1].SourceID {
 			t.Fatal("cursor repeated a review")
 		}
 		for _, path := range []string{"/api/v1/sepay-reviews?cursor=bad", "/api/v1/sepay-reviews?limit=101", "/api/v1/sepay-reviews?limit=0"} {
@@ -190,8 +193,11 @@ func TestSePayReviewsAndStatusPermissionsPrivacyAndPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 		var sepayFields map[string]any
-		if err := json.Unmarshal(fields["sepay"], &sepayFields); err != nil || len(sepayFields) != 3 {
-			t.Fatalf("unsafe status projection: %v err=%v", sepayFields, err)
+		if err := json.Unmarshal(fields["sepay"], &sepayFields); err != nil {
+			t.Fatalf("invalid status projection: %v err=%v", sepayFields, err)
+		}
+		for _, field := range []string{"storeKey", "accountNumber", "notificationAccountNumber", "nativeSubAccount", "sourceId", "reference", "botToken", "webhookSecret", "nativeWebhookSecret", "rawPayload"} {
+			if _, exposed := sepayFields[field]; exposed { t.Fatalf("status exposed private field %s",field) }
 		}
 		for _, private := range []string{cfg.WebhookSecret, cfg.QRPayload, cfg.AccountNumber, cfg.StoreKey, "private malformed payer", "private payer memo", "accepted-reference"} {
 			if strings.Contains(w.Body.String(), private) {
@@ -250,7 +256,7 @@ func TestSePayReviewsStorageFailureIsNotInvalidCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A syntactically valid cursor must not mask an outage as a caller error.
-	cursor := base64.RawURLEncoding.EncodeToString([]byte("2026-10-10T12:00:00Z\x00900001:1"))
+	cursor := base64.RawURLEncoding.EncodeToString([]byte(`[2,"2026-10-10T12:00:00Z","telegram","900001:1"]`))
 	for _, path := range []string{"/api/v1/sepay-reviews", "/api/v1/sepay-reviews?cursor=" + cursor, "/api/v1/status"} {
 		w := paymentRequest(f.handler, "GET", path, "", "", false)
 		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "storage_error") {

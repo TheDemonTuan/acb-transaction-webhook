@@ -24,7 +24,7 @@ func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) publicEventsStream(w http.ResponseWriter, r *http.Request) {
 	s.eventsStreamFiltered(w, r, func(eventType string) bool {
-		return eventType == "bank.transaction.credit"
+		return eventType == "bank.transaction.credit" || eventType == "voice.settings.changed"
 	}, true)
 }
 
@@ -241,6 +241,28 @@ func writeJournalEntry(rc *http.ResponseController, w http.ResponseWriter, flush
 			return fmt.Errorf("sanitize credit event: %w", err)
 		}
 		data = string(safe)
+	}
+	if public && eventType == "voice.settings.changed" {
+		var raw map[string]any
+		if err := json.Unmarshal(payload, &raw); err == nil {
+			var rev int64
+			switch v := raw["revision"].(type) {
+			case float64:
+				rev = int64(v)
+			case int64:
+				rev = v
+			case json.Number:
+				rev, _ = v.Int64()
+			}
+			if rev > 0 {
+				safe, _ := json.Marshal(map[string]int64{"revision": rev})
+				data = string(safe)
+			} else {
+				return nil
+			}
+		} else {
+			return nil
+		}
 	}
 	return writeSSE(rc, w, flusher, fmt.Sprintf("%s:%d", epoch, seq), eventType, data)
 }

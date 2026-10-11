@@ -45,11 +45,16 @@ type AdminFields struct {
 	ActivationAt              string `json:"activationAt"`
 	ReceiverVerified          bool   `json:"receiverVerified"`
 	SourceSeparated           bool   `json:"sourceSeparated"`
+	ActiveTransport           string `json:"activeTransport"`
+	NativeMode                string `json:"nativeMode"`
+	NativeSubAccount          string `json:"nativeSubAccount"`
+	NativeReferenceVerified   bool   `json:"nativeReferenceVerified"`
 }
 
 type managedFields struct {
-	Fields        AdminFields `json:"fields"`
-	WebhookSecret string      `json:"webhookSecret"`
+	Fields              AdminFields `json:"fields"`
+	WebhookSecret       string      `json:"webhookSecret"`
+	NativeWebhookSecret string      `json:"nativeWebhookSecret"`
 }
 
 type FieldError struct{ Field string }
@@ -79,7 +84,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Service, error) {
 	if json.Unmarshal(record.ConfigJSON, &saved) != nil {
 		return nil, storage.ErrSePayConfigUnavailable
 	}
-	cfg, err := adminRuntime(saved.Fields, saved.WebhookSecret)
+	cfg, err := adminRuntime(saved.Fields, saved.WebhookSecret, saved.NativeWebhookSecret)
 	if err != nil {
 		return nil, storage.ErrSePayConfigUnavailable
 	}
@@ -88,9 +93,22 @@ func (s *Service) Snapshot(ctx context.Context) (*Service, error) {
 }
 
 func fieldsFromConfig(cfg Config) AdminFields {
-	f := AdminFields{Mode: cfg.Mode, StoreKey: cfg.StoreKey, StoreName: cfg.StoreName, BankCode: cfg.BankCode, BankName: cfg.BankName, AccountNumber: cfg.AccountNumber, NotificationAccountNumber: cfg.NotificationAccountNumber, AccountName: cfg.AccountName, QRPayload: cfg.QRPayload, TopicID: strconv.FormatInt(cfg.TopicID, 10)}
+	f := AdminFields{
+		Mode: cfg.Mode, StoreKey: cfg.StoreKey, StoreName: cfg.StoreName,
+		BankCode: cfg.BankCode, BankName: cfg.BankName, AccountNumber: cfg.AccountNumber,
+		NotificationAccountNumber: cfg.NotificationAccountNumber, AccountName: cfg.AccountName,
+		QRPayload: cfg.QRPayload, TopicID: strconv.FormatInt(cfg.TopicID, 10),
+		ActiveTransport: cfg.ActiveTransport, NativeMode: cfg.NativeMode,
+		NativeSubAccount: cfg.NativeSubAccount, NativeReferenceVerified: cfg.NativeReferenceVerified,
+	}
 	if f.Mode == "" {
 		f.Mode = ModeDisabled
+	}
+	if f.ActiveTransport == "" {
+		f.ActiveTransport = "telegram"
+	}
+	if f.NativeMode == "" {
+		f.NativeMode = ModeDisabled
 	}
 	if cfg.BotID != 0 {
 		f.BotID = strconv.FormatInt(cfg.BotID, 10)
@@ -102,18 +120,20 @@ func fieldsFromConfig(cfg Config) AdminFields {
 		f.SenderBotID = strconv.FormatInt(cfg.SenderBotID, 10)
 	}
 	if !cfg.ActivationAt.IsZero() {
-		f.ActivationAt = cfg.ActivationAt.UTC().Format(time.RFC3339)
+		f.ActivationAt = cfg.ActivationAt.UTC().Format(time.RFC3339Nano)
 	}
 	return f
 }
 
 type AdminSnapshot struct {
-	Revision         int64       `json:"revision"`
-	Config           AdminFields `json:"config"`
-	HasBotToken      bool        `json:"hasBotToken"`
-	HasWebhookSecret bool        `json:"hasWebhookSecret"`
-	LastMessageAt    *time.Time  `json:"lastMessageAt"`
-	ReviewCount      int64       `json:"reviewCount"`
+	Revision               int64       `json:"revision"`
+	Config                 AdminFields `json:"config"`
+	HasBotToken            bool        `json:"hasBotToken"`
+	HasWebhookSecret       bool        `json:"hasWebhookSecret"`
+	HasNativeWebhookSecret bool        `json:"hasNativeWebhookSecret"`
+	LastMessageAt          *time.Time  `json:"lastMessageAt"`
+	LastWebhookAt          *time.Time  `json:"lastWebhookAt"`
+	ReviewCount            int64       `json:"reviewCount"`
 }
 
 func (s *Service) AdminConfig(ctx context.Context) (AdminSnapshot, error) {
@@ -125,10 +145,26 @@ func (s *Service) AdminConfig(ctx context.Context) (AdminSnapshot, error) {
 	if snap.fields != nil {
 		f = *snap.fields
 	}
-	result := AdminSnapshot{Revision: snap.revision, Config: f, HasBotToken: snap.token != "", HasWebhookSecret: snap.cfg.WebhookSecret != ""}
+	if f.ActiveTransport == "" {
+		f.ActiveTransport = "telegram"
+	}
+	if f.NativeMode == "" {
+		f.NativeMode = ModeDisabled
+	}
+	result := AdminSnapshot{
+		Revision:               snap.revision,
+		Config:                 f,
+		HasBotToken:            snap.token != "",
+		HasWebhookSecret:       snap.cfg.WebhookSecret != "",
+		HasNativeWebhookSecret: snap.cfg.NativeWebhookSecret != "",
+	}
 	if snap.store != nil {
 		if f.StoreKey != "" {
 			result.LastMessageAt, err = snap.store.LastSePayMessageAt(ctx, f.StoreKey)
+			if err != nil {
+				return AdminSnapshot{}, err
+			}
+			result.LastWebhookAt, err = snap.store.LastSePayWebhookAt(ctx, f.StoreKey)
 			if err != nil {
 				return AdminSnapshot{}, err
 			}
@@ -142,11 +178,17 @@ func validateDraft(f AdminFields) error {
 	if f.Mode != ModeDisabled && f.Mode != ModeObserve && f.Mode != ModeActive {
 		return &FieldError{"mode"}
 	}
+	if f.ActiveTransport != "" && f.ActiveTransport != "telegram" && f.ActiveTransport != "native" {
+		return &FieldError{"activeTransport"}
+	}
+	if f.NativeMode != "" && f.NativeMode != ModeDisabled && f.NativeMode != ModeObserve && f.NativeMode != ModeActive {
+		return &FieldError{"nativeMode"}
+	}
 	for _, v := range []struct {
 		key, value string
 		max        int
 	}{
-		{"storeKey", f.StoreKey, 48}, {"storeName", f.StoreName, 200}, {"bankCode", f.BankCode, 100}, {"bankName", f.BankName, 200}, {"accountNumber", f.AccountNumber, 200}, {"notificationAccountNumber", f.NotificationAccountNumber, 200}, {"accountName", f.AccountName, 200}, {"qrPayload", f.QRPayload, 4096},
+		{"storeKey", f.StoreKey, 48}, {"storeName", f.StoreName, 200}, {"bankCode", f.BankCode, 100}, {"bankName", f.BankName, 200}, {"accountNumber", f.AccountNumber, 200}, {"notificationAccountNumber", f.NotificationAccountNumber, 200}, {"accountName", f.AccountName, 200}, {"qrPayload", f.QRPayload, 4096}, {"nativeSubAccount", f.NativeSubAccount, 200},
 	} {
 		if !utf8.ValidString(v.value) || len(v.value) > v.max || strings.ContainsAny(v.value, "\r\n\x00") || strings.TrimSpace(v.value) != v.value {
 			return &FieldError{v.key}
@@ -167,26 +209,51 @@ func validateDraft(f AdminFields) error {
 	return nil
 }
 
-func adminRuntime(f AdminFields, secret string) (Config, error) {
+func adminRuntime(f AdminFields, secret, nativeSecret string) (Config, error) {
 	if err := validateDraft(f); err != nil {
 		return Config{}, err
 	}
-	cfg := Config{Mode: f.Mode, StoreKey: f.StoreKey, StoreName: f.StoreName, BankCode: f.BankCode, BankName: f.BankName, AccountNumber: f.AccountNumber, NotificationAccountNumber: f.NotificationAccountNumber, AccountName: f.AccountName, QRPayload: f.QRPayload, WebhookSecret: secret}
-	for _, v := range []struct {
-		key, value string
-		dest       *int64
-		sign       int
-	}{
-		{"botId", f.BotID, &cfg.BotID, 1}, {"chatId", f.ChatID, &cfg.ChatID, -1}, {"senderBotId", f.SenderBotID, &cfg.SenderBotID, 1}, {"topicId", f.TopicID, &cfg.TopicID, 0},
-	} {
-		if v.value == "" && f.Mode == ModeDisabled {
-			continue
+	if f.ActiveTransport == "" {
+		f.ActiveTransport = "telegram"
+	}
+	if f.NativeMode == "" {
+		f.NativeMode = ModeDisabled
+	}
+	cfg := Config{
+		Mode:                      f.Mode,
+		StoreKey:                  f.StoreKey,
+		StoreName:                 f.StoreName,
+		BankCode:                  f.BankCode,
+		BankName:                  f.BankName,
+		AccountNumber:             f.AccountNumber,
+		NotificationAccountNumber: f.NotificationAccountNumber,
+		AccountName:               f.AccountName,
+		QRPayload:                 f.QRPayload,
+		WebhookSecret:             secret,
+		ActiveTransport:           f.ActiveTransport,
+		NativeMode:                f.NativeMode,
+		NativeSubAccount:          f.NativeSubAccount,
+		NativeReferenceVerified:   f.NativeReferenceVerified,
+		NativeWebhookSecret:       nativeSecret,
+	}
+	hasTelegram := f.BotID != "" || f.ChatID != "" || f.SenderBotID != ""
+	if hasTelegram || f.ActiveTransport == "telegram" {
+		for _, v := range []struct {
+			key, value string
+			dest       *int64
+			sign       int
+		}{
+			{"botId", f.BotID, &cfg.BotID, 1}, {"chatId", f.ChatID, &cfg.ChatID, -1}, {"senderBotId", f.SenderBotID, &cfg.SenderBotID, 1}, {"topicId", f.TopicID, &cfg.TopicID, 0},
+		} {
+			if v.value == "" && (f.Mode == ModeDisabled || !hasTelegram && f.ActiveTransport == "native") {
+				continue
+			}
+			n, err := strconv.ParseInt(v.value, 10, 64)
+			if err != nil || strconv.FormatInt(n, 10) != v.value || (v.sign == 1 && n <= 0) || (v.sign == -1 && n >= 0) || (v.sign == 0 && n < 0) {
+				return Config{}, &FieldError{v.key}
+			}
+			*v.dest = n
 		}
-		n, err := strconv.ParseInt(v.value, 10, 64)
-		if err != nil || strconv.FormatInt(n, 10) != v.value || (v.sign == 1 && n <= 0) || (v.sign == -1 && n >= 0) || (v.sign == 0 && n < 0) {
-			return Config{}, &FieldError{v.key}
-		}
-		*v.dest = n
 	}
 	if f.ActivationAt != "" {
 		parsed, err := time.Parse(time.RFC3339, f.ActivationAt)
@@ -198,7 +265,12 @@ func adminRuntime(f AdminFields, secret string) (Config, error) {
 	if f.Mode == ModeDisabled {
 		return cfg, nil
 	}
-	for _, v := range []struct{ key, value string }{{"storeKey", cfg.StoreKey}, {"storeName", cfg.StoreName}, {"bankCode", cfg.BankCode}, {"bankName", cfg.BankName}, {"accountNumber", cfg.AccountNumber}, {"accountName", cfg.AccountName}, {"qrPayload", cfg.QRPayload}} {
+	for _, v := range []struct{ key, value string }{
+		{"storeKey", cfg.StoreKey}, {"storeName", cfg.StoreName},
+		{"bankCode", cfg.BankCode}, {"bankName", cfg.BankName},
+		{"accountNumber", cfg.AccountNumber}, {"accountName", cfg.AccountName},
+		{"qrPayload", cfg.QRPayload},
+	} {
 		if v.value == "" {
 			return Config{}, &FieldError{v.key}
 		}
@@ -206,25 +278,39 @@ func adminRuntime(f AdminFields, secret string) (Config, error) {
 	if cfg.ActivationAt.IsZero() {
 		return Config{}, &FieldError{"activationAt"}
 	}
-	if f.Mode == ModeActive && !f.ReceiverVerified {
-		return Config{}, &FieldError{"receiverVerified"}
+	if f.Mode == ModeActive {
+		if !f.ReceiverVerified {
+			return Config{}, &FieldError{"receiverVerified"}
+		}
+		if !f.SourceSeparated {
+			return Config{}, &FieldError{"sourceSeparated"}
+		}
 	}
-	if f.Mode == ModeActive && !f.SourceSeparated {
-		return Config{}, &FieldError{"sourceSeparated"}
+	if cfg.ActiveTransport == "native" && cfg.NativeMode == ModeActive && f.Mode != ModeActive {
+		return Config{}, &FieldError{"nativeMode"}
 	}
-	// Reuse strict legacy runtime validation instead of creating a second ingest policy.
+	if cfg.ActiveTransport == "telegram" && cfg.NativeMode == ModeActive {
+		return Config{}, &FieldError{"nativeMode"}
+	}
+	if cfg.NativeMode != ModeDisabled && (len(nativeSecret) < 32 || len(nativeSecret) > 256 || !utf8.ValidString(nativeSecret)) {
+		return Config{}, &FieldError{"nativeWebhookSecret"}
+	}
 	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return Config{}, storage.ErrSePayConfigUnavailable
-	}
-	_, err = ParseConfig(string(raw))
-	if err != nil {
-		return Config{}, storage.ErrSePayConfigUnavailable
-	}
+	if err != nil { return Config{}, storage.ErrSePayConfigUnavailable }
+	if _, err := ParseConfig(string(raw)); err != nil { return Config{}, storage.ErrSePayConfigUnavailable }
 	return cfg, nil
 }
 
-func (s *Service) SaveAdminConfig(ctx context.Context, revision int64, fields AdminFields, token string, actor storage.PaymentProviderActor) (AdminSnapshot, error) {
+func activeAuthority(cfg Config) string {
+	if cfg.Mode != ModeActive { return "" }
+	if cfg.ActiveTransport == "native" {
+		if cfg.NativeMode == ModeActive { return "native" }
+		return ""
+	}
+	return "telegram"
+}
+
+func (s *Service) SaveAdminConfig(ctx context.Context, revision int64, fields AdminFields, token, nativeSecret string, actor storage.PaymentProviderActor) (AdminSnapshot, error) {
 	if s == nil || s.store == nil {
 		return AdminSnapshot{}, ErrUnavailable
 	}
@@ -252,17 +338,28 @@ func (s *Service) SaveAdminConfig(ctx context.Context, revision int64, fields Ad
 		}
 		secret = base64.RawURLEncoding.EncodeToString(random)
 	}
-	if fields.Mode == ModeActive && old.cfg.Mode == ModeActive {
-		// Receiver matching changes must not move the live activation boundary.
-		fields.ActivationAt = fieldsFromConfig(old.cfg).ActivationAt
-	} else if fields.Mode != ModeDisabled && (fields.ActivationAt == "" || (fields.Mode == ModeActive && fields.ActivationAt == fieldsFromConfig(old.cfg).ActivationAt)) {
-		fields.ActivationAt = time.Now().UTC().Format(time.RFC3339)
+	sec := nativeSecret
+	if sec == "" {
+		sec = old.cfg.NativeWebhookSecret
 	}
-	cfg, err := adminRuntime(fields, secret)
+	if sec != "" && (len(sec) < 32 || len(sec) > 256 || !utf8.ValidString(sec)) {
+		return AdminSnapshot{}, &FieldError{"nativeWebhookSecret"}
+	}
+	if fields.ActiveTransport == "" { fields.ActiveTransport = "telegram" }
+	if fields.NativeMode == "" { fields.NativeMode = ModeDisabled }
+	nextAuthority := activeAuthority(Config{Mode: fields.Mode, ActiveTransport: fields.ActiveTransport, NativeMode: fields.NativeMode})
+	oldAuthority := activeAuthority(old.cfg)
+	if nextAuthority != "" && nextAuthority == oldAuthority {
+		fields.ActivationAt = fieldsFromConfig(old.cfg).ActivationAt
+	} else if nextAuthority != "" || fields.Mode != ModeDisabled && fields.ActivationAt == "" {
+		// A newly active authority never inherits an earlier transport's cutoff.
+		fields.ActivationAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	cfg, err := adminRuntime(fields, secret, sec)
 	if err != nil {
 		return AdminSnapshot{}, err
 	}
-	raw, err := json.Marshal(managedFields{Fields: fields, WebhookSecret: secret})
+	raw, err := json.Marshal(managedFields{Fields: fields, WebhookSecret: secret, NativeWebhookSecret: sec})
 	if err != nil {
 		return AdminSnapshot{}, storage.ErrSePayConfigUnavailable
 	}

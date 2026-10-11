@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,5 +355,111 @@ func TestSePayWebhookReferenceReplayAndEditedReview(t *testing.T) {
 	}
 	if webhookTestCount(t, store, "transactions") != 1 || webhookTestCount(t, store, "event_journal") != 1 || commits.Load() != 1 {
 		t.Fatal("edited message changed first credit")
+	}
+}
+
+func TestSePayWebhookTwoStoresConcurrentDuplicate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sepay-concurrent.db")
+	store1, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store1.Close()
+	store2, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store2.Close()
+
+	keyPath := filepath.Join(t.TempDir(), "master.key")
+	if err := os.WriteFile(keyPath, []byte("0123456789012345678901234567890123456789012345678901234567890123"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyring, err := security.LoadKeyring(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store1.WithKeyring(keyring)
+	store2.WithKeyring(keyring)
+
+	cfg := sepayWebhookConfig()
+	service1 := sepay.NewService(cfg, store1, nil)
+	service2 := sepay.NewService(cfg, store2, nil)
+	handler1 := New(config.Config{Production: true}, store1).WithSePay(service1).Handler()
+	handler2 := New(config.Config{Production: true}, store2).WithSePay(service2).Handler()
+
+	body := sepayWebhookBody(t, sepayWebhookEnvelope(t, 10, 10, "CONCURRENT_SEPAY_REF"))
+
+	var wg sync.WaitGroup
+	results := make([]*httptest.ResponseRecorder, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0] = sepayWebhookPost(handler1, cfg.WebhookSecret, body)
+	}()
+	go func() {
+		defer wg.Done()
+		results[1] = sepayWebhookPost(handler2, cfg.WebhookSecret, body)
+	}()
+	wg.Wait()
+
+	for i, res := range results {
+		if res.Code != 200 {
+			t.Fatalf("handler %d failed: %d", i+1, res.Code)
+		}
+	}
+	if count := webhookTestCount(t, store1, "transactions"); count != 1 {
+		t.Fatalf("expected 1 transaction across stores, got %d", count)
+	}
+	if count := webhookTestCount(t, store1, "sepay_receipts"); count != 1 {
+		t.Fatalf("expected 1 receipt across stores, got %d", count)
+	}
+	if count := webhookTestCount(t, store1, "event_journal"); count != 1 {
+		t.Fatalf("expected 1 journal entry across stores, got %d", count)
+	}
+}
+
+func TestSePayWebhookWorkerHangStillACKsAndCommits(t *testing.T) {
+	cfg := sepayWebhookConfig()
+	store, _, commits := sepayWebhookSetup(t, cfg)
+	service := sepay.NewService(cfg, store, nil)
+	server := New(config.Config{Production: true}, store).WithSePay(service).WithWakeDispatcher(func(ctx context.Context) error {
+		return errors.New("dispatcher unreachable")
+	})
+	handler := server.Handler()
+
+	body := sepayWebhookBody(t, sepayWebhookEnvelope(t, 20, 20, "HANG_SEPAY_REF"))
+	w := sepayWebhookPost(handler, cfg.WebhookSecret, body)
+	if w.Code != 200 {
+		t.Fatalf("expected 200 despite worker hang, got %d %s", w.Code, w.Body.String())
+	}
+	if count := webhookTestCount(t, store, "transactions"); count != 1 {
+		t.Fatalf("expected 1 transaction, got %d", count)
+	}
+	if count := webhookTestCount(t, store, "sepay_receipts"); count != 1 {
+		t.Fatalf("expected 1 receipt, got %d", count)
+	}
+	if count := webhookTestCount(t, store, "event_journal"); count != 1 {
+		t.Fatalf("expected 1 event_journal, got %d", count)
+	}
+	_ = commits
+}
+
+func TestSePayWebhookAckOnlyAfterCommit(t *testing.T) {
+	cfg := sepayWebhookConfig()
+	store, handler, _ := sepayWebhookSetup(t, cfg)
+	body := sepayWebhookBody(t, sepayWebhookEnvelope(t, 30, 30, "ACK_SEPAY_REF"))
+	w := sepayWebhookPost(handler, cfg.WebhookSecret, body)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if count := webhookTestCount(t, store, "transactions"); count != 1 {
+		t.Fatalf("transaction not committed on ACK: %d", count)
+	}
+	if count := webhookTestCount(t, store, "sepay_receipts"); count != 1 {
+		t.Fatalf("receipt not committed on ACK: %d", count)
+	}
+	if count := webhookTestCount(t, store, "event_journal"); count != 1 {
+		t.Fatalf("journal not committed on ACK: %d", count)
 	}
 }

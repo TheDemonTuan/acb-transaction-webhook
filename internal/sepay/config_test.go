@@ -33,15 +33,15 @@ func configJSON(t *testing.T, fields map[string]any) string {
 func TestParseConfigDisabled(t *testing.T) {
 	for _, raw := range []string{"", " \r\n", `{"mode":"disabled"}`} {
 		cfg, err := ParseConfig(raw)
-		if err != nil || cfg != (Config{Mode: ModeDisabled}) {
+		if err != nil || cfg.Mode != ModeDisabled || cfg.ActiveTransport != "telegram" || cfg.NativeMode != ModeDisabled || NewService(cfg,nil,nil).Enabled() {
 			t.Fatalf("absent/disabled config was not disabled: %v", err)
 		}
 	}
 	fields := testConfigFields()
 	fields["mode"] = ModeDisabled
 	cfg, err := ParseConfig(configJSON(t, fields))
-	if err != nil || cfg != (Config{Mode: ModeDisabled}) {
-		t.Fatal("disabled config retained receiver or credentials")
+	if err != nil || NewService(cfg,nil,nil).Enabled() || NewService(cfg,nil,nil).Authenticate(cfg.WebhookSecret) {
+		t.Fatal("disabled config admitted ingress")
 	}
 }
 

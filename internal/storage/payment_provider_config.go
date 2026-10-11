@@ -262,6 +262,8 @@ func (s *Store) BeginPaymentProviderOperation(ctx context.Context) (PaymentProvi
 }
 
 func (s *Store) RenewPaymentProviderOperation(ctx context.Context, token string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx, `UPDATE payment_provider_operations SET lease_until=? WHERE token=? AND lease_until>?`, time.Now().UTC().Add(5*time.Minute).Format(time.RFC3339Nano), token, now())
 	if err != nil {
 		return err
@@ -276,6 +278,8 @@ func (s *Store) RenewPaymentProviderOperation(ctx context.Context, token string)
 	return nil
 }
 func (s *Store) EndPaymentProviderOperation(ctx context.Context, token string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM payment_provider_operations WHERE token=?`, token)
 	return err
 }
@@ -304,6 +308,8 @@ func (s *Store) ConfirmPaymentProviderWebhook(ctx context.Context, revision int6
 }
 
 func (s *Store) SetPaymentProviderQuiesced(ctx context.Context, paused bool) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `UPDATE payment_provider_runtime SET quiesced=? WHERE id=1`, paused)
 	return err
 }

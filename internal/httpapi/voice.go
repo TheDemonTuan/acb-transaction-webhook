@@ -12,33 +12,27 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/auth"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/ttsclient"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/voicecopy"
 )
 
 type voiceAudioRequest struct {
-	IncludeDescription bool   `json:"includeDescription"`
+	ProfileRevision *int64   `json:"profileRevision"`
+	PhraseID        string   `json:"phraseId"`
+	Part            string   `json:"part"` // "full", "amount", "tail"
+	AmountVND       string   `json:"amountVnd,omitempty"`
+	TransactionIDs  []string `json:"transactionIds,omitempty"`
+
+	// Legacy override fields that are explicitly rejected with 400 VOICE_OVERRIDE_NOT_ALLOWED
+	IncludeDescription *bool  `json:"includeDescription,omitempty"`
 	Template           string `json:"template,omitempty"`
 	VoiceID            string `json:"voiceId,omitempty"`
 	Rate               any    `json:"rate,omitempty"`
 	Pitch              any    `json:"pitch,omitempty"`
-}
-
-type voiceSummaryRequest struct {
-	TransactionIDs     []string `json:"transactionIds"`
-	IncludeDescription bool     `json:"includeDescription"`
-	VoiceID            string   `json:"voiceId,omitempty"`
-	Rate               any      `json:"rate,omitempty"`
-	Pitch              any      `json:"pitch,omitempty"`
-}
-
-type voiceTestRequest struct {
-	IncludeDescription bool   `json:"includeDescription,omitempty"`
-	Template           string `json:"template,omitempty"`
-	VoiceID            string `json:"voiceId,omitempty"`
-	Rate               any    `json:"rate,omitempty"`
-	Pitch              any    `json:"pitch,omitempty"`
+	Amount             any    `json:"amount,omitempty"`
+	Text               string `json:"text,omitempty"`
 }
 
 func clampInt(val, minVal, maxVal int) int {
@@ -51,61 +45,9 @@ func clampInt(val, minVal, maxVal int) int {
 	return val
 }
 
-func sanitizeAnnouncementTemplate(raw string) string {
-	tpl := strings.TrimSpace(raw)
-	if tpl == "" {
-		return voicecopy.DefaultAnnouncementTemplate
-	}
-	runes := []rune(tpl)
-	if len(runes) > 120 {
-		runes = runes[:120]
-		tpl = strings.TrimSpace(string(runes))
-	}
-	if !strings.Contains(tpl, "{amount}") && !strings.Contains(tpl, "{amount_raw}") {
-		return voicecopy.DefaultAnnouncementTemplate
-	}
-	return tpl
-}
-
-func formatTTSRate(val any) string {
-	if val == nil {
-		return ""
-	}
-	switch v := val.(type) {
-	case string:
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return ""
-		}
-		if strings.HasSuffix(v, "%") {
-			numStr := strings.TrimSuffix(v, "%")
-			if p, err := strconv.Atoi(numStr); err == nil {
-				p = clampInt(p, -50, 100)
-				if p >= 0 {
-					return fmt.Sprintf("+%d%%", p)
-				}
-				return fmt.Sprintf("%d%%", p)
-			}
-			return ""
-		}
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return formatFloatRate(f)
-		}
-		return ""
-	case float64:
-		return formatFloatRate(v)
-	case int:
-		return formatFloatRate(float64(v))
-	case int64:
-		return formatFloatRate(float64(v))
-	default:
-		return ""
-	}
-}
-
 func formatFloatRate(rate float64) string {
 	if rate <= 0 {
-		return ""
+		return "+0%"
 	}
 	diff := (rate - 1.0) * 100.0
 	pct := clampInt(int(math.Round(diff)), -50, 100)
@@ -115,81 +57,148 @@ func formatFloatRate(rate float64) string {
 	return fmt.Sprintf("%d%%", pct)
 }
 
-func formatTTSPitch(val any) string {
-	if val == nil {
-		return ""
+func formatPitchHz(pitchHz int) string {
+	if pitchHz >= 0 {
+		return fmt.Sprintf("+%dHz", pitchHz)
 	}
-	switch v := val.(type) {
-	case string:
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return ""
-		}
-		if strings.HasSuffix(v, "Hz") {
-			numStr := strings.TrimSuffix(v, "Hz")
-			if p, err := strconv.Atoi(numStr); err == nil {
-				p = clampInt(p, -50, 50)
-				if p >= 0 {
-					return fmt.Sprintf("+%dHz", p)
-				}
-				return fmt.Sprintf("%dHz", p)
-			}
-			return ""
-		}
-		if strings.HasSuffix(v, "%") {
-			numStr := strings.TrimSuffix(v, "%")
-			if p, err := strconv.Atoi(numStr); err == nil {
-				p = clampInt(p, -50, 50)
-				if p >= 0 {
-					return fmt.Sprintf("+%d%%", p)
-				}
-				return fmt.Sprintf("%d%%", p)
-			}
-			return ""
-		}
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return formatFloatPitch(f)
-		}
-		return ""
-	case float64:
-		return formatFloatPitch(v)
-	case int:
-		return formatFloatPitch(float64(v))
-	case int64:
-		return formatFloatPitch(float64(v))
-	default:
-		return ""
-	}
+	return fmt.Sprintf("%dHz", pitchHz)
 }
 
-func formatFloatPitch(pitch float64) string {
-	if pitch <= 0 {
-		return ""
+func checkVoiceOverrides(r *http.Request, req voiceAudioRequest) error {
+	q := r.URL.Query()
+	if q.Get("voiceId") != "" || q.Get("rate") != "" || q.Get("pitch") != "" ||
+		q.Get("template") != "" || q.Get("text") != "" || q.Get("amount") != "" ||
+		q.Get("includeDescription") != "" {
+		return errors.New("VOICE_OVERRIDE_NOT_ALLOWED")
 	}
-	diff := (pitch - 1.0) * 50.0
-	diffInt := clampInt(int(math.Round(diff)), -50, 50)
-	if diffInt >= 0 {
-		return fmt.Sprintf("+%dHz", diffInt)
+	if req.VoiceID != "" || req.Rate != nil || req.Pitch != nil ||
+		req.Template != "" || req.Text != "" || req.Amount != nil ||
+		req.IncludeDescription != nil {
+		return errors.New("VOICE_OVERRIDE_NOT_ALLOWED")
 	}
-	return fmt.Sprintf("%dHz", diffInt)
+	return nil
+}
+
+func parseVoiceAudioRequest(r *http.Request) (voiceAudioRequest, error) {
+	var req voiceAudioRequest
+	if r.Method == http.MethodGet {
+		if r.URL.Query().Has("profileRevision") {
+			value := r.URL.Query().Get("profileRevision")
+			revision, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || revision <= 0 || strconv.FormatInt(revision, 10) != value {
+				return req, errors.New("invalid profileRevision")
+			}
+			req.ProfileRevision = &revision
+		}
+		req.PhraseID = r.URL.Query().Get("phraseId")
+		req.Part = r.URL.Query().Get("part")
+		req.AmountVND = r.URL.Query().Get("amountVnd")
+		txIDs := r.URL.Query().Get("transactionIds")
+		if txIDs != "" {
+			req.TransactionIDs = strings.Split(txIDs, ",")
+		}
+	} else if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+			return req, err
+		}
+	}
+	return req, nil
+}
+
+func (s *Server) resolveVoicePhrase(profile storage.VoiceProfile, amount int64, description string, phraseID string, part string) (string, error) {
+	if part == "" {
+		part = "full"
+	}
+	if part != "full" && part != "amount" && part != "tail" {
+		return "", errors.New("VOICE_RECIPE_MISMATCH")
+	}
+	core := voicecopy.StandardAnnouncement(amount)
+	var selected *storage.AmountBand
+	for i := range profile.AmountBands {
+		band := &profile.AmountBands[i]
+		from, err := strconv.ParseInt(band.FromVND, 10, 64)
+		if err != nil || amount < from {
+			continue
+		}
+		if band.ToVND != nil {
+			to, err := strconv.ParseInt(*band.ToVND, 10, 64)
+			if err != nil || amount >= to {
+				continue
+			}
+		}
+		selected = band
+		break
+	}
+	if phraseID != "" {
+		if selected == nil || !profile.FunEnabled || selected.StyleID == "custom" || voicecopy.ValidateRecipe(phraseID, selected.StyleID, selected.ID) != nil {
+			return "", errors.New("VOICE_RECIPE_MISMATCH")
+		}
+	}
+	if part == "amount" {
+		return core, nil
+	}
+	if !profile.FunEnabled || selected == nil {
+		if part == "tail" {
+			return "", nil
+		}
+		return core, nil
+	}
+	if selected.StyleID == "custom" {
+		if part == "tail" {
+			return "", errors.New("VOICE_RECIPE_MISMATCH")
+		}
+		return voicecopy.FormatAnnouncementTemplate(profile.CustomTemplate, amount, description, profile.IncludeDescription), nil
+	}
+	if template, ok := voicecopy.ClassicTemplate(phraseID); ok {
+		if part == "tail" {
+			return "", errors.New("VOICE_RECIPE_MISMATCH")
+		}
+		return voicecopy.FormatAnnouncementTemplate(template, amount, description, profile.IncludeDescription), nil
+	}
+	tail, _ := voicecopy.RecipeTail(phraseID)
+	if part == "tail" {
+		return tail, nil
+	}
+	if tail != "" {
+		core += " " + tail
+	}
+	if profile.IncludeDescription {
+		return voicecopy.FormatAnnouncementTemplate(core, amount, description, true), nil
+	}
+	return core, nil
 }
 
 func (s *Server) getVoiceSettings(w http.ResponseWriter, r *http.Request) {
-	settings, err := s.store.GetVoiceSettings(r.Context())
+	w.Header().Set("Cache-Control", "no-store")
+	profile, err := s.store.GetVoiceProfile(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get voice settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s *Server) getVoiceProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	profile, err := s.store.GetVoiceProfile(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get voice profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s *Server) publicVoiceProfile(w http.ResponseWriter, r *http.Request) {
+	s.getVoiceProfile(w, r)
 }
 
 func (s *Server) updateVoiceSettings(w http.ResponseWriter, r *http.Request) {
-	var input storage.VoiceSettings
+	var input storage.VoiceSettingsInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	saved, err := s.store.SaveVoiceSettings(r.Context(), input)
+	saved, err := s.store.SaveVoiceProfile(r.Context(), input)
 	if err != nil {
 		if errors.Is(err, storage.ErrVoiceSettingsConflict) {
 			writeError(w, http.StatusConflict, "voice settings modified by another operator")
@@ -200,24 +209,29 @@ func (s *Server) updateVoiceSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	audit(s.store, r, "voice_settings.update", fmt.Sprintf("rev_%d", saved.Revision))
-	s.publishStateEvent("voice.settings.changed", "singleton", saved)
+	s.publishStateEvent("voice.settings.changed", "singleton", map[string]any{"revision": saved.Revision})
 	writeJSON(w, http.StatusOK, saved)
 }
 
 func (s *Server) voiceStatus(w http.ResponseWriter, r *http.Request) {
-	settings, _ := s.store.GetVoiceSettings(r.Context())
+	profile, _ := s.store.GetVoiceProfile(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"available":      s.ttsClient != nil,
-		"primary":        "edge",
-		"fallback":       "gtts",
-		"providerMode":   settings.ProviderMode,
-		"edgeVoice":      settings.EdgeVoice,
-		"onlineFallback": settings.OnlineFallback,
+		"available":    s.ttsClient != nil,
+		"primary":      "edge",
+		"providerMode": profile.ProviderMode,
+		"edgeVoice":    profile.EdgeVoice,
+		"rate":         profile.Rate,
+		"pitchHz":      profile.PitchHz,
+		"revision":     profile.Revision,
 	})
 }
 
-func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult) {
+func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult, profile storage.VoiceProfile) {
 	defer stream.Close()
+	if stream.Provider != "edge" || stream.Voice != profile.EdgeVoice || stream.Fallback {
+		writeError(w, http.StatusBadGateway, "VOICE_SYNTHESIS_PROFILE_MISMATCH")
+		return
+	}
 
 	firstByteMs := stream.FirstByteDuration.Milliseconds()
 
@@ -229,6 +243,8 @@ func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult) {
 	w.Header().Set("X-TTS-Fallback", fmt.Sprintf("%t", stream.Fallback))
 	w.Header().Set("X-TTS-Cached", fmt.Sprintf("%t", stream.Cached))
 	w.Header().Set("X-TTS-First-Byte-Ms", strconv.FormatInt(firstByteMs, 10))
+	w.Header().Set("X-Voice-Revision", strconv.FormatInt(profile.Revision, 10))
+	w.Header().Set("X-Voice-Synthesis-Key", profile.SynthesisKey)
 	w.Header().Set("Server-Timing", fmt.Sprintf("tts_fb;dur=%d", firstByteMs))
 	w.WriteHeader(http.StatusOK)
 
@@ -241,7 +257,9 @@ func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult) {
 	for {
 		n, err := stream.Reader.Read(buf)
 		if n > 0 {
-			_, _ = w.Write(buf[:n])
+			if _, err := w.Write(buf[:n]); err != nil {
+				return
+			}
 			if canFlush {
 				flusher.Flush()
 			}
@@ -258,49 +276,79 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req voiceTestRequest
-	if r.Method == http.MethodGet {
-		req.VoiceID = r.URL.Query().Get("voiceId")
-		req.Rate = r.URL.Query().Get("rate")
-		req.Pitch = r.URL.Query().Get("pitch")
-		req.Template = r.URL.Query().Get("template")
-		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
-	} else {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	req, err := parseVoiceAudioRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
 	}
 
-	settings, _ := s.store.GetVoiceSettings(r.Context())
-	if settings.ProviderMode == "BROWSER_ONLY" {
+	if err := checkVoiceOverrides(r, req); err != nil {
+		writeError(w, http.StatusBadRequest, "VOICE_OVERRIDE_NOT_ALLOWED")
+		return
+	}
+
+	profile, err := s.store.GetVoiceProfile(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get voice profile")
+		return
+	}
+
+	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
+		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
+		return
+	}
+
+	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
 		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
 		return
 	}
-	voice := settings.EdgeVoice
-	if req.VoiceID == "vi-VN-HoaiMyNeural" || req.VoiceID == "vi-VN-NamMinhNeural" {
-		voice = req.VoiceID
-	}
-	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
-	template := sanitizeAnnouncementTemplate(req.Template)
-	phrase := voicecopy.FormatAnnouncementTemplate(template, 500000, "Ung ho quy", req.IncludeDescription)
-	ttsRate := formatTTSRate(req.Rate)
-	ttsPitch := formatTTSPitch(req.Pitch)
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	testAmount := int64(500000)
+	identity, _ := auth.FromContext(r.Context())
+	if req.AmountVND != "" {
+		if identity.Role != auth.Owner && identity.Role != auth.Operator {
+			writeError(w, http.StatusForbidden, "amount_override_forbidden")
+			return
+		}
+		parsed, err := strconv.ParseInt(req.AmountVND, 10, 64)
+		if err != nil || parsed <= 0 || parsed > 9007199254740991 {
+			writeError(w, http.StatusBadRequest, "invalid_amount_vnd")
+			return
+		}
+		testAmount = parsed
+	}
+
+	phrase, err := s.resolveVoicePhrase(profile, testAmount, "Thanh toán thử nghiệm", req.PhraseID, req.Part)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "VOICE_RECIPE_MISMATCH")
+		return
+	}
+	if phrase == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(profile.ColdRequestTimeoutMs)*time.Millisecond)
 	defer cancel()
+	if s.tryVoicePack(w, r.WithContext(ctx), profile, phrase) {
+		return
+	}
+	ttsRate := formatFloatRate(profile.Rate)
+	ttsPitch := formatPitchHz(profile.PitchHz)
+
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
-		Text:          phrase,
-		Voice:         voice,
-		Rate:          ttsRate,
-		Pitch:         ttsPitch,
-		Cacheable:     true,
-		AllowFallback: &allowFallback,
-		ProviderMode:  settings.ProviderMode,
+		Text:         phrase,
+		Voice:        profile.EdgeVoice,
+		Rate:         ttsRate,
+		Pitch:        ttsPitch,
+		Cacheable:    true,
+		ProviderMode: profile.ProviderMode,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("tts_synthesis_failed: %v", err))
+		writeVoiceSynthesisError(w, err)
 		return
 	}
 
-	writeAudioStream(w, stream)
+	writeAudioStream(w, stream, profile)
 }
 
 func (s *Server) publicTestVoiceAudio(w http.ResponseWriter, r *http.Request) {
@@ -309,47 +357,69 @@ func (s *Server) publicTestVoiceAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req voiceTestRequest
-	if r.Method == http.MethodGet {
-		req.VoiceID = r.URL.Query().Get("voiceId")
-		req.Rate = r.URL.Query().Get("rate")
-		req.Pitch = r.URL.Query().Get("pitch")
-	} else {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	req, err := parseVoiceAudioRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
 	}
 
-	settings, _ := s.store.GetVoiceSettings(r.Context())
-	if settings.ProviderMode == "BROWSER_ONLY" {
+	if err := checkVoiceOverrides(r, req); err != nil {
+		writeError(w, http.StatusBadRequest, "VOICE_OVERRIDE_NOT_ALLOWED")
+		return
+	}
+
+	if req.AmountVND != "" && req.AmountVND != "500000" {
+		writeError(w, http.StatusForbidden, "amount_override_forbidden")
+		return
+	}
+
+	profile, err := s.store.GetVoiceProfile(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get voice profile")
+		return
+	}
+
+	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
+		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
+		return
+	}
+
+	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
 		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
 		return
 	}
-	voice := settings.EdgeVoice
-	if req.VoiceID == "vi-VN-HoaiMyNeural" || req.VoiceID == "vi-VN-NamMinhNeural" {
-		voice = req.VoiceID
-	}
-	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
 
-	// Strict fixed test phrase for public viewer - do not allow custom templates or descriptions
-	phrase := voicecopy.FormatAnnouncementTemplate(voicecopy.DefaultAnnouncementTemplate, 500000, "", false)
-	ttsRate := formatTTSRate(req.Rate)
-	ttsPitch := formatTTSPitch(req.Pitch)
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	phrase, err := s.resolveVoicePhrase(profile, 500000, "", req.PhraseID, req.Part)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "VOICE_RECIPE_MISMATCH")
+		return
+	}
+	if phrase == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(profile.ColdRequestTimeoutMs)*time.Millisecond)
 	defer cancel()
+	if s.tryVoicePack(w, r.WithContext(ctx), profile, phrase) {
+		return
+	}
+	ttsRate := formatFloatRate(profile.Rate)
+	ttsPitch := formatPitchHz(profile.PitchHz)
+
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
-		Text:          phrase,
-		Voice:         voice,
-		Rate:          ttsRate,
-		Pitch:         ttsPitch,
-		Cacheable:     true,
-		AllowFallback: &allowFallback,
-		ProviderMode:  settings.ProviderMode,
+		Text:         phrase,
+		Voice:        profile.EdgeVoice,
+		Rate:         ttsRate,
+		Pitch:        ttsPitch,
+		Cacheable:    true,
+		ProviderMode: profile.ProviderMode,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("tts_synthesis_failed: %v", err))
+		writeVoiceSynthesisError(w, err)
 		return
 	}
 
-	writeAudioStream(w, stream)
+	writeAudioStream(w, stream, profile)
 }
 
 func (s *Server) synthesizePublicTransactionAudio(w http.ResponseWriter, r *http.Request) {
@@ -372,15 +442,15 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 		return
 	}
 
-	var req voiceAudioRequest
-	if r.Method == http.MethodGet {
-		req.VoiceID = r.URL.Query().Get("voiceId")
-		req.Rate = r.URL.Query().Get("rate")
-		req.Pitch = r.URL.Query().Get("pitch")
-		req.Template = r.URL.Query().Get("template")
-		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
-	} else {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	req, err := parseVoiceAudioRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := checkVoiceOverrides(r, req); err != nil {
+		writeError(w, http.StatusBadRequest, "VOICE_OVERRIDE_NOT_ALLOWED")
+		return
 	}
 
 	item, err := s.store.GetTransactionByID(r.Context(), id)
@@ -399,7 +469,7 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Freshness verification: transaction must have been observed within 5 minutes
+	// Freshness verification: transaction must have been observed within 5 minutes for public audio
 	if item.FirstSeenAt != "" {
 		seenTime, err := time.Parse(time.RFC3339Nano, item.FirstSeenAt)
 		if err != nil {
@@ -417,128 +487,53 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 		return
 	}
 
-	settings, _ := s.store.GetVoiceSettings(r.Context())
-	if settings.ProviderMode == "BROWSER_ONLY" {
+	profile, err := s.store.GetVoiceProfile(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get voice profile")
+		return
+	}
+
+	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
+		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
+		return
+	}
+
+	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
 		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
 		return
 	}
-	voice := settings.EdgeVoice
-	if req.VoiceID == "vi-VN-HoaiMyNeural" || req.VoiceID == "vi-VN-NamMinhNeural" {
-		voice = req.VoiceID
+
+	phrase, err := s.resolveVoicePhrase(profile, item.Credit, item.Description, req.PhraseID, req.Part)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "VOICE_RECIPE_MISMATCH")
+		return
 	}
-	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
-
-	template := sanitizeAnnouncementTemplate(req.Template)
-	phrase := voicecopy.FormatAnnouncementTemplate(template, item.Credit, item.Description, req.IncludeDescription)
-	ttsRate := formatTTSRate(req.Rate)
-	ttsPitch := formatTTSPitch(req.Pitch)
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if phrase == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(profile.ColdRequestTimeoutMs)*time.Millisecond)
 	defer cancel()
+	if s.tryVoicePack(w, r.WithContext(ctx), profile, phrase) {
+		return
+	}
+	ttsRate := formatFloatRate(profile.Rate)
+	ttsPitch := formatPitchHz(profile.PitchHz)
+
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
-		Text:          phrase,
-		Voice:         voice,
-		Rate:          ttsRate,
-		Pitch:         ttsPitch,
-		Cacheable:     !req.IncludeDescription,
-		AllowFallback: &allowFallback,
-		ProviderMode:  settings.ProviderMode,
+		Text:         phrase,
+		Voice:        profile.EdgeVoice,
+		Rate:         ttsRate,
+		Pitch:        ttsPitch,
+		Cacheable:    !profile.IncludeDescription,
+		ProviderMode: profile.ProviderMode,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("tts_synthesis_failed: %v", err))
+		writeVoiceSynthesisError(w, err)
 		return
 	}
 
-	writeAudioStream(w, stream)
-}
-
-func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) {
-	if s.ttsClient == nil {
-		writeError(w, http.StatusServiceUnavailable, "tts_client_not_configured")
-		return
-	}
-
-	var req voiceSummaryRequest
-	if r.Method == http.MethodGet {
-		ids := r.URL.Query()["transactionIds"]
-		if len(ids) == 0 {
-			ids = r.URL.Query()["txIds"]
-		}
-		for _, raw := range ids {
-			for _, id := range strings.Split(raw, ",") {
-				id = strings.TrimSpace(id)
-				if id != "" {
-					req.TransactionIDs = append(req.TransactionIDs, id)
-				}
-			}
-		}
-		req.VoiceID = r.URL.Query().Get("voiceId")
-		req.Rate = r.URL.Query().Get("rate")
-		req.Pitch = r.URL.Query().Get("pitch")
-		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
-	} else {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-	}
-
-	if len(req.TransactionIDs) < 2 || len(req.TransactionIDs) > 50 {
-		writeError(w, http.StatusBadRequest, "transactionIds count must be between 2 and 50")
-		return
-	}
-
-	var totalCredit int64
-	validCount := 0
-
-	for _, txID := range req.TransactionIDs {
-		item, err := s.store.GetTransactionByID(r.Context(), txID)
-		if err != nil || item == nil {
-			continue
-		}
-		if item.Credit > 0 && item.Source == "REALTIME" {
-			totalCredit += item.Credit
-			validCount++
-		}
-	}
-
-	if validCount == 0 {
-		writeError(w, http.StatusUnprocessableEntity, "no_valid_realtime_credits_in_summary")
-		return
-	}
-
-	settings, _ := s.store.GetVoiceSettings(r.Context())
-	if settings.ProviderMode == "BROWSER_ONLY" {
-		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
-		return
-	}
-	voice := settings.EdgeVoice
-	if req.VoiceID == "vi-VN-HoaiMyNeural" || req.VoiceID == "vi-VN-NamMinhNeural" {
-		voice = req.VoiceID
-	}
-	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
-
-	phrase := voicecopy.BuildBurstAnnouncement(validCount, totalCredit)
-	ttsRate := formatTTSRate(req.Rate)
-	ttsPitch := formatTTSPitch(req.Pitch)
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
-		Text:          phrase,
-		Voice:         voice,
-		Rate:          ttsRate,
-		Pitch:         ttsPitch,
-		Cacheable:     true,
-		AllowFallback: &allowFallback,
-		ProviderMode:  settings.ProviderMode,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("tts_synthesis_failed: %v", err))
-		return
-	}
-
-	writeAudioStream(w, stream)
+	writeAudioStream(w, stream, profile)
 }
 
 func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) {
@@ -553,15 +548,15 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req voiceAudioRequest
-	if r.Method == http.MethodGet {
-		req.VoiceID = r.URL.Query().Get("voiceId")
-		req.Rate = r.URL.Query().Get("rate")
-		req.Pitch = r.URL.Query().Get("pitch")
-		req.Template = r.URL.Query().Get("template")
-		req.IncludeDescription = r.URL.Query().Get("includeDescription") == "true"
-	} else {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	req, err := parseVoiceAudioRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := checkVoiceOverrides(r, req); err != nil {
+		writeError(w, http.StatusBadRequest, "VOICE_OVERRIDE_NOT_ALLOWED")
+		return
 	}
 
 	item, err := s.store.GetTransactionByID(r.Context(), id)
@@ -575,38 +570,135 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Manual replay: does not enforce realtime source or freshness
-	settings, _ := s.store.GetVoiceSettings(r.Context())
-	if settings.ProviderMode == "BROWSER_ONLY" {
+	profile, err := s.store.GetVoiceProfile(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get voice profile")
+		return
+	}
+
+	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
+		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
+		return
+	}
+
+	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
 		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
 		return
 	}
-	voice := settings.EdgeVoice
-	if req.VoiceID == "vi-VN-HoaiMyNeural" || req.VoiceID == "vi-VN-NamMinhNeural" {
-		voice = req.VoiceID
+
+	phrase, err := s.resolveVoicePhrase(profile, item.Credit, item.Description, req.PhraseID, req.Part)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "VOICE_RECIPE_MISMATCH")
+		return
 	}
-	allowFallback := settings.OnlineFallback && settings.ProviderMode == "ONLINE_AUTO"
-
-	template := sanitizeAnnouncementTemplate(req.Template)
-	phrase := voicecopy.FormatAnnouncementTemplate(template, item.Credit, item.Description, req.IncludeDescription)
-	ttsRate := formatTTSRate(req.Rate)
-	ttsPitch := formatTTSPitch(req.Pitch)
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if phrase == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(profile.ColdRequestTimeoutMs)*time.Millisecond)
 	defer cancel()
+	if s.tryVoicePack(w, r.WithContext(ctx), profile, phrase) {
+		return
+	}
+	ttsRate := formatFloatRate(profile.Rate)
+	ttsPitch := formatPitchHz(profile.PitchHz)
+
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
-		Text:          phrase,
-		Voice:         voice,
-		Rate:          ttsRate,
-		Pitch:         ttsPitch,
-		Cacheable:     !req.IncludeDescription,
-		AllowFallback: &allowFallback,
-		ProviderMode:  settings.ProviderMode,
+		Text:         phrase,
+		Voice:        profile.EdgeVoice,
+		Rate:         ttsRate,
+		Pitch:        ttsPitch,
+		Cacheable:    !profile.IncludeDescription,
+		ProviderMode: profile.ProviderMode,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("tts_synthesis_failed: %v", err))
+		writeVoiceSynthesisError(w, err)
 		return
 	}
 
-	writeAudioStream(w, stream)
+	writeAudioStream(w, stream, profile)
+}
+
+func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) {
+	if s.ttsClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "tts_client_not_configured")
+		return
+	}
+
+	req, err := parseVoiceAudioRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := checkVoiceOverrides(r, req); err != nil {
+		writeError(w, http.StatusBadRequest, "VOICE_OVERRIDE_NOT_ALLOWED")
+		return
+	}
+
+	if len(req.TransactionIDs) < 2 || len(req.TransactionIDs) > 50 {
+		writeError(w, http.StatusBadRequest, "transactionIds count must be between 2 and 50")
+		return
+	}
+
+	profile, err := s.store.GetVoiceProfile(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get voice profile")
+		return
+	}
+
+	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
+		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
+		return
+	}
+
+	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
+		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
+		return
+	}
+
+	var totalCredit int64
+	validCount := 0
+
+	for _, txID := range req.TransactionIDs {
+		item, err := s.store.GetTransactionByID(r.Context(), txID)
+		if err != nil || item == nil {
+			continue
+		}
+		if item.Credit > 0 && item.Source == "REALTIME" {
+			// Check overflow on addition
+			if totalCredit > math.MaxInt64-item.Credit {
+				writeError(w, http.StatusBadRequest, "summary_amount_overflow")
+				return
+			}
+			totalCredit += item.Credit
+			validCount++
+		}
+	}
+
+	if validCount == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "no_valid_realtime_credits_in_summary")
+		return
+	}
+
+	phrase := voicecopy.BuildBurstAnnouncement(validCount, totalCredit)
+	ttsRate := formatFloatRate(profile.Rate)
+	ttsPitch := formatPitchHz(profile.PitchHz)
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(profile.ColdRequestTimeoutMs)*time.Millisecond)
+	defer cancel()
+	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
+		Text:         phrase,
+		Voice:        profile.EdgeVoice,
+		Rate:         ttsRate,
+		Pitch:        ttsPitch,
+		Cacheable:    true,
+		ProviderMode: profile.ProviderMode,
+	})
+	if err != nil {
+		writeVoiceSynthesisError(w, err)
+		return
+	}
+
+	writeAudioStream(w, stream, profile)
 }

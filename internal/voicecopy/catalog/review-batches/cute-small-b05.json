@@ -1,0 +1,507 @@
+{
+  "id": "cute-small-b05",
+  "styleId": "cute",
+  "bandId": "small",
+  "recipes": [
+    {
+      "id": "cute-small-o021-c001",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn bạn đã ghé nhé."
+    },
+    {
+      "id": "cute-small-o021-c002",
+      "text": "Quầy mình có thêm hơi ấm. Chúc bạn một ngày dịu êm."
+    },
+    {
+      "id": "cute-small-o021-c003",
+      "text": "Quầy mình có thêm hơi ấm. Mong bạn luôn vui hôm nay."
+    },
+    {
+      "id": "cute-small-o021-c004",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn vì lần ghé này."
+    },
+    {
+      "id": "cute-small-o021-c005",
+      "text": "Quầy mình có thêm hơi ấm. Chúc bạn gặp nhiều điều đẹp."
+    },
+    {
+      "id": "cute-small-o021-c006",
+      "text": "Quầy mình có thêm hơi ấm. Gửi bạn một lời cảm ơn."
+    },
+    {
+      "id": "cute-small-o021-c007",
+      "text": "Quầy mình có thêm hơi ấm. Mong ngày của bạn thật ấm."
+    },
+    {
+      "id": "cute-small-o021-c008",
+      "text": "Quầy mình có thêm hơi ấm. Chúc bạn giữ nụ cười xinh."
+    },
+    {
+      "id": "cute-small-o021-c009",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn bạn thật nhiều nhé."
+    },
+    {
+      "id": "cute-small-o021-c010",
+      "text": "Quầy mình có thêm hơi ấm. Mong bạn có chiều thư thái."
+    },
+    {
+      "id": "cute-small-o021-c011",
+      "text": "Quầy mình có thêm hơi ấm. Chúc hành trình của bạn êm."
+    },
+    {
+      "id": "cute-small-o021-c012",
+      "text": "Quầy mình có thêm hơi ấm. Gửi bạn chút vui nhẹ nhàng."
+    },
+    {
+      "id": "cute-small-o021-c013",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn sự tin yêu này."
+    },
+    {
+      "id": "cute-small-o021-c014",
+      "text": "Quầy mình có thêm hơi ấm. Chúc bạn thêm nhiều an yên."
+    },
+    {
+      "id": "cute-small-o021-c015",
+      "text": "Quầy mình có thêm hơi ấm. Mong bạn luôn thấy dễ chịu."
+    },
+    {
+      "id": "cute-small-o021-c016",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn bạn đã lựa chọn."
+    },
+    {
+      "id": "cute-small-o021-c017",
+      "text": "Quầy mình có thêm hơi ấm. Chúc hôm nay thật trong lành."
+    },
+    {
+      "id": "cute-small-o021-c018",
+      "text": "Quầy mình có thêm hơi ấm. Gửi bạn một nụ cười hiền."
+    },
+    {
+      "id": "cute-small-o021-c019",
+      "text": "Quầy mình có thêm hơi ấm. Mong mọi việc đều thuận lợi."
+    },
+    {
+      "id": "cute-small-o021-c020",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn bạn đã đồng hành."
+    },
+    {
+      "id": "cute-small-o021-c021",
+      "text": "Quầy mình có thêm hơi ấm. Chúc bạn một buổi nhẹ tênh."
+    },
+    {
+      "id": "cute-small-o021-c022",
+      "text": "Quầy mình có thêm hơi ấm. Mong niềm vui ở bên bạn."
+    },
+    {
+      "id": "cute-small-o021-c023",
+      "text": "Quầy mình có thêm hơi ấm. Gửi lời tri ân chân thành."
+    },
+    {
+      "id": "cute-small-o021-c024",
+      "text": "Quầy mình có thêm hơi ấm. Chúc bạn thật nhiều ấm áp."
+    },
+    {
+      "id": "cute-small-o021-c025",
+      "text": "Quầy mình có thêm hơi ấm. Cảm ơn lần gặp dễ thương."
+    },
+    {
+      "id": "cute-small-o022-c001",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn bạn đã ghé nhé."
+    },
+    {
+      "id": "cute-small-o022-c002",
+      "text": "Một niềm vui thật vừa vặn. Chúc bạn một ngày dịu êm."
+    },
+    {
+      "id": "cute-small-o022-c003",
+      "text": "Một niềm vui thật vừa vặn. Mong bạn luôn vui hôm nay."
+    },
+    {
+      "id": "cute-small-o022-c004",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn vì lần ghé này."
+    },
+    {
+      "id": "cute-small-o022-c005",
+      "text": "Một niềm vui thật vừa vặn. Chúc bạn gặp nhiều điều đẹp."
+    },
+    {
+      "id": "cute-small-o022-c006",
+      "text": "Một niềm vui thật vừa vặn. Gửi bạn một lời cảm ơn."
+    },
+    {
+      "id": "cute-small-o022-c007",
+      "text": "Một niềm vui thật vừa vặn. Mong ngày của bạn thật ấm."
+    },
+    {
+      "id": "cute-small-o022-c008",
+      "text": "Một niềm vui thật vừa vặn. Chúc bạn giữ nụ cười xinh."
+    },
+    {
+      "id": "cute-small-o022-c009",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn bạn thật nhiều nhé."
+    },
+    {
+      "id": "cute-small-o022-c010",
+      "text": "Một niềm vui thật vừa vặn. Mong bạn có chiều thư thái."
+    },
+    {
+      "id": "cute-small-o022-c011",
+      "text": "Một niềm vui thật vừa vặn. Chúc hành trình của bạn êm."
+    },
+    {
+      "id": "cute-small-o022-c012",
+      "text": "Một niềm vui thật vừa vặn. Gửi bạn chút vui nhẹ nhàng."
+    },
+    {
+      "id": "cute-small-o022-c013",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn sự tin yêu này."
+    },
+    {
+      "id": "cute-small-o022-c014",
+      "text": "Một niềm vui thật vừa vặn. Chúc bạn thêm nhiều an yên."
+    },
+    {
+      "id": "cute-small-o022-c015",
+      "text": "Một niềm vui thật vừa vặn. Mong bạn luôn thấy dễ chịu."
+    },
+    {
+      "id": "cute-small-o022-c016",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn bạn đã lựa chọn."
+    },
+    {
+      "id": "cute-small-o022-c017",
+      "text": "Một niềm vui thật vừa vặn. Chúc hôm nay thật trong lành."
+    },
+    {
+      "id": "cute-small-o022-c018",
+      "text": "Một niềm vui thật vừa vặn. Gửi bạn một nụ cười hiền."
+    },
+    {
+      "id": "cute-small-o022-c019",
+      "text": "Một niềm vui thật vừa vặn. Mong mọi việc đều thuận lợi."
+    },
+    {
+      "id": "cute-small-o022-c020",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn bạn đã đồng hành."
+    },
+    {
+      "id": "cute-small-o022-c021",
+      "text": "Một niềm vui thật vừa vặn. Chúc bạn một buổi nhẹ tênh."
+    },
+    {
+      "id": "cute-small-o022-c022",
+      "text": "Một niềm vui thật vừa vặn. Mong niềm vui ở bên bạn."
+    },
+    {
+      "id": "cute-small-o022-c023",
+      "text": "Một niềm vui thật vừa vặn. Gửi lời tri ân chân thành."
+    },
+    {
+      "id": "cute-small-o022-c024",
+      "text": "Một niềm vui thật vừa vặn. Chúc bạn thật nhiều ấm áp."
+    },
+    {
+      "id": "cute-small-o022-c025",
+      "text": "Một niềm vui thật vừa vặn. Cảm ơn lần gặp dễ thương."
+    },
+    {
+      "id": "cute-small-o023-c001",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn bạn đã ghé nhé."
+    },
+    {
+      "id": "cute-small-o023-c002",
+      "text": "Buổi này thêm phần tươi tắn. Chúc bạn một ngày dịu êm."
+    },
+    {
+      "id": "cute-small-o023-c003",
+      "text": "Buổi này thêm phần tươi tắn. Mong bạn luôn vui hôm nay."
+    },
+    {
+      "id": "cute-small-o023-c004",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn vì lần ghé này."
+    },
+    {
+      "id": "cute-small-o023-c005",
+      "text": "Buổi này thêm phần tươi tắn. Chúc bạn gặp nhiều điều đẹp."
+    },
+    {
+      "id": "cute-small-o023-c006",
+      "text": "Buổi này thêm phần tươi tắn. Gửi bạn một lời cảm ơn."
+    },
+    {
+      "id": "cute-small-o023-c007",
+      "text": "Buổi này thêm phần tươi tắn. Mong ngày của bạn thật ấm."
+    },
+    {
+      "id": "cute-small-o023-c008",
+      "text": "Buổi này thêm phần tươi tắn. Chúc bạn giữ nụ cười xinh."
+    },
+    {
+      "id": "cute-small-o023-c009",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn bạn thật nhiều nhé."
+    },
+    {
+      "id": "cute-small-o023-c010",
+      "text": "Buổi này thêm phần tươi tắn. Mong bạn có chiều thư thái."
+    },
+    {
+      "id": "cute-small-o023-c011",
+      "text": "Buổi này thêm phần tươi tắn. Chúc hành trình của bạn êm."
+    },
+    {
+      "id": "cute-small-o023-c012",
+      "text": "Buổi này thêm phần tươi tắn. Gửi bạn chút vui nhẹ nhàng."
+    },
+    {
+      "id": "cute-small-o023-c013",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn sự tin yêu này."
+    },
+    {
+      "id": "cute-small-o023-c014",
+      "text": "Buổi này thêm phần tươi tắn. Chúc bạn thêm nhiều an yên."
+    },
+    {
+      "id": "cute-small-o023-c015",
+      "text": "Buổi này thêm phần tươi tắn. Mong bạn luôn thấy dễ chịu."
+    },
+    {
+      "id": "cute-small-o023-c016",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn bạn đã lựa chọn."
+    },
+    {
+      "id": "cute-small-o023-c017",
+      "text": "Buổi này thêm phần tươi tắn. Chúc hôm nay thật trong lành."
+    },
+    {
+      "id": "cute-small-o023-c018",
+      "text": "Buổi này thêm phần tươi tắn. Gửi bạn một nụ cười hiền."
+    },
+    {
+      "id": "cute-small-o023-c019",
+      "text": "Buổi này thêm phần tươi tắn. Mong mọi việc đều thuận lợi."
+    },
+    {
+      "id": "cute-small-o023-c020",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn bạn đã đồng hành."
+    },
+    {
+      "id": "cute-small-o023-c021",
+      "text": "Buổi này thêm phần tươi tắn. Chúc bạn một buổi nhẹ tênh."
+    },
+    {
+      "id": "cute-small-o023-c022",
+      "text": "Buổi này thêm phần tươi tắn. Mong niềm vui ở bên bạn."
+    },
+    {
+      "id": "cute-small-o023-c023",
+      "text": "Buổi này thêm phần tươi tắn. Gửi lời tri ân chân thành."
+    },
+    {
+      "id": "cute-small-o023-c024",
+      "text": "Buổi này thêm phần tươi tắn. Chúc bạn thật nhiều ấm áp."
+    },
+    {
+      "id": "cute-small-o023-c025",
+      "text": "Buổi này thêm phần tươi tắn. Cảm ơn lần gặp dễ thương."
+    },
+    {
+      "id": "cute-small-o024-c001",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn bạn đã ghé nhé."
+    },
+    {
+      "id": "cute-small-o024-c002",
+      "text": "Một cánh hoa vui vừa tới. Chúc bạn một ngày dịu êm."
+    },
+    {
+      "id": "cute-small-o024-c003",
+      "text": "Một cánh hoa vui vừa tới. Mong bạn luôn vui hôm nay."
+    },
+    {
+      "id": "cute-small-o024-c004",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn vì lần ghé này."
+    },
+    {
+      "id": "cute-small-o024-c005",
+      "text": "Một cánh hoa vui vừa tới. Chúc bạn gặp nhiều điều đẹp."
+    },
+    {
+      "id": "cute-small-o024-c006",
+      "text": "Một cánh hoa vui vừa tới. Gửi bạn một lời cảm ơn."
+    },
+    {
+      "id": "cute-small-o024-c007",
+      "text": "Một cánh hoa vui vừa tới. Mong ngày của bạn thật ấm."
+    },
+    {
+      "id": "cute-small-o024-c008",
+      "text": "Một cánh hoa vui vừa tới. Chúc bạn giữ nụ cười xinh."
+    },
+    {
+      "id": "cute-small-o024-c009",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn bạn thật nhiều nhé."
+    },
+    {
+      "id": "cute-small-o024-c010",
+      "text": "Một cánh hoa vui vừa tới. Mong bạn có chiều thư thái."
+    },
+    {
+      "id": "cute-small-o024-c011",
+      "text": "Một cánh hoa vui vừa tới. Chúc hành trình của bạn êm."
+    },
+    {
+      "id": "cute-small-o024-c012",
+      "text": "Một cánh hoa vui vừa tới. Gửi bạn chút vui nhẹ nhàng."
+    },
+    {
+      "id": "cute-small-o024-c013",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn sự tin yêu này."
+    },
+    {
+      "id": "cute-small-o024-c014",
+      "text": "Một cánh hoa vui vừa tới. Chúc bạn thêm nhiều an yên."
+    },
+    {
+      "id": "cute-small-o024-c015",
+      "text": "Một cánh hoa vui vừa tới. Mong bạn luôn thấy dễ chịu."
+    },
+    {
+      "id": "cute-small-o024-c016",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn bạn đã lựa chọn."
+    },
+    {
+      "id": "cute-small-o024-c017",
+      "text": "Một cánh hoa vui vừa tới. Chúc hôm nay thật trong lành."
+    },
+    {
+      "id": "cute-small-o024-c018",
+      "text": "Một cánh hoa vui vừa tới. Gửi bạn một nụ cười hiền."
+    },
+    {
+      "id": "cute-small-o024-c019",
+      "text": "Một cánh hoa vui vừa tới. Mong mọi việc đều thuận lợi."
+    },
+    {
+      "id": "cute-small-o024-c020",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn bạn đã đồng hành."
+    },
+    {
+      "id": "cute-small-o024-c021",
+      "text": "Một cánh hoa vui vừa tới. Chúc bạn một buổi nhẹ tênh."
+    },
+    {
+      "id": "cute-small-o024-c022",
+      "text": "Một cánh hoa vui vừa tới. Mong niềm vui ở bên bạn."
+    },
+    {
+      "id": "cute-small-o024-c023",
+      "text": "Một cánh hoa vui vừa tới. Gửi lời tri ân chân thành."
+    },
+    {
+      "id": "cute-small-o024-c024",
+      "text": "Một cánh hoa vui vừa tới. Chúc bạn thật nhiều ấm áp."
+    },
+    {
+      "id": "cute-small-o024-c025",
+      "text": "Một cánh hoa vui vừa tới. Cảm ơn lần gặp dễ thương."
+    },
+    {
+      "id": "cute-small-o025-c001",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn bạn đã ghé nhé."
+    },
+    {
+      "id": "cute-small-o025-c002",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc bạn một ngày dịu êm."
+    },
+    {
+      "id": "cute-small-o025-c003",
+      "text": "Lòng cảm ơn đang lên tiếng. Mong bạn luôn vui hôm nay."
+    },
+    {
+      "id": "cute-small-o025-c004",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn vì lần ghé này."
+    },
+    {
+      "id": "cute-small-o025-c005",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc bạn gặp nhiều điều đẹp."
+    },
+    {
+      "id": "cute-small-o025-c006",
+      "text": "Lòng cảm ơn đang lên tiếng. Gửi bạn một lời cảm ơn."
+    },
+    {
+      "id": "cute-small-o025-c007",
+      "text": "Lòng cảm ơn đang lên tiếng. Mong ngày của bạn thật ấm."
+    },
+    {
+      "id": "cute-small-o025-c008",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc bạn giữ nụ cười xinh."
+    },
+    {
+      "id": "cute-small-o025-c009",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn bạn thật nhiều nhé."
+    },
+    {
+      "id": "cute-small-o025-c010",
+      "text": "Lòng cảm ơn đang lên tiếng. Mong bạn có chiều thư thái."
+    },
+    {
+      "id": "cute-small-o025-c011",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc hành trình của bạn êm."
+    },
+    {
+      "id": "cute-small-o025-c012",
+      "text": "Lòng cảm ơn đang lên tiếng. Gửi bạn chút vui nhẹ nhàng."
+    },
+    {
+      "id": "cute-small-o025-c013",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn sự tin yêu này."
+    },
+    {
+      "id": "cute-small-o025-c014",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc bạn thêm nhiều an yên."
+    },
+    {
+      "id": "cute-small-o025-c015",
+      "text": "Lòng cảm ơn đang lên tiếng. Mong bạn luôn thấy dễ chịu."
+    },
+    {
+      "id": "cute-small-o025-c016",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn bạn đã lựa chọn."
+    },
+    {
+      "id": "cute-small-o025-c017",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc hôm nay thật trong lành."
+    },
+    {
+      "id": "cute-small-o025-c018",
+      "text": "Lòng cảm ơn đang lên tiếng. Gửi bạn một nụ cười hiền."
+    },
+    {
+      "id": "cute-small-o025-c019",
+      "text": "Lòng cảm ơn đang lên tiếng. Mong mọi việc đều thuận lợi."
+    },
+    {
+      "id": "cute-small-o025-c020",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn bạn đã đồng hành."
+    },
+    {
+      "id": "cute-small-o025-c021",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc bạn một buổi nhẹ tênh."
+    },
+    {
+      "id": "cute-small-o025-c022",
+      "text": "Lòng cảm ơn đang lên tiếng. Mong niềm vui ở bên bạn."
+    },
+    {
+      "id": "cute-small-o025-c023",
+      "text": "Lòng cảm ơn đang lên tiếng. Gửi lời tri ân chân thành."
+    },
+    {
+      "id": "cute-small-o025-c024",
+      "text": "Lòng cảm ơn đang lên tiếng. Chúc bạn thật nhiều ấm áp."
+    },
+    {
+      "id": "cute-small-o025-c025",
+      "text": "Lòng cảm ơn đang lên tiếng. Cảm ơn lần gặp dễ thương."
+    }
+  ]
+}

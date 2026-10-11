@@ -9,4 +9,5 @@ export interface SePayStoreConfig {
   accountName: string;
   qrPayload: string;
   lastMessageAt: string | null;
+  lastWebhookAt?: string | null;
 }

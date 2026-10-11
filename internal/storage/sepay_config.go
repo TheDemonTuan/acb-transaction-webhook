@@ -10,6 +10,8 @@ import (
 var (
 	ErrSePayConfigUnavailable = errors.New("SePay configuration unavailable")
 	ErrSePayRevisionConflict  = errors.New("SePay configuration revision changed")
+	ErrSePayStoreKeyImmutable = errors.New("SePay store key is immutable after native acceptance")
+	ErrSePayReferenceUnverified = errors.New("SePay native reference namespace is unverified")
 )
 
 // SePayManagedConfig is internal only. All fields, including receiver and token,
@@ -74,6 +76,23 @@ func (s *Store) SaveSePayManagedConfig(ctx context.Context, cfg SePayManagedConf
 		}
 		if err := checkSePayRevisionTx(ctx, tx, cfg.Revision); err != nil {
 			return err
+		}
+		// The native identity namespace cannot be reset by a config edit, including
+		// saves from a legacy bootstrap with no managed record yet.
+		var changedNamespace bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sepay_native_inbox WHERE reason='ACCEPTED' AND store_key<>?)`, storeKey).Scan(&changedNamespace); err != nil { return err }
+		if changedNamespace { return ErrSePayStoreKeyImmutable }
+		var policy struct { Fields struct {
+			Mode string `json:"mode"`
+			ActiveTransport string `json:"activeTransport"`
+			NativeMode string `json:"nativeMode"`
+			NativeReferenceVerified bool `json:"nativeReferenceVerified"`
+		} `json:"fields"` }
+		if json.Unmarshal(cfg.ConfigJSON, &policy) != nil { return ErrSePayConfigUnavailable }
+		if policy.Fields.Mode == "active" && policy.Fields.ActiveTransport == "native" && policy.Fields.NativeMode == "active" && !policy.Fields.NativeReferenceVerified {
+			var history bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sepay_receipts WHERE store_key=?)`, storeKey).Scan(&history); err != nil { return err }
+			if history { return ErrSePayReferenceUnverified }
 		}
 		if storeKey != "" {
 			var existingBank string

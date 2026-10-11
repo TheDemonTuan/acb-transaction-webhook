@@ -1,17 +1,55 @@
-import React, { useState } from 'react';
-import { Volume2, VolumeX, X } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Volume2, VolumeX, X, Sliders, CheckCircle2, AlertCircle } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVoiceAnnouncements } from '../VoiceAnnouncementProvider';
 import { VoiceTestButton } from './VoiceTestButton';
-import { DEFAULT_ANNOUNCEMENT_TEMPLATE, formatAnnouncementTemplate } from '../voice-copy';
-
+import {
+  saveVoiceSettingsServer,
+  DEFAULT_AMOUNT_BANDS,
+  type VoiceProfile,
+  type VoiceSettingsInput,
+} from '../voice-profile';
+import { queryKeys } from '../../../shared/api/query-keys';
+import { fetchStatus } from '../../../shared/api/queries';
 export interface VoiceSettingsSheetProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
 export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, onClose }) => {
-  const { settings, updateSettings, unlockAudio, isSupported, voices, lastTelemetry } = useVoiceAnnouncements();
+  const queryClient = useQueryClient();
+  const { settings, updateSettings, unlockAudio, audioUnlocked, isSupported, voices, lastTelemetry, profile: activeProfile, voiceState, voiceDetail, profileOffline, recentSkipped, replayVoice } = useVoiceAnnouncements();
   const [toggleError, setToggleError] = useState<string | null>(null);
+  const [serverSaveError, setServerSaveError] = useState<string | null>(null);
+  const [serverSaveSuccess, setServerSaveSuccess] = useState(false);
+  const [isSavingServer, setIsSavingServer] = useState(false);
+
+  const statusQuery = useQuery({ queryKey: queryKeys.status, queryFn: fetchStatus });
+  const isOwnerOrOperator =
+    statusQuery.data?.userRole === 'OWNER' || statusQuery.data?.userRole === 'OPERATOR';
+
+  const profileQuery = { data: activeProfile };
+
+  const [formDraft, setFormDraft] = useState<VoiceSettingsInput | null>(null);
+
+  const [legacyImported, setLegacyImported] = useState(false);
+  useEffect(() => {
+    if (profileQuery.data && !formDraft) {
+      setFormDraft({
+        revision: profileQuery.data.revision,
+        providerMode: profileQuery.data.providerMode,
+        edgeVoice: profileQuery.data.edgeVoice,
+        rate: profileQuery.data.rate,
+        pitchHz: profileQuery.data.pitchHz,
+        amountBands: profileQuery.data.amountBands || DEFAULT_AMOUNT_BANDS,
+        chimeEnabled: profileQuery.data.chimeEnabled,
+        loadingSoundEnabled: profileQuery.data.loadingSoundEnabled,
+        funEnabled: profileQuery.data.funEnabled,
+        includeDescription: profileQuery.data.includeDescription,
+        customTemplate: profileQuery.data.customTemplate,
+      });
+    }
+  }, [profileQuery.data, formDraft]);
 
   if (!isOpen) return null;
 
@@ -22,8 +60,8 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
 
   const handleToggle = async () => {
     setToggleError(null);
-    if (!settings.enabled) {
-      if (vietnameseVoices.length === 0 && voices.length > 0) {
+    if (!settings.enabled || !audioUnlocked) {
+      if (vietnameseVoices.length === 0 && voices.length > 0 && formDraft?.providerMode === 'BROWSER_ONLY') {
         setToggleError('Thiết bị chưa có giọng Tiếng Việt. Vui lòng cài đặt giọng tiếng Việt trong hệ thống.');
         return;
       }
@@ -34,17 +72,75 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
           return;
         }
         updateSettings({ enabled: true });
-      } catch (err: any) {
-        setToggleError(err?.message || 'Không thể kích hoạt âm thanh');
+      } catch (err: unknown) {
+        const msg = err && typeof err === 'object' && 'message' in err ? String(err.message) : 'Không thể kích hoạt âm thanh';
+        setToggleError(msg);
       }
     } else {
       updateSettings({ enabled: false });
     }
   };
 
+  const handleImportLegacy = () => {
+    if (!settings.legacySnapshot || !formDraft) return;
+    const snap = settings.legacySnapshot;
+    setLegacyImported(true);
+    setFormDraft((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        rate: typeof snap.rate === 'number' ? Math.min(2, Math.max(0.75, snap.rate)) : prev.rate,
+        customTemplate: snap.announcementTemplate || prev.customTemplate,
+        includeDescription: Boolean(snap.includeDescription ?? prev.includeDescription),
+      };
+    });
+  };
+
+  const handleSaveServer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formDraft) return;
+    setServerSaveError(null);
+    setServerSaveSuccess(false);
+    setIsSavingServer(true);
+    try {
+      const updated = await saveVoiceSettingsServer(formDraft);
+      setFormDraft({
+        revision: updated.revision,
+        providerMode: updated.providerMode,
+        edgeVoice: updated.edgeVoice,
+        rate: updated.rate,
+        pitchHz: updated.pitchHz,
+        amountBands: updated.amountBands,
+        chimeEnabled: updated.chimeEnabled,
+        loadingSoundEnabled: updated.loadingSoundEnabled,
+        funEnabled: updated.funEnabled,
+        includeDescription: updated.includeDescription,
+        customTemplate: updated.customTemplate,
+      });
+      // Clear legacy snapshot locally once imported and saved
+      if (legacyImported && settings.legacySnapshot) {
+        updateSettings({ legacySnapshot: undefined });
+      }
+      setLegacyImported(false);
+      queryClient.setQueryData(['voice-profile'], updated);
+      setServerSaveSuccess(true);
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message === 'VOICE_SETTINGS_CONFLICT') {
+        setServerSaveError('Cấu hình máy chủ đã bị thay đổi bởi người khác. Vui lòng tải lại trang.');
+      } else {
+        const msg = err instanceof Error ? err.message : 'Không thể lưu cấu hình lên máy chủ';
+        setServerSaveError(msg);
+      }
+    } finally {
+      setIsSavingServer(false);
+    }
+  };
+
+  const profile: VoiceProfile | undefined = profileQuery.data;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-2xl shadow-xl border border-stone-200 w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-2xl shadow-xl border border-stone-200 w-full max-w-lg max-h-[90vh] overflow-y-auto">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100">
           <div className="flex items-center gap-2">
@@ -53,7 +149,9 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
             </div>
             <div>
               <h3 className="font-semibold text-stone-900">Cài đặt đọc giao dịch</h3>
-              <p className="text-xs text-stone-500">Phát âm thanh khi có tiền vào tài khoản</p>
+              <p className="text-xs text-stone-500">
+                {profile ? `Hồ sơ máy chủ (rev ${profile.revision})` : 'Âm thanh thông báo'}
+              </p>
             </div>
           </div>
           <button
@@ -66,23 +164,41 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
         </div>
 
         {/* Modal Content */}
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-5 text-xs text-stone-700">
           {!isSupported ? (
             <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800 flex items-start gap-2.5">
               <VolumeX className="w-5 h-5 shrink-0 text-amber-600" />
-              <span>Trình duyệt hoặc thiết bị này chưa hỗ trợ đọc bằng giọng nói Web Speech.</span>
+              <span>Trình duyệt hoặc thiết bị này chưa hỗ trợ đọc bằng âm thanh Web Audio / Speech.</span>
             </div>
           ) : (
             <>
-              {/* Enable Toggle */}
+              {/* Enable Toggle (Local Device) */}
+              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
+                <p>Giọng hiệu lực: {profile?.providerMode === 'BROWSER_ONLY' ? 'Trình duyệt (đã chọn rõ)' : profile?.edgeVoice || 'Chưa tải hồ sơ'} · {profile?.rate}x · {profile?.pitchHz}Hz</p>
+                <p>{voiceState}{profileOffline ? ' · Hồ sơ máy chủ offline, dùng bản đã xác nhận' : ''} {voiceDetail}</p>
+                {settings.enabled && !audioUnlocked && <button type="button" onClick={handleToggle} className="rounded border border-amber-300 bg-amber-50 p-2">Mở khóa loa — cần thao tác trên thiết bị này</button>}
+                {profile?.providerMode === 'BROWSER_ONLY' && (
+                  <label>Giọng Tiếng Việt tại thiết bị
+                    <select value={settings.browserVoiceURI || ''} onChange={(event) => updateSettings({ browserVoiceURI: event.target.value })} className="w-full rounded border p-2">
+                      <option value="">Chọn đúng giọng tại thiết bị</option>
+                      {vietnameseVoices.map((voice) => <option key={voice.uri} value={voice.uri}>{voice.name}</option>)}
+                    </select>
+                  </label>
+                )}
+                {recentSkipped.length > 0 && <details><summary>Giao dịch chưa đọc ({recentSkipped.length} gần nhất)</summary>
+                  {recentSkipped.map((item, index) => <div key={`${item.transactionId}:${index}`} className="flex gap-2">
+                    <span>{item.reason}</span><button type="button" onClick={() => { void replayVoice(item.transactionId).catch((error: unknown) => setToggleError(error instanceof Error ? error.message : 'Không thể phát lại')); }}>Đọc lại {item.transactionId}</button>
+                  </div>)}
+                </details>}
+              </div>
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/70 space-y-2">
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="text-sm font-medium text-stone-900 block">
-                      Đọc giao dịch mới
+                      Bật loa thiết bị này
                     </span>
                     <span className="text-xs text-stone-500">
-                      Tự động đọc số tiền ngay khi giao dịch được ghi nhận
+                      Tự động phát chuông và đọc số tiền khi có giao dịch
                     </span>
                   </div>
                   <button
@@ -109,76 +225,10 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                 )}
               </div>
 
-              {/* Voice selection (Strict Vietnamese Only) */}
-              <div>
-                <label className="block text-xs font-medium text-stone-700 mb-1.5">
-                  Giọng đọc (Tiếng Việt)
-                </label>
-                {vietnameseVoices.length > 0 ? (
-                  <select
-                    value={settings.voiceURI || ''}
-                    onChange={(e) => updateSettings({ voiceURI: e.target.value || undefined })}
-                    disabled={!settings.enabled}
-                    className="w-full text-sm rounded-lg border border-stone-300 px-3 py-2 bg-white text-stone-800 disabled:bg-stone-100 disabled:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  >
-                    <option value="">Tự động chọn giọng tiếng Việt phù hợp nhất</option>
-                    {vietnameseVoices.map((v) => (
-                      <option key={v.uri} value={v.uri}>
-                        {v.name} ({v.lang})
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
-                    Thiết bị chưa có giọng Tiếng Việt. Trình duyệt không tìm thấy giọng đọc tiếng Việt được cài đặt trên máy.
-                  </div>
-                )}
-              </div>
-
-              {/* Template Editor */}
-              <div>
-                <div className="flex justify-between items-center text-xs font-medium text-stone-700 mb-1.5">
-                  <span>Mẫu câu thông báo</span>
-                  <button
-                    type="button"
-                    onClick={() => updateSettings({ announcementTemplate: DEFAULT_ANNOUNCEMENT_TEMPLATE })}
-                    className="text-stone-400 hover:text-stone-600 text-[11px] underline cursor-pointer"
-                  >
-                    Khôi phục mặc định
-                  </button>
-                </div>
-                <textarea
-                  rows={2}
-                  value={settings.announcementTemplate || DEFAULT_ANNOUNCEMENT_TEMPLATE}
-                  onChange={(e) => updateSettings({ announcementTemplate: e.target.value })}
-                  placeholder="Ví dụ: Đa tạ quý khách vì {amount}."
-                  className="w-full text-sm rounded-lg border border-stone-300 p-2.5 bg-white text-stone-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                />
-                <div className="flex flex-wrap gap-1.5 mt-1.5 text-[11px] text-stone-500">
-                  <span>Thẻ hỗ trợ:</span>
-                  <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{amount}'}</code>
-                  <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{amount_raw}'}</code>
-                  <code className="bg-stone-100 px-1 py-0.5 rounded text-stone-700">{'{description}'}</code>
-                </div>
-                {(!settings.announcementTemplate?.trim() || settings.announcementTemplate.trim() === DEFAULT_ANNOUNCEMENT_TEMPLATE) && (
-                  <p className="mt-1 text-xs text-stone-500">Mẫu mặc định tự đổi câu ngắn theo từng giao dịch; nghe thử dùng câu minh họa.</p>
-                )}
-                <div className="mt-2 p-2.5 rounded-lg bg-stone-50 border border-stone-200/80 text-xs text-stone-600">
-                  <span className="font-medium text-stone-700 block mb-0.5">Xem trước câu đọc:</span>
-                  <span className="italic text-emerald-800 font-medium">
-                    &ldquo;{formatAnnouncementTemplate(settings.announcementTemplate, {
-                      amount: 500000,
-                      description: 'ung ho quy',
-                      includeDescription: settings.includeDescription,
-                    })}&rdquo;
-                  </span>
-                </div>
-              </div>
-
-              {/* Volume Slider */}
+              {/* Volume Slider (Local Device) */}
               <div>
                 <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
-                  <span>Âm lượng</span>
+                  <span>Âm lượng thiết bị</span>
                   <span>{Math.round(settings.volume * 100)}%</span>
                 </div>
                 <input
@@ -193,47 +243,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                 />
               </div>
 
-              {/* Speech Rate Slider (0.75x to 2.0x) */}
-              <div>
-                <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
-                  <span>Tốc độ đọc</span>
-                  <span>{settings.rate}x</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.75"
-                  max="2"
-                  step="0.05"
-                  value={settings.rate}
-                  disabled={!settings.enabled}
-                  onChange={(e) => updateSettings({ rate: parseFloat(e.target.value) })}
-                  className="w-full accent-emerald-600 cursor-pointer disabled:opacity-50"
-                />
-              </div>
-
-              {/* Include Description checkbox */}
-              <label className="flex items-start gap-2.5 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={settings.includeDescription}
-                  disabled={!settings.enabled}
-                  onChange={(e) => updateSettings({ includeDescription: e.target.checked })}
-                  className="mt-0.5 rounded border-stone-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-50"
-                />
-                <div>
-                  <span className="text-sm font-medium text-stone-800 block">
-                    Đọc kèm nội dung chuyển khoản
-                  </span>
-                  <span className="text-xs text-stone-500 block">
-                    Phát thêm nội dung tin nhắn giao dịch sau khi đọc số tiền
-                  </span>
-                  <span className="text-[11px] text-amber-700 bg-amber-50 rounded px-1.5 py-0.5 mt-1 inline-block border border-amber-200/60">
-                    Khi bật, nội dung chuyển khoản sẽ được gửi tới dịch vụ đọc trực tuyến.
-                  </span>
-                </div>
-              </label>
-
-              {/* Announce when tab is in background */}
+              {/* Announce when hidden */}
               <label className="flex items-start gap-2.5 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -251,6 +261,234 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                   </span>
                 </div>
               </label>
+
+              {/* Server Profile Configuration (Owner / Operator) */}
+              {isOwnerOrOperator && formDraft && (
+                <form onSubmit={handleSaveServer} className="pt-4 border-t border-stone-100 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-stone-900 flex items-center gap-1.5 text-sm">
+                      <Sliders className="w-4 h-4 text-emerald-600" />
+                      Cấu hình phát âm toàn hệ thống
+                    </span>
+                    {settings.legacySnapshot && (
+                      <button
+                        type="button"
+                        onClick={handleImportLegacy}
+                        className="text-xs text-blue-600 hover:text-blue-800 font-medium underline cursor-pointer"
+                      >
+                        Nhập cấu hình cũ lên máy chủ
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Mode & Voice */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-stone-700 mb-1">
+                        Chế độ phát
+                      </label>
+                      <select
+                        value={formDraft.providerMode}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, providerMode: e.target.value as 'EDGE_ONLY' | 'BROWSER_ONLY' } : null))
+                        }
+                        className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800"
+                      >
+                        <option value="EDGE_ONLY">Giọng máy chủ Edge</option>
+                        <option value="BROWSER_ONLY">Giọng trình duyệt</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-stone-700 mb-1">
+                        Giọng máy chủ
+                      </label>
+                      <select
+                        value={formDraft.edgeVoice}
+                        disabled={formDraft.providerMode === 'BROWSER_ONLY'}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, edgeVoice: e.target.value } : null))
+                        }
+                        className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800 disabled:bg-stone-100"
+                      >
+                        <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ)</option>
+                        <option value="vi-VN-NamMinhNeural">Nam Minh (Nam)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Rate & Pitch */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="flex justify-between mb-1">
+                        <span>Tốc độ đọc</span>
+                        <span className="font-semibold">{formDraft.rate}x</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.75"
+                        max="2.0"
+                        step="0.05"
+                        value={formDraft.rate}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, rate: parseFloat(e.target.value) } : null))
+                        }
+                        className="w-full accent-emerald-600"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between mb-1">
+                        <span>Cao độ (Pitch)</span>
+                        <span className="font-semibold">{formDraft.pitchHz} Hz</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="-50"
+                        max="50"
+                        step="1"
+                        value={formDraft.pitchHz}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, pitchHz: parseInt(e.target.value, 10) } : null))
+                        }
+                        className="w-full accent-emerald-600"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Audio Features */}
+                  <div className="space-y-2 pt-1">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formDraft.chimeEnabled}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, chimeEnabled: e.target.checked } : null))
+                        }
+                        className="rounded border-stone-300 text-emerald-600"
+                      />
+                      <span>Phát chuông báo âm thanh trước khi đọc</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formDraft.funEnabled}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, funEnabled: e.target.checked } : null))
+                        }
+                        className="rounded border-stone-300 text-emerald-600"
+                      />
+                      <span>Đọc câu cảm ơn / câu vui sau số tiền</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formDraft.includeDescription}
+                        onChange={(e) =>
+                          setFormDraft((p) => (p ? { ...p, includeDescription: e.target.checked } : null))
+                        }
+                        className="rounded border-stone-300 text-emerald-600"
+                      />
+                      <span>Đọc kèm nội dung chuyển khoản</span>
+                    </label>
+                  </div>
+
+                  {/* Amount Band Styles */}
+                  <div className="pt-1 space-y-1.5">
+                    <span className="block font-medium text-stone-800">Phong cách câu theo khung tiền</span>
+                    <label>Áp dụng phong cách cho mọi khung
+                      <select defaultValue="" onChange={(event) => {
+                        const style = event.target.value;
+                        if (style === 'classic' || style === 'cute' || style === 'funny' || style === 'custom') {
+                          setFormDraft((draft) => draft ? { ...draft, amountBands: draft.amountBands.map((band) => ({ ...band, styleId: style })) } : null);
+                        }
+                      }} className="ml-2 rounded border p-1">
+                        <option value="">Chọn phong cách</option><option value="classic">Cổ điển</option><option value="cute">Dễ thương</option><option value="funny">Hài hước</option><option value="custom">Câu riêng</option>
+                      </select>
+                    </label>
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      {formDraft.amountBands.map((band, idx) => (
+                        <div key={band.id} className="p-2 rounded-lg bg-stone-50 border border-stone-200">
+                          <span className="font-semibold block capitalize">{band.id}:</span>
+                          {band.toVnd !== null && <label>Đến (không gồm)
+                            <input value={band.toVnd} inputMode="numeric" className="w-full rounded border p-1" onChange={(event) => {
+                              const threshold = event.target.value;
+                              setFormDraft((draft) => {
+                                if (!draft) return null;
+                                const bands = draft.amountBands.map((entry) => ({ ...entry }));
+                                bands[idx].toVnd = threshold; bands[idx + 1].fromVnd = threshold;
+                                return { ...draft, amountBands: bands };
+                              });
+                            }} />
+                          </label>}
+                          <select
+                            value={band.styleId}
+                            onChange={(e) => {
+                              const nextBands = [...formDraft.amountBands];
+                              nextBands[idx] = {
+                                ...band,
+                                styleId: e.target.value as 'classic' | 'cute' | 'funny' | 'custom',
+                              };
+                              setFormDraft((p) => (p ? { ...p, amountBands: nextBands } : null));
+                            }}
+                            className="mt-1 w-full p-1 bg-white border border-stone-200 rounded"
+                          >
+                            <option value="classic">Cổ điển (Classic)</option>
+                            <option value="cute">Dễ thương (Cute)</option>
+                            <option value="funny">Hài hước (Funny)</option>
+                            <option value="custom">Riêng (Custom)</option>
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Custom Template */}
+                  <div>
+                    <label className="block font-medium text-stone-800 mb-1">
+                      Câu riêng — có thể cần tổng hợp online
+                    </label>
+                    <input
+                      type="text"
+                      value={formDraft.customTemplate}
+                      placeholder="Ví dụ: Đã nhận {amount} từ khách quý."
+                      onChange={(e) =>
+                        setFormDraft((p) => (p ? { ...p, customTemplate: e.target.value } : null))
+                      }
+                      className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800"
+                    />
+                    <span className="text-[10px] text-stone-400 block mt-0.5">
+                      Đúng một {'{amount}'} hoặc {'{amount_raw}'}. Có thể kèm {'{description}'}. Tối đa 120 ký tự Unicode.
+                    </span>
+                  </div>
+
+                  {serverSaveError && (
+                    <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-1.5">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{serverSaveError}</span>
+                    </div>
+                  )}
+
+                  {serverSaveSuccess && (
+                    <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>Đã lưu cấu hình máy chủ thành công (rev {formDraft.revision})</span>
+                    </div>
+                  )}
+
+                  <div className="pt-2 flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={isSavingServer}
+                      className="px-4 py-2 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:opacity-50 cursor-pointer"
+                    >
+                      {isSavingServer ? 'Đang lưu...' : 'Lưu cấu hình máy chủ'}
+                    </button>
+                  </div>
+                </form>
+              )}
 
               {/* Latency Telemetry Breakdown */}
               {lastTelemetry && (
@@ -287,7 +525,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm font-medium bg-stone-900 text-white rounded-lg hover:bg-stone-800 transition cursor-pointer"
+              className="px-4 py-2 text-xs font-medium bg-stone-900 text-white rounded-lg hover:bg-stone-800 transition cursor-pointer"
             >
               Đóng
             </button>

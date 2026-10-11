@@ -3,10 +3,11 @@ package storage
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
-func TestVoiceSettingsLifecycle(t *testing.T) {
+func TestVoiceProfileLifecycle(t *testing.T) {
 	ctx := context.Background()
 	dbDir := t.TempDir()
 	dbPath := filepath.Join(dbDir, "test_voice_settings.db")
@@ -17,55 +18,145 @@ func TestVoiceSettingsLifecycle(t *testing.T) {
 	}
 	defer store.Close()
 
-	// 1. Initial read should return default settings
-	settings, err := store.GetVoiceSettings(ctx)
+	// 1. Initial read should return default profile
+	profile, err := store.GetVoiceProfile(ctx)
 	if err != nil {
-		t.Fatalf("GetVoiceSettings failed: %v", err)
+		t.Fatalf("GetVoiceProfile failed: %v", err)
 	}
-	if settings.Revision != 1 {
-		t.Errorf("expected revision 1, got %d", settings.Revision)
+	if profile.Revision != 1 {
+		t.Errorf("expected revision 1, got %d", profile.Revision)
 	}
-	if settings.ProviderMode != "ONLINE_AUTO" {
-		t.Errorf("expected ONLINE_AUTO, got %s", settings.ProviderMode)
+	if profile.ProviderMode != ProviderModeEdgeOnly {
+		t.Errorf("expected %s, got %s", ProviderModeEdgeOnly, profile.ProviderMode)
 	}
-	if settings.EdgeVoice != "vi-VN-HoaiMyNeural" {
-		t.Errorf("expected vi-VN-HoaiMyNeural, got %s", settings.EdgeVoice)
+	if profile.EdgeVoice != EdgeVoiceHoaiMy {
+		t.Errorf("expected %s, got %s", EdgeVoiceHoaiMy, profile.EdgeVoice)
+	}
+	if profile.Rate != 1.25 {
+		t.Errorf("expected rate 1.25, got %f", profile.Rate)
+	}
+	if profile.PitchHz != 0 {
+		t.Errorf("expected pitchHz 0, got %d", profile.PitchHz)
+	}
+	if len(profile.AmountBands) != 4 {
+		t.Fatalf("expected 4 amount bands, got %d", len(profile.AmountBands))
+	}
+	if profile.SynthesisKey == "" {
+		t.Error("expected non-empty synthesisKey")
 	}
 
 	// 2. Save modified settings
-	settings.EdgeVoice = "vi-VN-NamMinhNeural"
-	settings.ProviderMode = "EDGE_ONLY"
-	saved, err := store.SaveVoiceSettings(ctx, settings)
+	input := VoiceSettingsInput{
+		Revision:            profile.Revision,
+		ProviderMode:        ProviderModeEdgeOnly,
+		EdgeVoice:           EdgeVoiceNamMinh,
+		Rate:                1.50,
+		PitchHz:             10,
+		AmountBands:         profile.AmountBands,
+		ChimeEnabled:        true,
+		LoadingSoundEnabled: false,
+		FunEnabled:          true,
+		IncludeDescription:  false,
+		CustomTemplate:      "",
+	}
+	saved, err := store.SaveVoiceProfile(ctx, input)
 	if err != nil {
-		t.Fatalf("SaveVoiceSettings failed: %v", err)
+		t.Fatalf("SaveVoiceProfile failed: %v", err)
 	}
 	if saved.Revision != 2 {
 		t.Errorf("expected revision 2, got %d", saved.Revision)
 	}
-	if saved.EdgeVoice != "vi-VN-NamMinhNeural" {
-		t.Errorf("expected vi-VN-NamMinhNeural, got %s", saved.EdgeVoice)
+	if saved.EdgeVoice != EdgeVoiceNamMinh {
+		t.Errorf("expected %s, got %s", EdgeVoiceNamMinh, saved.EdgeVoice)
+	}
+	if saved.Rate != 1.50 || saved.PitchHz != 10 {
+		t.Errorf("unexpected rate/pitch: %f / %d", saved.Rate, saved.PitchHz)
 	}
 
 	// 3. Stale revision save should conflict
-	stale := settings
+	stale := input
 	stale.Revision = 1
-	_, err = store.SaveVoiceSettings(ctx, stale)
+	_, err = store.SaveVoiceProfile(ctx, stale)
 	if err != ErrVoiceSettingsConflict {
 		t.Errorf("expected ErrVoiceSettingsConflict, got %v", err)
 	}
 
-	// 4. Invalid providerMode or voice should fail validation
-	invalid := saved
-	invalid.ProviderMode = "INVALID"
-	_, err = store.SaveVoiceSettings(ctx, invalid)
-	if err == nil {
-		t.Error("expected error for invalid providerMode, got nil")
+	// 4. Invalid rate / pitch / bands should fail validation
+	invalidRate := input
+	invalidRate.Revision = saved.Revision
+	invalidRate.Rate = 0.50
+	if _, err = store.SaveVoiceProfile(ctx, invalidRate); err == nil {
+		t.Error("expected error for rate < 0.75")
 	}
 
-	invalidVoice := saved
+	invalidPitch := input
+	invalidPitch.Revision = saved.Revision
+	invalidPitch.PitchHz = 100
+	if _, err = store.SaveVoiceProfile(ctx, invalidPitch); err == nil {
+		t.Error("expected error for pitch > 50")
+	}
+
+	invalidVoice := input
+	invalidVoice.Revision = saved.Revision
 	invalidVoice.EdgeVoice = "en-US-Jenny"
-	_, err = store.SaveVoiceSettings(ctx, invalidVoice)
-	if err == nil {
-		t.Error("expected error for invalid edgeVoice, got nil")
+	if _, err = store.SaveVoiceProfile(ctx, invalidVoice); err == nil {
+		t.Error("expected error for invalid edgeVoice")
+	}
+
+	invalidTemplate := input
+	invalidTemplate.Revision = saved.Revision
+	invalidTemplate.CustomTemplate = "Nhận {amount} từ {sender_name}" // unknown placeholder
+	if _, err = store.SaveVoiceProfile(ctx, invalidTemplate); err == nil {
+		t.Error("expected error for invalid customTemplate placeholder")
+	}
+}
+
+func TestGetVoiceProfileDefaultSnapshotIsolation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "voice_profile.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Migrations seed the singleton; remove it to exercise the no-row default.
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM voice_settings"); err != nil {
+		t.Fatalf("delete voice profile: %v", err)
+	}
+	first, err := store.GetVoiceProfile(ctx)
+	if err != nil {
+		t.Fatalf("get first default: %v", err)
+	}
+	second, err := store.GetVoiceProfile(ctx)
+	if err != nil {
+		t.Fatalf("get second default: %v", err)
+	}
+	if !reflect.DeepEqual(first, DefaultVoiceProfile) || !reflect.DeepEqual(second, DefaultVoiceProfile) {
+		t.Fatalf("no-row profiles must match the default: first=%+v second=%+v", first, second)
+	}
+	if len(first.AmountBands) != 4 {
+		t.Fatalf("expected 4 default amount bands, got %d", len(first.AmountBands))
+	}
+	for i := range first.AmountBands {
+		first.AmountBands[i].ID = "changed"
+		first.AmountBands[i].FromVND = "2"
+		first.AmountBands[i].StyleID = "custom"
+		if first.AmountBands[i].ToVND != nil {
+			*first.AmountBands[i].ToVND = "3"
+		}
+	}
+	wantBands := defaultAmountBands()
+	if !reflect.DeepEqual(second.AmountBands, wantBands) {
+		t.Errorf("mutating one snapshot changed another: %+v", second.AmountBands)
+	}
+	if !reflect.DeepEqual(DefaultVoiceProfile.AmountBands, wantBands) {
+		t.Errorf("mutating one snapshot changed the default: %+v", DefaultVoiceProfile.AmountBands)
+	}
+	third, err := store.GetVoiceProfile(ctx)
+	if err != nil {
+		t.Fatalf("get default after mutation: %v", err)
+	}
+	if !reflect.DeepEqual(third.AmountBands, wantBands) {
+		t.Errorf("mutating one snapshot changed a later read: %+v", third.AmountBands)
 	}
 }

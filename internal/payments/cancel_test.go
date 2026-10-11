@@ -178,12 +178,26 @@ func TestTerminalWebhookRequiresMatchingVerifiedGet(t *testing.T) {
 					t.Fatal(err)
 				}
 				got := loadReconcileOrder(t, store, order.ID)
-				if gets.Load() != 1 {
-					t.Fatalf("terminal callback omitted Get: %d", gets.Load())
+				if gets.Load() != 0 {
+					t.Fatalf("webhook must not perform synchronous Get: %d", gets.Load())
 				}
+				if got.Status == "PAID" {
+					t.Fatalf("terminal callback should not become PAID synchronously: %+v", got)
+				}
+				reviews, err := store.ListPaymentReviews(context.Background(), "", 10)
+				if err != nil || len(reviews.Items) != 1 || reviews.Items[0].Reason != "PAYMENT_DETAILS_PENDING" {
+					t.Fatalf("callback not saved to pending review: %+v err=%v", reviews, err)
+				}
+
+				// Now run reconciliation
+				_ = svc.reconcileOrder(context.Background(), order.ID)
+				if gets.Load() != 1 {
+					t.Fatalf("reconciler omitted Get: %d", gets.Load())
+				}
+				got = loadReconcileOrder(t, store, order.ID)
 				if matching {
 					if got.Status != "PAID" {
-						t.Fatalf("late paid refused: %+v", got)
+						t.Fatalf("late paid refused after reconcile: %+v", got)
 					}
 				} else {
 					if got.Status == "PAID" {

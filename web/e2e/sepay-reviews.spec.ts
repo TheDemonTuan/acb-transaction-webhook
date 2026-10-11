@@ -6,7 +6,7 @@ async function installSystemFixture(page: Page, role: Role) {
   let reviewReads = 0;
   let statusReads = 0;
   let failReviews = false;
-  const reviews = [{ storeKey: 'test-store', messageId: '9007199254740993', reason: 'REFERENCE_CONFLICT', receivedAt: '2026-10-10T12:00:00Z' }];
+  const reviews = [{ storeKey: 'test-store', transport: 'telegram', sourceId: '900001:9007199254740993', reason: 'REFERENCE_CONFLICT', receivedAt: '2026-10-10T12:00:00Z' }];
   await page.route(/\/api\/v1\/status$/, (route) => {
     statusReads += 1;
     return route.fulfill({ json: {

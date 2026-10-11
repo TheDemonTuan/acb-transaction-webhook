@@ -1,11 +1,13 @@
-"""FastAPI Application for TTS Gateway."""
+"""FastAPI Application for TTS Gateway with Bounded Admission & Edge-only Synthesis."""
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+import os
 import secrets
+import anyio
 from typing import List, Optional
 from fastapi import FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from app.config import config
 from app.schemas import (
@@ -13,15 +15,17 @@ from app.schemas import (
     VoiceItem,
     HealthResponse,
     ProviderHealth,
-    ErrorResponse,
 )
-from app.circuit import CircuitBreaker, CircuitState
+from app.circuit import CircuitBreaker
 from app.cache import TTSCache
-from app.providers.edge import EdgeTTSProvider, SUPPORTED_VOICES
-from app.providers.gtts import GTTSProvider
+from app.admission import AdmissionController, remaining, timeout_error
+from app.assets import AssetStore
+from app.providers.edge import EdgeTTSProvider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tts-gateway")
+
+MAX_AUDIO_BYTES = 4 * 1024 * 1024  # 4 MiB max per audio response
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,10 +37,9 @@ async def lifespan(app: FastAPI):
             )
     yield
 
-app = FastAPI(title="TTS Gateway", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="TTS Gateway", version="2.0.0", lifespan=lifespan)
 
 edge_provider = EdgeTTSProvider()
-gtts_provider = GTTSProvider()
 edge_circuit = CircuitBreaker(
     failure_threshold=config.edge_circuit_failure_threshold,
     reset_timeout=config.edge_circuit_reset_timeout,
@@ -46,6 +49,13 @@ cache = TTSCache(
     max_bytes=config.cache_max_bytes,
     ttl_seconds=config.cache_ttl_seconds,
 )
+admission = AdmissionController(
+    max_active=2,
+    max_waiting=16,
+    max_total_waiters=64,
+)
+
+assets = AssetStore(os.environ.get("TTS_VOICEPACK_ROOT", "/app/assets/voicepacks"))
 
 def verify_token(x_internal_tts_token: Optional[str]):
     expected = config.get_token()
@@ -62,13 +72,54 @@ def verify_token(x_internal_tts_token: Optional[str]):
             detail="Unauthorized: invalid internal TTS token",
         )
 
+def verify_asset_token(token: Optional[str]):
+    # Published audio never inherits the development synthesis auth opt-out.
+    expected = config.get_token()
+    if not expected:
+        raise HTTPException(status_code=503, detail="VOICE_ASSET_AUTH_UNAVAILABLE")
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid internal TTS token")
+
+
+@app.get("/assets/profiles/{synthesis_key}/manifest")
+def voice_manifest(
+    synthesis_key: str,
+    x_internal_tts_token: Optional[str] = Header(None),
+    if_none_match: Optional[str] = Header(None),
+):
+    verify_asset_token(x_internal_tts_token)
+    try:
+        pack = assets.manifest(synthesis_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="VOICE_PACK_UNAVAILABLE") from None
+    etag = '"' + pack.manifest["packVersion"] + '"'
+    headers = {"Cache-Control": "no-cache", "ETag": etag}
+    if if_none_match == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=pack.body, media_type="application/json", headers=headers)
+
+
+@app.get("/assets/clips/{sha256}")
+def voice_clip(sha256: str, x_internal_tts_token: Optional[str] = Header(None)):
+    verify_asset_token(x_internal_tts_token)
+    try:
+        audio = assets.clip(sha256)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="VOICE_PACK_UNAVAILABLE") from None
+    return Response(content=audio, media_type="audio/mpeg", headers={
+        "Cache-Control": "public,max-age=31536000,immutable",
+        "ETag": '"' + sha256 + '"',
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     return HealthResponse(
         status="ok",
         primary="edge",
         edge=ProviderHealth(available=edge_circuit.can_attempt()),
-        gtts=ProviderHealth(available=True),
+        gtts=ProviderHealth(available=False),
     )
 
 @app.get("/voices", response_model=List[VoiceItem])
@@ -89,251 +140,162 @@ async def list_voices(x_internal_tts_token: Optional[str] = Header(None)):
         ),
     ]
 
-@app.post("/synthesize/stream")
-async def synthesize_stream(
-    req: SynthesizeRequest,
-    x_internal_tts_token: Optional[str] = Header(None),
-):
-    verify_token(x_internal_tts_token)
+def audio_headers(voice, cached=False):
+    return {
+        "X-TTS-Provider": "edge", "X-TTS-Voice": voice,
+        "X-TTS-Fallback": "false", "X-TTS-Cached": str(cached).lower(),
+    }
 
+
+def synthesis_parameters(req):
     text = req.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-    if len(text) > config.max_text_length:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Text exceeds maximum length of {config.max_text_length}",
-        )
-
+    if not text or len(text) > config.max_text_length:
+        raise HTTPException(status_code=400, detail="INVALID_TTS_TEXT")
     voice = req.voice or "vi-VN-HoaiMyNeural"
-    rate = req.rate or "+0%"
-    pitch = req.pitch or "+0Hz"
-    is_cacheable = bool(req.cacheable)
-    provider_mode = req.provider_mode or "ONLINE_AUTO"
-    allow_fallback = bool(req.allow_fallback) and provider_mode == "ONLINE_AUTO"
+    rate, pitch = req.rate or "+0%", req.pitch or "+0Hz"
+    key = cache.make_key(text, voice, rate, pitch, False, "EDGE_ONLY")
+    return text, voice, rate, pitch, key
 
-    cache_key = cache.make_key(text, voice, rate, pitch, allow_fallback, provider_mode)
 
-    if is_cacheable:
-        cached = await cache.get(cache_key)
-        if cached:
-            audio_bytes, provider, actual_voice = cached
-            async def _cached_stream():
-                yield audio_bytes
-            return StreamingResponse(
-                _cached_stream(),
-                media_type="audio/mpeg",
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "X-TTS-Provider": provider,
-                    "X-TTS-Voice": actual_voice,
-                    "X-TTS-Fallback": "true" if provider != "edge" else "false",
-                    "X-TTS-Cached": "true",
-                },
-            )
+class OwnedStreamingResponse(StreamingResponse):
+    """Own cleanup even when ASGI disconnects before iterating the first byte."""
+    def __init__(self, iterator, cleanup, deadline, **kwargs):
+        super().__init__(iterator, **kwargs)
+        self.cleanup = cleanup
+        self.deadline = deadline
 
-    if not edge_circuit.can_attempt():
-        if not allow_fallback or provider_mode == "EDGE_ONLY":
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="TTS_EDGE_CIRCUIT_OPEN: Edge TTS circuit open and fallback is disabled",
-            )
+    async def __call__(self, scope, receive, send):
         try:
-            audio = await gtts_provider.synthesize(text=text, voice="vi", rate=rate, pitch=pitch)
-            if is_cacheable:
-                await cache.set(cache_key, audio, "gtts", "vi")
-            async def _gtts_stream():
-                yield audio
-            return StreamingResponse(
-                _gtts_stream(),
-                media_type="audio/mpeg",
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "X-TTS-Provider": "gtts",
-                    "X-TTS-Voice": "vi",
-                    "X-TTS-Fallback": "true",
-                    "X-TTS-Cached": "false",
-                },
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"TTS_UNAVAILABLE: gTTS fallback failed: {e}",
-            )
-
-    try:
-        edge_gen = edge_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch)
-        first_chunk = await asyncio.wait_for(anext(edge_gen), timeout=config.edge_stream_initial_timeout)
-        edge_circuit.record_success()
-    except Exception as e:
-        logger.warning(f"Edge TTS stream initialization failed: {e}")
-        edge_circuit.record_failure()
-        if not allow_fallback or provider_mode == "EDGE_ONLY":
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"TTS_EDGE_ONLY_FAILED: Edge TTS failed ({e}) and fallback is disabled",
-            )
-        try:
-            audio = await gtts_provider.synthesize(text=text, voice="vi", rate=rate, pitch=pitch)
-            if is_cacheable:
-                await cache.set(cache_key, audio, "gtts", "vi")
-            async def _gtts_fallback_stream():
-                yield audio
-            return StreamingResponse(
-                _gtts_fallback_stream(),
-                media_type="audio/mpeg",
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "X-TTS-Provider": "gtts",
-                    "X-TTS-Voice": "vi",
-                    "X-TTS-Fallback": "true",
-                    "X-TTS-Cached": "false",
-                },
-            )
-        except Exception as fallback_err:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"TTS_UNAVAILABLE: both Edge TTS and gTTS failed: {fallback_err}",
-            )
-
-    async def _stream_and_tee():
-        import io
-        collected = io.BytesIO() if is_cacheable else None
-        if collected:
-            collected.write(first_chunk)
-        yield first_chunk
-        try:
-            while True:
+            # Includes backpressure/downstream sends, not just upstream reads.
+            async with asyncio.timeout_at(self.deadline):
+                await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
                 try:
-                    chunk = await asyncio.wait_for(anext(edge_gen), timeout=config.edge_stream_idle_timeout)
-                except StopAsyncIteration:
-                    break
-                if collected:
-                    collected.write(chunk)
-                yield chunk
-            if collected:
-                await cache.set(cache_key, collected.getvalue(), "edge", voice)
-        except Exception as err:
-            logger.error(f"Error during Edge stream chunk iteration: {err}")
-            edge_circuit.record_failure()
-            raise
+                    await self.body_iterator.aclose()
+                finally:
+                    await self.cleanup()
 
-    return StreamingResponse(
-        _stream_and_tee(),
-        media_type="audio/mpeg",
-        headers={
-            "Content-Type": "audio/mpeg",
-            "X-TTS-Provider": "edge",
-            "X-TTS-Voice": voice,
-            "X-TTS-Fallback": "false",
-            "X-TTS-Cached": "false",
-        },
-    )
 
-@app.post("/synthesize")
-async def synthesize(
-    req: SynthesizeRequest,
-    x_internal_tts_token: Optional[str] = Header(None),
-):
+@app.post("/synthesize/stream")
+async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Optional[str] = Header(None)):
     verify_token(x_internal_tts_token)
-
-    text = req.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-    if len(text) > config.max_text_length:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Text exceeds maximum length of {config.max_text_length}",
-        )
-
-    voice = req.voice or "vi-VN-HoaiMyNeural"
-    rate = req.rate or "+0%"
-    pitch = req.pitch or "+0Hz"
-    is_cacheable = bool(req.cacheable)
-    provider_mode = req.provider_mode or "ONLINE_AUTO"
-    allow_fallback = bool(req.allow_fallback) and provider_mode == "ONLINE_AUTO"
-
-    cache_key = cache.make_key(text, voice, rate, pitch, allow_fallback, provider_mode)
-
-    if is_cacheable:
-        cached = await cache.get(cache_key)
+    text, voice, rate, pitch, key = synthesis_parameters(req)
+    if req.cacheable:
+        cached = await cache.get(key)
         if cached:
-            audio_bytes, provider, actual_voice = cached
-            return Response(
-                content=audio_bytes,
-                media_type="audio/mpeg",
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "X-TTS-Provider": provider,
-                    "X-TTS-Voice": actual_voice,
-                    "X-TTS-Fallback": "true" if provider != "edge" else "false",
-                    "X-TTS-Cached": "true",
-                },
-            )
+            return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
+    if not edge_circuit.can_attempt():
+        raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
 
-    async def _execute_synthesis():
-        # 1. Try Edge TTS if circuit permits
-        if edge_circuit.can_attempt():
-            try:
-                audio = await edge_provider.synthesize(
-                    text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=4.0
-                )
-                edge_circuit.record_success()
-                return audio, "edge", voice
-            except Exception as e:
-                logger.warning(f"Edge TTS synthesis failed, recording circuit failure: {e}")
-                edge_circuit.record_failure()
-                if not allow_fallback or provider_mode == "EDGE_ONLY":
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="TTS_EDGE_ONLY_FAILED: Edge TTS failed and fallback is disabled",
-                    )
-        else:
-            logger.info("Edge circuit is OPEN")
-            if not allow_fallback or provider_mode == "EDGE_ONLY":
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="TTS_EDGE_CIRCUIT_OPEN: Edge TTS circuit open and fallback is disabled",
-                )
+    deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
+    await admission.register_waiter()
+    slot = None
+    generator = None
+    transferred = False
+    cleaned = False
 
-        # 2. Fallback to gTTS if permitted
+    async def cleanup():
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
         try:
-            logger.info("Synthesizing using gTTS fallback")
-            audio = await gtts_provider.synthesize(
-                text=text, voice="vi", rate=rate, pitch=pitch, timeout_seconds=3.0
-            )
-            return audio, "gtts", "vi"
-        except Exception as e:
-            logger.error(f"gTTS fallback synthesis failed: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="TTS_UNAVAILABLE: both Edge TTS and gTTS providers failed",
-            )
+            if generator is not None:
+                await generator.aclose()
+        finally:
+            try:
+                if slot is not None:
+                    await slot.__aexit__(None, None, None)
+            finally:
+                await admission.unregister_waiter()
 
     try:
-        if is_cacheable:
-            audio_bytes, provider, actual_voice = await cache.get_or_compute(
-                cache_key, _execute_synthesis
-            )
-        else:
-            audio_bytes, provider, actual_voice = await _execute_synthesis()
+        candidate = admission.acquire_slot(remaining(deadline))
+        await candidate.__aenter__()
+        slot = candidate
+        generator = edge_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch)
+        first = await asyncio.wait_for(anext(generator), min(config.edge_stream_initial_timeout, remaining(deadline)))
+        if not first or len(first) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
+
+        async def stream_and_tee():
+            collected = bytearray() if req.cacheable else None
+            total = 0
+            chunk = first
+            try:
+                while True:
+                    remaining(deadline)
+                    total += len(chunk)
+                    if total > MAX_AUDIO_BYTES:
+                        raise RuntimeError("TTS_AUDIO_TOO_LARGE")
+                    if collected is not None:
+                        collected.extend(chunk)
+                    # First yield is inside the same ownership finally as all later yields.
+                    yield chunk
+                    try:
+                        chunk = await asyncio.wait_for(anext(generator), min(config.edge_stream_idle_timeout, remaining(deadline)))
+                    except StopAsyncIteration:
+                        break
+                remaining(deadline)
+                edge_circuit.record_success()
+                if collected is not None:
+                    await cache.set(key, bytes(collected), "edge", voice)
+            except Exception:
+                edge_circuit.record_failure()
+                raise
+            finally:
+                if collected is not None:
+                    collected.clear()
+                with anyio.CancelScope(shield=True):
+                    await cleanup()
+
+        response = OwnedStreamingResponse(stream_and_tee(), cleanup, deadline, media_type="audio/mpeg", headers=audio_headers(voice))
+        transferred = True
+        return response
+    except TimeoutError:
+        raise timeout_error() from None
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Synthesis unexpected failure: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"TTS_SYNTHESIS_FAILED: {str(e)}",
-        )
+    except Exception:
+        edge_circuit.record_failure()
+        raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
+    finally:
+        if not transferred:
+            with anyio.CancelScope(shield=True):
+                await cleanup()
 
-    return Response(
-        content=audio_bytes,
-        media_type="audio/mpeg",
-        headers={
-            "Content-Type": "audio/mpeg",
-            "X-TTS-Provider": provider,
-            "X-TTS-Voice": actual_voice,
-            "X-TTS-Fallback": "true" if provider != "edge" else "false",
-            "X-TTS-Cached": "false",
-        },
-    )
+
+@app.post("/synthesize")
+async def synthesize(req: SynthesizeRequest, x_internal_tts_token: Optional[str] = Header(None)):
+    verify_token(x_internal_tts_token)
+    text, voice, rate, pitch, key = synthesis_parameters(req)
+    if req.cacheable:
+        cached = await cache.get(key)
+        if cached:
+            return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
+    if not edge_circuit.can_attempt():
+        raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
+
+    deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
+
+    async def execute():
+        try:
+            audio = await edge_provider.synthesize(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
+            if not audio or len(audio) > MAX_AUDIO_BYTES:
+                raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
+            remaining(deadline)
+            edge_circuit.record_success()
+            if req.cacheable:
+                await cache.set(key, audio, "edge", voice)
+            return audio, "edge", voice
+        except TimeoutError:
+            raise timeout_error() from None
+        except HTTPException:
+            raise
+        except Exception:
+            edge_circuit.record_failure()
+            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
+
+    audio, _, actual_voice = await admission.run_singleflight(key, execute, remaining(deadline))
+    return Response(content=audio, media_type="audio/mpeg", headers=audio_headers(actual_voice))

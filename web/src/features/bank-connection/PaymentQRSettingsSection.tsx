@@ -85,7 +85,7 @@ export const PaymentQRSettingsSection: React.FC = () => {
               <input
                 type="text"
                 value={wifiForm.ssid}
-                placeholder="Ví dụ: ACB_Coffee_Free"
+                placeholder="Ví dụ: CuaHang_Free_WiFi"
                 onChange={(e) => setWifiForm((p) => ({ ...p, ssid: e.target.value }))}
                 className="w-full px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-600/10 focus:border-blue-600"
               />

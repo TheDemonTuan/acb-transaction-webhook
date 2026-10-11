@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrowserSpeechEngine } from '../src/features/voice-announcements/browser-speech-engine';
 import type { VoiceMessage, VoiceTelemetry } from '../src/features/voice-announcements/voice-engine';
+import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 
 describe('voice-telemetry', () => {
   let prevWindow: any;
@@ -66,11 +67,15 @@ describe('voice-telemetry', () => {
       queuedAt,
       detectedToSseMs: sseReceivedAt - new Date(detectedAt).getTime(),
       sseToQueueMs: queuedAt - sseReceivedAt,
+      receivedMonotonicAt: performance.now() - 50,
     };
 
     let receivedTelemetry: VoiceTelemetry | undefined;
     const message: VoiceMessage = {
       text: 'Đa tạ quý khách vì mười nghìn đồng.',
+      profile: { ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY' },
+      voiceURI: 'vi-vn-hoaimy',
+      queuedMonotonicAt: performance.now() - 20,
       telemetry,
       onStart: (t) => {
         receivedTelemetry = t;
@@ -83,6 +88,6 @@ describe('voice-telemetry', () => {
     expect(receivedTelemetry?.speechStartedAt).toBeGreaterThanOrEqual(queuedAt);
     expect(receivedTelemetry?.queueToSpeakMs).toBeGreaterThanOrEqual(0);
     expect(receivedTelemetry?.sseToSpeakMs).toBeGreaterThanOrEqual(0);
-    expect(receivedTelemetry?.totalLatencyMs).toBeGreaterThan(1000);
+    expect(receivedTelemetry?.totalLatencyMs).toBeUndefined();
   });
 });

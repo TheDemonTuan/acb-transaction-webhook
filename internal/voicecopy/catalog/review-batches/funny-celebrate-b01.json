@@ -1,0 +1,507 @@
+{
+  "id": "funny-celebrate-b01",
+  "styleId": "funny",
+  "bandId": "celebrate",
+  "recipes": [
+    {
+      "id": "funny-celebrate-o001-c001",
+      "text": "Quầy vừa mở màn vui lớn. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o001-c002",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o001-c003",
+      "text": "Quầy vừa mở màn vui lớn. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o001-c004",
+      "text": "Quầy vừa mở màn vui lớn. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o001-c005",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o001-c006",
+      "text": "Quầy vừa mở màn vui lớn. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o001-c007",
+      "text": "Quầy vừa mở màn vui lớn. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o001-c008",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o001-c009",
+      "text": "Quầy vừa mở màn vui lớn. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o001-c010",
+      "text": "Quầy vừa mở màn vui lớn. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o001-c011",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o001-c012",
+      "text": "Quầy vừa mở màn vui lớn. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o001-c013",
+      "text": "Quầy vừa mở màn vui lớn. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o001-c014",
+      "text": "Quầy vừa mở màn vui lớn. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o001-c015",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o001-c016",
+      "text": "Quầy vừa mở màn vui lớn. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o001-c017",
+      "text": "Quầy vừa mở màn vui lớn. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o001-c018",
+      "text": "Quầy vừa mở màn vui lớn. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o001-c019",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o001-c020",
+      "text": "Quầy vừa mở màn vui lớn. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o001-c021",
+      "text": "Quầy vừa mở màn vui lớn. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o001-c022",
+      "text": "Quầy vừa mở màn vui lớn. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o001-c023",
+      "text": "Quầy vừa mở màn vui lớn. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o001-c024",
+      "text": "Quầy vừa mở màn vui lớn. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o001-c025",
+      "text": "Quầy vừa mở màn vui lớn. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o002-c001",
+      "text": "Niềm vui đã có ghế chính. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o002-c002",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o002-c003",
+      "text": "Niềm vui đã có ghế chính. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o002-c004",
+      "text": "Niềm vui đã có ghế chính. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o002-c005",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o002-c006",
+      "text": "Niềm vui đã có ghế chính. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o002-c007",
+      "text": "Niềm vui đã có ghế chính. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o002-c008",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o002-c009",
+      "text": "Niềm vui đã có ghế chính. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o002-c010",
+      "text": "Niềm vui đã có ghế chính. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o002-c011",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o002-c012",
+      "text": "Niềm vui đã có ghế chính. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o002-c013",
+      "text": "Niềm vui đã có ghế chính. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o002-c014",
+      "text": "Niềm vui đã có ghế chính. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o002-c015",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o002-c016",
+      "text": "Niềm vui đã có ghế chính. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o002-c017",
+      "text": "Niềm vui đã có ghế chính. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o002-c018",
+      "text": "Niềm vui đã có ghế chính. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o002-c019",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o002-c020",
+      "text": "Niềm vui đã có ghế chính. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o002-c021",
+      "text": "Niềm vui đã có ghế chính. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o002-c022",
+      "text": "Niềm vui đã có ghế chính. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o002-c023",
+      "text": "Niềm vui đã có ghế chính. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o002-c024",
+      "text": "Niềm vui đã có ghế chính. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o002-c025",
+      "text": "Niềm vui đã có ghế chính. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o003-c001",
+      "text": "Chiếc chuông xin một tràng cười vui. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o003-c002",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o003-c003",
+      "text": "Chiếc chuông xin một tràng cười vui. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o003-c004",
+      "text": "Chiếc chuông xin một tràng cười vui. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o003-c005",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o003-c006",
+      "text": "Chiếc chuông xin một tràng cười vui. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o003-c007",
+      "text": "Chiếc chuông xin một tràng cười vui. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o003-c008",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o003-c009",
+      "text": "Chiếc chuông xin một tràng cười vui. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o003-c010",
+      "text": "Chiếc chuông xin một tràng cười vui. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o003-c011",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o003-c012",
+      "text": "Chiếc chuông xin một tràng cười vui. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o003-c013",
+      "text": "Chiếc chuông xin một tràng cười vui. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o003-c014",
+      "text": "Chiếc chuông xin một tràng cười vui. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o003-c015",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o003-c016",
+      "text": "Chiếc chuông xin một tràng cười vui. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o003-c017",
+      "text": "Chiếc chuông xin một tràng cười vui. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o003-c018",
+      "text": "Chiếc chuông xin một tràng cười vui. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o003-c019",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o003-c020",
+      "text": "Chiếc chuông xin một tràng cười vui. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o003-c021",
+      "text": "Chiếc chuông xin một tràng cười vui. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o003-c022",
+      "text": "Chiếc chuông xin một tràng cười vui. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o003-c023",
+      "text": "Chiếc chuông xin một tràng cười vui. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o003-c024",
+      "text": "Chiếc chuông xin một tràng cười vui. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o003-c025",
+      "text": "Chiếc chuông xin một tràng cười vui. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o004-c001",
+      "text": "Ngày hôm nay có đoạn hay. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o004-c002",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o004-c003",
+      "text": "Ngày hôm nay có đoạn hay. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o004-c004",
+      "text": "Ngày hôm nay có đoạn hay. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o004-c005",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o004-c006",
+      "text": "Ngày hôm nay có đoạn hay. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o004-c007",
+      "text": "Ngày hôm nay có đoạn hay. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o004-c008",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o004-c009",
+      "text": "Ngày hôm nay có đoạn hay. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o004-c010",
+      "text": "Ngày hôm nay có đoạn hay. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o004-c011",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o004-c012",
+      "text": "Ngày hôm nay có đoạn hay. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o004-c013",
+      "text": "Ngày hôm nay có đoạn hay. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o004-c014",
+      "text": "Ngày hôm nay có đoạn hay. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o004-c015",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o004-c016",
+      "text": "Ngày hôm nay có đoạn hay. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o004-c017",
+      "text": "Ngày hôm nay có đoạn hay. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o004-c018",
+      "text": "Ngày hôm nay có đoạn hay. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o004-c019",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o004-c020",
+      "text": "Ngày hôm nay có đoạn hay. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o004-c021",
+      "text": "Ngày hôm nay có đoạn hay. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o004-c022",
+      "text": "Ngày hôm nay có đoạn hay. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o004-c023",
+      "text": "Ngày hôm nay có đoạn hay. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o004-c024",
+      "text": "Ngày hôm nay có đoạn hay. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o004-c025",
+      "text": "Ngày hôm nay có đoạn hay. Gửi bạn niềm vui vừa vặn."
+    },
+    {
+      "id": "funny-celebrate-o005-c001",
+      "text": "Nụ cười đã lên sân khấu. Trân trọng cảm ơn phút vui."
+    },
+    {
+      "id": "funny-celebrate-o005-c002",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn hôm nay tỏa sáng."
+    },
+    {
+      "id": "funny-celebrate-o005-c003",
+      "text": "Nụ cười đã lên sân khấu. Mong niềm vui luôn đúng điệu."
+    },
+    {
+      "id": "funny-celebrate-o005-c004",
+      "text": "Nụ cười đã lên sân khấu. Gửi bạn một lời hoan hỉ."
+    },
+    {
+      "id": "funny-celebrate-o005-c005",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn cười trong thanh thản."
+    },
+    {
+      "id": "funny-celebrate-o005-c006",
+      "text": "Nụ cười đã lên sân khấu. Cảm ơn bạn đã chung vui."
+    },
+    {
+      "id": "funny-celebrate-o005-c007",
+      "text": "Nụ cười đã lên sân khấu. Mong ngày đẹp luôn nối tiếp."
+    },
+    {
+      "id": "funny-celebrate-o005-c008",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn vui mà thư thái."
+    },
+    {
+      "id": "funny-celebrate-o005-c009",
+      "text": "Nụ cười đã lên sân khấu. Gửi bạn lời chúc rộn ràng."
+    },
+    {
+      "id": "funny-celebrate-o005-c010",
+      "text": "Nụ cười đã lên sân khấu. Cảm ơn lần ghé đáng nhớ."
+    },
+    {
+      "id": "funny-celebrate-o005-c011",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn thêm nhiều màn đẹp."
+    },
+    {
+      "id": "funny-celebrate-o005-c012",
+      "text": "Nụ cười đã lên sân khấu. Mong hứng khởi luôn ở lại."
+    },
+    {
+      "id": "funny-celebrate-o005-c013",
+      "text": "Nụ cười đã lên sân khấu. Gửi bạn tiếng cười tinh tế."
+    },
+    {
+      "id": "funny-celebrate-o005-c014",
+      "text": "Nụ cười đã lên sân khấu. Cảm ơn bạn đã làm ngày rạng rỡ."
+    },
+    {
+      "id": "funny-celebrate-o005-c015",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn giữ nét vui hiền."
+    },
+    {
+      "id": "funny-celebrate-o005-c016",
+      "text": "Nụ cười đã lên sân khấu. Mong ngày mới thật có duyên."
+    },
+    {
+      "id": "funny-celebrate-o005-c017",
+      "text": "Nụ cười đã lên sân khấu. Gửi bạn một trời vui nhẹ."
+    },
+    {
+      "id": "funny-celebrate-o005-c018",
+      "text": "Nụ cười đã lên sân khấu. Cảm ơn bạn cho ngày đẹp."
+    },
+    {
+      "id": "funny-celebrate-o005-c019",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn nhịp ngày thật đẹp."
+    },
+    {
+      "id": "funny-celebrate-o005-c020",
+      "text": "Nụ cười đã lên sân khấu. Mong mọi điều đều khởi sắc."
+    },
+    {
+      "id": "funny-celebrate-o005-c021",
+      "text": "Nụ cười đã lên sân khấu. Gửi bạn lời chúc phấn chấn."
+    },
+    {
+      "id": "funny-celebrate-o005-c022",
+      "text": "Nụ cười đã lên sân khấu. Cảm ơn bạn vì tin chọn."
+    },
+    {
+      "id": "funny-celebrate-o005-c023",
+      "text": "Nụ cười đã lên sân khấu. Chúc bạn đón tin vui đẹp."
+    },
+    {
+      "id": "funny-celebrate-o005-c024",
+      "text": "Nụ cười đã lên sân khấu. Mong bạn cười thật thoải mái."
+    },
+    {
+      "id": "funny-celebrate-o005-c025",
+      "text": "Nụ cười đã lên sân khấu. Gửi bạn niềm vui vừa vặn."
+    }
+  ]
+}

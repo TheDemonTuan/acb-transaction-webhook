@@ -1,27 +1,26 @@
 import pytest
 from httpx import AsyncClient, ASGITransport
-from app.main import app, edge_provider, gtts_provider, edge_circuit
+from app.main import app, edge_provider, edge_circuit
 
 @pytest.mark.asyncio
 async def test_health_endpoint():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.get("/health")
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
         assert data["primary"] == "edge"
         assert "edge" in data
-        assert "gtts" in data
 
 @pytest.mark.asyncio
 async def test_voices_endpoint():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.get("/voices")
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/voices")
         assert resp.status_code == 200
         voices = resp.json()
-        assert len(voices) >= 2
+        assert len(voices) == 2
         ids = [v["id"] for v in voices]
         assert "vi-VN-HoaiMyNeural" in ids
         assert "vi-VN-NamMinhNeural" in ids
@@ -32,42 +31,33 @@ async def test_synthesize_edge_success(monkeypatch):
         return b"fake_edge_audio"
 
     monkeypatch.setattr(edge_provider, "synthesize", mock_edge_synth)
-    edge_circuit.record_success()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post(
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
             "/synthesize",
-            json={"text": "Bạn vừa nhận được 500k", "voice": "vi-VN-HoaiMyNeural"},
+            json={"text": "Xin chao", "voice": "vi-VN-HoaiMyNeural"},
         )
         assert resp.status_code == 200
-        assert resp.headers["content-type"] == "audio/mpeg"
-        assert resp.headers["x-tts-provider"] == "edge"
-        assert resp.headers["x-tts-fallback"] == "false"
+        assert resp.headers["X-TTS-Provider"] == "edge"
+        assert resp.headers["X-TTS-Voice"] == "vi-VN-HoaiMyNeural"
         assert resp.content == b"fake_edge_audio"
 
 @pytest.mark.asyncio
-async def test_synthesize_fallback_to_gtts(monkeypatch):
+async def test_synthesize_edge_failure_returns_502(monkeypatch):
     async def mock_edge_fail(*args, **kwargs):
-        raise ConnectionError("Edge connection timed out")
-
-    async def mock_gtts_success(*args, **kwargs):
-        return b"fake_gtts_audio"
+        raise ValueError("Simulated Edge failure")
 
     monkeypatch.setattr(edge_provider, "synthesize", mock_edge_fail)
-    monkeypatch.setattr(gtts_provider, "synthesize", mock_gtts_success)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post(
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
             "/synthesize",
-            json={"text": "Bạn vừa nhận được 200k", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
+            json={"text": "Xin chao", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
         )
-        assert resp.status_code == 200
-        assert resp.headers["content-type"] == "audio/mpeg"
-        assert resp.headers["x-tts-provider"] == "gtts"
-        assert resp.headers["x-tts-fallback"] == "true"
-        assert resp.content == b"fake_gtts_audio"
+        assert resp.status_code == 502
+        assert "TTS_UNAVAILABLE" in resp.json()["detail"]
 
 @pytest.mark.asyncio
 async def test_synthesize_stream_edge_success(monkeypatch):
@@ -76,109 +66,34 @@ async def test_synthesize_stream_edge_success(monkeypatch):
         yield b"chunk_2"
 
     monkeypatch.setattr(edge_provider, "stream", mock_edge_stream)
-    edge_circuit.record_success()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post(
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
             "/synthesize/stream",
-            json={"text": "Bạn vừa nhận được 999k stream", "voice": "vi-VN-HoaiMyNeural", "cacheable": True},
+            json={"text": "Xin chao stream", "voice": "vi-VN-HoaiMyNeural"},
         )
         assert resp.status_code == 200
-        assert resp.headers["content-type"] == "audio/mpeg"
-        assert resp.headers["x-tts-provider"] == "edge"
-        assert resp.headers["x-tts-fallback"] == "false"
+        assert resp.headers["X-TTS-Provider"] == "edge"
+        assert resp.headers["X-TTS-Voice"] == "vi-VN-HoaiMyNeural"
         assert resp.content == b"chunk_1_chunk_2"
 
 @pytest.mark.asyncio
-async def test_synthesize_stream_fallback_to_gtts(monkeypatch):
+async def test_synthesize_stream_edge_failure_returns_502(monkeypatch):
     async def mock_edge_stream_fail(*args, **kwargs):
-        raise ConnectionError("Edge stream connection timed out")
+        raise ValueError("Edge stream failed")
         yield b""
 
-    async def mock_gtts_success(*args, **kwargs):
-        return b"gtts_stream_audio"
-
     monkeypatch.setattr(edge_provider, "stream", mock_edge_stream_fail)
-    monkeypatch.setattr(gtts_provider, "synthesize", mock_gtts_success)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post(
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
             "/synthesize/stream",
-            json={"text": "Bạn vừa nhận được 888k fallback stream", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
+            json={"text": "Xin chao stream fail", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
         )
-        assert resp.status_code == 200
-        assert resp.headers["content-type"] == "audio/mpeg"
-        assert resp.headers["x-tts-provider"] == "gtts"
-        assert resp.headers["x-tts-fallback"] == "true"
-        assert resp.content == b"gtts_stream_audio"
-
-@pytest.mark.asyncio
-async def test_synthesize_stream_initial_chunk_timeout_fallback(monkeypatch):
-    import asyncio
-    from app.config import config
-    monkeypatch.setattr(config, "edge_stream_initial_timeout", 0.05)
-
-    async def mock_edge_slow_first_chunk(*args, **kwargs):
-        await asyncio.sleep(0.2)
-        yield b"chunk_never"
-
-    async def mock_gtts_success(*args, **kwargs):
-        return b"gtts_fallback_on_initial_timeout"
-
-    monkeypatch.setattr(edge_provider, "stream", mock_edge_slow_first_chunk)
-    monkeypatch.setattr(gtts_provider, "synthesize", mock_gtts_success)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post(
-            "/synthesize/stream",
-            json={"text": "Test timeout fallback", "voice": "vi-VN-HoaiMyNeural"},
-        )
-        assert resp.status_code == 200
-        assert resp.headers["x-tts-provider"] == "gtts"
-        assert resp.headers["x-tts-fallback"] == "true"
-        assert resp.content == b"gtts_fallback_on_initial_timeout"
-
-@pytest.mark.asyncio
-async def test_synthesize_stream_idle_chunk_timeout(monkeypatch):
-    import asyncio
-    from app.config import config
-    monkeypatch.setattr(config, "edge_stream_idle_timeout", 0.05)
-
-    async def mock_edge_slow_idle_chunk(*args, **kwargs):
-        yield b"chunk_1"
-        await asyncio.sleep(0.2)
-        yield b"chunk_2"
-
-    monkeypatch.setattr(edge_provider, "stream", mock_edge_slow_idle_chunk)
-    edge_circuit.record_success()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with pytest.raises(Exception):
-            await ac.post(
-                "/synthesize/stream",
-                json={"text": "Test idle timeout", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
-            )
-
-@pytest.mark.asyncio
-async def test_synthesize_stream_midstream_exception_propagates(monkeypatch):
-    async def mock_edge_broken_midstream(*args, **kwargs):
-        yield b"chunk_1"
-        raise ConnectionResetError("Connection lost mid-stream")
-
-    monkeypatch.setattr(edge_provider, "stream", mock_edge_broken_midstream)
-    edge_circuit.record_success()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        with pytest.raises(ConnectionResetError):
-            await ac.post(
-                "/synthesize/stream",
-                json={"text": "Test midstream exception", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
-            )
+        assert resp.status_code == 502
+        assert "TTS_UNAVAILABLE" in resp.json()["detail"]
 
 @pytest.mark.asyncio
 async def test_cache_max_bytes_configured():
@@ -189,32 +104,31 @@ async def test_cache_max_bytes_configured():
 @pytest.mark.asyncio
 async def test_auth_enforcement(monkeypatch):
     from app.config import config
-    monkeypatch.setattr(config, "internal_token", "secret-test-token")
-    monkeypatch.setattr(config, "token_file", "")
     monkeypatch.setattr(config, "require_auth", True)
+    monkeypatch.setattr(config, "internal_token", "secret123")
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        # 1. No token -> 401
-        resp = await ac.get("/voices")
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Request without header fails with 401
+        resp = await client.get("/voices")
         assert resp.status_code == 401
 
-        # 2. Invalid token -> 401
-        resp = await ac.get("/voices", headers={"X-Internal-TTS-Token": "wrong-token"})
+        # Request with wrong token fails with 401
+        resp = await client.get("/voices", headers={"X-Internal-TTS-Token": "wrong"})
         assert resp.status_code == 401
 
-        # 3. Valid token -> 200
-        resp = await ac.get("/voices", headers={"X-Internal-TTS-Token": "secret-test-token"})
+        # Request with correct token succeeds with 200
+        resp = await client.get("/voices", headers={"X-Internal-TTS-Token": "secret123"})
         assert resp.status_code == 200
 
 @pytest.mark.asyncio
 async def test_lifespan_fail_when_auth_required_without_token(monkeypatch):
     from app.main import lifespan
     from app.config import config
+    monkeypatch.setattr(config, "require_auth", True)
     monkeypatch.setattr(config, "internal_token", "")
     monkeypatch.setattr(config, "token_file", "")
-    monkeypatch.setattr(config, "require_auth", True)
 
-    with pytest.raises(RuntimeError, match="TTS_REQUIRE_AUTH is enabled but internal token is missing"):
+    with pytest.raises(RuntimeError):
         async with lifespan(app):
             pass

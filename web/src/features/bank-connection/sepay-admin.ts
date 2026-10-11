@@ -15,6 +15,10 @@ export interface SePayAdminFields {
   activationAt: string;
   receiverVerified: boolean;
   sourceSeparated: boolean;
+  activeTransport: 'telegram' | 'native';
+  nativeMode: 'disabled' | 'observe' | 'active';
+  nativeSubAccount: string;
+  nativeReferenceVerified: boolean;
 }
 
 export interface SePayAdminConfig {
@@ -22,7 +26,9 @@ export interface SePayAdminConfig {
   config: SePayAdminFields;
   hasBotToken: boolean;
   hasWebhookSecret: boolean;
+  hasNativeWebhookSecret: boolean;
   lastMessageAt: string | null;
+  lastWebhookAt: string | null;
   reviewCount: number;
 }
 
@@ -30,6 +36,7 @@ export interface SePayAdminConfigInput {
   revision: number;
   config: SePayAdminFields;
   botToken: string;
+  nativeWebhookSecret: string;
 }
 
 export interface SePayTelegramStatus {

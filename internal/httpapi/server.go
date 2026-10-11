@@ -107,6 +107,7 @@ type Server struct {
 	paymentCreateLimiter *ipRateLimiter
 	paymentGetLimiter    *ipRateLimiter
 	paymentIntentLocks   [64]sync.Mutex
+	readyChecker         func(context.Context) error
 }
 
 func New(cfg config.Config, store *storage.Store) *Server {
@@ -143,6 +144,7 @@ func New(cfg config.Config, store *storage.Store) *Server {
 	r.Get("/internal/deployz", s.deployReady)
 	r.Post("/api/integrations/payos/webhook", s.payOSWebhook)
 	r.Post("/api/integrations/sepay/telegram", s.sepayTelegramWebhook)
+	r.Post("/api/integrations/sepay/webhook", s.sepayNativeWebhook)
 	r.Route("/api/public/v1", func(api chi.Router) {
 		api.Get("/payment-config", s.publicPaymentConfig)
 		api.Get("/sepay-store", s.publicSePayStore)
@@ -158,6 +160,10 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.Post("/voice/test", s.publicTestVoiceAudio)
 		api.Get("/voice/test/stream", s.publicTestVoiceAudio)
 		api.Post("/voice/test/stream", s.publicTestVoiceAudio)
+		api.Get("/voice/profile", s.publicVoiceProfile)
+		api.Get("/voice/catalog/{version}", s.voiceCatalog)
+		api.Get("/voice/profiles/{key}/manifest", s.voiceAssetManifest)
+		api.Get("/voice/assets/{hash}", s.voiceAssetClip)
 	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.auth.Require(auth.Owner, auth.Operator, auth.Viewer))
@@ -189,6 +195,10 @@ func New(cfg config.Config, store *storage.Store) *Server {
 
 		api.Get("/voice/settings", s.getVoiceSettings)
 		api.With(s.auth.Require(auth.Owner, auth.Operator), s.requireMutationAllowed).Put("/voice/settings", s.updateVoiceSettings)
+		api.Get("/voice/profile", s.getVoiceProfile)
+		api.Get("/voice/catalog/{version}", s.voiceCatalog)
+		api.Get("/voice/profiles/{key}/manifest", s.voiceAssetManifest)
+		api.Get("/voice/assets/{hash}", s.voiceAssetClip)
 		api.Get("/voice/status", s.voiceStatus)
 		api.Post("/voice/test", s.testVoiceAudio)
 		api.Get("/voice/test/stream", s.testVoiceAudio)
@@ -216,6 +226,11 @@ func New(cfg config.Config, store *storage.Store) *Server {
 		api.With(s.auth.Require(auth.Owner)).Post("/deliveries/{id}/replay", s.replayDelivery)
 	})
 	s.handler = r
+	return s
+}
+
+func (s *Server) WithReadyChecker(checker func(context.Context) error) *Server {
+	s.readyChecker = checker
 	return s
 }
 func (s *Server) WithEventHub(hub *eventhub.Hub) *Server {
@@ -327,6 +342,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	roleStr := string(s.cfg.RuntimeRole)
+	if s.readyChecker != nil {
+		if err := s.readyChecker(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status": "not_ready",
+				"error":  err.Error(),
+			})
+			return
+		}
+	}
 	// 1. Role check if requested
 	expectedRole := r.URL.Query().Get("role")
 	if expectedRole == "" {
@@ -432,6 +456,12 @@ func (s *Server) deployReady(w http.ResponseWriter, r *http.Request) {
 	if expectedRole != "" && roleStr != "" {
 		if !strings.EqualFold(roleStr, expectedRole) && !strings.EqualFold(roleStr, "all-in-one") {
 			resp["roleError"] = fmt.Sprintf("expected %s, got %s", expectedRole, roleStr)
+			status = "not_ready"
+		}
+	}
+	if s.readyChecker != nil {
+		if err := s.readyChecker(r.Context()); err != nil {
+			resp["readyError"] = err.Error()
 			status = "not_ready"
 		}
 	}

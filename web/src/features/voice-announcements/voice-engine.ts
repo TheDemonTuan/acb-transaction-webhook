@@ -1,3 +1,6 @@
+import type { VoiceProfile } from './voice-profile';
+import type { AnnouncementRecipe } from './voice-copy';
+
 export interface VoiceInfo {
   uri: string;
   name: string;
@@ -15,21 +18,28 @@ export interface VoiceTelemetry {
   queueToSpeakMs?: number;
   sseToSpeakMs?: number;
   totalLatencyMs?: number;
+  receivedMonotonicAt?: number;
+  speechStartedMonotonicAt?: number;
 }
 
 export interface VoiceMessage {
   text: string;
   volume?: number;
-  rate?: number;
-  pitch?: number;
   voiceURI?: string;
   lang?: string;
   transactionId?: string;
   summaryTransactionIds?: string[];
   isTest?: boolean;
   isReplay?: boolean;
-  includeDescription?: boolean;
-  template?: string;
+  phraseId?: string;
+  amountVnd?: string;
+  omitFun?: boolean;
+  profile?: Readonly<VoiceProfile>;
+  recipe?: AnnouncementRecipe;
+  description?: string;
+  chime?: boolean;
+  onTailStart?: (phraseId: string) => void;
+  queuedMonotonicAt?: number;
   telemetry?: VoiceTelemetry;
   onStart?: (telemetry?: VoiceTelemetry) => void;
   onSuccess?: () => void;
@@ -40,6 +50,8 @@ export interface VoiceEngine {
   isSupported(): boolean;
   getVoices(): Promise<VoiceInfo[]>;
   speak(message: VoiceMessage): Promise<void>;
+  prefetch(message: VoiceMessage, signal: AbortSignal): Promise<void>;
   cancel(): void;
+  dispose(): void | Promise<void>;
 }
 

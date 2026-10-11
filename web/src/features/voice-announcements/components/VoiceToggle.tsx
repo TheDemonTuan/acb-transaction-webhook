@@ -4,7 +4,7 @@ import { useVoiceAnnouncements } from '../VoiceAnnouncementProvider';
 import { VoiceSettingsSheet } from './VoiceSettingsSheet';
 
 export const VoiceToggle: React.FC<{ className?: string }> = ({ className = '' }) => {
-  const { settings, updateSettings, unlockAudio, isSupported } = useVoiceAnnouncements();
+  const { settings, updateSettings, unlockAudio, isSupported, audioUnlocked } = useVoiceAnnouncements();
   const [sheetOpen, setSheetOpen] = useState(false);
 
   return (
@@ -12,9 +12,9 @@ export const VoiceToggle: React.FC<{ className?: string }> = ({ className = '' }
       <div className={`inline-flex items-center shrink-0 flex-nowrap gap-1 bg-stone-100 p-1 rounded-xl border border-stone-200/80 ${className}`}>
         <button
           type="button"
-          aria-label={settings.enabled ? 'Giọng đọc: Bật' : 'Giọng đọc: Tắt'}
+          aria-label={settings.enabled && !audioUnlocked ? 'Mở khóa loa' : settings.enabled ? 'Giọng đọc: Bật' : 'Giọng đọc: Tắt'}
           onClick={async () => {
-            if (!settings.enabled) {
+            if (!settings.enabled || !audioUnlocked) {
               try {
                 const unlocked = await unlockAudio();
                 if (!unlocked) {
@@ -39,7 +39,7 @@ export const VoiceToggle: React.FC<{ className?: string }> = ({ className = '' }
           {settings.enabled ? (
             <>
               <Volume2 className="w-4 h-4 animate-pulse shrink-0" />
-              <span>Giọng đọc: Bật</span>
+              <span>{audioUnlocked ? 'Giọng đọc: Bật' : 'Mở khóa loa'}</span>
             </>
           ) : (
             <>

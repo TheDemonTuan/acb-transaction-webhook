@@ -12,10 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/thedemontuan/acb-transaction-webhook/internal/eventhub"
-	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 func TestServeWorkerHTTPReportsUnexpectedFailure(t *testing.T) {
@@ -250,33 +246,4 @@ func TestWorkerQuiesceDrainFlags(t *testing.T) {
 			t.Fatalf("expected stderr to mention failed to read worker internal token, got %q", stderr.String())
 		}
 	})
-}
-
-type mockWaker struct {
-	wakeCount int
-}
-
-func (m *mockWaker) Wake() {
-	m.wakeCount++
-}
-
-func TestWorkerPaymentNotifierPublishesCommittedEventAndWakesDispatcher(t *testing.T) {
-	waker := &mockWaker{}
-	hub := eventhub.New()
-	_, published, unsubscribe := hub.Subscribe()
-	defer unsubscribe()
-	notifier := newWorkerPaymentNotifier(waker, hub)
-	event := storage.EventNotification{JournalSeq: 42, Epoch: "ep1", EventType: "bank.transaction.credit", TransactionID: "txn_paid", Payload: []byte(`{"provider":"PAYOS","orderCode":"123456789012"}`), CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	notifier(event)
-	select {
-	case got := <-published:
-		if got.Seq != event.JournalSeq || got.AggregateID != event.TransactionID || got.EventType != event.EventType || !bytes.Equal(got.Payload, event.Payload) {
-			t.Fatalf("published wrong event: %+v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("committed event not published")
-	}
-	if waker.wakeCount != 1 {
-		t.Fatalf("dispatcher wake count: %d", waker.wakeCount)
-	}
 }

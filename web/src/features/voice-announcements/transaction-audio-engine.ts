@@ -1,498 +1,189 @@
-import { apiAudio } from '../../api';
 import { isPublicViewerHost } from '../../app/runtime-mode';
 import { BrowserSpeechEngine } from './browser-speech-engine';
 import type { VoiceEngine, VoiceInfo, VoiceMessage } from './voice-engine';
+import type { VoiceProfile } from './voice-profile';
+import { AudioAssets } from './audio-assets';
+import { RecentPhraseRing } from './voice-copy';
+import { prepareAnnouncement, playPrepared, type PreparedAnnouncement, type PreparationOptions } from './announcement-plan';
 
 export interface TransactionAudioEngineOptions {
   isPublic?: boolean;
+  onStatus?: PreparationOptions['onStatus'];
+  onProfileChanged?: () => void;
+}
+interface PrefetchedPlan {
+  message: VoiceMessage;
+  revision: number;
+  controller: AbortController;
+  promise: Promise<PreparedAnnouncement>;
+  detach: () => void;
 }
 
 export class TransactionAudioEngine implements VoiceEngine {
   private audioContext: AudioContext | null = null;
-  private gainNode: GainNode | null = null;
-  private currentSource: AudioBufferSourceNode | null = null;
-  private currentAudioElement: HTMLAudioElement | null = null;
-  private browserFallback = new BrowserSpeechEngine();
-  private abortController: AbortController | null = null;
-  private isPublic: boolean;
+  private readonly browser = new BrowserSpeechEngine();
+  private readonly assets: AudioAssets;
+  private readonly recent = new RecentPhraseRing();
+  private readonly isPublic: boolean;
+  private profile: Readonly<VoiceProfile> | null = null;
+  private currentController: AbortController | null = null;
+  private prefetched: PrefetchedPlan | null = null;
+  private disposed = false;
+  private chimeNodes: { oscillator: OscillatorNode; gain: GainNode }[] = [];
 
-  constructor(options?: TransactionAudioEngineOptions) {
-    this.isPublic = options?.isPublic ?? (typeof window !== 'undefined' && isPublicViewerHost());
+  constructor(private readonly options: TransactionAudioEngineOptions = {}) {
+    this.isPublic = options.isPublic ?? (typeof window !== 'undefined' && isPublicViewerHost());
+    this.assets = new AudioAssets(this.isPublic);
   }
-
+  public setProfile(profile: Readonly<VoiceProfile>): void {
+    if (this.profile?.revision === profile.revision) return;
+    this.profile = Object.freeze({ ...profile, amountBands: profile.amountBands.map((band) => ({ ...band })) });
+    this.clearPrefetch();
+    this.assets.changeProfile(profile.synthesisKey);
+  }
   public isSupported(): boolean {
-    return (
-      typeof window !== 'undefined' &&
-      (typeof window.AudioContext !== 'undefined' ||
-        typeof (window as any).webkitAudioContext !== 'undefined')
-    );
+    return typeof window !== 'undefined' && Boolean(window.AudioContext || ('webkitAudioContext' in window && window.webkitAudioContext) || window.Audio || this.browser.isSupported());
   }
-
-  private initAudioContext(): AudioContext | null {
-    if (this.audioContext) return this.audioContext;
-    if (typeof window === 'undefined') return null;
-
-    const AudioContextClass =
-      window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return null;
-
-    try {
-      this.audioContext = new AudioContextClass();
-      this.gainNode = this.audioContext.createGain();
-      this.gainNode.connect(this.audioContext.destination);
-      return this.audioContext;
-    } catch {
-      return null;
+  private context(): AudioContext | null {
+    if (this.disposed) throw new Error('VOICE_DISPOSED');
+    if (!this.audioContext && typeof window !== 'undefined') {
+      const legacy = window as Window & { webkitAudioContext?: typeof AudioContext };
+      const AudioContextClass = window.AudioContext || legacy.webkitAudioContext;
+      if (AudioContextClass) this.audioContext = new AudioContextClass();
     }
+    return this.audioContext;
   }
-
+  private preparationOptions(): PreparationOptions {
+    return { isPublic: this.isPublic, context: this.context(), assets: this.assets, recent: this.recent,
+      browser: this.browser, onStatus: this.options.onStatus };
+  }
   public async unlock(): Promise<boolean> {
-    const ctx = this.initAudioContext();
-    if (!ctx) return false;
-    if (ctx.state === 'suspended') {
-      try {
-        await ctx.resume();
-      } catch {
-        return false;
-      }
+    if (this.disposed || !this.profile) return false;
+    if (this.profile.providerMode === 'BROWSER_ONLY') return this.browser.unlock();
+    const context = this.context();
+    if (context) {
+      try { if (context.state === 'suspended') await context.resume(); } catch { return false; }
+      if (context.state !== 'running') return false;
+      void this.assets.preload(this.profile, context).catch(() => {});
+      return true;
     }
-    return ctx.state === 'running';
+    return typeof window !== 'undefined' && Boolean(window.Audio);
   }
-
   public async getVoices(): Promise<VoiceInfo[]> {
-    const onlineVoices: VoiceInfo[] = [
-      {
-        uri: 'vi-VN-HoaiMyNeural',
-        name: 'Hoài My (Giọng trực tuyến)',
-        lang: 'vi-VN',
-        isDefault: true,
-      },
-      {
-        uri: 'vi-VN-NamMinhNeural',
-        name: 'Nam Minh (Giọng trực tuyến)',
-        lang: 'vi-VN',
-        isDefault: false,
-      },
-    ];
-
-    try {
-      const localVi = await this.browserFallback.getVoices();
-      return [...onlineVoices, ...localVi];
-    } catch {
-      return onlineVoices;
-    }
+    // These are device-only Vietnamese choices; Edge voice is server profile data.
+    return this.browser.getVoices();
   }
-
+  private stopChime(): void {
+    for (const { oscillator, gain } of this.chimeNodes) {
+      oscillator.onended = null;
+      try { oscillator.stop(); } catch {}
+      oscillator.disconnect(); gain.disconnect();
+    }
+    this.chimeNodes = [];
+  }
+  public playChime(volume = 1): number {
+    const context = this.context();
+    if (!context || context.state !== 'running' || volume <= 0) return 0;
+    const start = context.currentTime;
+    for (const [frequency, offset, duration] of [[880, 0, 0.12], [1320, 0.12, 0.13]]) {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'sine'; oscillator.frequency.setValueAtTime(frequency, start + offset);
+      gain.gain.setValueAtTime(0.0001, start + offset);
+      gain.gain.exponentialRampToValueAtTime(0.15 * Math.min(1, volume), start + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration);
+      oscillator.connect(gain); gain.connect(context.destination);
+      const node = { oscillator, gain };
+      this.chimeNodes.push(node);
+      oscillator.onended = () => {
+        oscillator.disconnect(); gain.disconnect();
+        this.chimeNodes = this.chimeNodes.filter((entry) => entry !== node);
+      };
+      oscillator.start(start + offset); oscillator.stop(start + offset + duration);
+    }
+    return start + 0.25;
+  }
+  private clearPrefetch(): void {
+    const prefetched = this.prefetched;
+    this.prefetched = null;
+    if (!prefetched) return;
+    prefetched.detach(); prefetched.controller.abort();
+    void prefetched.promise.then((plan) => plan.release()).catch(() => {});
+  }
+  public async prefetch(message: VoiceMessage, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw new Error('VOICE_CANCELLED');
+    const profile = message.profile || this.profile;
+    if (!profile) throw new Error('VOICE_PROFILE_UNAVAILABLE');
+    if (this.prefetched?.message === message && this.prefetched.revision === profile.revision) {
+      await this.prefetched.promise; return;
+    }
+    this.clearPrefetch();
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    const options = this.preparationOptions();
+    const promise = prepareAnnouncement(message, profile, controller.signal, options);
+    this.prefetched = { message, revision: profile.revision, controller, promise, detach: () => signal.removeEventListener('abort', abort) };
+    await promise;
+  }
   public async speak(message: VoiceMessage): Promise<void> {
-    this.cancel();
-
-    if (this.isPublic) {
-      // Public hybrid strategy: local Vietnamese voice first, fallback to safe transaction-scoped or test online TTS
-      const isOnlineVoiceChosen = Boolean(message.voiceURI?.startsWith('vi-VN-'));
-      if (isOnlineVoiceChosen && (message.transactionId || message.isTest)) {
-        try {
-          await this.speakOnline(message);
-          return;
-        } catch (onlineErr: any) {
-          if (
-            (onlineErr instanceof DOMException && onlineErr.name === 'AbortError') ||
-            onlineErr?.name === 'AbortError' ||
-            onlineErr?.message === 'VOICE_CANCELLED'
-          ) {
-            throw new Error('VOICE_CANCELLED');
-          }
-          if (onlineErr?.playbackStarted || onlineErr?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-            throw onlineErr;
-          }
-          await this.browserFallback.speak(message);
-          return;
-        }
-      }
-
-      // Try local browser voice first
-      try {
-        await this.browserFallback.speak(message);
-        return;
-      } catch (browserError: any) {
-        if (
-          (browserError instanceof DOMException && browserError.name === 'AbortError') ||
-          browserError?.name === 'AbortError' ||
-          browserError?.message === 'VOICE_CANCELLED'
-        ) {
-          throw new Error('VOICE_CANCELLED');
-        }
-        // Fallback to online transaction or test TTS if transactionId present or isTest
-        if (message.transactionId || message.isTest) {
-          try {
-            await this.speakOnline(message);
-            return;
-          } catch (onlineError: any) {
-            if (
-              (onlineError instanceof DOMException && onlineError.name === 'AbortError') ||
-              onlineError?.name === 'AbortError' ||
-              onlineError?.message === 'VOICE_CANCELLED'
-            ) {
-              throw new Error('VOICE_CANCELLED');
-            }
-            if (onlineError?.playbackStarted || onlineError?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-              throw onlineError;
-            }
-            throw browserError;
-          }
-        }
-        throw browserError;
-      }
-    }
-
-    // Admin strategy: Try online transaction audio synthesis first
-    try {
-      await this.speakOnline(message);
-      return;
-    } catch (onlineError: any) {
-      if (
-        (onlineError instanceof DOMException && onlineError.name === 'AbortError') ||
-        onlineError?.name === 'AbortError' ||
-        onlineError?.message === 'VOICE_CANCELLED'
-      ) {
-        throw new Error('VOICE_CANCELLED');
-      }
-      if (onlineError?.playbackStarted || onlineError?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-        throw onlineError;
-      }
-      // Fallback to BrowserSpeechEngine with strict Vietnamese voice ONLY if not cancelled
-      try {
-        await this.browserFallback.speak(message);
-      } catch (browserError) {
-        throw browserError;
-      }
-    }
-  }
-
-  private async speakOnline(message: VoiceMessage): Promise<void> {
-    this.abortController = new AbortController();
-    const signal = this.abortController.signal;
-
-    let path = '';
-    let body: any = null;
-    let streamUrl: string | null = null;
-    const basePath = this.isPublic ? '/api/public/v1' : '/api/v1';
-
-    const searchParams = new URLSearchParams();
-    if (message.voiceURI) searchParams.set('voiceId', message.voiceURI);
-    if (message.rate !== undefined) searchParams.set('rate', String(message.rate));
-    if (message.pitch !== undefined) searchParams.set('pitch', String(message.pitch));
-    if (message.template) searchParams.set('template', message.template);
-    if (message.includeDescription) searchParams.set('includeDescription', 'true');
-    const querySuffix = searchParams.toString() ? `?${searchParams.toString()}` : '';
-
-    if (message.isTest) {
-      path = '/voice/test';
-      streamUrl = `${basePath}/voice/test/stream${querySuffix}`;
-      body = {
-        voiceId: message.voiceURI?.startsWith('vi-VN-') ? message.voiceURI : 'vi-VN-HoaiMyNeural',
-        rate: message.rate,
-        pitch: message.pitch,
-        template: message.template,
-        includeDescription: message.includeDescription,
-      };
-    } else if (message.isReplay && message.transactionId) {
-      path = `/voice/transactions/${encodeURIComponent(message.transactionId)}/replay`;
-      streamUrl = `${basePath}/voice/transactions/${encodeURIComponent(message.transactionId)}/replay/stream${querySuffix}`;
-      body = {
-        includeDescription: Boolean(message.includeDescription),
-        template: message.template,
-        voiceId: message.voiceURI,
-        rate: message.rate,
-        pitch: message.pitch,
-      };
-    } else if (
-      message.summaryTransactionIds &&
-      message.summaryTransactionIds.length >= 2
-    ) {
-      path = '/voice/transactions/summary';
-      const summaryParams = new URLSearchParams(searchParams);
-      summaryParams.set('transactionIds', message.summaryTransactionIds.join(','));
-      streamUrl = `${basePath}/voice/transactions/summary/stream?${summaryParams.toString()}`;
-      body = {
-        transactionIds: message.summaryTransactionIds,
-        includeDescription: false,
-        voiceId: message.voiceURI,
-        rate: message.rate,
-        pitch: message.pitch,
-      };
-    } else if (message.transactionId) {
-      path = `/voice/transactions/${encodeURIComponent(message.transactionId)}`;
-      streamUrl = `${basePath}/voice/transactions/${encodeURIComponent(message.transactionId)}/stream${querySuffix}`;
-      body = {
-        includeDescription: Boolean(message.includeDescription),
-        template: message.template,
-        voiceId: message.voiceURI,
-        rate: message.rate,
-        pitch: message.pitch,
-      };
+    if (this.disposed) throw new Error('VOICE_DISPOSED');
+    if (this.currentController) throw new Error('VOICE_ENGINE_BUSY');
+    const profile = message.profile || this.profile;
+    if (!profile) throw new Error('VOICE_PROFILE_UNAVAILABLE');
+    const prefetch = this.prefetched?.message === message && this.prefetched.revision === profile.revision ? this.prefetched : null;
+    let controller: AbortController;
+    let preparation: Promise<PreparedAnnouncement>;
+    const options = this.preparationOptions();
+    if (prefetch) {
+      this.prefetched = null; prefetch.detach();
+      controller = prefetch.controller; preparation = prefetch.promise;
     } else {
-      // If no transaction ID, fall back directly to browser speech
-      throw new Error('NO_ONLINE_ROUTE');
+      controller = new AbortController();
+      preparation = prepareAnnouncement(message, profile, controller.signal, options);
     }
-
-    const AudioCtor = (typeof window !== 'undefined' && (window as any).Audio) || (typeof Audio !== 'undefined' ? Audio : null);
-    if (streamUrl && AudioCtor) {
-      try {
-        await this.playAudioStream(streamUrl, message.volume ?? 1, message, signal, AudioCtor);
-        return;
-      } catch (streamErr: any) {
-        if (
-          (streamErr instanceof DOMException && streamErr.name === 'AbortError') ||
-          streamErr?.name === 'AbortError' ||
-          streamErr?.message === 'VOICE_CANCELLED'
-        ) {
-          throw new Error('VOICE_CANCELLED');
+    this.currentController = controller;
+    let plan: PreparedAnnouncement | undefined;
+    try {
+      // Preparation begins before the chime, so the first await never delays it.
+      const chimeEnd = message.chime && profile.chimeEnabled ? this.playChime(message.volume) : 0;
+      plan = await preparation;
+      if (controller.signal.aborted) throw new Error('VOICE_CANCELLED');
+      const onTailStart = message.onTailStart;
+      plan.message.onTailStart = (id) => { this.recent.started(id); onTailStart?.(id); };
+      if (plan.kind !== 'buffers' && chimeEnd && options.context && options.context.currentTime < chimeEnd) {
+        // Native/browser cannot schedule against AudioContext. Wait for the actual
+        // oscillator completion, not an arbitrary sleep between utterances.
+        const { promise, resolve } = Promise.withResolvers<void>();
+        const last = this.chimeNodes.at(-1);
+        if (last) {
+          const previous = last.oscillator.onended;
+          last.oscillator.onended = (event) => { previous?.call(last.oscillator, event); resolve(); };
+          const abort = () => resolve();
+          controller.signal.addEventListener('abort', abort, { once: true });
+          await promise;
+          controller.signal.removeEventListener('abort', abort);
         }
-        if (streamErr?.playbackStarted || streamErr?.message?.startsWith('AUDIO_STREAM_INTERRUPTED')) {
-          throw streamErr;
-        }
-        // Fallback to arrayBuffer decoding if stream playback fails before playback starts
       }
+      await playPrepared(plan, controller.signal, options, chimeEnd);
+    } catch (error) {
+      if ((error && typeof error === 'object' && 'code' in error && error.code === 'VOICE_PROFILE_CHANGED') ||
+          (error instanceof Error && error.message === 'AUDIO_PREPARATION_FAILED')) this.options.onProfileChanged?.();
+      this.options.onStatus?.('unavailable', error instanceof Error ? error.message : 'Giọng đọc không khả dụng');
+      throw error;
+    } finally {
+      plan?.release();
+      if (this.currentController === controller) this.currentController = null;
     }
-
-    const { data: audioData } = await apiAudio(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    });
-
-    if (signal.aborted) {
-      throw new Error('VOICE_CANCELLED');
-    }
-
-    await this.playAudioBuffer(audioData, message.volume ?? 1, message, signal);
   }
-
-  private playAudioStream(
-    streamUrl: string,
-    volume: number,
-    message: VoiceMessage | undefined,
-    signal: AbortSignal | undefined,
-    AudioCtor: any
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      let audio: HTMLAudioElement;
-      try {
-        audio = new AudioCtor(streamUrl);
-      } catch (err) {
-        reject(err);
-        return;
-      }
-      this.currentAudioElement = audio;
-      audio.volume = Math.max(0, Math.min(1, volume));
-
-      let settled = false;
-      let playbackStarted = false;
-      let startedOnce = false;
-
-      const createError = (baseMsg: string) => {
-        const err: any = new Error(baseMsg);
-        err.playbackStarted = playbackStarted;
-        return err;
-      };
-
-      const cleanup = (stop = false) => {
-        audio.removeEventListener?.('playing', onPlaying);
-        audio.removeEventListener?.('ended', onEnded);
-        audio.removeEventListener?.('error', onError);
-        signal?.removeEventListener('abort', onAbort);
-        if (stop) {
-          try {
-            audio.pause();
-            audio.removeAttribute('src');
-            audio.load?.();
-          } catch {}
-        }
-        if (this.currentAudioElement === audio) this.currentAudioElement = null;
-      };
-
-      const onAbort = () => {
-        if (!settled) {
-          settled = true;
-          cleanup(true);
-          reject(new Error('VOICE_CANCELLED'));
-        }
-      };
-
-
-      const onPlaying = () => {
-        playbackStarted = true;
-        if (startedOnce) return;
-        startedOnce = true;
-
-        if (message?.telemetry) {
-          message.telemetry.speechStartedAt = Date.now();
-          const sseAt = message.telemetry.sseReceivedAt || message.telemetry.queuedAt;
-          if (sseAt) {
-            message.telemetry.sseToSpeakMs = message.telemetry.speechStartedAt - sseAt;
-          }
-          if (message.telemetry.queuedAt) {
-            message.telemetry.queueToSpeakMs = message.telemetry.speechStartedAt - message.telemetry.queuedAt;
-          }
-          if (message.telemetry.detectedAt) {
-            const d = new Date(message.telemetry.detectedAt).getTime();
-            if (!isNaN(d)) {
-              message.telemetry.totalLatencyMs = message.telemetry.speechStartedAt - d;
-            }
-          }
-        }
-        message?.onStart?.(message.telemetry);
-      };
-
-      const onEnded = () => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          resolve();
-        }
-      };
-
-      const onError = () => {
-        if (!settled) {
-          settled = true;
-          const msg = playbackStarted
-            ? `AUDIO_STREAM_INTERRUPTED: ${audio.error?.message || 'unknown'}`
-            : `AUDIO_PLAYBACK_ERROR: ${audio.error?.message || 'unknown'}`;
-          cleanup(true);
-          reject(createError(msg));
-        }
-      };
-      audio.addEventListener?.('playing', onPlaying);
-      audio.addEventListener?.('ended', onEnded);
-      audio.addEventListener?.('error', onError);
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-      signal?.addEventListener('abort', onAbort);
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-
-      try {
-        const playPromise = audio.play();
-        if (playPromise && typeof playPromise.then === 'function') {
-          playPromise.catch((err: any) => {
-            if (!settled) {
-              settled = true;
-              cleanup(true);
-              if (err && typeof err === 'object') {
-                err.playbackStarted = playbackStarted;
-              }
-              reject(err);
-            }
-          });
-        }
-      } catch (err: any) {
-        if (!settled) {
-          settled = true;
-          cleanup(true);
-          if (err && typeof err === 'object') {
-            err.playbackStarted = playbackStarted;
-          }
-          reject(err);
-        }
-      }
-    });
-  }
-
-  private async playAudioBuffer(
-    arrayBuffer: ArrayBuffer,
-    volume: number,
-    message?: VoiceMessage,
-    signal?: AbortSignal
-  ): Promise<void> {
-    const ctx = this.initAudioContext();
-    if (!ctx) {
-      throw new Error('AUDIO_CONTEXT_UNAVAILABLE');
-    }
-
-    if (ctx.state === 'suspended') {
-      try {
-        await ctx.resume();
-      } catch {
-        throw new Error('AUDIO_LOCKED');
-      }
-    }
-
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    if (signal?.aborted) throw new Error('VOICE_CANCELLED');
-
-    return new Promise((resolve, reject) => {
-      try {
-        if (signal?.aborted) throw new Error('VOICE_CANCELLED');
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-
-        if (this.gainNode) {
-          this.gainNode.gain.setValueAtTime(Math.max(0, Math.min(1, volume)), ctx.currentTime);
-          source.connect(this.gainNode);
-        } else {
-          source.connect(ctx.destination);
-        }
-
-        let settled = false;
-
-        source.onended = () => {
-          if (!settled) {
-            settled = true;
-            this.currentSource = null;
-            resolve();
-          }
-        };
-
-        this.currentSource = source;
-        if (message?.telemetry) {
-          message.telemetry.speechStartedAt = Date.now();
-          const sseAt = message.telemetry.sseReceivedAt || message.telemetry.queuedAt;
-          if (sseAt) {
-            message.telemetry.sseToSpeakMs = message.telemetry.speechStartedAt - sseAt;
-          }
-          if (message.telemetry.queuedAt) {
-            message.telemetry.queueToSpeakMs = message.telemetry.speechStartedAt - message.telemetry.queuedAt;
-          }
-          if (message.telemetry.detectedAt) {
-            const d = new Date(message.telemetry.detectedAt).getTime();
-            if (!isNaN(d)) {
-              message.telemetry.totalLatencyMs = message.telemetry.speechStartedAt - d;
-            }
-          }
-        }
-        message?.onStart?.(message.telemetry);
-        if (signal?.aborted) throw new Error('VOICE_CANCELLED');
-        source.start(0);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
   public cancel(): void {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-    }
-    if (this.currentAudioElement) {
-      try {
-        this.currentAudioElement.pause();
-        this.currentAudioElement.removeAttribute('src');
-        this.currentAudioElement.load?.();
-      } catch {}
-      this.currentAudioElement = null;
-    }
-    if (this.currentSource) {
-      try {
-        this.currentSource.stop();
-      } catch {}
-      this.currentSource = null;
-    }
-    this.browserFallback.cancel();
+    this.currentController?.abort(); this.currentController = null;
+    this.assets.cancelPreload();
+    this.clearPrefetch(); this.stopChime(); this.browser.cancel();
+  }
+  public dispose(): void {
+    if (this.disposed) return;
+    this.cancel(); this.disposed = true; this.assets.dispose(); this.browser.dispose();
+    if (this.audioContext) { void this.audioContext.close().catch(() => {}); this.audioContext = null; }
   }
 }

@@ -13,7 +13,7 @@ PUBLIC = 'transactions.tuannguyenviet.site'
 ADMIN = 'bank.tuannguyenviet.site'
 CALLBACK = '/api/integrations/payos/webhook'
 SEPAY_CALLBACK = '/api/integrations/sepay/telegram'
-
+SEPAY_NATIVE_CALLBACK = '/api/integrations/sepay/webhook'
 
 def matches(rule, host, path, method):
     def matcher(match):
@@ -132,6 +132,9 @@ class PaymentIngressTests(unittest.TestCase):
             for method, path in (('GET', SEPAY_CALLBACK), ('HEAD', SEPAY_CALLBACK),
                                  ('OPTIONS', SEPAY_CALLBACK), ('PUT', SEPAY_CALLBACK),
                                  ('POST', SEPAY_CALLBACK + '/'), ('POST', SEPAY_CALLBACK + '/child'),
+                                 ('GET', SEPAY_NATIVE_CALLBACK), ('HEAD', SEPAY_NATIVE_CALLBACK),
+                                 ('OPTIONS', SEPAY_NATIVE_CALLBACK), ('PUT', SEPAY_NATIVE_CALLBACK),
+                                 ('POST', SEPAY_NATIVE_CALLBACK + '/'), ('POST', SEPAY_NATIVE_CALLBACK + '/child'),
                                  ('POST', '/api/integrations/sepay/other'),
                                  ('GET', '/api/v1/sepay-reviews')):
                 with self.subTest(config=label, method=method, path=path):
@@ -168,8 +171,23 @@ class PaymentIngressTests(unittest.TestCase):
                 expected_slot = 'blue' if label == 'shipped' else label
                 upstream = config['http']['services']['acb-service']['loadBalancer']['servers']
                 self.assertEqual(upstream, [{'url': f'http://acb-web-{expected_slot}:8090'}])
-                self.assertNotEqual(selected(config, ADMIN, SEPAY_CALLBACK, 'POST')[0], name)
-                self.assertEqual(selected(config, 'other.example', SEPAY_CALLBACK, 'POST'), (None, None))
+            with self.subTest(config=label, native=True):
+                name, router = selected(config, PUBLIC, SEPAY_NATIVE_CALLBACK, 'POST')
+                self.assertEqual(name, 'acb-sepay-native-router')
+                self.assertEqual(router['priority'], 1150)
+                self.assertEqual(router['service'], 'acb-service')
+                self.assertIs(router['observability']['accessLogs'], False)
+                self.assertEqual(router['middlewares'], [
+                    'tunnel-only', 'security-headers', 'payment-privacy',
+                    'sepay-telegram-rate-limit', 'sepay-telegram-body-limit'])
+
+                self.assertNotEqual(selected(config, ADMIN, SEPAY_NATIVE_CALLBACK, 'POST')[0], name)
+                self.assertEqual(selected(config, 'other.example', SEPAY_NATIVE_CALLBACK, 'POST'), (None, None))
+                policies = dict(self.shared, **config['http'].get('middlewares', {}))
+                for policy in (policies[key] for key in router['middlewares']):
+                    request_headers = policy.get('headers', {}).get('customRequestHeaders', {})
+                    for header in ('x-sepay-signature', 'x-sepay-timestamp'):
+                        self.assertNotIn(header, {key.lower() for key in request_headers})
                 _, payos = selected(config, PUBLIC, CALLBACK, 'POST')
                 self.assertIn('payos-webhook-rate-limit', payos['middlewares'])
                 self.assertNotIn('sepay-telegram-rate-limit', payos['middlewares'])

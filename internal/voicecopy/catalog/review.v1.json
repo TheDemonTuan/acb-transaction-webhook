@@ -1,0 +1,727 @@
+{
+  "version": "v1",
+  "approvedUnique": 10000,
+  "rejectedCount": 0,
+  "batches": [
+    {
+      "id": "cute-small-b01",
+      "sha256": "7a3aae58550800ba54380c11393648ea3398f91edbec0afe62c91848daf892da",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b02",
+      "sha256": "acbe478234002d401feb9f5fbdfc6b0c92ffa1e87753ef7807f44bee25397c89",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b03",
+      "sha256": "ab8baa2ccc3ae7bf2c4dff68ab2f389a80c4e8f39d90ba291ca1a4436168302b",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b04",
+      "sha256": "f1e567f2ba163f5ee061a92b3f8ff6ab378416e42da4f984c9eafb9f59aa39cf",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b05",
+      "sha256": "4b3fc021593d97936206ad8a49b0bb25de9810fc54b6f53af459ee28252bb4e6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b06",
+      "sha256": "b16d11fded3fbbb637fd25c45aefa9dcd36828abfdfeb50121b50767a80c3b5c",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b07",
+      "sha256": "d93870475ccb5bf135434a88d61a4b15d7943e460a5d53b019dedd37b528d42f",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b08",
+      "sha256": "7ab4d5404c49de853474582c39419fae133c894ef497c0be713b9f9e042a7717",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b09",
+      "sha256": "c64bd2489128368bc73df59e13fb04a19b0d2c222e060c25ef14c670365c1c70",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-small-b10",
+      "sha256": "31d8c44a4c2ed10ba29b799183dbfa79979af874731457e4273125209b3d16c4",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b01",
+      "sha256": "4147563260df606cd376dc01d767940f7aa0f9c09b7f82aa6c393106475502a5",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b02",
+      "sha256": "3fe01631d0fb10d2b98742f42524c398fd290ab8b99943f9eb9b75a9217ea6ae",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b03",
+      "sha256": "c20cad9c381c44e72a429cce57b63ec066b0a764ac4fbcea5c4835909c3f1a8c",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b04",
+      "sha256": "32bcaf804fe81466cc78f3aad32b030329758f1ad4a3dca07ae6c2987778e2d2",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b05",
+      "sha256": "a74408e7244f4bfafd09a5a84b58e62a1df3abdf9b7618474525e5c99d316ca6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b06",
+      "sha256": "af245fa763e6be484d2074963837f8f0efef3446c6925b1b8eb2f41567187412",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b07",
+      "sha256": "b892c2ebe3a55bc514ef401eed6dec48b4ca0e87839ec11b2893fd2b191306a6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b08",
+      "sha256": "fdedd3831057967a9bbf6b6236617a960f16ccf1ffc649c092b2ff5cb98e701b",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b09",
+      "sha256": "287396eacad68372f99d03029965580f51aea355b4d72bb5b5553f7e0ea683ae",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-medium-b10",
+      "sha256": "8f889e7988fa1e1af392afaff602a597b6c131c794dc5251a4ae0468b66fcaa6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b01",
+      "sha256": "0b91b68baaa318d2d20d2802200cd1eaf00fedf5c6ff3ea2c87508aee378248e",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b02",
+      "sha256": "12dde9b3c8797c90964ae88d0ef61c7e17ecc32596b666895835deb0a1738d7f",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b03",
+      "sha256": "d545d6a3f6b386cf1c7eca687f7d33f7f80d925ba628024524a7fe6a74b72e70",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b04",
+      "sha256": "1a7967a63289ef7330bf2d492c36927c81ed60cd745bda1d441b3356e9825a1e",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b05",
+      "sha256": "80957efdd7706d4565d4239690bedfb046600af1cd77c1004698441e16218789",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b06",
+      "sha256": "05334179f1abbb0d6024b27df949351308567aeebb06e85f1b7077d9c00d405f",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b07",
+      "sha256": "41ce45454aa5b322085b07c7890470de5a81c2369bc0e522dd75f561561455bc",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b08",
+      "sha256": "d1b1511ede6d486f731264653761b75b7c57b95834c51ddb6f848596cb51f460",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b09",
+      "sha256": "821360739f99725546ad007bc3b0b66d6ad30e532506a9c4b14a2b7b5d08b1fc",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-large-b10",
+      "sha256": "6880576c6afcc6881182e72c08e92bc5dc4da443da6b093698abb41f39d874d7",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewCuteBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b01",
+      "sha256": "932d2975976d1d1c8eb22dd4651652f9542e226b68d7b7245078f1801cec67fa",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b02",
+      "sha256": "261edb4f7bb80c0e6d4b95c2468ada851627719bea1dd43e09e8d1cce00b9098",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b03",
+      "sha256": "2879162c6fe4f1e9fe7d200ba0ac04a48162c9f8bfae595b28cd55311f18044a",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b04",
+      "sha256": "aadb4945a13d5c17309a946c5a20f0d5d72bfc657d02afa94b0656abef9dff4c",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b05",
+      "sha256": "0628f4e1101fd1981bdefa16f76bd695da3bceebf45c2d92221966f9dc4ea3cf",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b06",
+      "sha256": "5802c88db28314e71cce1d3d9ee6a69a115a88767931c798e99241147edc9304",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b07",
+      "sha256": "8cf483ad709f5d1dc6d29e1fd615de64d148172b9caf9053a3c98be4b4c72cf7",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b08",
+      "sha256": "357ba130a8fd0e4920f15216da70e7acd33104e48bda7f54ef21ac562190056d",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b09",
+      "sha256": "ae9f619ab617a13d9b87d0e41349583bacfca6ec5deb2262c3f367631c5067ae",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "cute-celebrate-b10",
+      "sha256": "26296c25f62344e123efe3f1a99f270569be4727881ec707a5a626f899646bd6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b01",
+      "sha256": "85e3f752efd578c0ef5643be945cf2a89438048013b99455aa71e5b81b7e3526",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b02",
+      "sha256": "67e0ee782d4c3c122dc26611e1562a3f49f8158364406dce2ca69e81d3692217",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b03",
+      "sha256": "9034eee55c30672eed11e4cf0a3f8db9b2e954aa7ffa9aac04fcc0311b3d06d6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b04",
+      "sha256": "5c8d409c7d9e8258c3416d4a8bba84df588c591433658f69bd89da0a158378fc",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b05",
+      "sha256": "1b34863febdfccc4c24bc39cff18fd0b9dc559828b4191790662fac4989a760c",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b06",
+      "sha256": "d1dc8ffe4151bad92236472a2b46d364f5dd9022e7c1db2879cedc878ab9b898",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b07",
+      "sha256": "814202521b1b4858898a77d524188e1600ffee5e9a74ce948f3fc97121240b33",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b08",
+      "sha256": "92d853e24a1370313b1f265809b24ad6b1d2eb54a4187c80517a01a29107ede7",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b09",
+      "sha256": "5b9b42ebabc37f5c113fb9972807094e3fbc9b25b67f450610eee38264ee5382",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-small-b10",
+      "sha256": "29c9df4ca5814c5dd17af9b3ba7c6327bde5be0dabb9cd72b1a63834141f1ae3",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b01",
+      "sha256": "da3b97c6edd0abd92c24f5faff8080d604f98682bf07f449110283bbf688fc1a",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b02",
+      "sha256": "acb8b686216b4db0b0b3e947224cb639d483dc3c9ccc9b2bd94fcd1a8eed2844",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b03",
+      "sha256": "79a58a39406a29b2d52581331b4aefae489623a4e99d486927ed6176bcf6785d",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b04",
+      "sha256": "64910296bf775c2c5b3f1b437191e2b9b3d4667e61091c3c423e8ea8c7f3ceba",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b05",
+      "sha256": "74264b36c8f330ca0fcfd7316848ed718043284e4f7a547e32ed3d802370fec1",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b06",
+      "sha256": "147e0e08bdde8f1886d1f4a523594dad33391364f9a306af333b6a9968b77e17",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b07",
+      "sha256": "041b73a910f80983338710c26ffc1d991a6f2e5becb038892e07ff300bafabd6",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b08",
+      "sha256": "9e0e02256160ef6321d74cb587ddb0fd24c22b50555d5d1cd240df4d57dcf8f7",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b09",
+      "sha256": "9125aea43f65a6ff0e352c8376234727976d681cd9e5443ef736f1d80cda54bd",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-medium-b10",
+      "sha256": "2eaf55e7687c8488d622972861c45f543756086351d5431f98ba2af19195a1d1",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewMixedBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b01",
+      "sha256": "be843e7d66b9b3f8f4b787e63738b1aa3b81bb7f00a0868cbef1dc57d0a0e586",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b02",
+      "sha256": "f4a02949f3ed386696074989f564376b0861682f9b5c6cd75eb330fc65bd31c4",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b03",
+      "sha256": "2f4198d44b383ee84bd6f395f03c041a34bf1fe8dbfe9a598c9d86923968e502",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b04",
+      "sha256": "3da965ca6f995efcf33d00a8ef54dc7bebd66bfc4c45629c701c3431156f2a3b",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b05",
+      "sha256": "be32eb61aa568653024ff6a80b4393a2eb75c55ffb7463db147f6fdcd20aae3d",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b06",
+      "sha256": "73acf8250d8e999a3fa4082a5e8f0025a8e844b4a09fef2dcba99e1c44b86481",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b07",
+      "sha256": "af2559c24ee7619f3d2c1344c41137cec6f236765759f9bf6a0ac326e0bcf378",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b08",
+      "sha256": "8b23545a5863334353cf9b358523018d59a0a551ed26a116cb954b8188f8646c",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b09",
+      "sha256": "40ccaa3622ff5899eb4daff6c21bb60be586f70a9741cf51a94f6205a8d851f9",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-large-b10",
+      "sha256": "232eda56e6cc4a574713c29eb68a2ea0e6e6bdf257f959cdb34a0c648ea02fc2",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b01",
+      "sha256": "c09d165e03746a09996fa301fb7d773648a16958b8981fca56d9017069243bff",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b02",
+      "sha256": "d1185f8cbe3b325751e6915a09fd0a1071be1027ec4b7840fa27a329fc04cf53",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b03",
+      "sha256": "3b88d706fa92992162fd8ebf626e57a28dd7638fc07a9f84ed357958dec2f16b",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b04",
+      "sha256": "43376dd4152c50cd0db3e5cd216967477546a18a2edf44c58f6a7f76f783e19e",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b05",
+      "sha256": "01f73ac50313c450b242c9e5aad8ee497c9be00eab65cef4f812093e41bbd632",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b06",
+      "sha256": "cdba40a63a3a91a0d464d8ec3d02216eef968e49b47c2cc79acfc88c957769a5",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b07",
+      "sha256": "4b19007919c09a2dc235d21b34df3297055f88e0c6117281c9a0f692daddd2c5",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b08",
+      "sha256": "d08747776cdced49ef6f9a76d7cb362328f866b7f42ae6131a5a3113fa437fe7",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b09",
+      "sha256": "7dc98fc5b875fad3976bfb3442916782d45b7c220e56a28e702e163b68c91d23",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    },
+    {
+      "id": "funny-celebrate-b10",
+      "sha256": "db27784d00e17e4a99cacb8aa26a0445a6fdec46a2a7d834a936ad930e8c347e",
+      "recipeCount": 125,
+      "decision": "approved",
+      "reviewer": "ReviewFunnyBands",
+      "rejectedRecipeIds": [],
+      "notes": "All 125 complete generated tails read and semantically approved after source corrections; no current rejected texts. Text review only, not audio acceptance."
+    }
+  ]
+}

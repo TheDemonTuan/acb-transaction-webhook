@@ -25,7 +25,7 @@ func TestManagedConfigDraftSecretsAndActivation(t *testing.T) {
 	store := protocolStore(t)
 	service := NewService(Config{Mode: ModeDisabled}, store, nil)
 	token := "900001:private_token_abcdefghijklmnopqrstuvwxyz"
-	saved, err := service.SaveAdminConfig(ctx, 0, AdminFields{Mode: ModeDisabled}, token, storage.PaymentProviderActor{})
+	saved, err := service.SaveAdminConfig(ctx, 0, AdminFields{Mode: ModeDisabled}, token, "", storage.PaymentProviderActor{})
 	if err != nil || saved.Revision != 1 || !saved.HasBotToken || !saved.HasWebhookSecret || saved.Config.Mode != ModeDisabled {
 		t.Fatalf("draft save failed: %v", err)
 	}
@@ -48,11 +48,11 @@ func TestManagedConfigDraftSecretsAndActivation(t *testing.T) {
 	fields := adminFixture(t)
 	fields.ActivationAt = ""
 	fields.SourceSeparated = false
-	if _, err := service.SaveAdminConfig(ctx, 1, fields, "", storage.PaymentProviderActor{}); err == nil {
+	if _, err := service.SaveAdminConfig(ctx, 1, fields, "", "", storage.PaymentProviderActor{}); err == nil {
 		t.Fatal("active missing attestation accepted")
 	}
 	fields.Mode = ModeObserve
-	observe, err := service.SaveAdminConfig(ctx, 1, fields, "", storage.PaymentProviderActor{})
+	observe, err := service.SaveAdminConfig(ctx, 1, fields, "", "", storage.PaymentProviderActor{})
 	if err != nil || observe.Config.ActivationAt == "" {
 		t.Fatalf("observe did not stamp UTC cutoff: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestManagedConfigDraftSecretsAndActivation(t *testing.T) {
 	fields = observe.Config
 	fields.Mode, fields.SourceSeparated = ModeActive, true
 	fields.ActivationAt = ""
-	active, err := service.SaveAdminConfig(ctx, 2, fields, "", storage.PaymentProviderActor{})
+	active, err := service.SaveAdminConfig(ctx, 2, fields, "", "", storage.PaymentProviderActor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestManagedConfigDraftSecretsAndActivation(t *testing.T) {
 	if err != nil || time.Since(activation) > 5*time.Second {
 		t.Fatal("new activation has no fresh cutoff")
 	}
-	if _, err := service.SaveAdminConfig(ctx, 2, fields, "", storage.PaymentProviderActor{}); !errors.Is(err, storage.ErrSePayRevisionConflict) {
+	if _, err := service.SaveAdminConfig(ctx, 2, fields, "", "", storage.PaymentProviderActor{}); !errors.Is(err, storage.ErrSePayRevisionConflict) {
 		t.Fatalf("stale config revision accepted: %v", err)
 	}
 }
@@ -82,7 +82,7 @@ func TestManagedConfigRuntimeAndObsoleteAuthenticatedSnapshot(t *testing.T) {
 	legacy := protocolConfig(t)
 	service := NewService(legacy, store, nil)
 	fields := adminFixture(t)
-	if _, err := service.SaveAdminConfig(ctx, 0, fields, "", storage.PaymentProviderActor{}); err != nil {
+	if _, err := service.SaveAdminConfig(ctx, 0, fields, "", "", storage.PaymentProviderActor{}); err != nil {
 		t.Fatal(err)
 	}
 	authenticated, err := service.Snapshot(ctx)
@@ -90,7 +90,7 @@ func TestManagedConfigRuntimeAndObsoleteAuthenticatedSnapshot(t *testing.T) {
 		t.Fatal("managed snapshot authentication failed")
 	}
 	fields.Mode = ModeDisabled
-	if _, err := service.SaveAdminConfig(ctx, 1, fields, "", storage.PaymentProviderActor{}); err != nil {
+	if _, err := service.SaveAdminConfig(ctx, 1, fields, "", "", storage.PaymentProviderActor{}); err != nil {
 		t.Fatal(err)
 	}
 	current, err := service.Snapshot(ctx)
@@ -118,20 +118,20 @@ func TestManagedConfigRuntimeAndObsoleteAuthenticatedSnapshot(t *testing.T) {
 func TestManagedFieldsRejectUnsafeDraftsAndInt64Loss(t *testing.T) {
 	fields := adminFixture(t)
 	fields.BotID = "9007199254740993"
-	cfg, err := adminRuntime(fields, protocolConfig(t).WebhookSecret)
+	cfg, err := adminRuntime(fields, protocolConfig(t).WebhookSecret, "")
 	if err != nil || cfg.BotID != 9007199254740993 {
 		t.Fatal("decimal trust ID lost precision")
 	}
 	for _, bad := range []string{"9e15", "9007199254740993.0", "+900001", "9223372036854775808"} {
 		candidate := fields
 		candidate.BotID = bad
-		if _, err := adminRuntime(candidate, cfg.WebhookSecret); err == nil {
+		if _, err := adminRuntime(candidate, cfg.WebhookSecret, ""); err == nil {
 			t.Fatal("noncanonical Telegram ID accepted")
 		}
 	}
 	for _, payload := range []string{"https://bank.example/qr", "javascript:alert(1)", "/pay", strings.Repeat("1", 4097)} {
 		candidate := AdminFields{Mode: ModeDisabled, QRPayload: payload}
-		if _, err := adminRuntime(candidate, cfg.WebhookSecret); err == nil {
+		if _, err := adminRuntime(candidate, cfg.WebhookSecret, ""); err == nil {
 			t.Fatal("unsafe QR draft accepted")
 		}
 	}
@@ -157,7 +157,7 @@ func TestManagedConfigurationRefreshesIndependentRuntimeHandles(t *testing.T) {
 	a := NewService(Config{Mode: ModeDisabled}, first, nil)
 	b := NewService(Config{Mode: ModeDisabled}, second, nil)
 	fields := adminFixture(t)
-	if _, err := a.SaveAdminConfig(ctx, 0, fields, testBotToken, storage.PaymentProviderActor{}); err != nil {
+	if _, err := a.SaveAdminConfig(ctx, 0, fields, testBotToken, "", storage.PaymentProviderActor{}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := b.Snapshot(ctx)
@@ -165,7 +165,7 @@ func TestManagedConfigurationRefreshesIndependentRuntimeHandles(t *testing.T) {
 		t.Fatal("second runtime missed managed config")
 	}
 	fields.Mode = ModeDisabled
-	if _, err := b.SaveAdminConfig(ctx, 1, fields, "", storage.PaymentProviderActor{}); err != nil {
+	if _, err := b.SaveAdminConfig(ctx, 1, fields, "", "", storage.PaymentProviderActor{}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := a.Snapshot(ctx)
@@ -212,12 +212,12 @@ func TestManagedNotificationAccountCutoverNeverReplaysMoney(t *testing.T) {
 	fields.ReceiverVerified, fields.SourceSeparated = true, false
 	fields.NotificationAccountNumber = "2210112002"
 	var fieldError *FieldError
-	if _, err := service.SaveAdminConfig(ctx, 0, fields, "", storage.PaymentProviderActor{}); !errors.As(err, &fieldError) || fieldError.Field != "sourceSeparated" {
+	if _, err := service.SaveAdminConfig(ctx, 0, fields, "", "", storage.PaymentProviderActor{}); !errors.As(err, &fieldError) || fieldError.Field != "sourceSeparated" {
 		t.Fatalf("main account changed without owner source attestation: %v", err)
 	}
 	fields.SourceSeparated = true
 	fields.ActivationAt = "2026-09-01T00:00:00Z"
-	saved, err := service.SaveAdminConfig(ctx, 0, fields, "", storage.PaymentProviderActor{})
+	saved, err := service.SaveAdminConfig(ctx, 0, fields, "", "", storage.PaymentProviderActor{})
 	if err != nil || saved.Config.NotificationAccountNumber != "2210112002" || saved.Config.AccountNumber != cfg.AccountNumber || saved.Config.QRPayload != cfg.QRPayload || saved.Config.ActivationAt != cfg.ActivationAt.Format(time.RFC3339) {
 		t.Fatalf("main notification save changed receiver/cutoff: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestManagedNotificationAccountCutoverNeverReplaysMoney(t *testing.T) {
 	}
 	fields = saved.Config
 	fields.NotificationAccountNumber, fields.ActivationAt = "", ""
-	cleared, err := service.SaveAdminConfig(ctx, 1, fields, "", storage.PaymentProviderActor{})
+	cleared, err := service.SaveAdminConfig(ctx, 1, fields, "", "", storage.PaymentProviderActor{})
 	if err != nil || cleared.Config.NotificationAccountNumber != "" || cleared.Config.ActivationAt != cfg.ActivationAt.Format(time.RFC3339) {
 		t.Fatalf("clearing override moved active cutoff: %v", err)
 	}
@@ -287,13 +287,13 @@ func TestManagedNotificationAccountCutoverNeverReplaysMoney(t *testing.T) {
 func TestManagedNotificationAccountDraftValidation(t *testing.T) {
 	for _, account := range []string{" account", "account ", "123-456", "１２３", "abc\n", strings.Repeat("A", 201)} {
 		var field *FieldError
-		_, err := adminRuntime(AdminFields{Mode: ModeDisabled, NotificationAccountNumber: account}, "")
+		_, err := adminRuntime(AdminFields{Mode: ModeDisabled, NotificationAccountNumber: account}, "", "")
 		if !errors.As(err, &field) || field.Field != "notificationAccountNumber" {
 			t.Fatalf("invalid draft notification account not field-rejected: %v", err)
 		}
 	}
 	for _, account := range []string{"", "2210112002", strings.Repeat("A", 200)} {
-		if _, err := adminRuntime(AdminFields{Mode: ModeDisabled, NotificationAccountNumber: account}, ""); err != nil {
+		if _, err := adminRuntime(AdminFields{Mode: ModeDisabled, NotificationAccountNumber: account}, "", ""); err != nil {
 			t.Fatalf("valid draft notification account rejected: %v", err)
 		}
 	}

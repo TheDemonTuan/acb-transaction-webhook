@@ -1,270 +1,132 @@
 import type { VoiceEngine, VoiceInfo, VoiceMessage } from './voice-engine';
 
-export type BrowserVoiceStatus =
-  | 'supported'
-  | 'no-vietnamese-voice'
-  | 'locked'
-  | 'ready'
-  | 'error';
-
-export function isVietnameseVoice(v: { lang?: string }): boolean {
-  if (!v.lang) return false;
-  const lang = v.lang.toLowerCase().replace('_', '-');
-  return lang === 'vi' || lang.startsWith('vi-');
+export type BrowserVoiceStatus = 'supported' | 'no-vietnamese-voice' | 'locked' | 'ready' | 'error';
+export function isVietnameseVoice(voice: { lang?: string }): boolean {
+  const lang = voice.lang?.toLowerCase().replace('_', '-');
+  return lang === 'vi' || Boolean(lang?.startsWith('vi-'));
 }
 
 export class BrowserSpeechEngine implements VoiceEngine {
   private currentStatus: BrowserVoiceStatus = 'supported';
   private audioReady = false;
+  private disposed = false;
+  private cancelCurrent: (() => void) | null = null;
+  private voiceWaits = new Set<() => void>();
 
   public isSupported(): boolean {
-    return (
-      typeof window !== 'undefined' &&
-      'speechSynthesis' in window &&
-      'SpeechSynthesisUtterance' in window
-    );
+    return !this.disposed && typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
   }
-
-  public getStatus(): BrowserVoiceStatus {
+  public getStatus(): BrowserVoiceStatus { return this.isSupported() ? this.currentStatus : 'error'; }
+  public async checkStatus(): Promise<BrowserVoiceStatus> {
     if (!this.isSupported()) return 'error';
+    const voices = await this.getVoices();
+    this.currentStatus = voices.length === 0 ? 'no-vietnamese-voice' : this.audioReady ? 'ready' : 'locked';
     return this.currentStatus;
   }
-
-  public async checkStatus(): Promise<BrowserVoiceStatus> {
-    if (!this.isSupported()) {
-      this.currentStatus = 'error';
-      return 'error';
-    }
-
-    const viVoices = await this.getVoices();
-    if (viVoices.length === 0) {
-      this.currentStatus = 'no-vietnamese-voice';
-      return 'no-vietnamese-voice';
-    }
-
-    if (this.audioReady) {
-      this.currentStatus = 'ready';
-      return 'ready';
-    }
-
-    this.currentStatus = 'locked';
-    return 'locked';
-  }
-
-  public async prime(): Promise<boolean> {
-    if (!this.isSupported()) {
-      this.currentStatus = 'error';
-      return false;
-    }
-
-    const viVoices = await this.getVoices();
-    if (viVoices.length === 0) {
-      this.currentStatus = 'no-vietnamese-voice';
-      return false;
-    }
-
-    return new Promise<boolean>((resolve) => {
-      try {
-        const synth = window.speechSynthesis;
-        if (synth.paused) {
-          synth.resume();
-        }
-
-        const UtteranceClass = (window as any).SpeechSynthesisUtterance || SpeechSynthesisUtterance;
-        const u = new UtteranceClass(' ');
-        u.volume = 0.01;
-        u.rate = 1;
-
-        let finished = false;
-        let timer: ReturnType<typeof setTimeout> | null = null;
-        const cleanup = () => {
-          if (timer) {
-            clearTimeout(timer);
-            timer = null;
-          }
-        };
-
-        const finish = (success: boolean) => {
-          if (finished) return;
-          finished = true;
-          cleanup();
-          if (success) {
-            this.audioReady = true;
-            this.currentStatus = 'ready';
-          } else {
-            this.currentStatus = 'error';
-          }
-          resolve(success);
-        };
-
-        u.onend = () => finish(true);
-        u.onerror = (e: any) => {
-          if (e?.error === 'canceled' || e?.error === 'interrupted') {
-            finish(true);
-          } else {
-            finish(false);
-          }
-        };
-
-        synth.speak(u);
-        // Autoplay policy guard: if playback lifecycle events do not fire, fail closed
-        timer = setTimeout(() => finish(false), 1500);
-      } catch {
-        this.currentStatus = 'error';
-        resolve(false);
-      }
-    });
-  }
-
-  public async unlock(): Promise<boolean> {
-    return this.prime();
-  }
-
   public async getVoices(): Promise<VoiceInfo[]> {
-    if (!this.isSupported()) {
-      this.currentStatus = 'error';
-      return [];
-    }
-
+    if (!this.isSupported()) return [];
     const synth = window.speechSynthesis;
-    let rawVoices = synth.getVoices();
-
-    if (rawVoices.length === 0) {
-      rawVoices = await new Promise<SpeechSynthesisVoice[]>((resolve) => {
-        let resolved = false;
-        const onVoicesChanged = () => {
-          if (resolved) return;
-          resolved = true;
-          synth.removeEventListener('voiceschanged', onVoicesChanged);
-          resolve(synth.getVoices());
-        };
-
-        synth.addEventListener('voiceschanged', onVoicesChanged);
-
-        setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            synth.removeEventListener('voiceschanged', onVoicesChanged);
-            resolve(synth.getVoices());
-          }
-        }, 500);
-      });
-    }
-
-    // STRICT VIETNAMESE ONLY: Never return foreign/English voices
-    const vietnameseVoices = rawVoices.filter(isVietnameseVoice);
-    if (rawVoices.length > 0 && vietnameseVoices.length === 0) {
-      this.currentStatus = 'no-vietnamese-voice';
-    } else if (vietnameseVoices.length > 0) {
-      if (this.currentStatus === 'no-vietnamese-voice' || this.currentStatus === 'supported') {
-        this.currentStatus = this.audioReady ? 'ready' : 'locked';
-      }
-    }
-
-    return this.mapVoices(vietnameseVoices);
-  }
-
-  private mapVoices(voices: SpeechSynthesisVoice[]): VoiceInfo[] {
-    return voices.map((v) => ({
-      uri: v.voiceURI,
-      name: v.name,
-      lang: v.lang,
-      isDefault: v.default,
-    }));
-  }
-
-  public async speak(message: VoiceMessage): Promise<void> {
-    if (!this.isSupported() || !message.text) return;
-
-    const synth = window.speechSynthesis;
-
-    if (synth.paused) {
-      synth.resume();
-    }
-
-    const rawVoices = synth.getVoices();
-    let selectedVoice: SpeechSynthesisVoice | undefined;
-
-    if (message.voiceURI) {
-      const match = rawVoices.find((v) => v.voiceURI === message.voiceURI);
-      if (match && isVietnameseVoice(match)) {
-        selectedVoice = match;
-      }
-    }
-
-    if (!selectedVoice) {
-      selectedVoice =
-        rawVoices.find((v) => v.lang.toLowerCase().replace('_', '-') === 'vi-vn') ??
-        rawVoices.find((v) => isVietnameseVoice(v));
-    }
-
-    // STRICT VIETNAMESE ONLY: Never fallback to English or default non-Vietnamese voices!
-    if (!selectedVoice) {
-      this.currentStatus = 'no-vietnamese-voice';
-      throw new Error('BROWSER_VIETNAMESE_VOICE_UNAVAILABLE');
-    }
-
-    return new Promise((resolve, reject) => {
-      const UtteranceClass = (window as any).SpeechSynthesisUtterance || SpeechSynthesisUtterance;
-      const utterance = new UtteranceClass(message.text);
-      utterance.voice = selectedVoice;
-      utterance.lang = selectedVoice.lang || 'vi-VN';
-      utterance.volume = message.volume ?? 1;
-      utterance.rate = message.rate ?? 1.25;
-      utterance.pitch = message.pitch ?? 1;
-
+    let voices = synth.getVoices();
+    if (!voices.length) {
+      const { promise, resolve } = Promise.withResolvers<SpeechSynthesisVoice[]>();
       let settled = false;
-
-      utterance.onstart = () => {
-        this.audioReady = true;
-        this.currentStatus = 'ready';
-        if (message.telemetry) {
-          message.telemetry.speechStartedAt = Date.now();
-          const sseAt = message.telemetry.sseReceivedAt || message.telemetry.queuedAt;
-          if (sseAt) {
-            message.telemetry.sseToSpeakMs = message.telemetry.speechStartedAt - sseAt;
-          }
-          if (message.telemetry.queuedAt) {
-            message.telemetry.queueToSpeakMs = message.telemetry.speechStartedAt - message.telemetry.queuedAt;
-          }
-          if (message.telemetry.detectedAt) {
-            const d = new Date(message.telemetry.detectedAt).getTime();
-            if (!isNaN(d)) {
-              message.telemetry.totalLatencyMs = message.telemetry.speechStartedAt - d;
-            }
-          }
-        }
-        message.onStart?.(message.telemetry);
+      const finish = () => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); synth.removeEventListener('voiceschanged', finish);
+        this.voiceWaits.delete(finish); resolve(synth.getVoices());
       };
-
-      utterance.onend = () => {
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
-      };
-
-      utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
-        if (!settled) {
-          settled = true;
-          if (event.error === 'canceled' || event.error === 'interrupted') {
-            resolve();
-          } else {
-            this.currentStatus = 'error';
-            reject(new Error(`BROWSER_SPEECH_ERROR: ${event.error || 'unknown'}`));
-          }
-        }
-      };
-
-      synth.speak(utterance);
-    });
-  }
-
-  public cancel(): void {
-    if (this.isSupported()) {
-      try {
-        window.speechSynthesis.cancel();
-      } catch {}
+      const timer = setTimeout(finish, 500);
+      this.voiceWaits.add(finish); synth.addEventListener('voiceschanged', finish);
+      voices = await promise;
     }
+    return voices.filter(isVietnameseVoice).map((voice) => ({ uri: voice.voiceURI, name: voice.name, lang: voice.lang, isDefault: voice.default }));
+  }
+  public resolveVoice(voiceURI?: string): SpeechSynthesisVoice | undefined {
+    if (!this.isSupported() || !voiceURI) return;
+    return window.speechSynthesis.getVoices().find((voice) => voice.voiceURI === voiceURI && isVietnameseVoice(voice));
+  }
+  public async prefetch(message: VoiceMessage, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw new Error('VOICE_CANCELLED');
+    if (message.profile?.providerMode !== 'BROWSER_ONLY') throw new Error('BROWSER_MODE_NOT_SELECTED');
+    if (!this.resolveVoice(message.voiceURI)) {
+      this.currentStatus = 'no-vietnamese-voice'; throw new Error('BROWSER_VIETNAMESE_VOICE_UNAVAILABLE');
+    }
+  }
+  public async prime(): Promise<boolean> {
+    if (!this.isSupported() || !(await this.getVoices()).length) return false;
+    const synth = window.speechSynthesis;
+    const utterance = new window.SpeechSynthesisUtterance(' ');
+    utterance.volume = 0.01;
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    let settled = false;
+    const finish = (success: boolean) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); utterance.onend = null; utterance.onerror = null;
+      this.cancelCurrent = null;
+      this.audioReady = success; this.currentStatus = success ? 'ready' : 'error'; resolve(success);
+    };
+    const timer = setTimeout(() => { finish(false); synth.cancel(); }, 1500);
+    this.cancelCurrent = () => finish(false);
+    utterance.onend = () => finish(true); utterance.onerror = () => finish(false);
+    try { if (synth.paused) synth.resume(); synth.speak(utterance); } catch { finish(false); }
+    return promise;
+  }
+  public async unlock(): Promise<boolean> { return this.prime(); }
+  public async speak(message: VoiceMessage): Promise<void> {
+    await this.prefetch(message, new AbortController().signal);
+    const selected = this.resolveVoice(message.voiceURI);
+    if (!selected) throw new Error('BROWSER_VIETNAMESE_VOICE_UNAVAILABLE');
+    if (!message.text) throw new Error('BROWSER_SPEECH_EMPTY');
+    const synth = window.speechSynthesis;
+    const utterance = new window.SpeechSynthesisUtterance(message.text);
+    utterance.voice = selected; utterance.lang = selected.lang;
+    utterance.volume = Math.max(0, Math.min(1, message.volume ?? 1));
+    utterance.rate = message.profile!.rate;
+    utterance.pitch = 1 + message.profile!.pitchHz / 50;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    let settled = false, started = false, tailStarted = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      utterance.onstart = null; utterance.onend = null; utterance.onerror = null; utterance.onboundary = null;
+      this.cancelCurrent = null;
+      if (error) reject(Object.assign(error, { playbackStarted: started })); else resolve();
+    };
+    const timer = setTimeout(() => { finish(new Error('AUDIO_PLAYBACK_TIMEOUT')); synth.cancel(); }, 120000);
+    this.cancelCurrent = () => finish(new Error('VOICE_CANCELLED'));
+    utterance.onstart = () => {
+      if (started || settled) return;
+      started = true; this.audioReady = true; this.currentStatus = 'ready';
+      const now = performance.now();
+      if (message.telemetry) {
+        message.telemetry.speechStartedAt = Date.now(); message.telemetry.speechStartedMonotonicAt = now;
+        if (message.telemetry.receivedMonotonicAt !== undefined) message.telemetry.sseToSpeakMs = now - message.telemetry.receivedMonotonicAt;
+        if (message.queuedMonotonicAt !== undefined) message.telemetry.queueToSpeakMs = now - message.queuedMonotonicAt;
+      }
+      message.onStart?.(message.telemetry);
+      if (message.recipe?.styleId === 'classic') { tailStarted = true; message.onTailStart?.(message.recipe.id); }
+    };
+    utterance.onboundary = (event) => {
+      const tailIndex = message.recipe?.tail ? message.text.indexOf(message.recipe.tail) : -1;
+      if (!tailStarted && message.recipe && tailIndex >= 0 && event.charIndex >= tailIndex) {
+        tailStarted = true; message.onTailStart?.(message.recipe.id);
+      }
+    };
+    utterance.onend = () => {
+      if (!tailStarted && message.recipe) message.onTailStart?.(message.recipe.id);
+      finish();
+    };
+    utterance.onerror = (event) => { this.currentStatus = 'error'; finish(new Error(`BROWSER_SPEECH_ERROR: ${event.error}`)); };
+    try { if (synth.paused) synth.resume(); synth.speak(utterance); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    return promise;
+  }
+  public cancel(): void {
+    this.cancelCurrent?.();
+    if (this.isSupported()) window.speechSynthesis.cancel();
+    for (const finish of this.voiceWaits) finish();
+  }
+  public dispose(): void {
+    if (this.disposed) return;
+    this.cancel(); this.disposed = true;
   }
 }

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -367,5 +368,196 @@ func TestPayOSWebhookGateAndAtomicFailureRetry(t *testing.T) {
 	}
 	if webhookTestCount(t, store, "payment_receipts") != 1 || commits.Load() != 1 {
 		t.Fatal("retry did not commit once")
+	}
+}
+
+func TestPayOSWebhookTwoStoresConcurrentDuplicate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "webhook-concurrent.db")
+	store1, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store1.Close()
+	store2, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store2.Close()
+
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request payos.CreatePaymentLinkRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		link := fmt.Sprintf("link-%d", request.OrderCode)
+		data := map[string]any{"orderCode": request.OrderCode, "amount": request.Amount, "description": request.Description, "currency": "VND", "paymentLinkId": link, "status": "PENDING", "qrCode": "qr", "accountNumber": fmt.Sprintf("VA-%d", request.OrderCode), "accountName": "SHOP", "bin": "970452", "checkoutUrl": "https://pay.payos.vn/web/" + link}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": "00", "data": data, "signature": webhookTestSignature(t, data)})
+	}))
+	defer fixture.Close()
+
+	adapter, err := payments.NewPayOS("webhook-fixture-channel", "fixture-api", webhookTestChecksum, payments.WithBaseURL(fixture.URL), payments.WithHTTPClient(fixture.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Production: true, Timezone: time.UTC, PayOSClientID: "webhook-fixture-channel", PayOSAPIKey: "fixture-api", PayOSChecksumKey: webhookTestChecksum, PaymentsEnabled: true, PayOSWebhookConfirmed: true, PaymentMaxAmountVND: 500000000, PaymentPublicOrigin: "https://transactions.example.test"}
+
+	service1 := payments.NewService(cfg, store1, adapter, nil)
+	service2 := payments.NewService(cfg, store2, adapter, nil)
+	handler1 := New(cfg, store1).WithPayments(service1).Handler()
+	handler2 := New(cfg, store2).WithPayments(service2).Handler()
+
+	endpoint, err := store1.CreateEndpointWithSecret(context.Background(), "receiver", "https://receiver.example.test/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store1.DB().Exec("UPDATE webhook_endpoints SET status='ACTIVE' WHERE id=?", endpoint.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	order, _, err := service1.CreateOrder(context.Background(), 50000, "STATIC_URL", "00000000-0000-4000-8000-000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := webhookTestBody(t, webhookTestData(order))
+
+	var wg sync.WaitGroup
+	results := make([]*httptest.ResponseRecorder, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0] = webhookTestPost(handler1, body)
+	}()
+	go func() {
+		defer wg.Done()
+		results[1] = webhookTestPost(handler2, body)
+	}()
+	wg.Wait()
+
+	for i, res := range results {
+		if res.Code != 200 {
+			t.Fatalf("handler %d returned status %d", i+1, res.Code)
+		}
+	}
+	if count := webhookTestCount(t, store1, "payment_receipts"); count != 1 {
+		t.Fatalf("expected 1 receipt across two stores, got %d", count)
+	}
+	if count := webhookTestCount(t, store1, "transactions"); count != 1 {
+		t.Fatalf("expected 1 transaction across two stores, got %d", count)
+	}
+	if count := webhookTestCount(t, store1, "event_journal"); count != 1 {
+		t.Fatalf("expected 1 journal entry across two stores, got %d", count)
+	}
+	if count := webhookTestCount(t, store1, "deliveries"); count != 1 {
+		t.Fatalf("expected 1 delivery row across two stores, got %d", count)
+	}
+	curOrder, err := store1.PaymentOrder(context.Background(), order.ID)
+	if err != nil || curOrder.Status != "PAID" {
+		t.Fatalf("order not PAID: %+v %v", curOrder, err)
+	}
+}
+
+func TestPayOSWebhookWorkerHangStillACKsAndCommits(t *testing.T) {
+	store, service, _, _ := webhookTestSetup(t)
+	cfg := config.Config{Production: true, Timezone: time.UTC, PayOSClientID: "webhook-fixture-channel", PayOSAPIKey: "fixture-api", PayOSChecksumKey: webhookTestChecksum, PaymentsEnabled: true, PayOSWebhookConfirmed: true, PaymentMaxAmountVND: 500000000, PaymentPublicOrigin: "https://transactions.example.test"}
+
+	service.WithReconcileWake(func(ctx context.Context) error {
+		return errors.New("reconcile worker unavailable")
+	})
+	server := New(cfg, store).WithPayments(service).WithWakeDispatcher(func(ctx context.Context) error {
+		return errors.New("dispatcher worker unavailable")
+	})
+	handler := server.Handler()
+
+	order, _, err := service.CreateOrder(context.Background(), 50000, "STATIC_URL", "00000000-0000-4000-8000-000000000002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := webhookTestBody(t, webhookTestData(order))
+	w := webhookTestPost(handler, body)
+	if w.Code != 200 {
+		t.Fatalf("expected 200 ACK despite worker failure, got %d %s", w.Code, w.Body.String())
+	}
+	if count := webhookTestCount(t, store, "payment_receipts"); count != 1 {
+		t.Fatalf("expected 1 receipt, got %d", count)
+	}
+	if count := webhookTestCount(t, store, "transactions"); count != 1 {
+		t.Fatalf("expected 1 transaction, got %d", count)
+	}
+	if count := webhookTestCount(t, store, "event_journal"); count != 1 {
+		t.Fatalf("expected 1 event_journal, got %d", count)
+	}
+	curOrder, err := store.PaymentOrder(context.Background(), order.ID)
+	if err != nil || curOrder.Status != "PAID" {
+		t.Fatalf("order not PAID: %+v %v", curOrder, err)
+	}
+}
+
+func TestPayOSWebhookAckOnlyAfterCommit(t *testing.T) {
+	store, service, handler, _ := webhookTestSetup(t)
+	order, _, err := service.CreateOrder(context.Background(), 75000, "STATIC_URL", "00000000-0000-4000-8000-000000000003")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := webhookTestBody(t, webhookTestData(order))
+	w := webhookTestPost(handler, body)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Assertion verifies that when handler returns 200, receipt, transaction, and journal are all queryable
+	if count := webhookTestCount(t, store, "payment_receipts"); count != 1 {
+		t.Fatalf("receipt missing after ACK: %d", count)
+	}
+	if count := webhookTestCount(t, store, "transactions"); count != 1 {
+		t.Fatalf("transaction missing after ACK: %d", count)
+	}
+	if count := webhookTestCount(t, store, "event_journal"); count != 1 {
+		t.Fatalf("journal missing after ACK: %d", count)
+	}
+}
+
+func TestPayOSWebhookTwoOrdersSameAmountIndependent(t *testing.T) {
+	store, service, handler, commits := webhookTestSetup(t)
+	order1, _, err := service.CreateOrder(context.Background(), 50000, "OPERATOR_DYNAMIC", "00000000-0000-4000-8000-000000000010")
+	if err != nil {
+		t.Fatal(err)
+	}
+	order2, _, err := service.CreateOrder(context.Background(), 50000, "OPERATOR_DYNAMIC", "00000000-0000-4000-8000-000000000020")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order1.OrderCode == order2.OrderCode {
+		t.Fatal("orders must have distinct order codes")
+	}
+
+	// Settle order 1 only
+	if w := webhookTestPost(handler, webhookTestBody(t, webhookTestData(order1))); w.Code != 200 {
+		t.Fatalf("order1 settle failed: %d", w.Code)
+	}
+	cur1, err := store.PaymentOrder(context.Background(), order1.ID)
+	if err != nil || cur1.Status != "PAID" {
+		t.Fatalf("order1 not paid: %+v %v", cur1, err)
+	}
+	cur2, err := store.PaymentOrder(context.Background(), order2.ID)
+	if err != nil || cur2.Status != "PENDING" {
+		t.Fatalf("order2 should still be PENDING: %+v %v", cur2, err)
+	}
+	if webhookTestCount(t, store, "payment_receipts") != 1 || webhookTestCount(t, store, "transactions") != 1 || commits.Load() != 1 {
+		t.Fatal("expected exactly 1 receipt and transaction after order 1")
+	}
+
+	// Settle order 2
+	if w := webhookTestPost(handler, webhookTestBody(t, webhookTestData(order2))); w.Code != 200 {
+		t.Fatalf("order2 settle failed: %d", w.Code)
+	}
+	cur2, err = store.PaymentOrder(context.Background(), order2.ID)
+	if err != nil || cur2.Status != "PAID" {
+		t.Fatalf("order2 not paid: %+v %v", cur2, err)
+	}
+	if webhookTestCount(t, store, "payment_receipts") != 2 || webhookTestCount(t, store, "transactions") != 2 || commits.Load() != 2 {
+		t.Fatal("expected exactly 2 receipts and transactions after order 2")
+	}
+	if cur1.TransactionID == cur2.TransactionID {
+		t.Fatalf("orders must have independent transaction IDs: %s vs %s", cur1.TransactionID, cur2.TransactionID)
 	}
 }

@@ -1,36 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ANNOUNCEMENT_TEMPLATES,
   buildBurstTransactionPhrase,
   buildSingleTransactionPhrase,
-  DEFAULT_ANNOUNCEMENT_TEMPLATE,
   formatAnnouncementTemplate,
   sanitizeSpeechDescription,
-  selectAnnouncementTemplate,
 } from '../src/features/voice-announcements/voice-copy';
 
 describe('voice-copy', () => {
 
-  it('selects a stable template without replacing custom copy', () => {
-    const ids = Array.from({ length: 30 }, (_, n) => `tx_local_${n}`);
-    expect(new Set(ids.map((id) => selectAnnouncementTemplate(undefined, id))).size).toBeGreaterThan(1);
-    expect(selectAnnouncementTemplate(undefined, '')).toBe(DEFAULT_ANNOUNCEMENT_TEMPLATE);
-    expect(selectAnnouncementTemplate('  Nhận {amount}!  ', ids[0])).toBe('Nhận {amount}!');
-    for (const id of ids) {
-      expect(selectAnnouncementTemplate(undefined, id)).toBe(selectAnnouncementTemplate(DEFAULT_ANNOUNCEMENT_TEMPLATE, id));
-    }
-    for (const template of ANNOUNCEMENT_TEMPLATES) {
-      expect(template.match(/\{amount\}/g)).toHaveLength(1);
-    }
-  });
 
   it('speaks each amount once and includes descriptions only when enabled', () => {
-    for (const [id, amount, words] of [
-      ['tx_local_1', '50000', 'năm mươi nghìn đồng'],
-      ['tx_local_2', '500000', 'năm trăm nghìn đồng'],
-      ['tx_local_3', '1250000', 'một triệu hai trăm năm mươi nghìn đồng'],
+    for (const [amount, words] of [
+      ['50000', 'năm mươi nghìn đồng'],
+      ['500000', 'năm trăm nghìn đồng'],
+      ['1250000', 'một triệu hai trăm năm mươi nghìn đồng'],
     ]) {
-      const template = selectAnnouncementTemplate(undefined, id);
+      const template = 'Đã nhận {amount}.';
       const plain = buildSingleTransactionPhrase(amount, 'thử nghiệm', { template });
       expect(plain.split(words)).toHaveLength(2);
       expect(plain).not.toContain('thử nghiệm');
@@ -88,7 +73,7 @@ describe('voice-copy', () => {
     const res = formatAnnouncementTemplate('   ', {
       amount: 10000,
     });
-    expect(res).toBe('Đa tạ quý khách vì mười nghìn đồng.');
+    expect(res).toBe('Đã nhận mười nghìn đồng.');
   });
 
   it('sanitizes description correctly', () => {

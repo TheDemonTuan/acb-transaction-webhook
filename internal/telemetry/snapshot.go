@@ -10,7 +10,14 @@ type TelemetrySnapshot struct {
 	MutationGate     MutationGateTelemetry   `json:"mutationGate"`
 	Singleton        SingletonTelemetry      `json:"singleton"`
 	Deployment       DeploymentTelemetry     `json:"deployment"`
-	BackupAndRestore BackupAndDrillTelemetry `json:"backupAndRestore"`
+	BackupAndRestore BackupAndDrillTelemetry       `json:"backupAndRestore"`
+	PaymentStages    map[string]PaymentStageMetric `json:"paymentStages,omitempty"`
+}
+
+type PaymentStageMetric struct {
+	Count int     `json:"count"`
+	P95Ms float64 `json:"p95Ms"`
+	P99Ms float64 `json:"p99Ms"`
 }
 
 type RealtimeTelemetry struct {

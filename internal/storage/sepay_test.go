@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -660,7 +661,7 @@ func TestSePayReviewPaginationAllowlistAndPrivacy(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, item := range page.Items {
-			got = append(got, item.MessageID)
+			got = append(got, item.SourceID)
 			encoded, err := json.Marshal(item)
 			if err != nil {
 				t.Fatal(err)
@@ -669,8 +670,11 @@ func TestSePayReviewPaginationAllowlistAndPrivacy(t *testing.T) {
 			if err := json.Unmarshal(encoded, &fields); err != nil {
 				t.Fatal(err)
 			}
-			if len(fields) != 4 || fields["storeKey"] != "test-store" || fields["messageId"] != item.MessageID || fields["reason"] != item.Reason || fields["receivedAt"] != at {
+			if fields["storeKey"] != "test-store" || fields["transport"] != "telegram" || fields["sourceId"] != item.SourceID || fields["reason"] != item.Reason || fields["receivedAt"] != at {
 				t.Fatalf("unsafe review projection: %s", encoded)
+			}
+			for _, field := range []string{"messageId", "payload", "rawPayload", "payloadEnvelope", "accountNumber", "reference", "botToken", "webhookSecret", "nativeWebhookSecret"} {
+				if _, exposed := fields[field]; exposed { t.Fatalf("review exposed private or retired field %s",field) }
 			}
 		}
 		if page.NextCursor == "" {
@@ -681,18 +685,13 @@ func TestSePayReviewPaginationAllowlistAndPrivacy(t *testing.T) {
 		}
 		cursor = page.NextCursor
 	}
-	var want []string
-	for botOffset := 2; botOffset >= 0; botOffset-- {
-		for updateID := 109; updateID >= 0; updateID-- {
-			if updateID%3 == botOffset {
-				want = append(want, fmt.Sprint(int64(9007199254740993)+int64(updateID)))
-			}
-		}
-	}
+	want := make([]string, 0, 110)
+	for i := range 110 { want = append(want, fmt.Sprintf("%d:%d", 900001+i%3, i)) }
+	sort.Sort(sort.Reverse(sort.StringSlice(want)))
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tie pagination lost/repeated/reordered rows: got=%v want=%v", got, want)
 	}
-	for _, invalid := range []string{"!", encodeCursor(at, "900001"), encodeCursor(at, "900001:bad"), encodeCursor(at, "0:1"), encodeCursor(at, "900001:-1"), encodeCursor("not-time", "900001:1")} {
+	for _, invalid := range []string{"!", "not-base64", encodeCursor(at, "900001"), encodeCursor("not-time", "telegram:900001:1")} {
 		if _, err := s.ListSePayReviews(ctx, invalid, 20); !errors.Is(err, ErrInvalidSePayReviewCursor) {
 			t.Fatalf("invalid cursor accepted: %q err=%v", invalid, err)
 		}
@@ -762,11 +761,11 @@ func TestSePayReviewCursorOrdersTimestampBeforeTelegramIDs(t *testing.T) {
 		}
 	}
 	first, err := s.ListSePayReviews(context.Background(), "", 1)
-	if err != nil || len(first.Items) != 1 || first.Items[0].MessageID != "2" || first.NextCursor == "" {
+	if err != nil || len(first.Items) != 1 || first.Items[0].SourceID != "900001:1" || first.NextCursor == "" {
 		t.Fatalf("primary timestamp order: %+v err=%v", first, err)
 	}
 	last, err := s.ListSePayReviews(context.Background(), first.NextCursor, 1)
-	if err != nil || len(last.Items) != 1 || last.Items[0].MessageID != "1" || last.NextCursor != "" {
+	if err != nil || len(last.Items) != 1 || last.Items[0].SourceID != "900003:99" || last.NextCursor != "" {
 		t.Fatalf("cross-timestamp cursor: %+v err=%v", last, err)
 	}
 }

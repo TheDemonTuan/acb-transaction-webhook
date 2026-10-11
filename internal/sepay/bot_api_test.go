@@ -25,7 +25,7 @@ func telegramServiceFixture(t *testing.T, handler http.HandlerFunc) *Service {
 	service := NewService(Config{Mode: ModeDisabled}, protocolStore(t), nil)
 	fields := adminFixture(t)
 	fields.Mode = ModeDisabled
-	if _, err := service.SaveAdminConfig(context.Background(), 0, fields, testBotToken, storage.PaymentProviderActor{}); err != nil {
+	if _, err := service.SaveAdminConfig(context.Background(), 0, fields, testBotToken, "", storage.PaymentProviderActor{}); err != nil {
 		t.Fatal(err)
 	}
 	client := NewTelegramClient()
@@ -191,7 +191,7 @@ func TestTelegramRegistrationRejectsRevisionChangeDuringNetwork(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-			if _, err := service.SaveAdminConfig(context.Background(), config.Revision, config.Config, "900001:ROTATED_abcdefghijklmnopqrstuvwxyz", storage.PaymentProviderActor{}); err != nil {
+			if _, err := service.SaveAdminConfig(context.Background(), config.Revision, config.Config, "900001:ROTATED_abcdefghijklmnopqrstuvwxyz", "", storage.PaymentProviderActor{}); err != nil {
 				t.Error(err)
 			}
 			registered.Store(true)

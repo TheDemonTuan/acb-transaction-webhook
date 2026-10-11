@@ -14,6 +14,7 @@ PUBLIC = 'transactions.tuannguyenviet.site'
 ADMIN = 'bank.tuannguyenviet.site'
 CALLBACK = '/api/integrations/payos/webhook'
 SEPAY_CALLBACK = '/api/integrations/sepay/telegram'
+SEPAY_NATIVE_CALLBACK = '/api/integrations/sepay/webhook'
 IMAGE = 'curlimages/curl:8.12.1'
 
 
@@ -85,6 +86,25 @@ def main():
     status, _, _ = request('POST', SEPAY_CALLBACK, b'{}', tunnel=False)
     assert status == 403, ('SePay callback accepted outside tunnel', status)
 
+    status, headers, body = request('POST', SEPAY_NATIVE_CALLBACK, b'{}')
+    assert status == 503, ('disabled native callback must fail closed at gateway', status)
+    assert isinstance(json.loads(body), dict), body
+    assert 'location' not in headers, headers
+    assert headers['referrer-policy'] == ['no-referrer'], headers
+    assert headers['cache-control'] == ['no-store'], headers
+    for method, path in (('GET', SEPAY_NATIVE_CALLBACK), ('HEAD', SEPAY_NATIVE_CALLBACK),
+                         ('OPTIONS', SEPAY_NATIVE_CALLBACK), ('PUT', SEPAY_NATIVE_CALLBACK),
+                         ('POST', SEPAY_NATIVE_CALLBACK + '/'), ('POST', SEPAY_NATIVE_CALLBACK + '/child')):
+        status, headers, _ = request(method, path)
+        assert status == 403, ('non-exact native route admitted', method, path, status)
+        assert 'location' not in headers, headers
+    status, _, _ = request('POST', SEPAY_NATIVE_CALLBACK, b'[' + b' ' * 65535)
+    assert status == 503, ('64KiB native body incorrectly rejected by edge', status)
+    status, _, _ = request('POST', SEPAY_NATIVE_CALLBACK, b'[' + b' ' * 65536)
+    assert status == 413, ('oversized native body reached backend', status)
+    status, _, _ = request('POST', SEPAY_NATIVE_CALLBACK, b'{}', tunnel=False)
+    assert status == 403, ('native callback accepted outside tunnel', status)
+
     capability = 'ingress-capability-' + uuid.uuid4().hex
     for host, prefix in ((PUBLIC, '/api/public/v1/payments/'),
                          (ADMIN, '/api/public/v1/payments/'),
@@ -115,7 +135,8 @@ def main():
             continue
         if isinstance(record, dict) and 'RequestPath' in record:
             access_records.append(record)
-    assert not any(record.get('RouterName', '').split('@')[0] == 'acb-sepay-telegram-router'
+    assert not any(record.get('RouterName', '').split('@')[0] in
+                   {'acb-sepay-telegram-router', 'acb-sepay-native-router'}
                    for record in access_records), 'SePay callback leaked into Traefik access logs'
 
     # One parallel curl process avoids container startup skew that would refill

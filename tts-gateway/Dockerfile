@@ -17,12 +17,12 @@ FROM python:3.13.15-alpine3.24
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8081
+    PORT=8081 \
+    TTS_VOICEPACK_ROOT=/app/assets/voicepacks
 
 WORKDIR /app
 
 RUN apk upgrade --no-cache && \
-    apk add --no-cache ffmpeg && \
     rm -rf /usr/local/bin/pip* \
       /usr/local/lib/python3.13/site-packages/pip* \
       /usr/local/lib/python3.13/site-packages/setuptools* && \
@@ -31,8 +31,11 @@ RUN apk upgrade --no-cache && \
 
 COPY --from=builder /opt/venv /opt/venv
 COPY app ./app
+COPY assets/voicepacks ./assets/voicepacks
 
-RUN chown -R appuser:appgroup /app /opt/venv
+RUN chown -R appuser:appgroup /app /opt/venv && \
+    chown -R root:root /app/assets && \
+    chmod -R a-w /app/assets
 USER appuser
 
 EXPOSE 8081

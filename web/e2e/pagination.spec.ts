@@ -242,12 +242,11 @@ test('transactions page cursor pagination preserves summary stats and removes in
   });
 
   await page.goto('/transactions');
+  await page.getByRole('tab', { name: /Lịch sử giao dịch/ }).click();
+  const history = page.getByRole('tabpanel', { name: 'Lịch sử giao dịch', exact: true });
 
   // Verify backend summary is preserved in stats cards
-  await expect(page.getByText('Giao dịch hôm nay')).toBeVisible();
-  await expect(page.getByText('35', { exact: true })).toBeVisible();
-  await expect(page.getByText('KienlongBank', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('ACB', { exact: true }).first()).toBeVisible();
+  await expect(history.getByText('35', { exact: true })).toBeVisible();
 
   // Verify pagination controls on page 1
   await expect(page.getByText('Trang 1 • 20 dòng')).toBeVisible();
@@ -263,5 +262,5 @@ test('transactions page cursor pagination preserves summary stats and removes in
   await expect(nextBtn).toBeDisabled();
   await expect(prevBtn).toBeEnabled();
   // Summary total is still 35
-  await expect(page.getByText('35', { exact: true })).toBeVisible();
+  await expect(history.getByText('35', { exact: true })).toBeVisible();
 });

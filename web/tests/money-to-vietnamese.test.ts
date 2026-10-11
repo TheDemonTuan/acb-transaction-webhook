@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { speakVnd } from '../src/features/voice-announcements/money-to-vietnamese';
+import fixtures from '../../internal/voicecopy/catalog/amount-fixtures.v1.json';
 
 describe('speakVnd', () => {
   it('handles zero correctly', () => {
@@ -31,5 +32,11 @@ describe('speakVnd', () => {
     expect(speakVnd(25000)).toBe('hai mươi lăm nghìn đồng');
     expect(speakVnd(15000)).toBe('mười lăm nghìn đồng');
     expect(speakVnd(105000)).toBe('một trăm linh năm nghìn đồng');
+  });
+
+  it('matches all 24 canonical fixtures identically with Go formatter', () => {
+    for (const f of fixtures) {
+      expect(speakVnd(f.amount)).toBe(f.spoken);
+    }
   });
 });

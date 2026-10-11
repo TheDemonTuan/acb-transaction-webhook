@@ -1,0 +1,312 @@
+import { getCsrfToken, parseApiError } from '../../api';
+import type { VoiceProfile } from './voice-profile';
+import type { VoiceMessage } from './voice-engine';
+import { AudioAssets } from './audio-assets';
+import { loadVoiceCatalog, readBounded, throwIfAborted } from './voice-catalog';
+import { formatAnnouncementTemplate, RecentPhraseRing, selectAnnouncementRecipe, type AnnouncementRecipe } from './voice-copy';
+import { speakVnd } from './money-to-vietnamese';
+import { BrowserSpeechEngine } from './browser-speech-engine';
+
+interface PlanCommon {
+  profile: Readonly<VoiceProfile>;
+  recipe?: AnnouncementRecipe;
+  amountVnd?: string;
+  transactionId?: string;
+  volume: number;
+  message: VoiceMessage;
+  release: () => void;
+}
+export type PreparedAnnouncement = PlanCommon & (
+  | { kind: 'buffers'; amountBuffer: AudioBuffer; tailBuffers: AudioBuffer[];
+      tail?: { ready: Promise<AudioBuffer | undefined>; abort: () => void } }
+  | { kind: 'stream'; streamUrl: string; audioElement: HTMLAudioElement }
+  | { kind: 'browser'; text: string; voiceURI: string }
+);
+export interface PreparationOptions {
+  isPublic: boolean;
+  context: AudioContext | null;
+  assets: AudioAssets;
+  recent: RecentPhraseRing;
+  browser: BrowserSpeechEngine;
+  onStatus?: (state: 'ready' | 'cold' | 'unavailable', detail?: string) => void;
+}
+
+export function voiceRoute(message: VoiceMessage, isPublic: boolean, profile: Readonly<VoiceProfile>, part: 'full' | 'amount' | 'tail') {
+  const base = isPublic ? '/api/public/v1' : '/api/v1';
+  let path: string;
+  if (message.isTest) path = '/voice/test';
+  else if (message.summaryTransactionIds && message.summaryTransactionIds.length >= 2) path = '/voice/transactions/summary';
+  else if (message.transactionId) {
+    path = `/voice/transactions/${encodeURIComponent(message.transactionId)}`;
+    if (message.isReplay && !isPublic) path += '/replay';
+  } else throw new Error('NO_ONLINE_ROUTE');
+  const body = { profileRevision: profile.revision, phraseId: part === 'amount' ? undefined : message.phraseId,
+    part, ...(message.summaryTransactionIds ? { transactionIds: message.summaryTransactionIds } : {}) };
+  const query = new URLSearchParams({ profileRevision: String(profile.revision), part });
+  if (body.phraseId) query.set('phraseId', body.phraseId);
+  if (message.summaryTransactionIds) query.set('transactionIds', message.summaryTransactionIds.join(','));
+  return { url: `${base}${path}`, streamUrl: `${base}${path}/stream?${query}`, body };
+}
+
+async function coldBuffer(message: VoiceMessage, profile: Readonly<VoiceProfile>, part: 'full' | 'amount' | 'tail',
+    options: PreparationOptions, signal: AbortSignal, owner: object): Promise<AudioBuffer> {
+  const route = voiceRoute(message, options.isPublic, profile, part);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) controller.abort();
+  const timer = setTimeout(abort, profile.coldRequestTimeoutMs);
+  try {
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    if (!options.isPublic) headers.set('X-CSRF-Token', await getCsrfToken());
+    throwIfAborted(controller.signal);
+    const response = await fetch(route.url, { method: 'POST', credentials: 'same-origin', signal: controller.signal,
+      headers, body: JSON.stringify(route.body) });
+    if (!response.ok) throw await parseApiError(response);
+    if (response.headers.get('X-Voice-Revision') !== String(profile.revision) ||
+        response.headers.get('X-Voice-Synthesis-Key') !== profile.synthesisKey ||
+        response.headers.get('X-TTS-Voice') !== profile.edgeVoice || response.headers.get('X-TTS-Provider') !== 'edge') {
+      await response.body?.cancel(); throw new Error('VOICE_AUDIO_PROFILE_MISMATCH');
+    }
+    const bytes = await readBounded(response, 4 * 1024 * 1024, controller.signal);
+    throwIfAborted(signal);
+    if (!options.context) throw new Error('AUDIO_CONTEXT_UNAVAILABLE');
+    // The eight-second network budget does not truncate playback or local decode.
+    clearTimeout(timer);
+    const buffer = await options.context.decodeAudioData(bytes);
+    throwIfAborted(signal);
+    const retained = options.assets.retainDecoded(`cold:${profile.synthesisKey}:${profile.revision}:${message.transactionId || 'test'}:${message.phraseId || ''}:${part}`, buffer, profile.synthesisKey, owner);
+    if (!retained) throw new Error('VOICE_DECODE_CAPACITY');
+    return retained;
+  } catch (error) {
+    throwIfAborted(signal);
+    if (controller.signal.aborted) throw new Error('TTS_TIMEOUT');
+    throw error;
+  } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
+}
+
+async function prepareNative(url: string, signal: AbortSignal, timeout: number): Promise<HTMLAudioElement> {
+  const AudioClass = typeof window !== 'undefined' ? window.Audio : undefined;
+  if (!AudioClass) throw new Error('AUDIO_CONTEXT_UNAVAILABLE');
+  const audio = new AudioClass();
+  audio.preload = 'auto';
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const clean = () => {
+      clearTimeout(timer); audio.removeEventListener('canplay', ready); audio.removeEventListener('error', failed);
+      signal.removeEventListener('abort', aborted);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true; clean();
+      if (error) { audio.pause(); audio.removeAttribute('src'); audio.load(); reject(error); }
+      else resolve(audio);
+    };
+    const ready = () => finish();
+    const failed = () => finish(new Error('AUDIO_PREPARATION_FAILED'));
+    const aborted = () => finish(new Error('VOICE_CANCELLED'));
+    const timer = setTimeout(() => finish(new Error('TTS_TIMEOUT')), timeout);
+    audio.addEventListener('canplay', ready); audio.addEventListener('error', failed);
+    signal.addEventListener('abort', aborted, { once: true });
+    if (signal.aborted) { aborted(); return; }
+    audio.src = url; audio.load();
+  });
+}
+
+export async function prepareAnnouncement(message: VoiceMessage, profile: Readonly<VoiceProfile>, signal: AbortSignal,
+    options: PreparationOptions): Promise<PreparedAnnouncement> {
+  throwIfAborted(signal);
+  const owner = {};
+  let objectURL: string | undefined;
+  let native: HTMLAudioElement | undefined;
+  let tailController: AbortController | undefined;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true; options.assets.release(owner); options.recent.release(owner); tailController?.abort();
+    if (native) { native.pause(); native.removeAttribute('src'); native.load(); }
+    if (objectURL) URL.revokeObjectURL(objectURL);
+    signal.removeEventListener('abort', release);
+  };
+  signal.addEventListener('abort', release, { once: true });
+  try {
+    const catalog = profile.funEnabled && !message.omitFun ? await loadVoiceCatalog(profile.catalogVersion, options.isPublic, signal) : null;
+    throwIfAborted(signal);
+    if (!message.recipe && !message.omitFun && message.amountVnd) {
+      message.recipe = selectAnnouncementRecipe({ transactionId: message.transactionId || 'voice-test', amountVnd: message.amountVnd,
+        profileRevision: profile.revision, catalogVersion: profile.catalogVersion, recentPhraseIds: options.recent.snapshot(), profile, catalog });
+      message.phraseId = message.recipe?.id;
+    }
+    const amount = message.amountVnd;
+    if (amount !== undefined && (!/^[1-9][0-9]*$/.test(amount) || BigInt(amount) > 9007199254740991n)) throw new Error('VOICE_INVALID_AMOUNT');
+    const band = amount ? profile.amountBands.find((b) => BigInt(amount) >= BigInt(b.fromVnd) && (b.toVnd === null || BigInt(amount) < BigInt(b.toVnd))) : undefined;
+    const custom = band?.styleId === 'custom' && profile.funEnabled && !message.omitFun;
+    const amountOnly = message.omitFun || !profile.funEnabled || (!message.recipe && !custom);
+    if (!amountOnly && message.recipe) options.recent.reserve(owner, message.recipe.id);
+    if (amount) {
+      message.text = amountOnly ? `Đã nhận ${speakVnd(amount)}.` : custom
+        ? formatAnnouncementTemplate(profile.customTemplate, { amount, description: message.description, includeDescription: profile.includeDescription })
+        : message.recipe?.template
+          ? formatAnnouncementTemplate(message.recipe.template, { amount, description: message.description, includeDescription: profile.includeDescription })
+          : `Đã nhận ${speakVnd(amount)}. ${message.recipe?.tail || ''}`;
+    }
+    const common: PlanCommon = { profile, recipe: amountOnly ? undefined : message.recipe, amountVnd: amount,
+      transactionId: message.transactionId, volume: Math.max(0, Math.min(1, message.volume ?? 1)), message, release };
+    if (profile.providerMode === 'BROWSER_ONLY') {
+      await options.browser.prefetch({ ...message, profile }, signal);
+      return { ...common, kind: 'browser', text: message.text, voiceURI: message.voiceURI || '' };
+    }
+    const context = options.context;
+    const manifest = !custom && !profile.includeDescription && amount && !message.summaryTransactionIds
+      ? await options.assets.getManifest(profile, signal) : null;
+    throwIfAborted(signal);
+    const mapping = amount && manifest ? manifest.amounts[amount] : undefined;
+    const classicId = !amountOnly && message.recipe?.styleId === 'classic' ? mapping?.classic[message.recipe.id] : undefined;
+    const needsClassicFull = !amountOnly && message.recipe?.styleId === 'classic';
+    const clipId = needsClassicFull ? classicId : mapping?.standard;
+    const clip = manifest?.clips.find((entry) => entry.clipId === clipId);
+    if (clip && amount && clip.transcript !== (classicId ? message.text : `Đã nhận ${speakVnd(amount)}.`)) throw new Error('VOICE_ASSET_TRANSCRIPT_MISMATCH');
+    if (clip && context) {
+      const buffer = await options.assets.getDecoded(clip, profile, context, owner, signal);
+      if (buffer) {
+        options.onStatus?.('ready', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế' : undefined);
+        const plan: PreparedAnnouncement = { ...common, kind: 'buffers', amountBuffer: buffer, tailBuffers: [] };
+        if (!classicId && !amountOnly && message.recipe) {
+          // Whole-tail mode remains active until fragment listening is approved.
+          tailController = new AbortController();
+          const ready = coldBuffer(message, profile, 'tail', options, tailController.signal, owner)
+            .then((value) => !tailController?.signal.aborted && !released ? value : undefined).catch(() => undefined);
+          plan.tail = { ready, abort: () => tailController?.abort() };
+        }
+        return plan;
+      }
+    }
+    if (clip && (amountOnly || classicId) && typeof window !== 'undefined' && window.Audio) {
+      const bytes = await options.assets.getCompressed(clip, signal);
+      objectURL = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+      native = await prepareNative(objectURL, signal, 8000);
+      options.onStatus?.('ready');
+      return { ...common, kind: 'stream', streamUrl: objectURL, audioElement: native };
+    }
+    options.onStatus?.('cold', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế · tổng hợp cùng giọng trực tuyến' : 'Chưa có bộ âm thanh cho cấu hình này');
+    const part = amountOnly ? 'amount' : 'full';
+    // Choose one cold transport before requesting. Never resynthesize after failure.
+    if (typeof window !== 'undefined' && window.Audio) {
+      const route = voiceRoute(message, options.isPublic, profile, part);
+      native = await prepareNative(route.streamUrl, signal, profile.coldRequestTimeoutMs);
+      return { ...common, kind: 'stream', streamUrl: route.streamUrl, audioElement: native };
+    }
+    const buffer = await coldBuffer(message, profile, part, options, signal, owner);
+    return { ...common, kind: 'buffers', amountBuffer: buffer, tailBuffers: [] };
+  } catch (error) { release(); throw error; }
+}
+
+export function markSpeechStarted(message: VoiceMessage): void {
+  if (message.telemetry) {
+    const now = performance.now();
+    message.telemetry.speechStartedAt = Date.now();
+    message.telemetry.speechStartedMonotonicAt = now;
+    if (message.telemetry.receivedMonotonicAt !== undefined) message.telemetry.sseToSpeakMs = now - message.telemetry.receivedMonotonicAt;
+    if (message.queuedMonotonicAt !== undefined) message.telemetry.queueToSpeakMs = now - message.queuedMonotonicAt;
+  }
+  message.onStart?.(message.telemetry);
+}
+
+export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSignal, options: PreparationOptions,
+    notBefore = 0): Promise<void> {
+  throwIfAborted(signal);
+  if (plan.kind === 'browser') {
+    await options.browser.speak({ ...plan.message, profile: plan.profile, text: plan.text, voiceURI: plan.voiceURI });
+    return;
+  }
+  if (plan.kind === 'stream') {
+    const audio = plan.audioElement;
+    audio.volume = plan.volume; audio.playbackRate = 1;
+    await new Promise<void>((resolve, reject) => {
+      let started = false, settled = false;
+      const finish = (error?: unknown) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        signal.removeEventListener('abort', aborted);
+        audio.removeEventListener('playing', playing); audio.removeEventListener('ended', ended); audio.removeEventListener('error', failed);
+        if (error) reject(Object.assign(error instanceof Error ? error : new Error(String(error)), { playbackStarted: started }));
+        else resolve();
+      };
+      const playing = () => { if (!started) { started = true; markSpeechStarted(plan.message); if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id); } };
+      // Native whole-phrase audio has no word-boundary event: completion is the
+      // conservative evidence that the tail was heard, never a guessed timestamp.
+      const ended = () => { if (plan.recipe && plan.recipe.styleId !== 'classic') plan.message.onTailStart?.(plan.recipe.id); finish(); };
+      const aborted = () => { audio.pause(); finish(new Error('VOICE_CANCELLED')); };
+      const failed = () => finish(new Error(started ? 'AUDIO_STREAM_INTERRUPTED' : 'AUDIO_PLAYBACK_ERROR'));
+      const timer = setTimeout(() => finish(new Error('AUDIO_PLAYBACK_TIMEOUT')), 120000);
+      signal.addEventListener('abort', aborted, { once: true });
+      audio.addEventListener('playing', playing); audio.addEventListener('ended', ended); audio.addEventListener('error', failed);
+      if (signal.aborted) { aborted(); return; }
+      try { void audio.play().catch(finish); } catch (error) { finish(error); }
+    });
+    return;
+  }
+  const context = options.context;
+  if (!context) throw new Error('AUDIO_CONTEXT_UNAVAILABLE');
+  if (context.state === 'suspended') await context.resume();
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const sources: AudioBufferSourceNode[] = [];
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(plan.volume, context.currentTime); gain.connect(context.destination);
+    let started = false, settled = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true; clearTimeout(watchdog); timers.forEach(clearTimeout); signal.removeEventListener('abort', aborted);
+      for (const source of sources) { source.onended = null; try { source.stop(); } catch {} source.disconnect(); }
+      gain.disconnect();
+      if (error) reject(Object.assign(error, { playbackStarted: started })); else resolve();
+    };
+    const aborted = () => finish(new Error('VOICE_CANCELLED'));
+    const watchdog = setTimeout(() => finish(new Error('AUDIO_PLAYBACK_TIMEOUT')), 120000);
+    signal.addEventListener('abort', aborted, { once: true });
+    let cursor = Math.max(context.currentTime, notBefore);
+    const startAt = cursor;
+    const schedule = (buffer: AudioBuffer, end: () => void) => {
+      const source = context.createBufferSource(); source.buffer = buffer; source.playbackRate.value = 1;
+      source.connect(gain); source.onended = end; sources.push(source);
+      source.start(cursor); cursor += buffer.duration;
+    };
+    try {
+      if (signal.aborted) { aborted(); return; }
+      let tailScheduled = false;
+      schedule(plan.amountBuffer, () => {
+        if (settled) return;
+        if (plan.tail && !tailScheduled) { plan.tail.abort(); finish(); }
+        else if (!plan.tail && plan.tailBuffers.length === 0) {
+          if (plan.recipe && plan.recipe.styleId !== 'classic') plan.message.onTailStart?.(plan.recipe.id);
+          finish();
+        }
+      });
+      const amountEnd = cursor;
+      const markTail = () => {
+        timers.push(setTimeout(() => {
+          if (!settled && !signal.aborted && plan.recipe) plan.message.onTailStart?.(plan.recipe.id);
+        }, Math.max(0, (amountEnd - context.currentTime) * 1000)));
+      };
+      for (let i = 0; i < plan.tailBuffers.length; i++) {
+        schedule(plan.tailBuffers[i], i === plan.tailBuffers.length - 1 ? () => finish() : () => {});
+      }
+      if (plan.tailBuffers.length) markTail();
+      if (plan.tail) void plan.tail.ready.then((buffer) => {
+        // Schedule on the same audio clock before the core ends. End callbacks
+        // only release lifecycle; they never introduce an MP3 stitching gap.
+        if (!buffer || settled || signal.aborted || context.currentTime >= amountEnd) return;
+        tailScheduled = true;
+        schedule(buffer, () => finish());
+        markTail();
+      });
+      timers.push(setTimeout(() => {
+        if (settled || signal.aborted) return;
+        started = true; markSpeechStarted(plan.message);
+        if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id);
+      }, Math.max(0, (startAt - context.currentTime) * 1000)));
+    } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+  });
+}

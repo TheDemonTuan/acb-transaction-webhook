@@ -1,0 +1,507 @@
+{
+  "id": "cute-medium-b02",
+  "styleId": "cute",
+  "bandId": "medium",
+  "recipes": [
+    {
+      "id": "cute-medium-o006-c001",
+      "text": "Một chùm nắng vừa ghé tới. Cảm ơn bạn đã tin tưởng."
+    },
+    {
+      "id": "cute-medium-o006-c002",
+      "text": "Một chùm nắng vừa ghé tới. Chúc bạn ngày dài tươi sáng."
+    },
+    {
+      "id": "cute-medium-o006-c003",
+      "text": "Một chùm nắng vừa ghé tới. Mong bạn gặp chuyện dễ thương."
+    },
+    {
+      "id": "cute-medium-o006-c004",
+      "text": "Một chùm nắng vừa ghé tới. Gửi bạn lời cảm ơn ấm."
+    },
+    {
+      "id": "cute-medium-o006-c005",
+      "text": "Một chùm nắng vừa ghé tới. Chúc bạn một chiều thật đẹp."
+    },
+    {
+      "id": "cute-medium-o006-c006",
+      "text": "Một chùm nắng vừa ghé tới. Cảm ơn bạn đã ủng hộ."
+    },
+    {
+      "id": "cute-medium-o006-c007",
+      "text": "Một chùm nắng vừa ghé tới. Mong bạn giữ được niềm vui."
+    },
+    {
+      "id": "cute-medium-o006-c008",
+      "text": "Một chùm nắng vừa ghé tới. Chúc buổi này thật dịu dàng."
+    },
+    {
+      "id": "cute-medium-o006-c009",
+      "text": "Một chùm nắng vừa ghé tới. Gửi bạn nhiều điều tốt lành."
+    },
+    {
+      "id": "cute-medium-o006-c010",
+      "text": "Một chùm nắng vừa ghé tới. Cảm ơn bạn luôn tin yêu."
+    },
+    {
+      "id": "cute-medium-o006-c011",
+      "text": "Một chùm nắng vừa ghé tới. Chúc bạn nở nụ cười tươi."
+    },
+    {
+      "id": "cute-medium-o006-c012",
+      "text": "Một chùm nắng vừa ghé tới. Mong mọi chuyến đi đều êm."
+    },
+    {
+      "id": "cute-medium-o006-c013",
+      "text": "Một chùm nắng vừa ghé tới. Gửi bạn một lời chúc đẹp."
+    },
+    {
+      "id": "cute-medium-o006-c014",
+      "text": "Một chùm nắng vừa ghé tới. Cảm ơn tình cảm của bạn."
+    },
+    {
+      "id": "cute-medium-o006-c015",
+      "text": "Một chùm nắng vừa ghé tới. Chúc bạn hôm nay thong thả."
+    },
+    {
+      "id": "cute-medium-o006-c016",
+      "text": "Một chùm nắng vừa ghé tới. Mong bạn có phút nghỉ vui."
+    },
+    {
+      "id": "cute-medium-o006-c017",
+      "text": "Một chùm nắng vừa ghé tới. Gửi bạn chút nắng trong lòng."
+    },
+    {
+      "id": "cute-medium-o006-c018",
+      "text": "Một chùm nắng vừa ghé tới. Cảm ơn bạn vì tin yêu."
+    },
+    {
+      "id": "cute-medium-o006-c019",
+      "text": "Một chùm nắng vừa ghé tới. Chúc bạn ngày mới an lành."
+    },
+    {
+      "id": "cute-medium-o006-c020",
+      "text": "Một chùm nắng vừa ghé tới. Mong ngày của bạn sáng hơn."
+    },
+    {
+      "id": "cute-medium-o006-c021",
+      "text": "Một chùm nắng vừa ghé tới. Gửi bạn niềm vui thật hiền."
+    },
+    {
+      "id": "cute-medium-o006-c022",
+      "text": "Một chùm nắng vừa ghé tới. Cảm ơn một lần ghé quý."
+    },
+    {
+      "id": "cute-medium-o006-c023",
+      "text": "Một chùm nắng vừa ghé tới. Chúc bạn vững nhịp bình yên."
+    },
+    {
+      "id": "cute-medium-o006-c024",
+      "text": "Một chùm nắng vừa ghé tới. Mong bạn có nhiều tin vui."
+    },
+    {
+      "id": "cute-medium-o006-c025",
+      "text": "Một chùm nắng vừa ghé tới. Gửi bạn lời tri ân ấm."
+    },
+    {
+      "id": "cute-medium-o007-c001",
+      "text": "Quầy có thêm lời reo nhỏ. Cảm ơn bạn đã tin tưởng."
+    },
+    {
+      "id": "cute-medium-o007-c002",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc bạn ngày dài tươi sáng."
+    },
+    {
+      "id": "cute-medium-o007-c003",
+      "text": "Quầy có thêm lời reo nhỏ. Mong bạn gặp chuyện dễ thương."
+    },
+    {
+      "id": "cute-medium-o007-c004",
+      "text": "Quầy có thêm lời reo nhỏ. Gửi bạn lời cảm ơn ấm."
+    },
+    {
+      "id": "cute-medium-o007-c005",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc bạn một chiều thật đẹp."
+    },
+    {
+      "id": "cute-medium-o007-c006",
+      "text": "Quầy có thêm lời reo nhỏ. Cảm ơn bạn đã ủng hộ."
+    },
+    {
+      "id": "cute-medium-o007-c007",
+      "text": "Quầy có thêm lời reo nhỏ. Mong bạn giữ được niềm vui."
+    },
+    {
+      "id": "cute-medium-o007-c008",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc buổi này thật dịu dàng."
+    },
+    {
+      "id": "cute-medium-o007-c009",
+      "text": "Quầy có thêm lời reo nhỏ. Gửi bạn nhiều điều tốt lành."
+    },
+    {
+      "id": "cute-medium-o007-c010",
+      "text": "Quầy có thêm lời reo nhỏ. Cảm ơn bạn luôn tin yêu."
+    },
+    {
+      "id": "cute-medium-o007-c011",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc bạn nở nụ cười tươi."
+    },
+    {
+      "id": "cute-medium-o007-c012",
+      "text": "Quầy có thêm lời reo nhỏ. Mong mọi chuyến đi đều êm."
+    },
+    {
+      "id": "cute-medium-o007-c013",
+      "text": "Quầy có thêm lời reo nhỏ. Gửi bạn một lời chúc đẹp."
+    },
+    {
+      "id": "cute-medium-o007-c014",
+      "text": "Quầy có thêm lời reo nhỏ. Cảm ơn tình cảm của bạn."
+    },
+    {
+      "id": "cute-medium-o007-c015",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc bạn hôm nay thong thả."
+    },
+    {
+      "id": "cute-medium-o007-c016",
+      "text": "Quầy có thêm lời reo nhỏ. Mong bạn có phút nghỉ vui."
+    },
+    {
+      "id": "cute-medium-o007-c017",
+      "text": "Quầy có thêm lời reo nhỏ. Gửi bạn chút nắng trong lòng."
+    },
+    {
+      "id": "cute-medium-o007-c018",
+      "text": "Quầy có thêm lời reo nhỏ. Cảm ơn bạn vì tin yêu."
+    },
+    {
+      "id": "cute-medium-o007-c019",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc bạn ngày mới an lành."
+    },
+    {
+      "id": "cute-medium-o007-c020",
+      "text": "Quầy có thêm lời reo nhỏ. Mong ngày của bạn sáng hơn."
+    },
+    {
+      "id": "cute-medium-o007-c021",
+      "text": "Quầy có thêm lời reo nhỏ. Gửi bạn niềm vui thật hiền."
+    },
+    {
+      "id": "cute-medium-o007-c022",
+      "text": "Quầy có thêm lời reo nhỏ. Cảm ơn một lần ghé quý."
+    },
+    {
+      "id": "cute-medium-o007-c023",
+      "text": "Quầy có thêm lời reo nhỏ. Chúc bạn vững nhịp bình yên."
+    },
+    {
+      "id": "cute-medium-o007-c024",
+      "text": "Quầy có thêm lời reo nhỏ. Mong bạn có nhiều tin vui."
+    },
+    {
+      "id": "cute-medium-o007-c025",
+      "text": "Quầy có thêm lời reo nhỏ. Gửi bạn lời tri ân ấm."
+    },
+    {
+      "id": "cute-medium-o008-c001",
+      "text": "Một nhịp vui vừa bắt đầu. Cảm ơn bạn đã tin tưởng."
+    },
+    {
+      "id": "cute-medium-o008-c002",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc bạn ngày dài tươi sáng."
+    },
+    {
+      "id": "cute-medium-o008-c003",
+      "text": "Một nhịp vui vừa bắt đầu. Mong bạn gặp chuyện dễ thương."
+    },
+    {
+      "id": "cute-medium-o008-c004",
+      "text": "Một nhịp vui vừa bắt đầu. Gửi bạn lời cảm ơn ấm."
+    },
+    {
+      "id": "cute-medium-o008-c005",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc bạn một chiều thật đẹp."
+    },
+    {
+      "id": "cute-medium-o008-c006",
+      "text": "Một nhịp vui vừa bắt đầu. Cảm ơn bạn đã ủng hộ."
+    },
+    {
+      "id": "cute-medium-o008-c007",
+      "text": "Một nhịp vui vừa bắt đầu. Mong bạn giữ được niềm vui."
+    },
+    {
+      "id": "cute-medium-o008-c008",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc buổi này thật dịu dàng."
+    },
+    {
+      "id": "cute-medium-o008-c009",
+      "text": "Một nhịp vui vừa bắt đầu. Gửi bạn nhiều điều tốt lành."
+    },
+    {
+      "id": "cute-medium-o008-c010",
+      "text": "Một nhịp vui vừa bắt đầu. Cảm ơn bạn luôn tin yêu."
+    },
+    {
+      "id": "cute-medium-o008-c011",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc bạn nở nụ cười tươi."
+    },
+    {
+      "id": "cute-medium-o008-c012",
+      "text": "Một nhịp vui vừa bắt đầu. Mong mọi chuyến đi đều êm."
+    },
+    {
+      "id": "cute-medium-o008-c013",
+      "text": "Một nhịp vui vừa bắt đầu. Gửi bạn một lời chúc đẹp."
+    },
+    {
+      "id": "cute-medium-o008-c014",
+      "text": "Một nhịp vui vừa bắt đầu. Cảm ơn tình cảm của bạn."
+    },
+    {
+      "id": "cute-medium-o008-c015",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc bạn hôm nay thong thả."
+    },
+    {
+      "id": "cute-medium-o008-c016",
+      "text": "Một nhịp vui vừa bắt đầu. Mong bạn có phút nghỉ vui."
+    },
+    {
+      "id": "cute-medium-o008-c017",
+      "text": "Một nhịp vui vừa bắt đầu. Gửi bạn chút nắng trong lòng."
+    },
+    {
+      "id": "cute-medium-o008-c018",
+      "text": "Một nhịp vui vừa bắt đầu. Cảm ơn bạn vì tin yêu."
+    },
+    {
+      "id": "cute-medium-o008-c019",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc bạn ngày mới an lành."
+    },
+    {
+      "id": "cute-medium-o008-c020",
+      "text": "Một nhịp vui vừa bắt đầu. Mong ngày của bạn sáng hơn."
+    },
+    {
+      "id": "cute-medium-o008-c021",
+      "text": "Một nhịp vui vừa bắt đầu. Gửi bạn niềm vui thật hiền."
+    },
+    {
+      "id": "cute-medium-o008-c022",
+      "text": "Một nhịp vui vừa bắt đầu. Cảm ơn một lần ghé quý."
+    },
+    {
+      "id": "cute-medium-o008-c023",
+      "text": "Một nhịp vui vừa bắt đầu. Chúc bạn vững nhịp bình yên."
+    },
+    {
+      "id": "cute-medium-o008-c024",
+      "text": "Một nhịp vui vừa bắt đầu. Mong bạn có nhiều tin vui."
+    },
+    {
+      "id": "cute-medium-o008-c025",
+      "text": "Một nhịp vui vừa bắt đầu. Gửi bạn lời tri ân ấm."
+    },
+    {
+      "id": "cute-medium-o009-c001",
+      "text": "Không gian bỗng tươi hơn rồi. Cảm ơn bạn đã tin tưởng."
+    },
+    {
+      "id": "cute-medium-o009-c002",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc bạn ngày dài tươi sáng."
+    },
+    {
+      "id": "cute-medium-o009-c003",
+      "text": "Không gian bỗng tươi hơn rồi. Mong bạn gặp chuyện dễ thương."
+    },
+    {
+      "id": "cute-medium-o009-c004",
+      "text": "Không gian bỗng tươi hơn rồi. Gửi bạn lời cảm ơn ấm."
+    },
+    {
+      "id": "cute-medium-o009-c005",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc bạn một chiều thật đẹp."
+    },
+    {
+      "id": "cute-medium-o009-c006",
+      "text": "Không gian bỗng tươi hơn rồi. Cảm ơn bạn đã ủng hộ."
+    },
+    {
+      "id": "cute-medium-o009-c007",
+      "text": "Không gian bỗng tươi hơn rồi. Mong bạn giữ được niềm vui."
+    },
+    {
+      "id": "cute-medium-o009-c008",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc buổi này thật dịu dàng."
+    },
+    {
+      "id": "cute-medium-o009-c009",
+      "text": "Không gian bỗng tươi hơn rồi. Gửi bạn nhiều điều tốt lành."
+    },
+    {
+      "id": "cute-medium-o009-c010",
+      "text": "Không gian bỗng tươi hơn rồi. Cảm ơn bạn luôn tin yêu."
+    },
+    {
+      "id": "cute-medium-o009-c011",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc bạn nở nụ cười tươi."
+    },
+    {
+      "id": "cute-medium-o009-c012",
+      "text": "Không gian bỗng tươi hơn rồi. Mong mọi chuyến đi đều êm."
+    },
+    {
+      "id": "cute-medium-o009-c013",
+      "text": "Không gian bỗng tươi hơn rồi. Gửi bạn một lời chúc đẹp."
+    },
+    {
+      "id": "cute-medium-o009-c014",
+      "text": "Không gian bỗng tươi hơn rồi. Cảm ơn tình cảm của bạn."
+    },
+    {
+      "id": "cute-medium-o009-c015",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc bạn hôm nay thong thả."
+    },
+    {
+      "id": "cute-medium-o009-c016",
+      "text": "Không gian bỗng tươi hơn rồi. Mong bạn có phút nghỉ vui."
+    },
+    {
+      "id": "cute-medium-o009-c017",
+      "text": "Không gian bỗng tươi hơn rồi. Gửi bạn chút nắng trong lòng."
+    },
+    {
+      "id": "cute-medium-o009-c018",
+      "text": "Không gian bỗng tươi hơn rồi. Cảm ơn bạn vì tin yêu."
+    },
+    {
+      "id": "cute-medium-o009-c019",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc bạn ngày mới an lành."
+    },
+    {
+      "id": "cute-medium-o009-c020",
+      "text": "Không gian bỗng tươi hơn rồi. Mong ngày của bạn sáng hơn."
+    },
+    {
+      "id": "cute-medium-o009-c021",
+      "text": "Không gian bỗng tươi hơn rồi. Gửi bạn niềm vui thật hiền."
+    },
+    {
+      "id": "cute-medium-o009-c022",
+      "text": "Không gian bỗng tươi hơn rồi. Cảm ơn một lần ghé quý."
+    },
+    {
+      "id": "cute-medium-o009-c023",
+      "text": "Không gian bỗng tươi hơn rồi. Chúc bạn vững nhịp bình yên."
+    },
+    {
+      "id": "cute-medium-o009-c024",
+      "text": "Không gian bỗng tươi hơn rồi. Mong bạn có nhiều tin vui."
+    },
+    {
+      "id": "cute-medium-o009-c025",
+      "text": "Không gian bỗng tươi hơn rồi. Gửi bạn lời tri ân ấm."
+    },
+    {
+      "id": "cute-medium-o010-c001",
+      "text": "Một niềm hân hoan vừa đến. Cảm ơn bạn đã tin tưởng."
+    },
+    {
+      "id": "cute-medium-o010-c002",
+      "text": "Một niềm hân hoan vừa đến. Chúc bạn ngày dài tươi sáng."
+    },
+    {
+      "id": "cute-medium-o010-c003",
+      "text": "Một niềm hân hoan vừa đến. Mong bạn gặp chuyện dễ thương."
+    },
+    {
+      "id": "cute-medium-o010-c004",
+      "text": "Một niềm hân hoan vừa đến. Gửi bạn lời cảm ơn ấm."
+    },
+    {
+      "id": "cute-medium-o010-c005",
+      "text": "Một niềm hân hoan vừa đến. Chúc bạn một chiều thật đẹp."
+    },
+    {
+      "id": "cute-medium-o010-c006",
+      "text": "Một niềm hân hoan vừa đến. Cảm ơn bạn đã ủng hộ."
+    },
+    {
+      "id": "cute-medium-o010-c007",
+      "text": "Một niềm hân hoan vừa đến. Mong bạn giữ được niềm vui."
+    },
+    {
+      "id": "cute-medium-o010-c008",
+      "text": "Một niềm hân hoan vừa đến. Chúc buổi này thật dịu dàng."
+    },
+    {
+      "id": "cute-medium-o010-c009",
+      "text": "Một niềm hân hoan vừa đến. Gửi bạn nhiều điều tốt lành."
+    },
+    {
+      "id": "cute-medium-o010-c010",
+      "text": "Một niềm hân hoan vừa đến. Cảm ơn bạn luôn tin yêu."
+    },
+    {
+      "id": "cute-medium-o010-c011",
+      "text": "Một niềm hân hoan vừa đến. Chúc bạn nở nụ cười tươi."
+    },
+    {
+      "id": "cute-medium-o010-c012",
+      "text": "Một niềm hân hoan vừa đến. Mong mọi chuyến đi đều êm."
+    },
+    {
+      "id": "cute-medium-o010-c013",
+      "text": "Một niềm hân hoan vừa đến. Gửi bạn một lời chúc đẹp."
+    },
+    {
+      "id": "cute-medium-o010-c014",
+      "text": "Một niềm hân hoan vừa đến. Cảm ơn tình cảm của bạn."
+    },
+    {
+      "id": "cute-medium-o010-c015",
+      "text": "Một niềm hân hoan vừa đến. Chúc bạn hôm nay thong thả."
+    },
+    {
+      "id": "cute-medium-o010-c016",
+      "text": "Một niềm hân hoan vừa đến. Mong bạn có phút nghỉ vui."
+    },
+    {
+      "id": "cute-medium-o010-c017",
+      "text": "Một niềm hân hoan vừa đến. Gửi bạn chút nắng trong lòng."
+    },
+    {
+      "id": "cute-medium-o010-c018",
+      "text": "Một niềm hân hoan vừa đến. Cảm ơn bạn vì tin yêu."
+    },
+    {
+      "id": "cute-medium-o010-c019",
+      "text": "Một niềm hân hoan vừa đến. Chúc bạn ngày mới an lành."
+    },
+    {
+      "id": "cute-medium-o010-c020",
+      "text": "Một niềm hân hoan vừa đến. Mong ngày của bạn sáng hơn."
+    },
+    {
+      "id": "cute-medium-o010-c021",
+      "text": "Một niềm hân hoan vừa đến. Gửi bạn niềm vui thật hiền."
+    },
+    {
+      "id": "cute-medium-o010-c022",
+      "text": "Một niềm hân hoan vừa đến. Cảm ơn một lần ghé quý."
+    },
+    {
+      "id": "cute-medium-o010-c023",
+      "text": "Một niềm hân hoan vừa đến. Chúc bạn vững nhịp bình yên."
+    },
+    {
+      "id": "cute-medium-o010-c024",
+      "text": "Một niềm hân hoan vừa đến. Mong bạn có nhiều tin vui."
+    },
+    {
+      "id": "cute-medium-o010-c025",
+      "text": "Một niềm hân hoan vừa đến. Gửi bạn lời tri ân ấm."
+    }
+  ]
+}

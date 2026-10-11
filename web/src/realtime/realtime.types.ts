@@ -5,6 +5,7 @@ export interface RealtimeEnvelope<T = unknown> {
   type: string;
   data: T;
   receivedAt: number;
+  receivedMonotonicAt?: number;
 }
 
 export interface BankTransactionCreditData {
@@ -38,6 +39,10 @@ export interface NotificationChangedData {
   status?: string;
   name?: string;
   provider?: string;
+}
+
+export interface VoiceSettingsChangedData {
+  revision: number;
 }
 
 export interface DeliveryChangedData {

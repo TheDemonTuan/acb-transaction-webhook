@@ -39,6 +39,19 @@ func TestSpeakVND(t *testing.T) {
 		{10500000, "mười triệu năm trăm nghìn đồng"},
 		{1000000000, "một tỷ đồng"},
 		{2500000000, "hai tỷ năm trăm triệu đồng"},
+		{1001, "một nghìn không trăm linh một đồng"},
+		{10005, "mười nghìn không trăm linh năm đồng"},
+		{49999, "bốn mươi chín nghìn chín trăm chín mươi chín đồng"},
+		{50000, "năm mươi nghìn đồng"},
+		{99999, "chín mươi chín nghìn chín trăm chín mươi chín đồng"},
+		{100001, "một trăm nghìn không trăm linh một đồng"},
+		{199999, "một trăm chín mươi chín nghìn chín trăm chín mươi chín đồng"},
+		{200000, "hai trăm nghìn đồng"},
+		{999999, "chín trăm chín mươi chín nghìn chín trăm chín mươi chín đồng"},
+		{1000001, "một triệu không trăm linh một đồng"},
+		{1010005, "một triệu không trăm mười nghìn không trăm linh năm đồng"},
+		{1000000000000, "một nghìn tỷ đồng"},
+		{9007199254740991, "chín triệu không trăm linh bảy nghìn một trăm chín mươi chín tỷ hai trăm năm mươi tư triệu bảy trăm bốn mươi nghìn chín trăm chín mươi mốt đồng"},
 	}
 
 	for _, tt := range tests {

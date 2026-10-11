@@ -27,6 +27,8 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
           cancelReject = null;
         }
       },
+      prefetch: async () => {},
+      dispose: () => {},
     };
 
     const queue = new VoiceQueue(engine);
@@ -78,6 +80,8 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
       getVoices: async () => [],
       speak: async () => {},
       cancel: () => {},
+      prefetch: async () => {},
+      dispose: () => {},
     };
 
     const queue = new VoiceQueue(engine);
@@ -107,6 +111,8 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
         spoken.push(msg.text);
       },
       cancel: () => {},
+      prefetch: async () => {},
+      dispose: () => {},
     };
 
     const queue = new VoiceQueue(engine);
@@ -119,7 +125,6 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
     queue.enqueue({
       text,
       transactionId: opts.transactionId,
-      includeDescription: true,
       onSuccess: () => dedupe.commit(opts),
       onError: () => dedupe.release(opts),
     });

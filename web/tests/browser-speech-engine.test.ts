@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserSpeechEngine, isVietnameseVoice } from '../src/features/voice-announcements/browser-speech-engine';
+import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 
 describe('BrowserSpeechEngine strict Vietnamese', () => {
   let prevWindow: any;
@@ -96,7 +97,7 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
 
     const engine = new BrowserSpeechEngine();
     await expect(
-      engine.speak({ text: 'Bạn vừa nhận được tiền' })
+      engine.speak({ text: 'Bạn vừa nhận được tiền', profile: { ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY' }, voiceURI: 'en-us-david' })
     ).rejects.toThrow('BROWSER_VIETNAMESE_VOICE_UNAVAILABLE');
 
     expect(mockSynth.speak).not.toHaveBeenCalled();
@@ -197,7 +198,7 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
     }
   });
 
-  it('speaks successfully with custom rate when Vietnamese voice is available', async () => {
+  it('speaks with rate from resolved profile when exact Vietnamese voice is available', async () => {
     let capturedRate = 0;
     class MockUtterance {
       text: string;
@@ -251,11 +252,19 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
 
     const engine = new BrowserSpeechEngine();
     await expect(
-      engine.speak({ text: 'Bạn vừa nhận được tiền', rate: 1.5 })
+      engine.speak({ text: 'Bạn vừa nhận được tiền', profile: { ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY', rate: 1.5 }, voiceURI: 'vi-vn-hoaimy' })
     ).resolves.toBeUndefined();
 
     expect(mockSynth.speak).toHaveBeenCalledTimes(1);
     expect(capturedRate).toBe(1.5);
     expect(engine.getStatus()).toBe('ready');
+  });
+
+  it('never selects another Vietnamese voice when the selected URI disappears', () => {
+    vi.stubGlobal('window', { speechSynthesis: { getVoices: () => [{ lang: 'vi-VN', voiceURI: 'other' }] }, SpeechSynthesisUtterance: class {} });
+    const engine = new BrowserSpeechEngine();
+    expect(engine.resolveVoice('missing')).toBeUndefined();
+    expect(engine.resolveVoice()).toBeUndefined();
+    vi.unstubAllGlobals();
   });
 });

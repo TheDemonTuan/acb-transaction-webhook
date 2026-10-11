@@ -16,6 +16,13 @@ var (
 	ErrUnavailable     = errors.New("tts_service_unavailable")
 	ErrSynthesisFailed = errors.New("tts_synthesis_failed")
 	ErrUnauthorized    = errors.New("tts_unauthorized")
+	ErrOverloaded      = errors.New("tts_overloaded")
+	ErrTimeout         = errors.New("tts_timeout")
+)
+
+const (
+	maxSynthesisDuration = 8 * time.Second
+	maxAudioBytes        = 4 << 20
 )
 
 type SynthesizeRequest struct {
@@ -26,6 +33,7 @@ type SynthesizeRequest struct {
 	Cacheable     bool   `json:"cacheable"`
 	AllowFallback *bool  `json:"allow_fallback,omitempty"`
 	ProviderMode  string `json:"provider_mode,omitempty"`
+	TimeoutMS     int    `json:"timeout_ms"`
 }
 
 type SynthesizeResult struct {
@@ -68,7 +76,8 @@ func New(baseURL, internalToken string) *Client {
 	streamTransport := http.DefaultTransport
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		cloned := t.Clone()
-		cloned.ResponseHeaderTimeout = 5 * time.Second
+		// The request context owns the entire synthesis budget, including headers.
+		cloned.ResponseHeaderTimeout = 0
 		streamTransport = cloned
 	}
 
@@ -76,7 +85,8 @@ func New(baseURL, internalToken string) *Client {
 		baseURL:       strings.TrimRight(baseURL, "/"),
 		internalToken: internalToken,
 		bufferedClient: &http.Client{
-			Timeout: 8 * time.Second,
+			Transport: streamTransport,
+			Timeout:   8 * time.Second,
 		},
 		streamClient: &http.Client{
 			Transport: streamTransport,
@@ -95,168 +105,199 @@ func (c *Client) WithHTTPClients(buffered, stream *http.Client) *Client {
 	return c
 }
 
-func (c *Client) SynthesizeStream(ctx context.Context, req SynthesizeRequest) (*StreamResult, error) {
+// synthesisRequest starts one total budget. Neither headers nor body reads renew it.
+func (c *Client) synthesisRequest(ctx context.Context, path string, req SynthesizeRequest) (*http.Request, context.CancelFunc, error) {
+	ctx, cancel := context.WithTimeout(ctx, maxSynthesisDuration)
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return nil, nil, synthesisError(ctx, err)
+	}
+	deadline, _ := ctx.Deadline()
+	req.TimeoutMS = int(time.Until(deadline) / time.Millisecond)
+	if req.TimeoutMS < 1 {
+		req.TimeoutMS = 1
+	}
+	if req.TimeoutMS > 8000 {
+		req.TimeoutMS = 8000
+	}
 	bodyBytes, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		cancel()
+		return nil, nil, ErrSynthesisFailed
 	}
-
-	url := c.baseURL + "/synthesize/stream"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+		cancel()
+		return nil, nil, ErrUnavailable
 	}
-
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.internalToken != "" {
 		httpReq.Header.Set("X-Internal-TTS-Token", c.internalToken)
 	}
+	return httpReq, cancel, nil
+}
 
+// synthesisError never exposes transport URLs or upstream error text.
+func synthesisError(ctx context.Context, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", ErrTimeout, context.DeadlineExceeded)
+	}
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return ErrTimeout
+	}
+	return ErrUnavailable
+}
+
+func synthesisStatusError(status int) error {
+	switch status {
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusServiceUnavailable:
+		return ErrOverloaded
+	case http.StatusGatewayTimeout:
+		return ErrTimeout
+	case http.StatusBadGateway:
+		return ErrUnavailable
+	default:
+		return ErrSynthesisFailed
+	}
+}
+
+// synthesisBody caps streaming consumers as well as buffered reads. It probes one
+// extra byte at the limit so oversized audio cannot become a successful truncation.
+type synthesisBody struct {
+	body      io.ReadCloser
+	ctx       context.Context
+	cancel    context.CancelFunc
+	remaining int
+	closed    bool
+	readErr   error
+}
+
+func (b *synthesisBody) Close() error {
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	err := b.body.Close()
+	b.cancel()
+	return err
+}
+
+func (b *synthesisBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.readErr != nil {
+		return 0, b.readErr
+	}
+	if b.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if b.remaining == 0 {
+		var probe [1]byte
+		n, err := b.body.Read(probe[:])
+		if n > 0 {
+			b.readErr = ErrSynthesisFailed
+		} else if err != nil {
+			b.readErr = err
+			if !errors.Is(err, io.EOF) {
+				b.readErr = synthesisError(b.ctx, err)
+			}
+		} else {
+			return 0, nil
+		}
+		_ = b.Close()
+		return 0, b.readErr
+	}
+	if len(p) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.body.Read(p)
+	b.remaining -= n
+	if err != nil {
+		b.readErr = err
+		if !errors.Is(err, io.EOF) {
+			b.readErr = synthesisError(b.ctx, err)
+		}
+		_ = b.Close()
+		err = b.readErr
+	}
+	return n, err
+}
+
+func (c *Client) SynthesizeStream(ctx context.Context, req SynthesizeRequest) (*StreamResult, error) {
+	httpReq, cancel, err := c.synthesisRequest(ctx, "/synthesize/stream", req)
+	if err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	resp, err := c.streamClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		err = synthesisError(httpReq.Context(), err)
+		cancel()
+		return nil, err
 	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		_ = resp.Body.Close()
-		return nil, ErrUnauthorized
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		_ = resp.Body.Close()
-		return c.synthesizeStreamBufferedFallback(ctx, req)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("%w (status %d): %s", ErrSynthesisFailed, resp.StatusCode, string(respBody))
-	}
-
-	buf := make([]byte, 4096)
-	n, err := resp.Body.Read(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("read initial chunk: %w", err)
+		cancel()
+		return nil, synthesisStatusError(resp.StatusCode)
 	}
-	firstByteDuration := time.Since(start)
-
+	body := &synthesisBody{body: resp.Body, ctx: httpReq.Context(), cancel: cancel, remaining: maxAudioBytes}
+	buf := make([]byte, 4096)
+	n, err := body.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		_ = body.Close()
+		return nil, err
+	}
 	provider := resp.Header.Get("X-TTS-Provider")
 	if provider == "" {
 		provider = "edge"
 	}
-	voice := resp.Header.Get("X-TTS-Voice")
-	fallback := strings.EqualFold(resp.Header.Get("X-TTS-Fallback"), "true")
-	cached := strings.EqualFold(resp.Header.Get("X-TTS-Cached"), "true")
-
-	var reader io.Reader
-	if n > 0 {
-		reader = io.MultiReader(bytes.NewReader(buf[:n]), resp.Body)
-	} else {
-		reader = resp.Body
-	}
-
 	return &StreamResult{
-		Reader:            reader,
-		Closer:            resp.Body,
+		Reader:            io.MultiReader(bytes.NewReader(buf[:n]), body),
+		Closer:            body,
 		Provider:          provider,
-		Voice:             voice,
-		Fallback:          fallback,
-		Cached:            cached,
-		FirstByteDuration: firstByteDuration,
-	}, nil
-}
-
-func (c *Client) synthesizeStreamBufferedFallback(ctx context.Context, req SynthesizeRequest) (*StreamResult, error) {
-	start := time.Now()
-	res, err := c.synthesizeBuffered(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	firstByteDuration := time.Since(start)
-	return &StreamResult{
-		Reader:            bytes.NewReader(res.Audio),
-		Closer:            io.NopCloser(bytes.NewReader(nil)),
-		Provider:          res.Provider,
-		Voice:             res.Voice,
-		Fallback:          res.Fallback,
-		Cached:            res.Cached,
-		FirstByteDuration: firstByteDuration,
+		Voice:             resp.Header.Get("X-TTS-Voice"),
+		Fallback:          strings.EqualFold(resp.Header.Get("X-TTS-Fallback"), "true"),
+		Cached:            strings.EqualFold(resp.Header.Get("X-TTS-Cached"), "true"),
+		FirstByteDuration: time.Since(start),
 	}, nil
 }
 
 func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) (*SynthesizeResult, error) {
-	stream, err := c.SynthesizeStream(ctx, req)
+	httpReq, cancel, err := c.synthesisRequest(ctx, "/synthesize", req)
 	if err != nil {
 		return nil, err
 	}
-	defer stream.Close()
-
-	audioData, err := io.ReadAll(io.LimitReader(stream.Reader, 4*1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("read audio: %w", err)
-	}
-
-	return &SynthesizeResult{
-		Audio:    audioData,
-		Provider: stream.Provider,
-		Voice:    stream.Voice,
-		Fallback: stream.Fallback,
-		Cached:   stream.Cached,
-	}, nil
-}
-
-func (c *Client) synthesizeBuffered(ctx context.Context, req SynthesizeRequest) (*SynthesizeResult, error) {
-	bodyBytes, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	url := c.baseURL + "/synthesize"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.internalToken != "" {
-		httpReq.Header.Set("X-Internal-TTS-Token", c.internalToken)
-	}
-
+	defer cancel()
 	resp, err := c.bufferedClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, synthesisError(httpReq.Context(), err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, ErrUnauthorized
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("%w (status %d): %s", ErrSynthesisFailed, resp.StatusCode, string(respBody))
+		_ = resp.Body.Close()
+		return nil, synthesisStatusError(resp.StatusCode)
 	}
-
-	audioData, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	body := &synthesisBody{body: resp.Body, ctx: httpReq.Context(), cancel: cancel, remaining: maxAudioBytes}
+	defer body.Close()
+	audioData, err := io.ReadAll(body)
 	if err != nil {
-		return nil, fmt.Errorf("read audio: %w", err)
+		return nil, err
 	}
-
 	provider := resp.Header.Get("X-TTS-Provider")
 	if provider == "" {
 		provider = "edge"
 	}
-	voice := resp.Header.Get("X-TTS-Voice")
-	fallback := strings.EqualFold(resp.Header.Get("X-TTS-Fallback"), "true")
-	cached := strings.EqualFold(resp.Header.Get("X-TTS-Cached"), "true")
-
 	return &SynthesizeResult{
 		Audio:    audioData,
 		Provider: provider,
-		Voice:    voice,
-		Fallback: fallback,
-		Cached:   cached,
+		Voice:    resp.Header.Get("X-TTS-Voice"),
+		Fallback: strings.EqualFold(resp.Header.Get("X-TTS-Fallback"), "true"),
+		Cached:   strings.EqualFold(resp.Header.Get("X-TTS-Cached"), "true"),
 	}, nil
 }

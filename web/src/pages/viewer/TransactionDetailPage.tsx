@@ -19,7 +19,6 @@ import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import { useVoiceAnnouncements } from '../../features/voice-announcements/VoiceAnnouncementProvider';
-import { buildSingleTransactionPhrase } from '../../features/voice-announcements/voice-copy';
 import { isPublicViewerHost } from '../../app/runtime-mode';
 import { ROUTES } from '../../app/routes';
 
@@ -27,7 +26,7 @@ export const TransactionDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
-  const { replayVoice, testVoice, settings } = useVoiceAnnouncements();
+  const { replayVoice } = useVoiceAnnouncements();
 
   const { data: transaction, isLoading } = useQuery({
     queryKey: queryKeys.transactionDetail(id || ''),
@@ -79,20 +78,6 @@ export const TransactionDetailPage: React.FC = () => {
 
   const handleSpeak = () => {
     if (!isCredit || !transaction.id) return;
-
-    if (isPublicViewerHost()) {
-      const phrase = buildSingleTransactionPhrase(
-        String(transaction.credit),
-        transaction.description || '',
-        {
-          includeDescription: settings.includeDescription,
-          template: settings.announcementTemplate,
-        },
-      );
-
-      void testVoice(phrase);
-      return;
-    }
 
     void replayVoice(transaction.id);
   };

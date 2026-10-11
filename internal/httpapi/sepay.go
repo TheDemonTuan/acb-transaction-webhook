@@ -10,6 +10,7 @@ import (
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/sepay"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
+	"github.com/thedemontuan/acb-transaction-webhook/internal/telemetry"
 )
 
 // SePayStoreConfigResponse exposes only the receiver approved for public use.
@@ -23,6 +24,7 @@ type SePayStoreConfigResponse struct {
 	AccountName   string     `json:"accountName"`
 	QRPayload     string     `json:"qrPayload"`
 	LastMessageAt *time.Time `json:"lastMessageAt"`
+	LastWebhookAt *time.Time `json:"lastWebhookAt"`
 }
 
 // WithSePay attaches the independent Store notification service before serving.
@@ -59,6 +61,11 @@ func (s *Server) publicSePayStore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response.LastMessageAt = lastMessageAt
+		response.LastWebhookAt, err = s.store.LastSePayWebhookAt(r.Context(), cfg.StoreKey)
+		if err != nil {
+			writeSePayWebhookError(w, http.StatusServiceUnavailable, "SEPAY_UNAVAILABLE")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -68,9 +75,10 @@ const maxSePayWebhookBytes = 64 << 10
 // The callback authenticates its Telegram secret before reading untrusted JSON.
 // HandleUpdate returns only after ignored input or a durable storage commit.
 func (s *Server) sepayTelegramWebhook(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
 	w.Header().Set("Cache-Control", "no-store")
 	snapshot, err := s.sepay.Snapshot(r.Context())
-	if err != nil || !snapshot.Enabled() {
+	if err != nil || !snapshot.TelegramEnabled() {
 		writeSePayWebhookError(w, http.StatusServiceUnavailable, "SEPAY_UNAVAILABLE")
 		return
 	}
@@ -106,11 +114,19 @@ func (s *Server) sepayTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		writeSePayWebhookError(w, http.StatusBadRequest, "INVALID_WEBHOOK")
 		return
 	}
+	verifiedAt := time.Now()
+	telemetry.RecordPaymentStage(telemetry.PaymentProviderSePayTelegram, telemetry.PaymentStageVerify, verifiedAt.Sub(receivedAt))
+
 	if err := snapshot.HandleUpdate(r.Context(), update); err != nil {
 		writeSePayWebhookError(w, http.StatusServiceUnavailable, "SEPAY_UNAVAILABLE")
 		return
 	}
+	committedAt := time.Now()
+	telemetry.RecordPaymentStage(telemetry.PaymentProviderSePayTelegram, telemetry.PaymentStageCommit, committedAt.Sub(verifiedAt))
+
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	ackAt := time.Now()
+	telemetry.RecordPaymentStage(telemetry.PaymentProviderSePayTelegram, telemetry.PaymentStageAck, ackAt.Sub(committedAt))
 }
 
 func writeSePayWebhookError(w http.ResponseWriter, status int, code string) {
@@ -123,6 +139,7 @@ func writeSePayWebhookError(w http.ResponseWriter, status int, code string) {
 type SePayStatusResponse struct {
 	Mode          string     `json:"mode"`
 	LastMessageAt *time.Time `json:"lastMessageAt"`
+	LastWebhookAt *time.Time `json:"lastWebhookAt"`
 	ReviewCount   int64      `json:"reviewCount"`
 }
 
@@ -143,6 +160,8 @@ func (s *Server) sepayStatus(r *http.Request) (SePayStatusResponse, error) {
 				return response, err
 			}
 			response.LastMessageAt = last
+			response.LastWebhookAt, err = s.store.LastSePayWebhookAt(r.Context(), cfg.StoreKey)
+			if err != nil { return response, err }
 		}
 	}
 	count, err := s.store.SePayReviewCount(r.Context())
