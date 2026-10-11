@@ -1,12 +1,12 @@
 # Piper/ONNX and lameenc publish glibc manylinux wheels, including ARM64.
-FROM python:3.13.15-slim-bookworm AS builder
+FROM python:3.13.15-slim-trixie AS builder
 WORKDIR /app
 COPY requirements.lock ./
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --only-binary=:all: --no-cache-dir --require-hashes -r requirements.lock && \
     rm -rf /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.13 /opt/venv/lib/python3.13/site-packages/pip /opt/venv/lib/python3.13/site-packages/pip-*.dist-info
 
-FROM python:3.13.15-slim-bookworm
+FROM python:3.13.15-slim-trixie
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
