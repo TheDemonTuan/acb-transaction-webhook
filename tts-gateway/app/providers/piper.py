@@ -41,7 +41,7 @@ class PiperTTSProvider:
         launch = asyncio.create_task(asyncio.create_subprocess_exec(
             sys.executable, "-m", "app.providers.piper_worker", str(self.model_path),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env=environment,
+            stderr=None, env=environment,
             cwd=str(Path(__file__).resolve().parents[2]),
         ))
         try:
