@@ -17,6 +17,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     TTS_VOICEPACK_ROOT=/app/assets/voicepacks
 WORKDIR /app
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends libgomp1 libstdc++6 && \
     rm -rf /var/lib/apt/lists/* /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 /usr/local/lib/python3.13/site-packages/pip /usr/local/lib/python3.13/site-packages/pip-*.dist-info && \
     groupadd --gid 1000 appgroup && useradd --uid 1000 --gid appgroup --no-create-home appuser
