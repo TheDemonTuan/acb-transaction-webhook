@@ -1340,7 +1340,10 @@ func (h *harness) assertCounts() error {
 		"retainedOutbox":            `SELECT count(*) FROM deliveries WHERE id='fixture-legacy-delivery' AND event_id='fixture-legacy-event' AND endpoint_id='fixture-legacy-endpoint' AND status='PENDING' AND attempts=2 AND next_attempt_at='2099-01-01T00:00:00Z'`,
 		"mismatchedPayOSProjection": `SELECT count(*) FROM payment_orders o JOIN payment_receipts r ON r.order_id=o.id JOIN transactions t ON t.id=r.transaction_id WHERE o.status!='PAID' OR o.transaction_id!=t.id OR o.amount_vnd!=t.credit OR r.amount_vnd!=t.credit`,
 		"duplicateFinancialEvents":  `SELECT count(*) FROM (SELECT transaction_id FROM events GROUP BY transaction_id,event_type HAVING count(*)!=1)`,
-		"orphanFinancialJournal":    `SELECT count(*) FROM transactions t WHERE t.credit>0 AND t.id!='fixture-legacy-credit' AND ((SELECT count(*) FROM event_journal j WHERE j.aggregate_id=t.id AND j.event_type='bank.transaction.credit')!=1 OR (SELECT count(*) FROM events e WHERE e.transaction_id=t.id AND e.event_type='bank.transaction.credit')!=1)`,
+		"orphanFinancialJournal": `SELECT count(*) FROM transactions t
+			LEFT JOIN (SELECT aggregate_id,count(*) AS n FROM event_journal WHERE event_type='bank.transaction.credit' GROUP BY aggregate_id) j ON j.aggregate_id=t.id
+			LEFT JOIN (SELECT transaction_id,count(*) AS n FROM events WHERE event_type='bank.transaction.credit' GROUP BY transaction_id) e ON e.transaction_id=t.id
+			WHERE t.credit>0 AND t.id!='fixture-legacy-credit' AND (coalesce(j.n,0)!=1 OR coalesce(e.n,0)!=1)`,
 	}
 	for key, query := range integrityQueries {
 		var actual int64
