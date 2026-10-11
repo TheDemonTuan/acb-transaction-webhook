@@ -187,3 +187,15 @@ async def test_asset_auth_remains_required_when_development_synthesis_auth_is_di
     async with AsyncClient(transport=ASGITransport(app=gateway.app), base_url="http://test") as client:
         assert (await client.get(f"/assets/profiles/{key}/manifest")).status_code == 503
         assert (await client.get(f"/assets/clips/{digest}")).status_code == 503
+
+
+def test_piper_exact_profile_manifest_is_published_without_edge_alias(tmp_path):
+    voice = "vi-VN-vais1000-medium"
+    key, digest, manifest = publish(tmp_path, voice=voice)
+    store = AssetStore(tmp_path)
+    pack = store.manifest(key)
+    assert pack.manifest["voiceId"] == voice
+    assert pack.manifest["synthesisKey"] == synthesis_key(voice, 1.25, 0)
+    assert store.clip(digest) == AUDIO
+    with pytest.raises(InvalidPack):
+        synthesis_key(voice, 1.25, 10)

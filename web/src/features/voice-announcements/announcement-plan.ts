@@ -65,7 +65,8 @@ async function coldBuffer(message: VoiceMessage, profile: Readonly<VoiceProfile>
     if (!response.ok) throw await parseApiError(response);
     if (response.headers.get('X-Voice-Revision') !== String(profile.revision) ||
         response.headers.get('X-Voice-Synthesis-Key') !== profile.synthesisKey ||
-        response.headers.get('X-TTS-Voice') !== profile.edgeVoice || response.headers.get('X-TTS-Provider') !== 'edge') {
+        response.headers.get('X-TTS-Voice') !== profile.voiceId ||
+        response.headers.get('X-TTS-Provider') !== (profile.providerMode === 'PIPER_ONLY' ? 'piper' : 'edge')) {
       await response.body?.cancel(); throw new Error('VOICE_AUDIO_PROFILE_MISMATCH');
     }
     const bytes = await readBounded(response, 4 * 1024 * 1024, controller.signal);
@@ -188,7 +189,7 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
       options.onStatus?.('ready');
       return { ...common, kind: 'stream', streamUrl: objectURL, audioElement: native };
     }
-    options.onStatus?.('cold', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế · tổng hợp cùng giọng trực tuyến' : 'Chưa có bộ âm thanh cho cấu hình này');
+    options.onStatus?.('cold', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế · tổng hợp cùng giọng tại máy chủ' : 'Chưa có bộ âm thanh cho cấu hình này');
     const part = amountOnly ? 'amount' : 'full';
     // Choose one cold transport before requesting. Never resynthesize after failure.
     if (typeof window !== 'undefined' && window.Audio) {

@@ -53,6 +53,9 @@ docker run -d \
   --cap-drop ALL \
   --security-opt "no-new-privileges:true" \
   --read-only \
+  --cpus 0.50 \
+  --memory 384m \
+  --pids-limit 100 \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   -p "127.0.0.1:${TTS_PORT}:8081" \
   -v "$token_file:/run/secrets/tts_internal_token:ro" \
@@ -63,7 +66,7 @@ docker run -d \
 
 echo "Waiting for tts-gateway container to become ready..."
 ready=0
-for i in {1..30}; do
+for i in {1..60}; do
   if curl --silent --fail "http://${host}:${TTS_PORT}/health" >/dev/null 2>&1; then
     ready=1
     break
@@ -72,7 +75,7 @@ for i in {1..30}; do
 done
 
 if [[ $ready -ne 1 ]]; then
-  echo "Error: tts-gateway failed to respond on /health within 30s" >&2
+  echo "Error: tts-gateway failed to respond on /health within 60s" >&2
   exit 1
 fi
 
@@ -97,17 +100,19 @@ if [[ "$http_code" != "200" ]]; then
   exit 1
 fi
 
-echo "Verifying real fixed-voice Edge synthesis and downstream cancellation (external network required)..."
+echo "Verifying real fixed Piper synthesis, streaming, and inference cancellation (no upstream network)..."
 docker exec -i "$container_name" python - <<'PY'
 import http.client
 import json
 from pathlib import Path
-import socket
+import os
+import signal
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
 
 TOKEN = Path("/run/secrets/tts_internal_token").read_text().strip()
-VOICE = "vi-VN-NamMinhNeural"
+VOICE = "vi-VN-vais1000-medium"
 CORE = "Đã nhận năm trăm nghìn đồng."
 LIMIT = 4 * 1024 * 1024
 
@@ -130,13 +135,13 @@ def request(path, text):
     try:
         connection.request("POST", path, json.dumps({
             "text": text, "voice": VOICE, "rate": "+25%", "pitch": "+0Hz",
-            "provider_mode": "EDGE_ONLY", "cacheable": False, "timeout_ms": 8000,
+            "provider_mode": "PIPER_ONLY", "cacheable": False, "timeout_ms": 8000,
         }, ensure_ascii=False).encode(), {
             "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
         })
         response = connection.getresponse()
         if response.status == 502:
-            raise RuntimeError("EXTERNAL_FAILURE: fixed Edge synthesis unavailable (HTTP 502); no fallback accepted")
+            raise RuntimeError("PIPER_UNAVAILABLE: fixed local synthesis failed; no fallback accepted")
         if response.status == 504:
             raise RuntimeError("TTS_TIMEOUT: total synthesis budget exhausted (admission/upstream); no fallback accepted")
         if response.status == 503:
@@ -144,7 +149,7 @@ def request(path, text):
         if response.status != 200:
             raise AssertionError(f"Synthesis HTTP {response.status}")
         assert response.getheader("Content-Type", "").split(";")[0] == "audio/mpeg", "Not MPEG content type"
-        assert response.getheader("X-TTS-Provider") == "edge", "Unexpected provider/fallback"
+        assert response.getheader("X-TTS-Provider") == "piper", "Unexpected provider/fallback"
         assert response.getheader("X-TTS-Voice") == VOICE, "Effective voice mismatch"
         assert response.getheader("X-TTS-Cached") == "false", "Smoke must exercise real synthesis"
         assert response.getheader("X-TTS-Fallback") == "false", "Fallback not permitted"
@@ -163,24 +168,80 @@ def buffered():
         response.close()
         connection.close()
 
-try:
-    buffered()
-    # Three uncached streams exceed the active-slot cap if disconnects leak slots.
-    # Close immediately after actual audio, never persist or publish synthesized bytes.
-    for index in range(3):
-        connection, response = request("/synthesize/stream", (CORE + " Cảm ơn bạn đã ghé quầy.") * (8 + index))
+def worker_pids():
+    pids = set()
+    for path in Path("/proc").glob("[0-9]*/cmdline"):
         try:
-            data = response.read(512)
-            assert mpeg_frame(data), "Cancelled stream did not start with MPEG audio"
-            if connection.sock is not None:
-                connection.sock.shutdown(socket.SHUT_RDWR)
+            if b"app.providers.piper_worker" in path.read_bytes():
+                pids.add(path.parent.name)
+        except (FileNotFoundError, PermissionError):
+            pass
+    return pids
+
+try:
+    health_connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=3)
+    health_connection.request("GET", "/health")
+    health_data = json.loads(health_connection.getresponse().read())
+    health_connection.close()
+    assert health_data["primary"] == "piper" and health_data["piper"]["available"], "Piper not ready"
+    buffered()
+    connection, response = request("/synthesize/stream", CORE)
+    assert mpeg_frame(response.read(LIMIT + 1)), "Stream is not real MPEG"
+    response.close()
+    connection.close()
+    # Disconnect BEFORE headers while real inference is running. Reaped worker
+    # PIDs, followed by real successful synthesis, prove cancellation ownership.
+    for index in range(3):
+        before = worker_pids()
+        for pid in before:
+            os.kill(int(pid), signal.SIGSTOP)
+        connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
+        connection.request("POST", "/synthesize/stream", json.dumps({
+            "text": (CORE + " Cảm ơn bạn đã ghé quầy. ") * 8 + str(index),
+            "voice": VOICE, "provider_mode": "PIPER_ONLY", "cacheable": False,
+            "rate": "+25%", "pitch": "+0Hz", "timeout_ms": 8000,
+        }, ensure_ascii=False).encode(), {
+            "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
+        })
+        time.sleep(0.05)
+        connection.close()
+        deadline = time.monotonic() + 3
+        while before <= worker_pids() and time.monotonic() < deadline:
+            time.sleep(0.025)
+        assert before - worker_pids(), "Disconnected inference worker was not killed/reaped"
+        for pid in worker_pids():
+            os.kill(int(pid), signal.SIGCONT)
+        assert len(worker_pids()) <= 2, "Unbounded inference workers"
+        buffered()
+        buffered()
+    # Exercise maximum accepted text on both slots under production caps.
+    # A bounded 504 is truthful degraded service; OOM/provider crash is not.
+    def long_request(index):
+        connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
+        try:
+            text = ((CORE + " ") * 25)[:599] + str(index)
+            connection.request("POST", "/synthesize", json.dumps({
+                "text": text, "voice": VOICE, "provider_mode": "PIPER_ONLY",
+                "rate": "+25%", "cacheable": False, "timeout_ms": 8000,
+            }, ensure_ascii=False).encode(), {
+                "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
+            })
+            response = connection.getresponse()
+            data = response.read(LIMIT + 1)
+            assert response.status in (200, 504), f"Maximum-text request failed HTTP {response.status}"
+            if response.status == 200:
+                assert mpeg_frame(data) and len(data) <= LIMIT
+            else:
+                assert json.loads(data)["detail"] == "TTS_TIMEOUT"
+            return response.status
         finally:
-            response.close()
             connection.close()
-        time.sleep(0.1)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        print("Maximum-text two-slot resource smoke:", list(workers.map(long_request, range(2))))
+    buffered()
     buffered()
 except (OSError, TimeoutError, http.client.HTTPException) as error:
-    print(f"EXTERNAL_FAILURE: Edge/network stream interrupted: {type(error).__name__}; no fallback accepted", file=sys.stderr)
+    print(f"PIPER_FAILURE: local stream interrupted: {type(error).__name__}; no fallback accepted", file=sys.stderr)
     sys.exit(2)
 except RuntimeError as error:
     print(str(error), file=sys.stderr)
@@ -188,7 +249,7 @@ except RuntimeError as error:
 except AssertionError as error:
     print(f"SYNTHESIS_CONTRACT_FAILURE: {error}", file=sys.stderr)
     sys.exit(1)
-print("Real Nam Minh 500,000 VND MPEG/header checks passed; 3 downstream disconnects followed by successful synthesis.")
+print("Real fixed Piper 500,000 VND buffered/stream MPEG headers passed; 3 in-flight disconnects reaped workers and subsequent synthesis succeeded at 0.50 CPU/384MiB.")
 PY
 
 echo "TTS-gateway smoke test PASSED successfully."

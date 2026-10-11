@@ -1,0 +1,33 @@
+[
+  {
+    "file": "piper-tts-1.8.0.tar.gz",
+    "url": "https://files.pythonhosted.org/packages/02/cc/95b18b58d9c235d8e0bcece7321b7a7347873c14f9fea2c734b31ef04ff2/piper_tts-1.8.0.tar.gz",
+    "sha256": "830588aded347df579c91a32703e0fc2a3685d84f1e3533b14f2de69135d4904",
+    "bytes": 24276117
+  },
+  {
+    "file": "espeak-ng-724808c.tar.gz",
+    "url": "https://codeload.github.com/espeak-ng/espeak-ng/tar.gz/724808c",
+    "sha256": "26b71dc68bb364f7c2130bec4cacd223a9ece469662c40f1c5234e404590208d",
+    "bytes": 18641179
+  },
+  {
+    "file": "lameenc-1.8.4.tar.gz",
+    "url": "https://codeload.github.com/chrisstaite/lameenc/tar.gz/refs/tags/v1.8.4",
+    "sha256": "70c7a23830c98139f2b8e2ebdd56990b3e8e50bb8eaf22daa7b8861b1f6bffcb",
+    "bytes": 13499
+  },
+  {
+    "file": "lame-3.100.tar.gz",
+    "url": "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz",
+    "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+    "bytes": 1524133
+  },
+  {
+    "file": "piper-tts-1.8.0-full-639388b.tar.gz",
+    "url": "https://codeload.github.com/OHF-Voice/piper1-gpl/tar.gz/639388b6317fc4731e91d53da42aea68fd4166ff",
+    "sha256": "a7045b7ef4268d1088047c20a69ae447b552e579dacb42d3dc18f53576aa54ce",
+    "bytes": 24738952,
+    "commit": "639388b6317fc4731e91d53da42aea68fd4166ff"
+  }
+]

@@ -41,7 +41,7 @@ function canonicalJSON(value: unknown): string {
 export async function validateManifest(data: unknown, profile: Readonly<VoiceProfile>): Promise<VoiceManifest> {
   const m = data as VoiceManifest;
   if (!m || m.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(m.packVersion) ||
-      m.synthesisKey !== profile.synthesisKey || m.voiceId !== profile.edgeVoice || m.rate !== profile.rate ||
+      m.synthesisKey !== profile.synthesisKey || m.voiceId !== profile.voiceId || m.rate !== profile.rate ||
       m.pitchHz !== profile.pitchHz || m.formatterVersion !== 'money-vi-v1' || m.catalogVersion !== profile.catalogVersion ||
       !Array.isArray(m.clips) || !m.amounts || typeof m.amounts !== 'object') throw new Error('VOICE_PACK_MISMATCH');
   const { packVersion: _version, ...unsigned } = m;

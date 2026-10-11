@@ -99,3 +99,104 @@ describe('prepared audio timeline', () => {
     f.options.assets.dispose(); f.options.browser.dispose();
   });
 });
+
+describe('server-provider audio preparation', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), funEnabled: false };
+  const decoded = { duration: 1, length: 24000, numberOfChannels: 1 } as AudioBuffer;
+  const responseHeaders = (provider = 'piper') => ({
+    'Content-Type': 'audio/mpeg', 'X-TTS-Provider': provider, 'X-TTS-Voice': profile.voiceId,
+    'X-Voice-Revision': String(profile.revision), 'X-Voice-Synthesis-Key': profile.synthesisKey,
+  });
+
+  it.each([
+    { ...profile, providerMode: 'PIPER_ONLY' as const, provider: 'piper' },
+    { ...profile, providerMode: 'EDGE_ONLY' as const, voiceId: 'vi-VN-NamMinhNeural', provider: 'edge' },
+  ])('verifies $providerMode buffered metadata and leaves playback rate neutral', async (chosen) => {
+    vi.stubGlobal('window', {});
+    const f = fixture();
+    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue(null);
+    const decode = vi.fn(async () => decoded);
+    Object.assign(f.context, { decodeAudioData: decode });
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), {
+      headers: { ...responseHeaders(chosen.provider), 'X-TTS-Voice': chosen.voiceId },
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx' }, chosen,
+      new AbortController().signal, f.options);
+    expect(plan.kind).toBe('buffers');
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toEqual({ profileRevision: 1, part: 'amount' });
+    const playing = playPrepared(plan, new AbortController().signal, f.options);
+    expect(f.sources[0].playbackRate.value).toBe(1);
+    f.sources[0].onended!(); await playing;
+    plan.release(); f.options.assets.dispose(); f.options.browser.dispose();
+  });
+
+  it.each([
+    { 'X-TTS-Provider': 'edge' }, { 'X-TTS-Voice': 'vi-VN-HoaiMyNeural' },
+    { 'X-Voice-Revision': '2' }, { 'X-Voice-Synthesis-Key': 'b'.repeat(64) },
+  ])('rejects mismatched Piper metadata before decode without another request: %j', async (override) => {
+    vi.stubGlobal('window', {});
+    const f = fixture(), decode = vi.fn();
+    Object.assign(f.context, { decodeAudioData: decode });
+    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue(null);
+    const fetcher = vi.fn(async () => new Response(new Uint8Array([1]), { headers: { ...responseHeaders(), ...override } }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx' }, profile,
+      new AbortController().signal, f.options)).rejects.toThrow('VOICE_AUDIO_PROFILE_MISMATCH');
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(decode).not.toHaveBeenCalled();
+    f.options.assets.dispose(); f.options.browser.dispose();
+  });
+
+  it.each(['amount', 'classic'] as const)('uses an exact-profile Piper %s clip without cold synthesis', async (kind) => {
+    const f = fixture(), chosen = { ...profile, funEnabled: kind === 'classic' };
+    vi.spyOn(catalogModule, 'loadVoiceCatalog').mockResolvedValue(null);
+    const classic = { ...recipe, id: 'classic-1', styleId: 'classic', fragmentIds: [],
+      template: 'Đã nhận {amount}. Cảm ơn quý khách.' };
+    const transcript = kind === 'classic' ? 'Đã nhận một nghìn đồng. Cảm ơn quý khách.' : 'Đã nhận một nghìn đồng.';
+    const clip = { clipId: 'exact', kind, transcript, durationMs: 1000, sampleRate: 24000, bytes: 3, sha256: 'c'.repeat(64) };
+    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue({ schemaVersion: 1, packVersion: 'd'.repeat(64),
+      synthesisKey: chosen.synthesisKey, voiceId: chosen.voiceId, rate: chosen.rate, pitchHz: 0,
+      formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [clip],
+      amounts: { '1000': { standard: 'exact', classic: { 'classic-1': 'exact' } } } });
+    const getDecoded = vi.spyOn(f.options.assets, 'getDecoded').mockResolvedValue(decoded);
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx',
+      ...(kind === 'classic' ? { recipe: classic, phraseId: classic.id } : {}) }, chosen,
+      new AbortController().signal, f.options);
+    expect(plan.kind).toBe('buffers'); expect(getDecoded).toHaveBeenCalledTimes(1);
+    expect(fetcher).not.toHaveBeenCalled();
+    plan.release(); f.options.assets.dispose(); f.options.browser.dispose();
+  });
+  it('keeps Piper warm fragment joining disabled and requests a single complete tail', async () => {
+    vi.stubGlobal('window', {});
+    const f = fixture(), chosen = { ...profile, funEnabled: true,
+      amountBands: profile.amountBands.map((band) => ({ ...band, styleId: 'cute' as const })) };
+    Object.assign(f.context, { decodeAudioData: vi.fn(async () => decoded) });
+    vi.spyOn(catalogModule, 'loadVoiceCatalog').mockResolvedValue(null);
+    const core = { clipId: 'core', kind: 'amount' as const, transcript: 'Đã nhận một nghìn đồng.',
+      durationMs: 1000, sampleRate: 24000, bytes: 3, sha256: 'c'.repeat(64) };
+    const fragments = recipe.fragmentIds.map((clipId) => ({ ...core, clipId, kind: 'tail-fragment' as const }));
+    vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue({ schemaVersion: 1, packVersion: 'd'.repeat(64),
+      synthesisKey: chosen.synthesisKey, voiceId: chosen.voiceId, rate: chosen.rate, pitchHz: 0,
+      formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [core, ...fragments],
+      amounts: { '1000': { standard: 'core', classic: {} } } });
+    const getDecoded = vi.spyOn(f.options.assets, 'getDecoded').mockResolvedValue(decoded);
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(new Uint8Array([1, 2, 3]), { headers: responseHeaders() }));
+    vi.stubGlobal('fetch', fetcher);
+    const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx', recipe, phraseId: recipe.id },
+      chosen, new AbortController().signal, f.options);
+    expect(plan.kind).toBe('buffers');
+    if (plan.kind !== 'buffers') throw new Error('Expected prepared amount buffer');
+    expect(plan.tailBuffers).toEqual([]);
+    expect(await plan.tail!.ready).toBe(decoded);
+    expect(getDecoded).toHaveBeenCalledTimes(1);
+    expect(getDecoded.mock.calls[0][0].clipId).toBe('core');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toMatchObject({ part: 'tail', phraseId: recipe.id });
+    plan.release(); f.options.assets.dispose(); f.options.browser.dispose();
+  });
+});

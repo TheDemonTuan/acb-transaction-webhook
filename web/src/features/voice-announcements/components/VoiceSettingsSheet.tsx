@@ -2,10 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { Volume2, VolumeX, X, Sliders, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVoiceAnnouncements } from '../VoiceAnnouncementProvider';
+import { isVoiceCancellation } from '../voice-engine';
 import { VoiceTestButton } from './VoiceTestButton';
 import {
   saveVoiceSettingsServer,
   DEFAULT_AMOUNT_BANDS,
+  PIPER_VOICE_ID,
+  PIPER_VOICE_LABEL,
+  EDGE_VOICE_IDS,
+  type VoiceProviderMode,
   type VoiceProfile,
   type VoiceSettingsInput,
 } from '../voice-profile';
@@ -38,7 +43,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
       setFormDraft({
         revision: profileQuery.data.revision,
         providerMode: profileQuery.data.providerMode,
-        edgeVoice: profileQuery.data.edgeVoice,
+        voiceId: profileQuery.data.voiceId,
         rate: profileQuery.data.rate,
         pitchHz: profileQuery.data.pitchHz,
         amountBands: profileQuery.data.amountBands || DEFAULT_AMOUNT_BANDS,
@@ -107,7 +112,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
       setFormDraft({
         revision: updated.revision,
         providerMode: updated.providerMode,
-        edgeVoice: updated.edgeVoice,
+        voiceId: updated.voiceId,
         rate: updated.rate,
         pitchHz: updated.pitchHz,
         amountBands: updated.amountBands,
@@ -174,7 +179,14 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
             <>
               {/* Enable Toggle (Local Device) */}
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
-                <p>Giọng hiệu lực: {profile?.providerMode === 'BROWSER_ONLY' ? 'Trình duyệt (đã chọn rõ)' : profile?.edgeVoice || 'Chưa tải hồ sơ'} · {profile?.rate}x · {profile?.pitchHz}Hz</p>
+                <p>Giọng hiệu lực: {profile?.providerMode === 'BROWSER_ONLY' ? 'Trình duyệt (đã chọn rõ)' : profile?.providerMode === 'PIPER_ONLY' ? PIPER_VOICE_LABEL : profile?.voiceId || 'Chưa tải hồ sơ'} · {profile?.rate}x · {profile?.pitchHz}Hz</p>
+                {profile?.providerMode === 'PIPER_ONLY' && (
+                  <p className="text-[11px] text-stone-500">
+                    <a href="https://huggingface.co/rhasspy/piper-voices/tree/c10ece1aade47bb51c153c893d14e5bf8e5b7117/vi/vi_VN/vais1000/medium" target="_blank" rel="noopener noreferrer" className="underline">Piper / VAIS-1000</a>
+                    {' · '}
+                    <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="underline">CC BY 4.0</a>
+                  </p>
+                )}
                 <p>{voiceState}{profileOffline ? ' · Hồ sơ máy chủ offline, dùng bản đã xác nhận' : ''} {voiceDetail}</p>
                 {settings.enabled && !audioUnlocked && <button type="button" onClick={handleToggle} className="rounded border border-amber-300 bg-amber-50 p-2">Mở khóa loa — cần thao tác trên thiết bị này</button>}
                 {profile?.providerMode === 'BROWSER_ONLY' && (
@@ -187,7 +199,13 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                 )}
                 {recentSkipped.length > 0 && <details><summary>Giao dịch chưa đọc ({recentSkipped.length} gần nhất)</summary>
                   {recentSkipped.map((item, index) => <div key={`${item.transactionId}:${index}`} className="flex gap-2">
-                    <span>{item.reason}</span><button type="button" onClick={() => { void replayVoice(item.transactionId).catch((error: unknown) => setToggleError(error instanceof Error ? error.message : 'Không thể phát lại')); }}>Đọc lại {item.transactionId}</button>
+                    <span>{item.reason}</span><button type="button" onClick={() => {
+                      setToggleError(null);
+                      void replayVoice(item.transactionId).catch((error: unknown) => {
+                        if (isVoiceCancellation(error)) return;
+                        setToggleError(error instanceof Error ? error.message : 'Không thể phát lại');
+                      });
+                    }}>Đọc lại {item.transactionId}</button>
                   </div>)}
                 </details>}
               </div>
@@ -284,35 +302,46 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                   {/* Mode & Voice */}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-medium text-stone-700 mb-1">
+                      <label htmlFor="voice-provider-mode" className="block text-xs font-medium text-stone-700 mb-1">
                         Chế độ phát
                       </label>
                       <select
+                        id="voice-provider-mode"
                         value={formDraft.providerMode}
-                        onChange={(e) =>
-                          setFormDraft((p) => (p ? { ...p, providerMode: e.target.value as 'EDGE_ONLY' | 'BROWSER_ONLY' } : null))
-                        }
+                        onChange={(e) => {
+                          const providerMode = e.target.value as VoiceProviderMode;
+                          setFormDraft((p) => p ? { ...p, providerMode,
+                            voiceId: providerMode === 'PIPER_ONLY' ? PIPER_VOICE_ID
+                              : providerMode === 'EDGE_ONLY' && !EDGE_VOICE_IDS.some((id) => id === p.voiceId) ? EDGE_VOICE_IDS[0] : p.voiceId,
+                            pitchHz: providerMode === 'PIPER_ONLY' ? 0 : p.pitchHz } : null);
+                        }}
                         className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800"
                       >
+                        <option value="PIPER_ONLY">{PIPER_VOICE_LABEL}</option>
                         <option value="EDGE_ONLY">Giọng máy chủ Edge</option>
                         <option value="BROWSER_ONLY">Giọng trình duyệt</option>
                       </select>
                     </div>
 
                     <div>
-                      <label className="block text-xs font-medium text-stone-700 mb-1">
+                      <label htmlFor="voice-server-id" className="block text-xs font-medium text-stone-700 mb-1">
                         Giọng máy chủ
                       </label>
                       <select
-                        value={formDraft.edgeVoice}
-                        disabled={formDraft.providerMode === 'BROWSER_ONLY'}
+                        id="voice-server-id"
+                        value={formDraft.voiceId}
+                        disabled={formDraft.providerMode !== 'EDGE_ONLY'}
                         onChange={(e) =>
-                          setFormDraft((p) => (p ? { ...p, edgeVoice: e.target.value } : null))
+                          setFormDraft((p) => (p ? { ...p, voiceId: e.target.value } : null))
                         }
                         className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800 disabled:bg-stone-100"
                       >
-                        <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ)</option>
-                        <option value="vi-VN-NamMinhNeural">Nam Minh (Nam)</option>
+                        {formDraft.providerMode !== 'EDGE_ONLY' && formDraft.voiceId === PIPER_VOICE_ID &&
+                          <option value={PIPER_VOICE_ID}>{PIPER_VOICE_LABEL}</option>}
+                        {formDraft.providerMode !== 'PIPER_ONLY' && <>
+                          <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ) · Edge</option>
+                          <option value="vi-VN-NamMinhNeural">Nam Minh (Nam) · Edge</option>
+                        </>}
                       </select>
                     </div>
                   </div>
@@ -326,6 +355,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                       </div>
                       <input
                         type="range"
+                        aria-label="Tốc độ đọc"
                         min="0.75"
                         max="2.0"
                         step="0.05"
@@ -343,11 +373,13 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                         <span className="font-semibold">{formDraft.pitchHz} Hz</span>
                       </div>
                       <input
+                        aria-label="Cao độ (Pitch)"
                         type="range"
                         min="-50"
                         max="50"
                         step="1"
                         value={formDraft.pitchHz}
+                        disabled={formDraft.providerMode === 'PIPER_ONLY'}
                         onChange={(e) =>
                           setFormDraft((p) => (p ? { ...p, pitchHz: parseInt(e.target.value, 10) } : null))
                         }
@@ -448,7 +480,7 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                   {/* Custom Template */}
                   <div>
                     <label className="block font-medium text-stone-800 mb-1">
-                      Câu riêng — có thể cần tổng hợp online
+                      Câu riêng — có thể cần tổng hợp tại máy chủ
                     </label>
                     <input
                       type="text"

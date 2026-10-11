@@ -66,3 +66,8 @@ var VoiceProfileSQL string
 //
 //go:embed 020_sepay_native.sql
 var SePayNativeSQL string
+
+// PiperVoiceSQL embeds schema version 21 licensed self-hosted voice cutover.
+//
+//go:embed 021_piper_voice.sql
+var PiperVoiceSQL string

@@ -19,6 +19,7 @@ import { queryKeys } from '../../shared/api/query-keys';
 import { formatVndCurrency } from '../../shared/formatters/money';
 import { formatDateTimeVN } from '../../shared/formatters/datetime';
 import { useVoiceAnnouncements } from '../../features/voice-announcements/VoiceAnnouncementProvider';
+import { isVoiceCancellation } from '../../features/voice-announcements/voice-engine';
 import { isPublicViewerHost } from '../../app/runtime-mode';
 import { ROUTES } from '../../app/routes';
 
@@ -26,6 +27,7 @@ export const TransactionDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const { replayVoice } = useVoiceAnnouncements();
 
   const { data: transaction, isLoading } = useQuery({
@@ -79,7 +81,11 @@ export const TransactionDetailPage: React.FC = () => {
   const handleSpeak = () => {
     if (!isCredit || !transaction.id) return;
 
-    void replayVoice(transaction.id);
+    setVoiceError(null);
+    void replayVoice(transaction.id).catch((error: unknown) => {
+      if (isVoiceCancellation(error)) return;
+      setVoiceError(error instanceof Error ? error.message : 'Không thể đọc lại giao dịch');
+    });
   };
 
   return (
@@ -226,6 +232,7 @@ export const TransactionDetailPage: React.FC = () => {
               </button>
             )}
           </div>
+          {voiceError && <p role="alert" className="text-xs text-rose-600">{voiceError}</p>}
         </div>
       </div>
     </div>

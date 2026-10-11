@@ -9,9 +9,11 @@ async def test_health_endpoint():
         resp = await client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "ok"
-        assert data["primary"] == "edge"
-        assert "edge" in data
+        from app.main import piper_provider
+        assert data["status"] == ("ok" if piper_provider.available else "degraded")
+        assert data["primary"] == "piper"
+        assert data["piper"]["available"] == piper_provider.available
+        assert "edge" in data and "gtts" not in data
 
 @pytest.mark.asyncio
 async def test_voices_endpoint():
@@ -20,10 +22,11 @@ async def test_voices_endpoint():
         resp = await client.get("/voices")
         assert resp.status_code == 200
         voices = resp.json()
-        assert len(voices) == 2
+        assert len(voices) == 3
         ids = [v["id"] for v in voices]
         assert "vi-VN-HoaiMyNeural" in ids
         assert "vi-VN-NamMinhNeural" in ids
+        assert "vi-VN-vais1000-medium" in ids
 
 @pytest.mark.asyncio
 async def test_synthesize_edge_success(monkeypatch):
@@ -34,10 +37,7 @@ async def test_synthesize_edge_success(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/synthesize",
-            json={"text": "Xin chao", "voice": "vi-VN-HoaiMyNeural"},
-        )
+        resp = await client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "Xin chao", "voice": "vi-VN-HoaiMyNeural"}})
         assert resp.status_code == 200
         assert resp.headers["X-TTS-Provider"] == "edge"
         assert resp.headers["X-TTS-Voice"] == "vi-VN-HoaiMyNeural"
@@ -52,10 +52,7 @@ async def test_synthesize_edge_failure_returns_502(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/synthesize",
-            json={"text": "Xin chao", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
-        )
+        resp = await client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "Xin chao", "voice": "vi-VN-HoaiMyNeural", "cacheable": False}})
         assert resp.status_code == 502
         assert "TTS_UNAVAILABLE" in resp.json()["detail"]
 
@@ -69,10 +66,7 @@ async def test_synthesize_stream_edge_success(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/synthesize/stream",
-            json={"text": "Xin chao stream", "voice": "vi-VN-HoaiMyNeural"},
-        )
+        resp = await client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "Xin chao stream", "voice": "vi-VN-HoaiMyNeural"}})
         assert resp.status_code == 200
         assert resp.headers["X-TTS-Provider"] == "edge"
         assert resp.headers["X-TTS-Voice"] == "vi-VN-HoaiMyNeural"
@@ -88,10 +82,7 @@ async def test_synthesize_stream_edge_failure_returns_502(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/synthesize/stream",
-            json={"text": "Xin chao stream fail", "voice": "vi-VN-HoaiMyNeural", "cacheable": False},
-        )
+        resp = await client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "Xin chao stream fail", "voice": "vi-VN-HoaiMyNeural", "cacheable": False}})
         assert resp.status_code == 502
         assert "TTS_UNAVAILABLE" in resp.json()["detail"]
 

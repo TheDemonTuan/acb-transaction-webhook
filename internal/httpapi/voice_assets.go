@@ -71,11 +71,11 @@ func (s *Server) voiceAssetClip(w http.ResponseWriter, r *http.Request) {
 // tryVoicePack returns only exact-profile, exact-transcript published audio.
 // A missing or corrupt pack stays on the fixed-voice cold synthesis path.
 func (s *Server) tryVoicePack(w http.ResponseWriter, r *http.Request, profile storage.VoiceProfile, phrase string) bool {
-	if s.ttsClient == nil || phrase == "" || profile.IncludeDescription {
+	if s.ttsClient == nil || phrase == "" || profile.IncludeDescription || profile.ProviderMode == storage.ProviderModeBrowserOnly {
 		return false
 	}
 	_, manifest, status, err := s.ttsClient.VoiceManifest(r.Context(), profile.SynthesisKey)
-	if err != nil || status != http.StatusOK || manifest.VoiceID != profile.EdgeVoice || manifest.Rate != profile.Rate || manifest.PitchHz != profile.PitchHz {
+	if err != nil || status != http.StatusOK || manifest.VoiceID != profile.VoiceID || manifest.Rate != profile.Rate || manifest.PitchHz != profile.PitchHz {
 		return false
 	}
 	for _, clip := range manifest.Clips {
@@ -88,8 +88,8 @@ func (s *Server) tryVoicePack(w http.ResponseWriter, r *http.Request, profile st
 		}
 		w.Header().Set("Content-Type", "audio/mpeg")
 		w.Header().Set("Cache-Control", "private,no-store")
-		w.Header().Set("X-TTS-Provider", "edge")
-		w.Header().Set("X-TTS-Voice", profile.EdgeVoice)
+		w.Header().Set("X-TTS-Provider", profile.SynthesisProvider())
+		w.Header().Set("X-TTS-Voice", profile.VoiceID)
 		w.Header().Set("X-TTS-Cached", "true")
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-Voice-Revision", strconv.FormatInt(profile.Revision, 10))

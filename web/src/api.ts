@@ -154,7 +154,6 @@ export interface AudioResponseResult {
   data: ArrayBuffer;
   provider: string;
   voice: string;
-  fallback: boolean;
   cached: boolean;
 }
 
@@ -219,9 +218,8 @@ export const apiAudio = async (path: string, init?: RequestInit): Promise<AudioR
   const data = await response.arrayBuffer();
   return {
     data,
-    provider: response.headers.get('X-TTS-Provider') || 'edge',
+    provider: response.headers.get('X-TTS-Provider') || '',
     voice: response.headers.get('X-TTS-Voice') || '',
-    fallback: response.headers.get('X-TTS-Fallback') === 'true',
     cached: response.headers.get('X-TTS-Cached') === 'true',
   };
 };

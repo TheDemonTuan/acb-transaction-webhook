@@ -55,3 +55,7 @@ export interface VoiceEngine {
   dispose(): void | Promise<void>;
 }
 
+export function isVoiceCancellation(error: unknown): boolean {
+  return error instanceof Error && error.message === 'VOICE_CANCELLED';
+}
+

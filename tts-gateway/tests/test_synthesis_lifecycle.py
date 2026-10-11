@@ -31,10 +31,7 @@ async def test_admission_overload_cap_19_requests(monkeypatch):
         for i in range(18):
             # 18 distinct texts to avoid singleflight deduplication
             t = asyncio.create_task(
-                client.post(
-                    "/synthesize/stream",
-                    json={"text": f"distinct phrase {i}", "cacheable": False},
-                )
+                client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": f"distinct phrase {i}", "cacheable": False}})
             )
             tasks.append(t)
 
@@ -45,10 +42,7 @@ async def test_admission_overload_cap_19_requests(monkeypatch):
         assert admission.waiting_count == 16
 
         # 19th request should immediately get 503 TTS_OVERLOADED
-        resp19 = await client.post(
-            "/synthesize/stream",
-            json={"text": "distinct phrase 19", "cacheable": False},
-        )
+        resp19 = await client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "distinct phrase 19", "cacheable": False}})
         assert resp19.status_code == 503
         assert resp19.headers.get("Retry-After") == "1"
         assert "TTS_OVERLOADED" in resp19.json().get("detail", "")
@@ -72,10 +66,10 @@ async def test_singleflight_waiter_cancellation_does_not_abort_other_waiters(mon
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Launch waiter A and waiter B for the SAME text
         task_a = asyncio.create_task(
-            client.post("/synthesize", json={"text": "shared phrase", "cacheable": True})
+            client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "shared phrase", "cacheable": True}})
         )
         task_b = asyncio.create_task(
-            client.post("/synthesize", json={"text": "shared phrase", "cacheable": True})
+            client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "shared phrase", "cacheable": True}})
         )
 
         await asyncio.sleep(0.02)
@@ -104,9 +98,6 @@ async def test_synthesis_timeout_returns_504(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/synthesize",
-            json={"text": "timeout test", "timeout_ms": 50, "cacheable": False},
-        )
+        resp = await client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "timeout test", "timeout_ms": 50, "cacheable": False}})
         assert resp.status_code == 504
         assert "TTS_TIMEOUT" in resp.json().get("detail", "")

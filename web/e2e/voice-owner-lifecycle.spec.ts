@@ -38,6 +38,8 @@ test('restored enabled owner exposes locked state and unlocks without first disa
 });
 
 test('disable while replay detail is pending prevents late enqueue while later explicit test still works', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
   const detail = { id: 'pending-replay', bank: 'KienlongBank', semanticKey: 'PAYOS:pending-replay', credit: 50000,
     debit: 0, transactionDate: new Date().toISOString(), effectiveDate: new Date().toISOString(),
     firstSeenAt: new Date().toISOString(), description: 'REPLAY DETAIL FIXTURE', source: 'REALTIME' };
@@ -62,4 +64,28 @@ test('disable while replay detail is pending prevents late enqueue while later e
     const fixture = window as Window & { __ownerSpeech: string[] };
     return fixture.__ownerSpeech;
   })).toEqual(['Đã nhận năm trăm nghìn đồng.']);
+  await expect(page.getByRole('alert').filter({ hasText: 'VOICE_CANCELLED' })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test('a genuine replay detail failure is visible and handled without an unhandled rejection', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  const detail = { id: 'failed-replay', bank: 'KienlongBank', semanticKey: 'PAYOS:failed-replay', credit: 50000,
+    debit: 0, transactionDate: new Date().toISOString(), effectiveDate: new Date().toISOString(),
+    firstSeenAt: new Date().toISOString(), description: 'REPLAY FAILURE FIXTURE', source: 'REALTIME' };
+  let requests = 0;
+  await page.route(/\/api\/(?:public\/)?v1\/transactions\/failed-replay$/, async route => {
+    if (++requests > 1) {
+      await route.fulfill({ status: 503, json: { code: 'REPLAY_DETAIL_UNAVAILABLE', error: 'Không thể tải giao dịch để đọc lại' } });
+      return;
+    }
+    await route.fulfill({ json: detail });
+  });
+  await page.goto('/transactions/failed-replay');
+  await page.getByRole('button', { name: 'Mở khóa loa', exact: true }).click();
+  await page.getByRole('button', { name: 'Đọc lại giao dịch', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Không thể tải giao dịch để đọc lại');
+  expect(await page.evaluate(() => (window as Window & { __ownerSpeech: string[] }).__ownerSpeech)).toEqual([]);
+  expect(pageErrors).toEqual([]);
 });

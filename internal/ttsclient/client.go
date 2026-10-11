@@ -26,14 +26,13 @@ const (
 )
 
 type SynthesizeRequest struct {
-	Text          string `json:"text"`
-	Voice         string `json:"voice,omitempty"`
-	Rate          string `json:"rate,omitempty"`
-	Pitch         string `json:"pitch,omitempty"`
-	Cacheable     bool   `json:"cacheable"`
-	AllowFallback *bool  `json:"allow_fallback,omitempty"`
-	ProviderMode  string `json:"provider_mode,omitempty"`
-	TimeoutMS     int    `json:"timeout_ms"`
+	Text         string `json:"text"`
+	Voice        string `json:"voice,omitempty"`
+	Rate         string `json:"rate,omitempty"`
+	Pitch        string `json:"pitch,omitempty"`
+	Cacheable    bool   `json:"cacheable"`
+	ProviderMode string `json:"provider_mode,omitempty"`
+	TimeoutMS    int    `json:"timeout_ms"`
 }
 
 type SynthesizeResult struct {
@@ -255,9 +254,6 @@ func (c *Client) SynthesizeStream(ctx context.Context, req SynthesizeRequest) (*
 		return nil, err
 	}
 	provider := resp.Header.Get("X-TTS-Provider")
-	if provider == "" {
-		provider = "edge"
-	}
 	return &StreamResult{
 		Reader:            io.MultiReader(bytes.NewReader(buf[:n]), body),
 		Closer:            body,
@@ -290,9 +286,6 @@ func (c *Client) Synthesize(ctx context.Context, req SynthesizeRequest) (*Synthe
 		return nil, err
 	}
 	provider := resp.Header.Get("X-TTS-Provider")
-	if provider == "" {
-		provider = "edge"
-	}
 	return &SynthesizeResult{
 		Audio:    audioData,
 		Provider: provider,

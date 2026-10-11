@@ -33,6 +33,7 @@ type voiceAudioRequest struct {
 	Pitch              any    `json:"pitch,omitempty"`
 	Amount             any    `json:"amount,omitempty"`
 	Text               string `json:"text,omitempty"`
+	disallowedFields   bool
 }
 
 func clampInt(val, minVal, maxVal int) int {
@@ -66,12 +67,12 @@ func formatPitchHz(pitchHz int) string {
 
 func checkVoiceOverrides(r *http.Request, req voiceAudioRequest) error {
 	q := r.URL.Query()
-	if q.Get("voiceId") != "" || q.Get("rate") != "" || q.Get("pitch") != "" ||
+	if q.Get("voiceId") != "" || q.Has("edgeVoice") || q.Get("rate") != "" || q.Get("pitch") != "" ||
 		q.Get("template") != "" || q.Get("text") != "" || q.Get("amount") != "" ||
 		q.Get("includeDescription") != "" {
 		return errors.New("VOICE_OVERRIDE_NOT_ALLOWED")
 	}
-	if req.VoiceID != "" || req.Rate != nil || req.Pitch != nil ||
+	if req.disallowedFields || req.VoiceID != "" || req.Rate != nil || req.Pitch != nil ||
 		req.Template != "" || req.Text != "" || req.Amount != nil ||
 		req.IncludeDescription != nil {
 		return errors.New("VOICE_OVERRIDE_NOT_ALLOWED")
@@ -98,7 +99,13 @@ func parseVoiceAudioRequest(r *http.Request) (voiceAudioRequest, error) {
 			req.TransactionIDs = strings.Split(txIDs, ",")
 		}
 	} else if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil && err.Error() != "EOF" {
+			if strings.HasPrefix(err.Error(), "json: unknown field ") {
+				req.disallowedFields = true
+				return req, nil
+			}
 			return req, err
 		}
 	}
@@ -194,7 +201,9 @@ func (s *Server) publicVoiceProfile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateVoiceSettings(w http.ResponseWriter, r *http.Request) {
 	var input storage.VoiceSettingsInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -216,10 +225,10 @@ func (s *Server) updateVoiceSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) voiceStatus(w http.ResponseWriter, r *http.Request) {
 	profile, _ := s.store.GetVoiceProfile(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"available":    s.ttsClient != nil,
-		"primary":      "edge",
+		"available":    s.ttsClient != nil && profile.SynthesisProvider() != "browser",
+		"primary":      profile.SynthesisProvider(),
 		"providerMode": profile.ProviderMode,
-		"edgeVoice":    profile.EdgeVoice,
+		"voiceId":      profile.VoiceID,
 		"rate":         profile.Rate,
 		"pitchHz":      profile.PitchHz,
 		"revision":     profile.Revision,
@@ -228,7 +237,7 @@ func (s *Server) voiceStatus(w http.ResponseWriter, r *http.Request) {
 
 func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult, profile storage.VoiceProfile) {
 	defer stream.Close()
-	if stream.Provider != "edge" || stream.Voice != profile.EdgeVoice || stream.Fallback {
+	if stream.Provider != profile.SynthesisProvider() || stream.Voice != profile.VoiceID || stream.Fallback {
 		writeError(w, http.StatusBadGateway, "VOICE_SYNTHESIS_PROFILE_MISMATCH")
 		return
 	}
@@ -337,7 +346,7 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:         phrase,
-		Voice:        profile.EdgeVoice,
+		Voice:        profile.VoiceID,
 		Rate:         ttsRate,
 		Pitch:        ttsPitch,
 		Cacheable:    true,
@@ -408,7 +417,7 @@ func (s *Server) publicTestVoiceAudio(w http.ResponseWriter, r *http.Request) {
 
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:         phrase,
-		Voice:        profile.EdgeVoice,
+		Voice:        profile.VoiceID,
 		Rate:         ttsRate,
 		Pitch:        ttsPitch,
 		Cacheable:    true,
@@ -522,7 +531,7 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:         phrase,
-		Voice:        profile.EdgeVoice,
+		Voice:        profile.VoiceID,
 		Rate:         ttsRate,
 		Pitch:        ttsPitch,
 		Cacheable:    !profile.IncludeDescription,
@@ -605,7 +614,7 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:         phrase,
-		Voice:        profile.EdgeVoice,
+		Voice:        profile.VoiceID,
 		Rate:         ttsRate,
 		Pitch:        ttsPitch,
 		Cacheable:    !profile.IncludeDescription,
@@ -689,7 +698,7 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 	defer cancel()
 	stream, err := s.ttsClient.SynthesizeStream(ctx, ttsclient.SynthesizeRequest{
 		Text:         phrase,
-		Voice:        profile.EdgeVoice,
+		Voice:        profile.VoiceID,
 		Rate:         ttsRate,
 		Pitch:        ttsPitch,
 		Cacheable:    true,

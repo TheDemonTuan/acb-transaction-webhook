@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 	"github.com/thedemontuan/acb-transaction-webhook/internal/voicecopy"
 )
 
@@ -154,6 +156,17 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 	}
 	if inputs.SynthesisKey == other.SynthesisKey {
 		t.Fatal("different voices share synthesis key")
+	}
+	piper, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if piper.VoiceID != storage.VoiceIDPiperVais1000 || piper.SynthesisKey != storage.ComputeSynthesisKey(storage.VoiceIDPiperVais1000, 1.25, 0) ||
+		piper.SchemaVersion != 1 || len(piper.Clips) != 740 || !reflect.DeepEqual(piper.Clips, inputs.Clips) || !reflect.DeepEqual(piper.Amounts, inputs.Amounts) {
+		t.Fatal("Piper pack must export the same exact 740 Go transcripts under its own synthesis key")
+	}
+	if _, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 1}); err == nil {
+		t.Fatal("Piper pitch override accepted")
 	}
 }
 

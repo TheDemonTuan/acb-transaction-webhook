@@ -250,4 +250,5 @@ CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_provider_status ON webhook_endp
 	{17, "2026-10-10-v17-sepay-store", migrationfiles.SePayStoreSQL},
 	{18, "2026-10-10-v18-sepay-managed-config", migrationfiles.SePayManagedConfigSQL},
 	{19, "2026-10-11-v19-voice-profile", migrationfiles.VoiceProfileSQL},
-	{20, "2026-10-11-v20-sepay-native", migrationfiles.SePayNativeSQL}}
+	{20, "2026-10-11-v20-sepay-native", migrationfiles.SePayNativeSQL},
+	{21, "2026-10-11-v21-piper-voice", migrationfiles.PiperVoiceSQL}}
