@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.lock ./
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --only-binary=:all: --no-cache-dir --require-hashes -r requirements.lock && \
-    rm -rf /opt/venv/bin/pip* /opt/venv/lib/python3.13/site-packages/pip*
+    rm -rf /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.13 /opt/venv/lib/python3.13/site-packages/pip /opt/venv/lib/python3.13/site-packages/pip-*.dist-info
 
 FROM python:3.13.15-slim-bookworm
 ENV PATH="/opt/venv/bin:$PATH" \
@@ -18,7 +18,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libgomp1 libstdc++6 && \
-    rm -rf /var/lib/apt/lists/* /usr/local/bin/pip* /usr/local/lib/python3.13/site-packages/pip* && \
+    rm -rf /var/lib/apt/lists/* /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 /usr/local/lib/python3.13/site-packages/pip /usr/local/lib/python3.13/site-packages/pip-*.dist-info && \
     groupadd --gid 1000 appgroup && useradd --uid 1000 --gid appgroup --no-create-home appuser
 COPY --from=builder /opt/venv /opt/venv
 COPY app ./app
