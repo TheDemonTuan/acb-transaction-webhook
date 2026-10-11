@@ -29,6 +29,14 @@ COPY Dockerfile requirements.txt requirements.lock requirements-dev.txt requirem
 COPY scripts /app/licenses/application/scripts
 # Both inference inputs and corresponding dependency sources ship read-only.
 RUN chown -R root:root /app /opt/venv && chmod -R a-w /app /opt/venv
+# No mounts, login, systemd, Perl or terminal UI run in this sidecar.
+# Purge their actual files and dpkg records, not scanner metadata alone.
+# Dependency overrides are limited to the immutable application-only image;
+# the constrained ARM smoke must prove HTTP, inference and cancellation.
+RUN dpkg --purge --force-depends --force-remove-essential \
+    bsdutils util-linux login mount perl-base ncurses-base ncurses-bin \
+    libncursesw6 libtinfo6 libacl1 libblkid1 liblastlog2-2 libmount1 \
+    libsmartcols1 libsystemd0 libudev1 libuuid1
 USER appuser
 EXPOSE 8081
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 --start-period=30s \
