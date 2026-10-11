@@ -6,15 +6,17 @@ const CACHE_NAME = 'acb.voice.clips.v1';
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 export interface VoiceClip {
   clipId: string;
-  kind: 'amount' | 'classic' | 'tail-fragment' | 'tail-full';
+  kind: 'amount' | 'classic' | 'tail-fragment' | 'tail-full' | 'amount-segment' | 'amount-prefix' | 'amount-suffix';
   transcript: string;
   durationMs: number;
   sampleRate: number;
   bytes: number;
   sha256: string;
+  speechStartMs?: number | null;
+  amountStartMs?: number | null;
 }
 export interface VoiceManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   packVersion: string;
   synthesisKey: string;
   voiceId: string;
@@ -22,6 +24,15 @@ export interface VoiceManifest {
   pitchHz: number;
   formatterVersion: 'money-vi-v1';
   catalogVersion: 'v1';
+  qualityEvidenceSha256: string;
+  preloadClipIds: string[];
+  composition: {
+    tail: 'whole' | 'fragments';
+    numbers: 'whole' | 'segments';
+  };
+  numberSegments?: Record<string, string>;
+  numberPrefix?: string | null;
+  numberSuffix?: string | null;
   clips: VoiceClip[];
   amounts: Record<string, { standard: string; classic: Record<string, string> }>;
 }
@@ -40,10 +51,10 @@ function canonicalJSON(value: unknown): string {
 }
 export async function validateManifest(data: unknown, profile: Readonly<VoiceProfile>): Promise<VoiceManifest> {
   const m = data as VoiceManifest;
-  if (!m || m.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(m.packVersion) ||
+  if (!m || m.schemaVersion !== 2 || !/^[a-f0-9]{64}$/.test(m.packVersion) || !/^[a-f0-9]{64}$/.test(m.qualityEvidenceSha256) ||
       m.synthesisKey !== profile.synthesisKey || m.voiceId !== profile.voiceId || m.rate !== profile.rate ||
       m.pitchHz !== profile.pitchHz || m.formatterVersion !== 'money-vi-v1' || m.catalogVersion !== profile.catalogVersion ||
-      !Array.isArray(m.clips) || !m.amounts || typeof m.amounts !== 'object') throw new Error('VOICE_PACK_MISMATCH');
+      !Array.isArray(m.clips) || !m.amounts || typeof m.amounts !== 'object' || !Array.isArray(m.preloadClipIds)) throw new Error('VOICE_PACK_MISMATCH');
   const { packVersion: _version, ...unsigned } = m;
   if (await sha256(new TextEncoder().encode(canonicalJSON(unsigned)).buffer) !== m.packVersion) throw new Error('VOICE_PACK_CORRUPT');
   const ids = new Set<string>();
@@ -52,7 +63,7 @@ export async function validateManifest(data: unknown, profile: Readonly<VoicePro
     if (!clip || typeof clip.clipId !== 'string' || ids.has(clip.clipId) || !/^[a-f0-9]{64}$/.test(clip.sha256) ||
         !Number.isSafeInteger(clip.bytes) || clip.bytes <= 0 || clip.bytes > 4 * MiB || clip.sampleRate !== 24000 ||
         !Number.isFinite(clip.durationMs) || clip.durationMs <= 0 || typeof clip.transcript !== 'string' ||
-        !['amount', 'classic', 'tail-fragment', 'tail-full'].includes(clip.kind)) throw new Error('VOICE_PACK_CORRUPT');
+        !['amount', 'classic', 'tail-fragment', 'tail-full', 'amount-segment', 'amount-prefix', 'amount-suffix'].includes(clip.kind)) throw new Error('VOICE_PACK_CORRUPT');
     ids.add(clip.clipId); total += clip.bytes;
   }
   if (total > 64 * MiB) throw new Error('VOICE_PACK_TOO_LARGE');
@@ -268,9 +279,12 @@ export class AudioAssets {
     try {
       const manifest = await this.getManifest(profile, controller.signal);
       if (!manifest) return;
-      const amounts = ['20000', '50000', '100000', '200000', '500000', '1000000'];
-      const ids = amounts.map((amount) => manifest.amounts[amount]?.standard).filter(Boolean);
-      ids.push(...manifest.clips.filter((clip) => clip.kind === 'tail-fragment').slice(0, 8).map((clip) => clip.clipId));
+      const ids: string[] = (Array.isArray(manifest.preloadClipIds) && manifest.preloadClipIds.length > 0)
+        ? manifest.preloadClipIds
+        : [
+            ...['20000', '50000', '100000', '200000', '500000', '1000000'].map((a) => manifest.amounts[a]?.standard).filter(Boolean),
+            ...manifest.clips.filter((c) => c.kind === 'tail-fragment').slice(0, 8).map((c) => c.clipId),
+          ];
       let index = 0;
       const worker = async () => {
         while (index < ids.length) {

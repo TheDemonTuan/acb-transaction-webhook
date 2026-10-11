@@ -2,26 +2,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrowserSpeechEngine } from '../src/features/voice-announcements/browser-speech-engine';
 import type { VoiceMessage, VoiceTelemetry } from '../src/features/voice-announcements/voice-engine';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
+import { clearVoiceTelemetry, exportVoiceTelemetry, recordVoiceTelemetry } from '../src/features/voice-announcements/voice-telemetry';
+
+interface GlobalWindowHolder {
+  window?: unknown;
+}
 
 describe('voice-telemetry', () => {
-  let prevWindow: any;
+  let prevWindow: unknown;
 
   beforeEach(() => {
-    prevWindow = (globalThis as any).window;
+    const holder = globalThis as unknown as GlobalWindowHolder;
+    prevWindow = holder.window;
   });
 
   afterEach(() => {
-    (globalThis as any).window = prevWindow;
+    const holder = globalThis as unknown as GlobalWindowHolder;
+    holder.window = prevWindow;
   });
 
   it('populates timestamp breakdown from detectedAt -> SSE -> queue -> speak onstart', async () => {
     class MockUtterance {
       text: string;
       lang = 'vi-VN';
-      voice: any = null;
+      voice: SpeechSynthesisVoice | null = null;
       rate = 1;
-      onstart: any = null;
-      onend: any = null;
+      onstart: ((ev: Event) => void) | null = null;
+      onend: ((ev: Event) => void) | null = null;
       constructor(text: string) {
         this.text = text;
       }
@@ -38,11 +45,19 @@ describe('voice-telemetry', () => {
           voiceURI: 'vi-vn-hoaimy',
         },
       ],
-      speak: vi.fn((utt: any) => {
-        setTimeout(() => {
-          utt.onstart?.(new Event('start'));
-          utt.onend?.(new Event('end'));
-        }, 20);
+      speak: vi.fn((utt: unknown) => {
+        if (utt && typeof utt === 'object' && 'onstart' in utt && 'onend' in utt) {
+          const startCb = utt.onstart;
+          const endCb = utt.onend;
+          queueMicrotask(() => {
+            if (typeof startCb === 'function') {
+              startCb(new Event('start'));
+            }
+            if (typeof endCb === 'function') {
+              endCb(new Event('end'));
+            }
+          });
+        }
       }),
       cancel: vi.fn(),
       resume: vi.fn(),
@@ -50,7 +65,8 @@ describe('voice-telemetry', () => {
       removeEventListener: vi.fn(),
     };
 
-    (globalThis as any).window = {
+    const holder = globalThis as unknown as GlobalWindowHolder;
+    holder.window = {
       speechSynthesis: mockSynth,
       SpeechSynthesisUtterance: MockUtterance,
     };
@@ -65,7 +81,6 @@ describe('voice-telemetry', () => {
       detectedAt,
       sseReceivedAt,
       queuedAt,
-      detectedToSseMs: sseReceivedAt - new Date(detectedAt).getTime(),
       sseToQueueMs: queuedAt - sseReceivedAt,
       receivedMonotonicAt: performance.now() - 50,
     };
@@ -88,6 +103,26 @@ describe('voice-telemetry', () => {
     expect(receivedTelemetry?.speechStartedAt).toBeGreaterThanOrEqual(queuedAt);
     expect(receivedTelemetry?.queueToSpeakMs).toBeGreaterThanOrEqual(0);
     expect(receivedTelemetry?.sseToSpeakMs).toBeGreaterThanOrEqual(0);
-    expect(receivedTelemetry?.totalLatencyMs).toBeUndefined();
+  });
+
+  it('records telemetry in bounded ring buffer without PII', () => {
+    clearVoiceTelemetry();
+    const payloadWithSecret = {
+      detectedAt: '2026-10-11T12:00:00Z',
+      sseToSpeakMs: 320,
+      audioPath: 'decoded-pack' as const,
+      outcome: 'completed' as const,
+      text: 'Secret text should be omitted',
+    };
+    recordVoiceTelemetry(payloadWithSecret);
+
+    const exported = exportVoiceTelemetry();
+    expect(exported.schemaVersion).toBe(1);
+    expect(exported.samples).toHaveLength(1);
+    const firstSample = exported.samples[0];
+    expect(firstSample.sseToSpeakMs).toBe(320);
+    expect(firstSample.audioPath).toBe('decoded-pack');
+    expect(firstSample.outcome).toBe('completed');
+    expect('text' in firstSample).toBe(false);
   });
 });

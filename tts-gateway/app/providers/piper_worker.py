@@ -34,7 +34,7 @@ def load_voice(model_path):
     return PiperVoice(session=session, config=config)
 
 
-def encode(voice, text, rate):
+def stream_encode(voice, text, rate):
     import lameenc
     from piper import SynthesisConfig
 
@@ -45,21 +45,31 @@ def encode(voice, text, rate):
     encoder.set_out_sample_rate(24000)
     encoder.set_channels(1)
     encoder.set_quality(2)
-    audio = bytearray()
+
+    total_bytes = 0
     samples = 0
-    # Rate is applied exactly once, in inference, not in MP3 playback.
+
     for chunk in voice.synthesize(text, SynthesisConfig(length_scale=1.0 / rate)):
         samples += len(chunk.audio_int16_bytes) // 2
         if samples > voice.config.sample_rate * 120:
             raise ValueError("Audio duration exceeds limit")
-        audio.extend(encoder.encode(chunk.audio_int16_bytes))
-        if len(audio) > MAX_AUDIO_BYTES:
-            raise ValueError("Audio exceeds limit")
-    audio.extend(encoder.flush())
-    if not audio or len(audio) > MAX_AUDIO_BYTES:
-        raise ValueError("Invalid audio size")
-    return audio
+        encoded = encoder.encode(chunk.audio_int16_bytes)
+        if encoded:
+            total_bytes += len(encoded)
+            if total_bytes > MAX_AUDIO_BYTES:
+                raise ValueError("Audio exceeds limit")
+            for offset in range(0, len(encoded), 16384):
+                yield encoded[offset:offset + 16384]
 
+    flushed = encoder.flush()
+    total_bytes += len(flushed)
+    if total_bytes > MAX_AUDIO_BYTES:
+        raise ValueError("Audio exceeds limit")
+    for offset in range(0, len(flushed), 16384):
+        yield flushed[offset:offset + 16384]
+
+    if total_bytes == 0:
+        raise ValueError("Invalid audio size: 0 bytes generated")
 
 def main():
     voice = load_voice(sys.argv[1])
@@ -72,7 +82,9 @@ def main():
             rate = request["rate"]
             if not 0.75 <= rate <= 2 or not isinstance(request["text"], str) or not 0 < len(request["text"]) <= 600:
                 raise ValueError("Invalid request")
-            send(1, encode(voice, request["text"], rate))
+            for chunk in stream_encode(voice, request["text"], rate):
+                send(1, chunk)
+            send(3)
         except Exception:
             # Do not expose text, filesystem paths, or provider internals.
             send(2)

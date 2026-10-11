@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -266,15 +267,18 @@ func writeAudioStream(w http.ResponseWriter, stream *ttsclient.StreamResult, pro
 	for {
 		n, err := stream.Reader.Read(buf)
 		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
-				return
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				panic(http.ErrAbortHandler)
 			}
 			if canFlush {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
-			break
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			panic(http.ErrAbortHandler)
 		}
 	}
 }

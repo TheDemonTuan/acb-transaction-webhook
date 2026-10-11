@@ -132,4 +132,13 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
     // Immediate enqueue transitions state to speaking without 750ms burst delay
     expect(queue.getState()).toBe('speaking');
   });
+
+  it('bounds skipped keys set to 500 entries under 10000 skip calls', () => {
+    for (let i = 0; i < 10000; i++) {
+      dedupe.markSkipped({ transactionId: `tx_skip_${i}` }, 'QUEUE_OVERFLOW');
+    }
+    expect(dedupe.has({ transactionId: 'tx_skip_0' })).toBe(false);
+    expect(dedupe.has({ transactionId: 'tx_skip_9999' })).toBe(true);
+    expect(dedupe.has({ transactionId: 'tx_skip_9700' })).toBe(true);
+  });
 });

@@ -105,23 +105,28 @@ describe('VoiceQueue', () => {
     expect(queue.getPendingCount()).toBe(0);
   });
 
-  it('omits fun tail when pending >= 3', () => {
+  it('burst 4 accepted items retains chosen recipe and pending <= 20 without implicit shortening', () => {
     const fake = new FakeVoiceEngine();
     const { promise: blocker, resolve: unblock } = Promise.withResolvers<void>();
     fake.blocker = blocker;
     const queue = new VoiceQueue(fake, undefined, { maxPending: 20 });
 
     queue.enqueue({ text: 'Current' });
-    const msg1: VoiceMessage = { text: 'Item 1' };
-    const msg2: VoiceMessage = { text: 'Item 2' };
-    const msg3: VoiceMessage = { text: 'Item 3' };
+    const msg1: VoiceMessage = { text: 'Item 1', phraseId: 'recipe-1' };
+    const msg2: VoiceMessage = { text: 'Item 2', phraseId: 'recipe-2' };
+    const msg3: VoiceMessage = { text: 'Item 3', phraseId: 'recipe-3' };
+    const msg4: VoiceMessage = { text: 'Item 4', phraseId: 'recipe-4' };
 
-    queue.enqueue(msg1);
-    queue.enqueue(msg2);
-    queue.enqueue(msg3);
+    expect(queue.enqueue(msg1)).toBe('queued');
+    expect(queue.enqueue(msg2)).toBe('queued');
+    expect(queue.enqueue(msg3)).toBe('queued');
+    expect(queue.enqueue(msg4)).toBe('queued');
 
-    // msg3 was enqueued when queue already had 2 items pending (current + 2 = 3 in total)
-    expect(msg3.omitFun).toBe(true);
+    expect(queue.getPendingCount()).toBe(4);
+    expect(msg1.phraseId).toBe('recipe-1');
+    expect(msg2.phraseId).toBe('recipe-2');
+    expect(msg3.phraseId).toBe('recipe-3');
+    expect(msg4.phraseId).toBe('recipe-4');
 
     unblock();
     queue.cancel();

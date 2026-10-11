@@ -81,6 +81,7 @@ services:
       PORT: 8081
       TZ: Asia/Ho_Chi_Minh
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
+      PIPER_WORKERS: ${PIPER_WORKERS:-1}
     expose:
       - "8081"
     networks:

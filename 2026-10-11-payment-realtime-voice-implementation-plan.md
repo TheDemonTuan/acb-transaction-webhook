@@ -1,5 +1,16 @@
 # Payment realtime, dọn ACB và voice tiếng Việt nhất quán
 
+## Release correction — 2026-10-12
+
+- Báo cáo trước ghi 42/42 hoàn thành không phải evidence phát hành. Metrics A/B được hardcode; điểm nghe/rate/composition được tự điền; chưa chứng minh ARM64 quota, soak hai giờ hay pack được người nghe duyệt. Đã loại bỏ benchmark scaffolds giả và rút các manifest/profile local chưa có review thật. Không commit DB/audio/evidence local.
+- Release mã nguồn này giữ cold synthesis cùng giọng; pack schema 2 chỉ được publish khi có review đầy đủ gắn hash, profile/input và reviewer/time. `build_voice_pack.py --publish` cần `--model-card` cho Piper hoặc `--rights-evidence` cho Edge; candidate không tự trở thành pack phát hành. Publication immutable; thiếu review phải bị từ chối.
+- Worker mặc định vẫn là 1. Worker 2 chỉ là cấu hình khả dụng, chưa có quyết định production dựa trên ARM64 quota.
+- Cold browser playback dùng fetch-owned transport: kiểm tra exact profile headers, giới hạn 4MiB/deadline, MSE khi hỗ trợ hoặc buffered blob cùng request; upstream lỗi không được tính là EOF thành công. CSP chỉ bổ sung `media-src 'self' blob: data:` cho audio local/unlock.
+- ARM64 container gate phát hiện ngắt client trước headers chưa hủy inference. `preheaders_disconnect_guard` hiện sở hữu disconnect trong admission/first-byte cho cả Piper và Edge, dừng/join watcher trước khi chuyển receive cho `OwnedStreamingResponse`; cleanup phải giải phóng lease/worker. Regression lifecycle/ownership 27 tests pass; gate container phải pass trước merge.
+- Rehearsal fault-matrix phát hiện candidate capability bị bỏ qua khi digest old/candidate bằng nhau. Deploy hiện kiểm tra riêng running worker và isolated candidate, không suy role từ digest; gate `candidate-missing-payment-drain` vẫn phải chặn trước worker replacement.
+- Kiểm chứng local: Go `go test ./...` pass 26 packages; Pytest nhóm runtime/pack 99 passed, 2 skipped; frontend build và 230 tests/31 files pass. Payment/Piper smoke disposable PASS, audio 200/Piper/MP3; listening/transcript NOT_RUN. Chromium phát MP3 MSE đến ended 1.56s và buffered đến ended 1.504667s; profile mismatch bị từ chối. Không suy diễn thành đã nghe duyệt hay latency production.
+- Commit/merge/deployment identity và kiểm chứng production phải ghi riêng theo kết quả thực; ghi chú này chưa tuyên bố đã deploy hoặc hoàn tất toàn bộ kế hoạch audio/A/B.
+
 ## Context
 Hợp nhất ba tài liệu `2026-10-10-payment-core-cleanup.md`, `2026-10-10-payments-realtime-voice-design.md`, `2026-10-10-voice-fast-consistent.md` thành một thứ tự triển khai: bỏ phần ACB business đã lỗi thời, nhận payOS/SePay nhanh nhưng đúng tiền, cập nhật quầy ngay, đọc tiếng Việt đúng cấu hình với chuông ngắn và câu vui theo khung tiền. Người dùng đã chọn **giữ dịch vụ TTS hiện tại, không thêm phí mặc định**, và **ít nhất 10.000 biến thể câu vui đã kiểm duyệt ngay trong đợt này**. Giữ Go gateway + singleton worker + SQLite WAL/FULL + SSE + React + tts-gateway; không thêm broker, database, model inference hay framework payment/voice tổng quát.
 

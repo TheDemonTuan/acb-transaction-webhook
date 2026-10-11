@@ -50,28 +50,24 @@ func readThreeDigits(n int, hasHigherGroup bool) []string {
 	return words
 }
 
-// SpeakVND converts an int64 amount into natural spoken Vietnamese text followed by "đồng".
-// Example: 500000 -> "năm trăm nghìn đồng"
-// Example: 1250000 -> "một triệu hai trăm năm mươi nghìn đồng"
-func SpeakVND(amount int64) string {
+// SpeakVNDParts breaks amount into spoken 3-digit groups with scale suffixes.
+// For positive amounts, strings.Join(SpeakVNDParts(amount), " ") + " đồng" == SpeakVND(amount).
+func SpeakVNDParts(amount int64) []string {
 	if amount <= 0 {
-		return "không đồng"
+		return nil
 	}
-	// Break amount into groups of 3 digits from right to left
 	var groups []int
 	val := amount
 	for val > 0 {
 		groups = append(groups, int(val%1000))
 		val /= 1000
 	}
-
-	// Pad groups to a multiple of 3 so each block has 3 groups (đơn vị, nghìn, triệu)
 	for len(groups)%3 != 0 {
 		groups = append(groups, 0)
 	}
 
 	numBlocks := len(groups) / 3
-	var resultParts []string
+	var parts []string
 	hasHigherOverall := false
 
 	for b := numBlocks - 1; b >= 0; b-- {
@@ -84,36 +80,47 @@ func SpeakVND(amount int64) string {
 			continue
 		}
 
+		var blockParts []string
+
 		if g2 > 0 {
-			w := readThreeDigits(g2, hasHigherOverall)
-			resultParts = append(resultParts, w...)
-			resultParts = append(resultParts, "triệu")
+			w := append(readThreeDigits(g2, hasHigherOverall), "triệu")
+			blockParts = append(blockParts, strings.Join(w, " "))
 			hasHigherOverall = true
 		}
 
 		if g1 > 0 {
-			w := readThreeDigits(g1, hasHigherOverall)
-			resultParts = append(resultParts, w...)
-			resultParts = append(resultParts, "nghìn")
+			w := append(readThreeDigits(g1, hasHigherOverall), "nghìn")
+			blockParts = append(blockParts, strings.Join(w, " "))
 			hasHigherOverall = true
 		}
 
 		if g0 > 0 {
 			w := readThreeDigits(g0, hasHigherOverall)
-			resultParts = append(resultParts, w...)
+			blockParts = append(blockParts, strings.Join(w, " "))
 			hasHigherOverall = true
 		}
 
-		if b > 0 {
-			for range b {
-				resultParts = append(resultParts, "tỷ")
-			}
+		if b > 0 && len(blockParts) > 0 {
+			tys := strings.Repeat(" tỷ", b)
+			blockParts[len(blockParts)-1] += tys
 		}
+
+		parts = append(parts, blockParts...)
 	}
 
-	if len(resultParts) == 0 {
+	return parts
+}
+
+// SpeakVND converts an int64 amount into natural spoken Vietnamese text followed by "đồng".
+// Example: 500000 -> "năm trăm nghìn đồng"
+// Example: 1250000 -> "một triệu hai trăm năm mươi nghìn đồng"
+func SpeakVND(amount int64) string {
+	if amount <= 0 {
 		return "không đồng"
 	}
-
-	return strings.Join(resultParts, " ") + " đồng"
+	parts := SpeakVNDParts(amount)
+	if len(parts) == 0 {
+		return "không đồng"
+	}
+	return strings.Join(parts, " ") + " đồng"
 }

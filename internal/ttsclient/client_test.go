@@ -458,3 +458,17 @@ func TestSynthesisTransportErrorsAreSafe(t *testing.T) {
 		})
 	}
 }
+
+func TestSynthesisRejectsEmptySuccessfulHTTPBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	client := New(upstream.URL, "fixture")
+	if _, err := client.Synthesize(context.Background(), SynthesizeRequest{}); !errors.Is(err, ErrSynthesisFailed) {
+		t.Fatalf("empty buffered audio accepted: %v", err)
+	}
+	if _, err := client.SynthesizeStream(context.Background(), SynthesizeRequest{}); !errors.Is(err, ErrSynthesisFailed) {
+		t.Fatalf("empty streamed audio accepted: %v", err)
+	}
+}

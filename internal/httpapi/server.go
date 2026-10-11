@@ -924,7 +924,13 @@ func securityHeaders(next http.Handler) http.Handler {
 func recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if recover() != nil {
+			if rec := recover(); rec != nil {
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					panic(rec)
+				}
+				if rec == http.ErrAbortHandler {
+					panic(rec)
+				}
 				writeError(w, http.StatusInternalServerError, "internal_error")
 			}
 		}()

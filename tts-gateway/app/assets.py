@@ -1,5 +1,6 @@
 """Read-only, manifest-authorized voice packs. No runtime synthesis or writes."""
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 import hashlib
 import json
@@ -18,8 +19,7 @@ VOICES = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural", PIPER_VOICE}
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 AMOUNT = re.compile(r"^[1-9][0-9]*$")
-KINDS = {"amount", "classic", "tail-fragment", "tail-full"}
-
+KINDS = {"amount", "classic", "tail-fragment", "tail-full", "amount-segment", "amount-prefix", "amount-suffix"}
 
 class InvalidPack(ValueError):
     pass
@@ -69,12 +69,15 @@ def synthesis_key(voice, rate, pitch):
     provider = "piper" if voice == PIPER_VOICE else "edge"
     if provider == "piper" and pitch != 0:
         raise InvalidPack("Piper requires zero pitch")
-    source = f"{provider}|{voice}|{rate:.2f}|{pitch}|{FORMATTER_VERSION}|pack-schema-1"
+    source = f"{provider}|{voice}|{rate:.2f}|{pitch}|{FORMATTER_VERSION}|pack-schema-2"
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def validate_inputs(data):
-    _fields(data, ("schemaVersion", "synthesisKey", "voiceId", "rate", "pitchHz", "formatterVersion", "catalogVersion", "clips", "amounts"))
+    required_in = {"schemaVersion", "synthesisKey", "voiceId", "rate", "pitchHz", "formatterVersion", "catalogVersion", "clips", "amounts", "preloadClipIds"}
+    allowed_in = required_in | {"numberSegments", "numberPrefix", "numberSuffix"}
+    if not isinstance(data, dict) or not (required_in <= set(data.keys()) <= allowed_in):
+        raise InvalidPack("Invalid schema fields")
     _validate_common(data)
     ids = {}
     if not isinstance(data["clips"], list) or not data["clips"] or len(data["clips"]) > 20000:
@@ -83,12 +86,36 @@ def validate_inputs(data):
         _fields(clip, ("clipId", "kind", "transcript"))
         _validate_clip_text(clip, ids)
     _validate_amounts(data["amounts"], ids)
+    _validate_schema2_inputs(data, ids)
     return data
 
 
+def _validate_schema2_inputs(data, ids):
+    preloads = data.get("preloadClipIds")
+    if not isinstance(preloads, list) or any(not isinstance(cid, str) for cid in preloads) or len(preloads) > 14 or len(set(preloads)) != len(preloads):
+        raise InvalidPack("Invalid preload clip IDs (must be <=14 unique)")
+    for cid in preloads:
+        if cid not in ids:
+            raise InvalidPack(f"Preload clip {cid} not found in clips")
+    num_segs = data.get("numberSegments")
+    if num_segs is not None:
+        if not isinstance(num_segs, dict) or len(num_segs) > 128:
+            raise InvalidPack("Invalid numberSegments map")
+        for group, cid in num_segs.items():
+            if not isinstance(group, str) or not group.strip() or not isinstance(cid, str) or cid not in ids or ids[cid]["kind"] != "amount-segment" or ids[cid]["transcript"] != group:
+                raise InvalidPack(f"Invalid number segment mapping: {group}")
+    prefix = data.get("numberPrefix")
+    if prefix is not None:
+        if not isinstance(prefix, str) or prefix not in ids or ids[prefix]["kind"] != "amount-prefix":
+            raise InvalidPack("Invalid numberPrefix")
+    suffix = data.get("numberSuffix")
+    if suffix is not None:
+        if not isinstance(suffix, str) or suffix not in ids or ids[suffix]["kind"] != "amount-suffix":
+            raise InvalidPack("Invalid numberSuffix")
+
 def _validate_common(data):
-    if type(data["schemaVersion"]) is not int or data["schemaVersion"] != 1 or data["formatterVersion"] != FORMATTER_VERSION or data["catalogVersion"] != "v1":
-        raise InvalidPack("Unsupported pack version")
+    if type(data["schemaVersion"]) is not int or data["schemaVersion"] != 2 or data["formatterVersion"] != FORMATTER_VERSION or data["catalogVersion"] != "v1":
+        raise InvalidPack("Unsupported pack version (must be schema 2)")
     if data["synthesisKey"] != synthesis_key(data["voiceId"], data["rate"], data["pitchHz"]):
         raise InvalidPack("Profile/key mismatch")
 
@@ -120,7 +147,7 @@ def _validate_amounts(amounts, ids):
 
 
 def validate_clip_metadata(clip):
-    _fields(clip, ("clipId", "kind", "transcript", "durationMs", "sampleRate", "bytes", "sha256"))
+    _fields(clip, ("clipId", "kind", "transcript", "durationMs", "sampleRate", "bytes", "sha256", "speechStartMs", "amountStartMs"))
     _validate_clip_text(clip, {})
     if type(clip["bytes"]) is not int or not 0 < clip["bytes"] <= MAX_CLIP_BYTES:
         raise InvalidPack("Clip exceeds limit")
@@ -128,11 +155,26 @@ def validate_clip_metadata(clip):
         raise InvalidPack("Invalid audio metadata")
     if not isinstance(clip["sha256"], str) or not HASH.fullmatch(clip["sha256"]):
         raise InvalidPack("Invalid clip hash")
-
+    for onset in ("speechStartMs", "amountStartMs"):
+        val = clip.get(onset)
+        if val is not None:
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or val < 0 or val >= clip["durationMs"]:
+                raise InvalidPack(f"Invalid onset timestamp for {onset}")
+    if clip["kind"] in ("tail-fragment", "tail-full") and clip["amountStartMs"] is not None:
+        raise InvalidPack("Tail clips cannot have an amount onset")
 
 def validate_manifest(data):
-    _fields(data, ("schemaVersion", "packVersion", "synthesisKey", "voiceId", "rate", "pitchHz", "formatterVersion", "catalogVersion", "clips", "amounts"))
+    required = {"schemaVersion", "packVersion", "synthesisKey", "voiceId", "rate", "pitchHz", "formatterVersion", "catalogVersion", "clips", "amounts", "preloadClipIds", "composition", "qualityEvidenceSha256"}
+    allowed = required | {"numberSegments", "numberPrefix", "numberSuffix"}
+    if not isinstance(data, dict) or not (required <= set(data.keys()) <= allowed):
+        raise InvalidPack("Invalid schema fields")
     _validate_common(data)
+    quality_evidence = data.get("qualityEvidenceSha256")
+    if not isinstance(quality_evidence, str) or not HASH.fullmatch(quality_evidence):
+        raise InvalidPack("Invalid quality evidence hash")
+    comp = data.get("composition")
+    if not isinstance(comp, dict) or set(comp.keys()) != {"tail", "numbers"} or comp["tail"] not in ("whole", "fragments") or comp["numbers"] not in ("whole", "segments"):
+        raise InvalidPack("Invalid composition modes")
     version = data["packVersion"]
     unsigned = {k: v for k, v in data.items() if k != "packVersion"}
     if not isinstance(version, str) or not HASH.fullmatch(version) or hashlib.sha256(canonical_json(unsigned)).hexdigest() != version:
@@ -148,7 +190,96 @@ def validate_manifest(data):
     if total > MAX_PACK_BYTES:
         raise InvalidPack("Pack exceeds limit")
     _validate_amounts(data["amounts"], ids)
+    _validate_schema2_inputs(data, ids)
+    if comp["numbers"] == "segments" and (not data.get("numberSegments") or data.get("numberPrefix") is None or data.get("numberSuffix") is None):
+        raise InvalidPack("Segment composition requires number clips, prefix and suffix")
     return data
+
+
+def manifest_inputs(manifest):
+    """Recover exactly the reviewed input contract, excluding audio metadata."""
+    return {
+        **{key: value for key, value in manifest.items() if key not in ("clips", "packVersion", "composition", "qualityEvidenceSha256")},
+        "clips": [{key: clip[key] for key in ("clipId", "kind", "transcript")} for clip in manifest["clips"]],
+    }
+
+
+def validate_quality_evidence(evidence, manifest):
+    """Validate the human attestation at publish, verify and runtime boundaries."""
+    _fields(evidence, (
+        "schemaVersion", "synthesisKey", "inputHash", "reviewer", "reviewedAt", "decision",
+        "clips", "heardClipIds", "heardRecipePairIds", "amountAccuracy", "readabilityMedian",
+        "naturalnessMedian", "joinFailures", "rejectedClipIds", "candidateDecisions",
+        "tailMode", "numberMode", "selectedRate", "sampleSetSha256",
+    ))
+    if type(evidence["schemaVersion"]) is not int or evidence["schemaVersion"] != 1 or evidence["decision"] != "approved":
+        raise InvalidPack("Quality review must be explicitly approved")
+    if not isinstance(evidence["reviewer"], str) or not evidence["reviewer"].strip():
+        raise InvalidPack("Quality review requires a reviewer")
+    try:
+        reviewed = datetime.fromisoformat(evidence["reviewedAt"].replace("Z", "+00:00"))
+        if reviewed.utcoffset() is None:
+            raise ValueError("missing timezone")
+    except (AttributeError, TypeError, ValueError):
+        raise InvalidPack("Quality review requires a timestamp with timezone") from None
+    for name in ("inputHash", "sampleSetSha256"):
+        if not isinstance(evidence[name], str) or not HASH.fullmatch(evidence[name]):
+            raise InvalidPack("Invalid quality " + name)
+    expected_hash = hashlib.sha256(canonical_json(manifest_inputs(manifest))).hexdigest()
+    if evidence["synthesisKey"] != manifest["synthesisKey"] or evidence["inputHash"] != expected_hash:
+        raise InvalidPack("Quality evidence does not match exact input transcripts/profile")
+    if isinstance(evidence["selectedRate"], bool) or not isinstance(evidence["selectedRate"], (int, float)) or evidence["selectedRate"] != manifest["rate"]:
+        raise InvalidPack("Quality selected rate mismatch")
+    for name in ("readabilityMedian", "naturalnessMedian"):
+        score = evidence[name]
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 4 <= score <= 5:
+            raise InvalidPack("Quality review has missing or failing " + name)
+    accuracy = evidence["amountAccuracy"]
+    _fields(accuracy, ("correct", "total"))
+    if type(accuracy["correct"]) is not int or type(accuracy["total"]) is not int or accuracy["total"] < 50 or accuracy["correct"] != accuracy["total"]:
+        raise InvalidPack("Quality review requires zero amount errors across at least 50 cases")
+    clip_ids = {clip["clipId"] for clip in manifest["clips"]}
+    for name in ("heardClipIds", "heardRecipePairIds", "joinFailures", "rejectedClipIds"):
+        values = evidence[name]
+        if not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values) or len(set(values)) != len(values):
+            raise InvalidPack("Invalid quality " + name)
+    if set(evidence["heardClipIds"]) != clip_ids or evidence["rejectedClipIds"]:
+        raise InvalidPack("Every published clip must have been heard and approved")
+    decisions = evidence["candidateDecisions"]
+    _fields(decisions, ("tail", "numbers"))
+    if any(value not in ("approved", "rejected") for value in decisions.values()):
+        raise InvalidPack("Invalid candidate decisions")
+    if evidence["tailMode"] not in ("whole", "fragments") or evidence["numberMode"] not in ("whole", "segments"):
+        raise InvalidPack("Invalid reviewed composition modes")
+    if manifest["composition"] != {"tail": evidence["tailMode"], "numbers": evidence["numberMode"]}:
+        raise InvalidPack("Quality composition mismatch")
+    for role, mode in (("tail", evidence["tailMode"]), ("numbers", evidence["numberMode"])):
+        if mode in ("fragments", "segments") and (decisions[role] != "approved" or evidence["joinFailures"]):
+            raise InvalidPack("Unapproved joins cannot be enabled")
+    if evidence["tailMode"] == "fragments" and (sum(clip["kind"] == "tail-fragment" for clip in manifest["clips"]) != 600 or len(evidence["heardRecipePairIds"]) < 80):
+        raise InvalidPack("Fragment composition requires all 600 clips and 80 reviewed pairs")
+    reviews = evidence["clips"]
+    if not isinstance(reviews, list) or len(reviews) != len(clip_ids):
+        raise InvalidPack("Quality clip review must cover the exact clip set")
+    by_id = {}
+    for review in reviews:
+        _fields(review, ("clipId", "sha256", "speechStartMs", "amountStartMs"))
+        cid = review["clipId"]
+        if not isinstance(cid, str) or cid not in clip_ids or cid in by_id:
+            raise InvalidPack("Invalid/duplicate quality clip review")
+        by_id[cid] = review
+    for clip in manifest["clips"]:
+        review = by_id[clip["clipId"]]
+        if any(review[key] != clip[key] for key in ("sha256", "speechStartMs", "amountStartMs")):
+            raise InvalidPack("Quality review does not match exact clip hashes/onsets")
+    return evidence
+
+
+def read_quality_evidence(directory, manifest):
+    evidence = parse_json(read_bounded(directory / "quality.json", MAX_MANIFEST_BYTES))
+    if hashlib.sha256(canonical_json(evidence)).hexdigest() != manifest["qualityEvidenceSha256"]:
+        raise InvalidPack("Quality evidence checksum mismatch")
+    return validate_quality_evidence(evidence, manifest)
 
 
 def read_bounded(path, limit):
@@ -206,6 +337,7 @@ class AssetStore:
                     manifest = validate_manifest(parse_json(raw))
                     if manifest["synthesisKey"] != directory.name:
                         raise InvalidPack("Profile directory mismatch")
+                    read_quality_evidence(directory, manifest)
                     for clip in manifest["clips"]:
                         read_clip(self.root, clip)
                     packs[directory.name] = PublishedPack(manifest, canonical_json(manifest))

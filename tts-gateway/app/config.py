@@ -1,8 +1,19 @@
 """Configuration for TTS Gateway sidecar."""
 import os
 from pydantic import BaseModel
+def _parse_piper_workers() -> int:
+    raw = os.getenv("PIPER_WORKERS", "1").strip()
+    try:
+        val = int(raw)
+        if val in (1, 2):
+            return val
+    except ValueError:
+        pass
+    raise ValueError(f"PIPER_WORKERS must be 1 or 2, got: {raw!r}")
+
 
 class Config(BaseModel):
+    piper_workers: int = _parse_piper_workers()
     host: str = os.getenv("TTS_HOST", "0.0.0.0")
     port: int = int(os.getenv("TTS_PORT", "8081"))
     internal_token: str = os.getenv("TTS_INTERNAL_TOKEN", "")

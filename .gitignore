@@ -32,4 +32,6 @@ deploy/.previous-slot
 /voice-inputs.local.json
 /voice-profile.local.json
 /voicepacks.local/
+/voice-qa.local/
+/.local-qa/
 

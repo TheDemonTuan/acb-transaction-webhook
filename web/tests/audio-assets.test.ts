@@ -79,8 +79,9 @@ describe('bounded browser audio assets', () => {
     assets.dispose();
   });
   it('rejects packs for another synthesis profile before any clip download', async () => {
-    const manifest: VoiceManifest = { schemaVersion: 1, packVersion: 'c'.repeat(64), synthesisKey: 'b'.repeat(64),
-      voiceId: profile.voiceId, rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [], amounts: {} };
+    const manifest: VoiceManifest = { schemaVersion: 2, packVersion: 'c'.repeat(64), synthesisKey: 'b'.repeat(64),
+      voiceId: profile.voiceId, rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1',
+      qualityEvidenceSha256: 'e'.repeat(64), preloadClipIds: [], composition: { tail: 'whole', numbers: 'whole' }, clips: [], amounts: {} };
     await expect(validateManifest(manifest, profile)).rejects.toThrow('VOICE_PACK_MISMATCH');
   });
   it('preloads only six active-profile cores plus eight fragments through real verified fetch/decode, concurrency two', async () => {
@@ -92,8 +93,11 @@ describe('bounded browser audio assets', () => {
       clipId: index < amounts.length ? `amount-${amounts[index]}` : `fragment-${index - amounts.length}`,
       kind: index < amounts.length ? 'amount' : 'tail-fragment',
     }));
-    const unsigned = { schemaVersion: 1, synthesisKey: profile.synthesisKey, voiceId: profile.voiceId,
-      rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips,
+    const preloadClipIds = [...amounts.slice(0, 6).map((a) => `amount-${a}`), ...Array.from({ length: 8 }, (_, i) => `fragment-${i}`)];
+    const unsigned = { schemaVersion: 2, synthesisKey: profile.synthesisKey, voiceId: profile.voiceId,
+      rate: profile.rate, pitchHz: 0, formatterVersion: 'money-vi-v1', catalogVersion: 'v1',
+      qualityEvidenceSha256: 'e'.repeat(64), preloadClipIds,
+      composition: { tail: 'whole', numbers: 'whole' }, clips,
       amounts: Object.fromEntries(amounts.map((amount) => [amount, { standard: `amount-${amount}`, classic: {} }])) };
     const canonical = (value: unknown): string => {
       if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;

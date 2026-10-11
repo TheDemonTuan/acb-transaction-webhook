@@ -13,13 +13,25 @@ export interface VoiceTelemetry {
   sseReceivedAt?: number;
   queuedAt?: number;
   speechStartedAt?: number;
-  detectedToSseMs?: number;
   sseToQueueMs?: number;
   queueToSpeakMs?: number;
   sseToSpeakMs?: number;
-  totalLatencyMs?: number;
   receivedMonotonicAt?: number;
   speechStartedMonotonicAt?: number;
+  preparationStartedMonotonicAt?: number;
+  audioReadyMonotonicAt?: number;
+  chimeStartedMonotonicAt?: number;
+  chimeEndedMonotonicAt?: number;
+  amountStartedMonotonicAt?: number;
+  speechEndedMonotonicAt?: number;
+  sseToChimeMs?: number;
+  sseToAmountMs?: number;
+  audioPath?: 'decoded-pack' | 'compressed-pack' | 'network-pack' | 'cold-stream' | 'cold-buffer' | 'browser';
+  startEvidence?: 'audio-clock' | 'media-playing' | 'speech-onstart';
+  amountEvidence?: 'reviewed-offset' | 'segment-boundary' | 'speech-boundary' | 'unavailable';
+  outcome?: 'completed' | 'failed' | 'interrupted' | 'overflow' | 'expired' | 'cancelled';
+  isTest?: boolean;
+  isReplay?: boolean;
 }
 
 export interface VoiceMessage {
@@ -33,7 +45,6 @@ export interface VoiceMessage {
   isReplay?: boolean;
   phraseId?: string;
   amountVnd?: string;
-  omitFun?: boolean;
   profile?: Readonly<VoiceProfile>;
   recipe?: AnnouncementRecipe;
   description?: string;

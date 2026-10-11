@@ -84,7 +84,7 @@ func ComputeSynthesisKey(voiceID string, rate float64, pitchHz int) string {
 	if voiceID == VoiceIDPiperVais1000 {
 		provider = "piper"
 	}
-	raw := fmt.Sprintf("%s|%s|%.2f|%d|money-vi-v1|pack-schema-1", provider, voiceID, rate, pitchHz)
+	raw := fmt.Sprintf("%s|%s|%.2f|%d|money-vi-v1|pack-schema-2", provider, voiceID, rate, pitchHz)
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
 }

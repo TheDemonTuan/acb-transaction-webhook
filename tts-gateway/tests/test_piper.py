@@ -25,7 +25,7 @@ def is_mp3(audio):
 def test_piper_fixed_contract_and_synthesis_key():
     request = SynthesizeRequest(text="Đã nhận năm trăm nghìn đồng.")
     assert request.voice == VOICE_ID and request.provider_mode == "PIPER_ONLY"
-    canonical = "piper|vi-VN-vais1000-medium|1.25|0|money-vi-v1|pack-schema-1"
+    canonical = "piper|vi-VN-vais1000-medium|1.25|0|money-vi-v1|pack-schema-2"
     assert synthesis_key(VOICE_ID, 1.25, 0) == hashlib.sha256(canonical.encode()).hexdigest()
     with pytest.raises(InvalidPack):
         synthesis_key(VOICE_ID, 1.25, 1)
@@ -231,3 +231,81 @@ async def test_consumer_cancellation_during_recovery_reaps_without_respawn(monke
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         await provider.close()
+
+
+def test_encoder_emits_short_sentence_before_generating_next(monkeypatch):
+    """Framing-only double: this is not real audio or inference timing evidence."""
+    import sys
+    from types import SimpleNamespace
+    from app.providers.piper_worker import stream_encode
+    encoded_sentence = b"encoded-sentence"
+    flush_calls = []
+    class Encoder:
+        def __getattr__(self, name):
+            return lambda *args: None
+        def encode(self, pcm):
+            return encoded_sentence
+        def flush(self):
+            flush_calls.append(True)
+            return b"trailer"
+    monkeypatch.setitem(sys.modules, "lameenc", SimpleNamespace(Encoder=Encoder))
+    monkeypatch.setitem(sys.modules, "piper", SimpleNamespace(SynthesisConfig=lambda **kwargs: kwargs))
+    second_generated = []
+    def sentences(text, config):
+        yield SimpleNamespace(audio_int16_bytes=b"\x00\x00")
+        second_generated.append(True)
+        yield SimpleNamespace(audio_int16_bytes=b"\x00\x00")
+    voice = SimpleNamespace(config=SimpleNamespace(sample_rate=22050), synthesize=sentences)
+    encoded = stream_encode(voice, "two sentences", 1.25)
+    assert next(encoded) == encoded_sentence
+    assert not second_generated and not flush_calls
+    assert list(encoded) == [encoded_sentence, b"trailer"]
+    assert second_generated and flush_calls == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["missing-end", "error", "empty-end"])
+async def test_private_stream_requires_data_and_valid_end(monkeypatch, ending):
+    import struct
+    from types import SimpleNamespace
+    provider = PiperTTSProvider(worker_count=1)
+    stdout = asyncio.StreamReader()
+    if ending != "empty-end":
+        stdout.feed_data(struct.pack("!BI", 1, 5) + b"audio")
+    if ending == "error":
+        stdout.feed_data(struct.pack("!BI", 2, 0))
+    elif ending == "empty-end":
+        stdout.feed_data(struct.pack("!BI", 3, 0))
+    stdout.feed_eof()
+    async def drain():
+        pass
+    worker = SimpleNamespace(returncode=None, stdout=stdout, stdin=SimpleNamespace(write=lambda _: None, drain=drain))
+    provider._workers[0] = worker
+    provider._closed = False
+    provider._idle.put_nowait(0)
+    stopped = []
+    async def stop(index, propagate_cancel=True):
+        stopped.append(index)
+        provider._workers[index] = None
+    monkeypatch.setattr(provider, "_stop", stop)
+    with pytest.raises((RuntimeError, asyncio.IncompleteReadError)):
+        async for _ in provider.stream("protocol fixture"):
+            pass
+    assert stopped == [0] and provider.idle_count == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_recovery_uses_remaining_total_deadline(monkeypatch):
+    provider = PiperTTSProvider(worker_count=1)
+    provider._closed = False
+    provider._idle.put_nowait(0)
+    spawning_closed = asyncio.Event()
+    async def spawn(index):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            spawning_closed.set()
+    monkeypatch.setattr(provider, "_spawn", spawn)
+    with pytest.raises(TimeoutError):
+        await anext(provider.stream("recovery fixture", timeout_seconds=0.01))
+    assert spawning_closed.is_set() and provider.idle_count == 1

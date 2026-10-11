@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
 
 func TestVoiceClipIntegrityAndAuthentication(t *testing.T) {
@@ -51,12 +53,51 @@ func TestVoiceClipIntegrityAndAuthentication(t *testing.T) {
 }
 
 func TestVoiceManifestRejectsWrongProfileAndOversizedClips(t *testing.T) {
-	key := strings.Repeat("a", 64)
+	key := storage.ComputeSynthesisKey(storage.VoiceIDPiperVais1000, 1.25, 0)
 	other := strings.Repeat("b", 64)
 	manifestKey := other
 	clipBytes := int64(1)
+	qualitySha := strings.Repeat("c", 64)
+	damage := ""
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		manifest := map[string]any{"schemaVersion": 1, "synthesisKey": manifestKey, "formatterVersion": "money-vi-v1", "catalogVersion": "v1", "clips": []any{map[string]any{"sha256": other, "bytes": clipBytes, "durationMs": 100, "sampleRate": 24000}}}
+		manifest := map[string]any{
+			"schemaVersion":         2,
+			"synthesisKey":          manifestKey,
+			"formatterVersion":      "money-vi-v1",
+			"catalogVersion":        "v1",
+			"qualityEvidenceSha256": qualitySha,
+			"voiceId":               storage.VoiceIDPiperVais1000, "rate": 1.25, "pitchHz": 0,
+			"composition":    map[string]any{"tail": "whole", "numbers": "whole"},
+			"preloadClipIds": []string{"amount-1"},
+			"amounts":        map[string]any{"1": map[string]any{"standard": "amount-1", "classic": map[string]any{}}},
+			"clips": []any{map[string]any{
+				"clipId": "amount-1", "kind": "amount", "transcript": "Đã nhận một đồng.",
+				"speechStartMs": nil, "amountStartMs": nil,
+				"sha256":     other,
+				"bytes":      clipBytes,
+				"durationMs": 100,
+				"sampleRate": 24000,
+			}},
+		}
+		clip := manifest["clips"].([]any)[0].(map[string]any)
+		switch damage {
+		case "schema1":
+			manifest["schemaVersion"] = 1
+		case "empty-clips":
+			manifest["clips"] = []any{}
+		case "missing-onset":
+			delete(clip, "speechStartMs")
+		case "invalid-onset":
+			clip["amountStartMs"] = 100
+		case "unknown-preload":
+			manifest["preloadClipIds"] = []string{"missing"}
+		case "incomplete-segments":
+			manifest["composition"] = map[string]any{"tail": "whole", "numbers": "segments"}
+		case "missing-amount":
+			manifest["amounts"] = map[string]any{"1": map[string]any{"standard": "missing", "classic": map[string]any{}}}
+		case "profile-rate":
+			manifest["rate"] = 1.1
+		}
 		canonical, _ := json.Marshal(manifest)
 		digest := sha256.Sum256(canonical)
 		manifest["packVersion"] = hex.EncodeToString(digest[:])
@@ -75,5 +116,11 @@ func TestVoiceManifestRejectsWrongProfileAndOversizedClips(t *testing.T) {
 	clipBytes = 1
 	if _, _, status, err := client.VoiceManifest(context.Background(), key); err != nil || status != http.StatusOK {
 		t.Fatalf("valid manifest status=%d error=%v", status, err)
+	}
+	for _, name := range []string{"schema1", "empty-clips", "missing-onset", "invalid-onset", "unknown-preload", "incomplete-segments", "missing-amount", "profile-rate"} {
+		damage = name
+		if _, _, _, err := client.VoiceManifest(context.Background(), key); err == nil {
+			t.Fatalf("invalid manifest %s accepted", name)
+		}
 	}
 }
