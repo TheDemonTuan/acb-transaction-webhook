@@ -205,11 +205,11 @@ release_gate() {
 # Regular deploy accepts only the payOS drain contract. Legacy admission and
 # authoritative post-drain backup belong exclusively to migrate-payos-runtime.sh.
 quiesce_worker() {
-  local old="$1" candidate="$2" report
-  for image in "$old" "$candidate"; do
-    if [[ "$image" == "$old" ]]; then report="$(docker exec acb-worker /worker -deploy-capabilities)"; else report="$(docker run --rm --entrypoint /worker "$image" -deploy-capabilities)"; fi
-    printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert type(d["protocol"]) is int and d["protocol"]>=3 and all(d.get(k) is True for k in ("quiesce","drain","resume","notificationDrain","paymentDrain","journalCheckpoint"))'
-  done
+  local candidate="$2" report
+  report="$(docker exec acb-worker /worker -deploy-capabilities)"
+  printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert type(d["protocol"]) is int and d["protocol"]>=3 and all(d.get(k) is True for k in ("quiesce","drain","resume","notificationDrain","paymentDrain","journalCheckpoint"))'
+  report="$(docker run --rm --entrypoint /worker "$candidate" -deploy-capabilities)"
+  printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert type(d["protocol"]) is int and d["protocol"]>=3 and all(d.get(k) is True for k in ("quiesce","drain","resume","notificationDrain","paymentDrain","journalCheckpoint"))'
   report="$(timeout 45 docker exec -e WORKER_INTERNAL_TOKEN_FILE=/run/secrets/worker_internal_token acb-worker /worker -quiesce)"
   printf '%s' "$report" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["status"]=="quiesced" and d["quiesced"] is True and d["dispatcher"]=="IDLE" and all(type(d[k]) is int and d[k]==0 for k in ("activeDeliveries","activePaymentRequests")) and type(d["journalSeq"]) is int and d["journalSeq"]>=0'
   QUIESCED=1
