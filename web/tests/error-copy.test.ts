@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { formatErrorMessage } from '../src/content/error-copy';
 
 describe('error-copy', () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { VoiceDedupe } from '../src/features/voice-announcements/voice-dedupe';
 import { VoiceQueue } from '../src/features/voice-announcements/voice-queue';
 import { buildSingleTransactionPhrase } from '../src/features/voice-announcements/voice-copy';

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { AudioAssets, sha256, validateManifest, type VoiceClip, type VoiceManifest } from '../src/features/voice-announcements/audio-assets';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 
@@ -10,15 +11,18 @@ const clip = async (index: number, size = 16): Promise<{ descriptor: VoiceClip; 
 };
 // The fake supplies only the DOM decoder interface exercised here; it is not a
 // replacement for the upstream audio/listening acceptance gate.
-const context = (length = 24000) => ({ decodeAudioData: vi.fn(async () => ({ length, numberOfChannels: 1, duration: length / 24000 })) }) as unknown as AudioContext;
+const context = (length = 24000) => {
+  const decodeAudioData = vi.fn(async () => ({ length, numberOfChannels: 1, duration: length / 24000 } as AudioBuffer));
+  return Object.assign({ decodeAudioData } as unknown as AudioContext, { decodeAudioData });
+};
 
 describe('bounded browser audio assets', () => {
-  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  afterEach(() => { restoreTestGlobals(); vi.restoreAllMocks(); });
   it('bounds compressed fallback to 8MiB and decoded entries to 32', async () => {
-    vi.stubGlobal('caches', undefined);
+    setTestGlobal('caches', undefined);
     const values = await Promise.all(Array.from({ length: 40 }, (_, index) => clip(index)));
     const byHash = new Map(values.map((value) => [value.descriptor.sha256, value.bytes]));
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(byHash.get(url.split('/').at(-1)!))));
+    setTestGlobal('fetch', vi.fn(async (url: string) => new Response(byHash.get(url.split('/').at(-1)!))));
     const assets = new AudioAssets(true), decoder = context();
     const owner = {}, signal = new AbortController().signal;
     for (const value of values) { await assets.getDecoded(value.descriptor, profile, decoder, owner, signal); assets.release(owner); }
@@ -31,10 +35,10 @@ describe('bounded browser audio assets', () => {
     expect(assets.getStats()).toMatchObject({ decodedCount: 0, compressedBytes: 0 });
   });
   it('never exceeds decoded cap because entries are pinned; declines oversized decode', async () => {
-    vi.stubGlobal('caches', undefined);
+    setTestGlobal('caches', undefined);
     const values = await Promise.all(Array.from({ length: 10 }, (_, index) => clip(index)));
     const byHash = new Map(values.map((value) => [value.descriptor.sha256, value.bytes]));
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(byHash.get(url.split('/').at(-1)!))));
+    setTestGlobal('fetch', vi.fn(async (url: string) => new Response(byHash.get(url.split('/').at(-1)!))));
     const assets = new AudioAssets(true), owner = {}, decoder = context(2 * 1024 * 1024 / 4);
     for (const value of values.slice(0, 8)) expect(await assets.getDecoded(value.descriptor, profile, decoder, owner, new AbortController().signal)).not.toBeNull();
     expect(await assets.getDecoded(values[8].descriptor, profile, decoder, {}, new AbortController().signal)).toBeNull();
@@ -42,16 +46,16 @@ describe('bounded browser audio assets', () => {
     assets.release(owner);
     expect(await assets.getDecoded(values[8].descriptor, profile, decoder, {}, new AbortController().signal)).not.toBeNull();
     const oversized = { ...values[9].descriptor, durationMs: 200000 };
-    const calls = vi.mocked(decoder.decodeAudioData).mock.calls.length;
+    const calls = decoder.decodeAudioData.mock.calls.length;
     expect(await assets.getDecoded(oversized, profile, decoder, {}, new AbortController().signal)).toBeNull();
-    expect(vi.mocked(decoder.decodeAudioData).mock.calls).toHaveLength(calls);
+    expect(decoder.decodeAudioData.mock.calls).toHaveLength(calls);
     assets.dispose();
   });
   it('verifies checksum before decode and never retries an untrusted network response', async () => {
-    vi.stubGlobal('caches', undefined);
+    setTestGlobal('caches', undefined);
     const value = await clip(1);
     const fetcher = vi.fn(async () => new Response(new Uint8Array(value.descriptor.bytes)));
-    vi.stubGlobal('fetch', fetcher);
+    setTestGlobal('fetch', fetcher);
     const assets = new AudioAssets(true), decoder = context();
     await expect(assets.getDecoded(value.descriptor, profile, decoder, {}, new AbortController().signal)).rejects.toThrow('VOICE_ASSET_CORRUPT');
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -59,9 +63,9 @@ describe('bounded browser audio assets', () => {
     assets.dispose();
   });
   it('does not insert a decoded buffer after cancel, and clears old unpinned synthesis keys', async () => {
-    vi.stubGlobal('caches', undefined);
+    setTestGlobal('caches', undefined);
     const value = await clip(1);
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(value.bytes)));
+    setTestGlobal('fetch', vi.fn(async () => new Response(value.bytes)));
     const { promise, resolve } = Promise.withResolvers<AudioBuffer>();
     const { promise: started, resolve: decoding } = Promise.withResolvers<void>();
     const decoder = { decodeAudioData: () => { decoding(); return promise; } } as unknown as AudioContext;
@@ -85,7 +89,7 @@ describe('bounded browser audio assets', () => {
     await expect(validateManifest(manifest, profile)).rejects.toThrow('VOICE_PACK_MISMATCH');
   });
   it('preloads only six active-profile cores plus eight fragments through real verified fetch/decode, concurrency two', async () => {
-    vi.stubGlobal('caches', undefined);
+    setTestGlobal('caches', undefined);
     const assets = new AudioAssets(true);
     const amounts = ['20000', '50000', '100000', '200000', '500000', '1000000', '5000000'];
     const inputs = await Promise.all(Array.from({ length: 27 }, (_, index) => clip(index + 1)));
@@ -112,7 +116,7 @@ describe('bounded browser audio assets', () => {
     const descriptorByHash = new Map(clips.map((value) => [value.sha256, value]));
     let active = 0, maximum = 0;
     const requested: string[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    setTestGlobal('fetch', vi.fn(async (url: string) => {
       if (url.endsWith('/manifest')) return new Response(JSON.stringify(manifest));
       const hash = url.split('/').at(-1)!;
       requested.push(descriptorByHash.get(hash)!.clipId);
@@ -133,7 +137,7 @@ describe('bounded browser audio assets', () => {
     const cancelled = new AudioAssets(true);
     const requests: AbortSignal[] = [];
     const started = Promise.withResolvers<void>();
-    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    setTestGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       if (url.endsWith('/manifest')) return new Response(JSON.stringify(manifest));
       const signal = init.signal!;
       requests.push(signal);
@@ -156,7 +160,7 @@ describe('bounded browser audio assets', () => {
     const bothStarted = Promise.withResolvers<void>();
     const stopSecond = Promise.withResolvers<void>();
     const siblingAborted = Promise.withResolvers<void>();
-    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    setTestGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       if (url.endsWith('/manifest')) return new Response(JSON.stringify(manifest));
       const signal = init.signal!;
       inFlight.push(signal);

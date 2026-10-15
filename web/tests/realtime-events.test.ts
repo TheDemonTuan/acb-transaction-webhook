@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { isKnownEventType } from '../src/realtime/realtime.events';
 
 describe('realtime-events', () => {

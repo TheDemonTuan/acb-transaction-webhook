@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { expect, test } from 'bun:test';
 import {
   CSRF_CODE_ORIGIN_MISMATCH,
   CSRF_CODE_TOKEN_INVALID,

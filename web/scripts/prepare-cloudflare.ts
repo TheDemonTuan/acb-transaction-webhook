@@ -2,8 +2,8 @@ import { lstat, readdir } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Post-process Vite output only. Cloudflare publishing runs Wrangler under Node,
-// not Bun; this script intentionally uses Bun's file and HTML APIs.
+// Post-process static build output. Cloudflare publishing runs Wrangler under Node;
+// this script intentionally uses Bun's file and HTML APIs.
 const webDirectory = fileURLToPath(new URL('../', import.meta.url));
 const distDirectory = resolve(webDirectory, 'dist');
 const publicDirectory = resolve(webDirectory, 'public');
@@ -57,7 +57,7 @@ async function inspectDirectory(directory: string, prefix = ''): Promise<void> {
     const generated = relative.startsWith('assets/') && fingerprint.test(entry.name)
       && !(await Bun.file(resolve(publicDirectory, relative)).exists());
     if (extension === '.js' && !generated) {
-      fail(`JavaScript must be a fingerprinted Vite output, not copied source: ${relative}`);
+      fail(`JavaScript must be a fingerprinted build output, not copied source: ${relative}`);
     }
     if (generated) generatedAssets.add(relative);
     files.add(relative);

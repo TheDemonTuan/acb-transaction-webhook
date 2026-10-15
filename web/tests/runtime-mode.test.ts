@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { createMemoryRouter } from 'react-router-dom';
 import { isPublicViewerHost, PUBLIC_VIEWER_HOST, ADMIN_ORIGIN } from '../src/app/runtime-mode';
 import { publicRoutes, adminRoutes } from '../src/app/router';
@@ -7,14 +8,9 @@ import { api, apiAudio } from '../src/api';
 import { buildSingleTransactionPhrase } from '../src/features/voice-announcements/voice-copy';
 
 describe('Runtime Mode & Public Isolation', () => {
-  let prevWindow: any;
-
-  beforeEach(() => {
-    prevWindow = (globalThis as any).window;
-  });
 
   afterEach(() => {
-    (globalThis as any).window = prevWindow;
+    restoreTestGlobals();
     vi.restoreAllMocks();
   });
 
@@ -61,12 +57,12 @@ describe('Runtime Mode & Public Isolation', () => {
 
   describe('API behavior on public host', () => {
     beforeEach(() => {
-      (globalThis as any).window = {
+      setTestGlobal('window', {
         location: {
           hostname: PUBLIC_VIEWER_HOST,
           origin: `https://${PUBLIC_VIEWER_HOST}`,
         },
-      };
+      });
     });
 
     it('blocks mutations (POST/PUT/PATCH/DELETE) on public host without network call', async () => {

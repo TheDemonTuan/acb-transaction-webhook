@@ -1,24 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { BrowserSpeechEngine } from '../src/features/voice-announcements/browser-speech-engine';
 import type { VoiceMessage, VoiceTelemetry } from '../src/features/voice-announcements/voice-engine';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 import { clearVoiceTelemetry, exportVoiceTelemetry, recordVoiceTelemetry } from '../src/features/voice-announcements/voice-telemetry';
-
-interface GlobalWindowHolder {
-  window?: unknown;
-}
-
 describe('voice-telemetry', () => {
-  let prevWindow: unknown;
-
-  beforeEach(() => {
-    const holder = globalThis as unknown as GlobalWindowHolder;
-    prevWindow = holder.window;
-  });
-
   afterEach(() => {
-    const holder = globalThis as unknown as GlobalWindowHolder;
-    holder.window = prevWindow;
+    restoreTestGlobals();
   });
 
   it('populates timestamp breakdown from detectedAt -> SSE -> queue -> speak onstart', async () => {
@@ -65,11 +53,10 @@ describe('voice-telemetry', () => {
       removeEventListener: vi.fn(),
     };
 
-    const holder = globalThis as unknown as GlobalWindowHolder;
-    holder.window = {
+    setTestGlobal('window', {
       speechSynthesis: mockSynth,
       SpeechSynthesisUtterance: MockUtterance,
-    };
+    });
 
     const engine = new BrowserSpeechEngine();
 

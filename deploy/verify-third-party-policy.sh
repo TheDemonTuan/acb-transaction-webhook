@@ -97,77 +97,7 @@ if [[ ! -f "$allowlist_file" ]]; then
   exit 1
 fi
 
-if command -v node >/dev/null 2>&1; then
-  node - "$allowlist_file" "$image_ref" "$image_digest" "$reference_date" <<'JSEOF'
-const fs = require('fs');
-
-const filepath = process.argv[2];
-const imageRef = process.argv[3];
-const targetDigest = process.argv[4];
-const refDateStr = process.argv[5];
-
-let data;
-try {
-  data = JSON.parse(fs.readFileSync(filepath, 'utf8'));
-} catch (e) {
-  console.error(`Error: failed to parse JSON in ${filepath}: ${e.message}`);
-  process.exit(1);
-}
-
-if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(refDateStr) || isNaN(Date.parse(refDateStr))) {
-  console.error(`Error: invalid reference date '${refDateStr}'`);
-  process.exit(1);
-}
-
-let images = [];
-if (Array.isArray(data)) {
-  images = data;
-} else if (data && typeof data === 'object' && Array.isArray(data.images)) {
-  images = data.images;
-} else {
-  console.error(`Error: allowlist must contain an array or an object with 'images' key in ${filepath}`);
-  process.exit(1);
-}
-
-let match = null;
-for (let i = 0; i < images.length; i++) {
-  const item = images[i];
-  if (!item || typeof item !== 'object') {
-    console.error(`Error: entry #${i} must be an object`);
-    process.exit(1);
-  }
-  for (const req of ['digest', 'owner', 'reason', 'expiry']) {
-    if (!item[req] || typeof item[req] !== 'string' || !item[req].trim()) {
-      console.error(`Error: entry #${i} missing required field '${req}'`);
-      process.exit(1);
-    }
-  }
-  const itemDigest = item.digest.trim();
-  if (itemDigest === targetDigest || (item.image && `${item.image}@${itemDigest}` === imageRef)) {
-    match = item;
-    break;
-  }
-}
-
-if (!match) {
-  console.error(`Error: image digest '${targetDigest}' is not in approved third-party allowlist: ${filepath}`);
-  process.exit(1);
-}
-
-const expiryStr = match.expiry.trim();
-if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(expiryStr) || isNaN(Date.parse(expiryStr))) {
-  console.error(`Error: invalid expiry date format '${expiryStr}' for digest ${targetDigest}`);
-  process.exit(1);
-}
-
-if (expiryStr < refDateStr) {
-  console.error(`Error: third-party allowlist entry for ${targetDigest} expired on ${expiryStr} (owner: ${match.owner}, reason: ${match.reason})`);
-  process.exit(1);
-}
-
-console.log(`Third-party policy OK: image ${imageRef} approved by allowlist (owner: ${match.owner}, expiry: ${match.expiry}).`);
-JSEOF
-elif command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1; then
   python3 - "$allowlist_file" "$image_ref" "$image_digest" "$reference_date" <<'PYEOF'
 import sys, json, re, datetime
 
@@ -234,6 +164,6 @@ if exp_date < ref_date:
 print(f"Third-party policy OK: image {image_ref} approved by allowlist (owner: {match['owner']}, expiry: {match['expiry']}).")
 PYEOF
 else
-  printf 'Error: neither node nor python3 available to validate third-party allowlist\n' >&2
+  printf 'Error: python3 required to validate third-party allowlist\n' >&2
   exit 1
 fi

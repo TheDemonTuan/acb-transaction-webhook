@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { prepareAnnouncement, playPrepared, type PreparedAnnouncement, type PreparationOptions } from '../src/features/voice-announcements/announcement-plan';
 import { AudioAssets } from '../src/features/voice-announcements/audio-assets';
 import { BrowserSpeechEngine } from '../src/features/voice-announcements/browser-speech-engine';
@@ -7,7 +8,7 @@ import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice
 import * as catalogModule from '../src/features/voice-announcements/voice-catalog';
 
 interface TestSource { buffer: AudioBuffer | null; playbackRate: { value: number }; start: (time: number) => void;
-  stop: () => void; disconnect: () => void; connect: () => void; onended: (() => void) | null }
+  stop: Mock<() => void>; disconnect: Mock<() => void>; connect: Mock<() => void>; onended: (() => void) | null }
 function fixture() {
   const starts: number[] = [], sources: TestSource[] = [];
   const context = { currentTime: 10, state: 'running', destination: {}, createGain: () => ({ gain: { setValueAtTime: vi.fn() }, connect: vi.fn(), disconnect: vi.fn() }),
@@ -25,7 +26,7 @@ const recipe = { id: 'cute-small-o001-c001', styleId: 'cute', bandId: 'small', w
   openingId: 'o', closingId: 'c', tail: 'Cảm ơn quý khách.', fragmentIds: ['o', 'c'] };
 
 describe('prepared audio timeline', () => {
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  afterEach(() => { vi.useRealTimers(); restoreTestGlobals(); vi.restoreAllMocks(); });
   it('schedules complete core and approved tail buffers on one audio clock after chime', async () => {
     vi.useFakeTimers();
     const f = fixture(), onTailStart = vi.fn(), onStart = vi.fn();
@@ -34,13 +35,13 @@ describe('prepared audio timeline', () => {
     const pending = playPrepared(plan, new AbortController().signal, f.options, 10.25);
     expect(f.starts).toEqual([10.25, 12.25, 13.25]);
     expect(f.sources.every((source) => source.playbackRate.value === 1)).toBe(true);
-    await vi.advanceTimersByTimeAsync(250);
+    vi.advanceTimersByTime(250);
     expect(onStart).toHaveBeenCalledTimes(1);
     expect(onTailStart).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(2000);
+    vi.advanceTimersByTime(2000);
     expect(onTailStart).toHaveBeenCalledWith(recipe.id);
     f.sources.at(-1)!.onended!(); await pending;
-    expect(f.sources.every((source) => vi.mocked(source.disconnect).mock.calls.length === 1)).toBe(true);
+    expect(f.sources.every((source) => source.disconnect.mock.calls.length === 1)).toBe(true);
   });
   it('schedules ordered segments on timeline and triggers onTailStart when tail begins', async () => {
     vi.useFakeTimers();
@@ -56,7 +57,7 @@ describe('prepared audio timeline', () => {
     };
     const pending = playPrepared(plan, new AbortController().signal, f.options, 10);
     expect(f.starts).toEqual([10, 12]);
-    await vi.advanceTimersByTimeAsync(2000);
+    vi.advanceTimersByTime(2000);
     expect(onTailStart).toHaveBeenCalledWith(recipe.id);
     f.sources[1].onended!();
     await pending;
@@ -69,9 +70,9 @@ describe('prepared audio timeline', () => {
     const pending = playPrepared(plan, controller.signal, f.options, 10.25);
     controller.abort();
     await expect(pending).rejects.toMatchObject({ message: 'VOICE_CANCELLED', playbackStarted: false });
-    await vi.advanceTimersByTimeAsync(5000);
+    vi.advanceTimersByTime(5000);
     expect(onStart).not.toHaveBeenCalled(); expect(onTailStart).not.toHaveBeenCalled();
-    expect(f.sources.every((source) => vi.mocked(source.stop).mock.calls.length === 1)).toBe(true);
+    expect(f.sources.every((source) => source.stop.mock.calls.length === 1)).toBe(true);
   });
 
   it('colliding current and next seeds reserve distinct recipes and release on cancellation or preparation failure', async () => {
@@ -82,7 +83,7 @@ describe('prepared audio timeline', () => {
       fragments: [{ id: 'o', text: 'Niềm vui vừa ghé.', styleId: 'cute', bandId: 'small' },
         { id: 'c', text: 'Cảm ơn quý khách.', styleId: 'cute', bandId: 'small' }], classic: [],
       recipes: [{ ...recipe, id: 'first' }, { ...recipe, id: 'second' }] });
-    vi.stubGlobal('window', { speechSynthesis: { getVoices: () => [{ voiceURI: 'exact', lang: 'vi-VN' }], cancel: vi.fn() }, SpeechSynthesisUtterance: class {} });
+    setTestGlobal('window', { speechSynthesis: { getVoices: () => [{ voiceURI: 'exact', lang: 'vi-VN' }], cancel: vi.fn() }, SpeechSynthesisUtterance: class {} });
     const firstAbort = new AbortController(), nextAbort = new AbortController();
     const [first, next] = await Promise.all([
       prepareAnnouncement({ text: '', transactionId: 'same-seed', amountVnd: '1000', voiceURI: 'exact' }, profile, firstAbort.signal, f.options),
@@ -100,7 +101,7 @@ describe('prepared audio timeline', () => {
 });
 
 describe('server-provider audio preparation', () => {
-  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  afterEach(() => { restoreTestGlobals(); vi.restoreAllMocks(); });
   const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), funEnabled: false };
   const decoded = { duration: 1, length: 24000, numberOfChannels: 1 } as AudioBuffer;
   const responseHeaders = (provider = 'piper') => ({
@@ -112,7 +113,7 @@ describe('server-provider audio preparation', () => {
     { ...profile, providerMode: 'PIPER_ONLY' as const, provider: 'piper' },
     { ...profile, providerMode: 'EDGE_ONLY' as const, voiceId: 'vi-VN-NamMinhNeural', provider: 'edge' },
   ])('verifies $providerMode buffered metadata and leaves playback rate neutral', async (chosen) => {
-    vi.stubGlobal('window', {});
+    setTestGlobal('window', {});
     const f = fixture();
     vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue(null);
     const decode = vi.fn(async () => decoded);
@@ -120,7 +121,7 @@ describe('server-provider audio preparation', () => {
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), {
       headers: { ...responseHeaders(chosen.provider), 'X-TTS-Voice': chosen.voiceId },
     }));
-    vi.stubGlobal('fetch', fetcher);
+    setTestGlobal('fetch', fetcher);
     const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx' }, chosen,
       new AbortController().signal, f.options);
     expect(plan.kind).toBe('buffers');
@@ -137,12 +138,12 @@ describe('server-provider audio preparation', () => {
     { 'X-TTS-Provider': 'edge' }, { 'X-TTS-Voice': 'vi-VN-HoaiMyNeural' },
     { 'X-Voice-Revision': '2' }, { 'X-Voice-Synthesis-Key': 'b'.repeat(64) },
   ])('rejects mismatched Piper metadata before decode without another request: %j', async (override) => {
-    vi.stubGlobal('window', {});
+    setTestGlobal('window', {});
     const f = fixture(), decode = vi.fn();
     Object.assign(f.context, { decodeAudioData: decode });
     vi.spyOn(f.options.assets, 'getManifest').mockResolvedValue(null);
     const fetcher = vi.fn(async () => new Response(new Uint8Array([1]), { headers: { ...responseHeaders(), ...override } }));
-    vi.stubGlobal('fetch', fetcher);
+    setTestGlobal('fetch', fetcher);
     await expect(prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx' }, profile,
       new AbortController().signal, f.options)).rejects.toThrow('VOICE_AUDIO_PROFILE_MISMATCH');
     expect(fetcher).toHaveBeenCalledTimes(1); expect(decode).not.toHaveBeenCalled();
@@ -162,7 +163,7 @@ describe('server-provider audio preparation', () => {
       formatterVersion: 'money-vi-v1', catalogVersion: 'v1', clips: [clip],
       amounts: { '1000': { standard: 'exact', classic: { 'classic-1': 'exact' } } } });
     const getDecoded = vi.spyOn(f.options.assets, 'getDecoded').mockResolvedValue(decoded);
-    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    const fetcher = vi.fn(); setTestGlobal('fetch', fetcher);
     const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx',
       ...(kind === 'classic' ? { recipe: classic, phraseId: classic.id } : {}) }, chosen,
       new AbortController().signal, f.options);
@@ -171,7 +172,7 @@ describe('server-provider audio preparation', () => {
     plan.release(); f.options.assets.dispose(); f.options.browser.dispose();
   });
   it('keeps Piper warm fragment joining disabled and requests a single complete tail', async () => {
-    vi.stubGlobal('window', {});
+    setTestGlobal('window', {});
     const f = fixture(), chosen = { ...profile, funEnabled: true,
       amountBands: profile.amountBands.map((band) => ({ ...band, styleId: 'cute' as const })) };
     Object.assign(f.context, { decodeAudioData: vi.fn(async () => decoded) });
@@ -187,7 +188,7 @@ describe('server-provider audio preparation', () => {
     const getDecoded = vi.spyOn(f.options.assets, 'getDecoded').mockResolvedValue(decoded);
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
       new Response(new Uint8Array([1, 2, 3]), { headers: responseHeaders() }));
-    vi.stubGlobal('fetch', fetcher);
+    setTestGlobal('fetch', fetcher);
     const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx', recipe, phraseId: recipe.id },
       chosen, new AbortController().signal, f.options);
     expect(plan.kind).toBe('buffers');

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import {
   DEFAULT_VOICE_PROFILE, EDGE_VOICE_IDS, PIPER_VOICE_ID,
   fetchVoiceProfile, validateVoiceProfile,
@@ -7,7 +8,7 @@ import {
 const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64) };
 
 describe('resolved server voice profile', () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => { restoreTestGlobals(); });
 
   it('defaults to the single self-hosted Piper voice at neutral pitch', () => {
     expect(validateVoiceProfile(profile)).toMatchObject({
@@ -41,7 +42,7 @@ describe('resolved server voice profile', () => {
 
   it('fetches the confirmed Piper profile without caching or changing its synthesis key', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify(profile)));
-    vi.stubGlobal('fetch', fetcher);
+    setTestGlobal('fetch', fetcher);
     expect(await fetchVoiceProfile(true)).toEqual(profile);
     expect(fetcher).toHaveBeenCalledWith('/api/public/v1/voice/profile', expect.objectContaining({ cache: 'no-store' }));
   });

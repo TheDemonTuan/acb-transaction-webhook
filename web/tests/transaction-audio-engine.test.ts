@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { TransactionAudioEngine } from '../src/features/voice-announcements/transaction-audio-engine';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 import { voiceRoute } from '../src/features/voice-announcements/announcement-plan';
@@ -20,7 +21,7 @@ class NativeAudio extends EventTarget {
 }
 const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), chimeEnabled: false, funEnabled: false };
 function stubAudioResponse(chosenProfile = profile) {
-  vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('/stream?')
+  setTestGlobal('fetch', vi.fn(async (url: string) => url.includes('/stream?')
     ? new Response(new Uint8Array([1, 2, 3]), { headers: {
       'X-Voice-Revision': String(chosenProfile.revision), 'X-Voice-Synthesis-Key': chosenProfile.synthesisKey,
       'X-TTS-Voice': chosenProfile.voiceId,
@@ -31,10 +32,10 @@ function stubAudioResponse(chosenProfile = profile) {
 describe('transaction audio explicit profile ownership', () => {
   beforeEach(() => {
     NativeAudio.owners = []; NativeAudio.failPrepare = false;
-    vi.stubGlobal('window', { Audio: NativeAudio, speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() } });
+    setTestGlobal('window', { Audio: NativeAudio, speechSynthesis: { getVoices: () => [], speak: vi.fn(), cancel: vi.fn() } });
     stubAudioResponse();
   });
-  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  afterEach(() => { restoreTestGlobals(); vi.restoreAllMocks(); });
   it('requires confirmed server profile before preparation or playback', async () => {
     const engine = new TransactionAudioEngine({ isPublic: true });
     await expect(engine.speak({ text: '', transactionId: 'tx' })).rejects.toThrow('VOICE_PROFILE_UNAVAILABLE');

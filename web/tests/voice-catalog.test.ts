@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { readBounded, validateCatalog, type VoiceCatalog } from '../src/features/voice-announcements/voice-catalog';
 import { RecentPhraseRing, selectAnnouncementRecipe } from '../src/features/voice-announcements/voice-copy';
 import { DEFAULT_VOICE_PROFILE, validateVoiceProfile } from '../src/features/voice-announcements/voice-profile';
