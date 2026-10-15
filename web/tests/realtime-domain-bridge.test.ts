@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'bun:test';
 import { QueryClient } from '@tanstack/react-query';
 import {
   applyCreditEventToQueryCache,
@@ -20,6 +20,7 @@ describe('RealtimeDomainBridge cache & coalescing logic', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     queryClient.clear();
   });
 

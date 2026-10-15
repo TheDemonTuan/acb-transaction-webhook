@@ -1,13 +1,9 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-  },
   server: {
     strictPort: true,
     port: 5173,
@@ -22,9 +18,5 @@ export default defineConfig({
       '/ready': 'http://127.0.0.1:18081',
       '/readyz': 'http://127.0.0.1:18081',
     },
-  },
-  test: {
-    environment: 'node',
-    include: ['tests/**/*.{test,spec}.{ts,tsx}', 'src/**/*.{test,spec}.{ts,tsx}'],
   },
 });

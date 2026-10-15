@@ -33,7 +33,7 @@ try {
     Set-Location -Path "./web"
     $env:E2E_SKIP_WEBSERVER = "1"
     $env:E2E_BASE_URL = "http://127.0.0.1:18081"
-    bunx playwright test
+    bun run e2e
 }
 finally {
     Write-Host "Stopping gateway process..."

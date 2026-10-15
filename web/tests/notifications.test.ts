@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'bun:test';
 import { queryKeys } from '../src/shared/api/query-keys';
 import type { NotificationChannel, NotificationProvider, BarkConfig } from '../src/realtime-types';
 

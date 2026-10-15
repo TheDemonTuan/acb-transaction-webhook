@@ -1,14 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { DEFAULT_VOICE_SETTINGS, loadVoiceSettings, saveVoiceSettings } from '../src/features/voice-announcements/voice-settings';
 
 describe('device voice preferences', () => {
   let store: Record<string, string>;
   beforeEach(() => {
     store = {};
-    vi.stubGlobal('window', { localStorage: { getItem: (key: string) => store[key] ?? null,
+    setTestGlobal('window', { localStorage: { getItem: (key: string) => store[key] ?? null,
       setItem: (key: string, value: string) => { store[key] = value; } } });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => restoreTestGlobals());
   it('defaults to disabled and never stores a server voice/rate/template locally', () => {
     expect(loadVoiceSettings()).toEqual(DEFAULT_VOICE_SETTINGS);
     saveVoiceSettings({ enabled: true, volume: 0.8, browserVoiceURI: 'selected-vi' });

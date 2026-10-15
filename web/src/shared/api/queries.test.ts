@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'bun:test';
 import {
   toggleWebhookEndpoint,
   fetchSePayReviews,
@@ -16,6 +16,7 @@ describe('queries and mutations with centralized CSRF', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
   });
 
   it('toggleWebhookEndpoint sends POST with CSRF token', async () => {
@@ -36,7 +37,7 @@ describe('queries and mutations with centralized CSRF', () => {
       }
       throw new Error(`Unexpected url: ${url}`);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const ep = await toggleWebhookEndpoint('ep-1', 'disable');
     expect(ep.status).toBe('DISABLED');
@@ -44,12 +45,12 @@ describe('queries and mutations with centralized CSRF', () => {
 
   it('fetches sanitized SePay reviews with a private no-store GET and encoded cursor', async () => {
     const params = { cursor: 'opaque/cursor+value=', limit: 20 };
-    const review = { storeKey: 'store', transport: 'native', sourceId: 'store:9007199254740993', reason: 'INVALID_AMOUNT', receivedAt: '2026-10-10T12:00:00Z' };
+    const review = { storeKey: 'store', transport: 'native' as const, sourceId: 'store:9007199254740993', reason: 'INVALID_AMOUNT' as const, receivedAt: '2026-10-10T12:00:00Z' };
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [review] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
     expect(await fetchSePayReviews(params)).toEqual({ items: [review] });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -65,7 +66,7 @@ describe('queries and mutations with centralized CSRF', () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'Forbidden' }), {
       status: 403,
       headers: { 'Content-Type': 'application/json' },
-    }));
+    })) as unknown as typeof fetch;
     await expect(fetchSePayReviews()).rejects.toMatchObject({ status: 403 });
   });
 });

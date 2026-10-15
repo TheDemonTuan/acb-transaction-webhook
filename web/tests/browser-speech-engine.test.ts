@@ -1,16 +1,12 @@
-import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { BrowserSpeechEngine, isVietnameseVoice } from '../src/features/voice-announcements/browser-speech-engine';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 
 describe('BrowserSpeechEngine strict Vietnamese', () => {
-  let prevWindow: any;
-
-  beforeEach(() => {
-    prevWindow = (globalThis as any).window;
-  });
-
   afterEach(() => {
-    (globalThis as any).window = prevWindow;
+    restoreTestGlobals();
+    vi.restoreAllMocks();
   });
 
   it('correctly identifies Vietnamese language tags', () => {
@@ -25,7 +21,7 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
   });
 
   it('returns status error when window or speechSynthesis is missing', async () => {
-    (globalThis as any).window = undefined;
+    setTestGlobal('window', undefined);
     const engine = new BrowserSpeechEngine();
     expect(engine.isSupported()).toBe(false);
     expect(engine.getStatus()).toBe('error');
@@ -51,10 +47,10 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
       removeEventListener: vi.fn(),
     };
 
-    (globalThis as any).window = {
+    setTestGlobal('window', {
       speechSynthesis: mockSynth,
       SpeechSynthesisUtterance: class {},
-    };
+    });
 
     const engine = new BrowserSpeechEngine();
     const voices = await engine.getVoices();
@@ -90,10 +86,10 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
       removeEventListener: vi.fn(),
     };
 
-    (globalThis as any).window = {
+    setTestGlobal('window', {
       speechSynthesis: mockSynth,
       SpeechSynthesisUtterance: MockUtterance,
-    };
+    });
 
     const engine = new BrowserSpeechEngine();
     await expect(
@@ -135,10 +131,10 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
       removeEventListener: vi.fn(),
     };
 
-    (globalThis as any).window = {
+    setTestGlobal('window', {
       speechSynthesis: mockSynth,
       SpeechSynthesisUtterance: MockUtterance,
-    };
+    });
 
     const engine = new BrowserSpeechEngine();
     expect(await engine.checkStatus()).toBe('locked');
@@ -162,6 +158,7 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
         }
       }
 
+      const { promise: speakCalled, resolve: onSpeak } = Promise.withResolvers<void>();
       const mockSynth = {
         paused: false,
         speaking: false,
@@ -174,7 +171,7 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
           },
         ],
         speak: vi.fn(() => {
-          // Autoplay blocked: no event fired
+          onSpeak();
         }),
         cancel: vi.fn(),
         resume: vi.fn(),
@@ -182,14 +179,15 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
         removeEventListener: vi.fn(),
       };
 
-      (globalThis as any).window = {
+      setTestGlobal('window', {
         speechSynthesis: mockSynth,
         SpeechSynthesisUtterance: MockUtterance,
-      };
+      });
 
       const engine = new BrowserSpeechEngine();
       const primePromise = engine.prime();
-      await vi.advanceTimersByTimeAsync(1600);
+      await speakCalled;
+      vi.advanceTimersByTime(1600);
       const result = await primePromise;
       expect(result).toBe(false);
       expect(engine.getStatus()).toBe('error');
@@ -245,10 +243,10 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
       removeEventListener: vi.fn(),
     };
 
-    (globalThis as any).window = {
+    setTestGlobal('window', {
       speechSynthesis: mockSynth,
       SpeechSynthesisUtterance: MockUtterance,
-    };
+    });
 
     const engine = new BrowserSpeechEngine();
     await expect(
@@ -261,10 +259,9 @@ describe('BrowserSpeechEngine strict Vietnamese', () => {
   });
 
   it('never selects another Vietnamese voice when the selected URI disappears', () => {
-    vi.stubGlobal('window', { speechSynthesis: { getVoices: () => [{ lang: 'vi-VN', voiceURI: 'other' }] }, SpeechSynthesisUtterance: class {} });
+    setTestGlobal('window', { speechSynthesis: { getVoices: () => [{ lang: 'vi-VN', voiceURI: 'other' }] }, SpeechSynthesisUtterance: class {} });
     const engine = new BrowserSpeechEngine();
     expect(engine.resolveVoice('missing')).toBeUndefined();
     expect(engine.resolveVoice()).toBeUndefined();
-    vi.unstubAllGlobals();
   });
 });

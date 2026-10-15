@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'bun:test';
 import { api, apiAudio, isMutation, ApiError, CSRF_CODE_TOKEN_INVALID, invalidateCsrfToken } from './api';
 import * as runtimeMode from './app/runtime-mode';
 
@@ -12,6 +12,7 @@ describe('api transport and centralized CSRF', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
   });
 
   it('identifies mutation methods accurately', () => {
@@ -40,7 +41,7 @@ describe('api transport and centralized CSRF', () => {
       }
       throw new Error(`Unexpected url: ${url}`);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const res = await api<{ ok: boolean }>('/test');
     expect(res).toEqual({ ok: true });
@@ -79,7 +80,7 @@ describe('api transport and centralized CSRF', () => {
         }
         throw new Error(`Unexpected url: ${url}`);
       });
-      globalThis.fetch = fetchMock;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const res = await api<{ created: true }>('/resource', {
         method,
@@ -126,7 +127,7 @@ describe('api transport and centralized CSRF', () => {
       }
       throw new Error(`Unexpected call: ${url}`);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const res = await api<{ success: boolean }>('/mutate', {
       method: 'POST',
@@ -157,7 +158,7 @@ describe('api transport and centralized CSRF', () => {
       }
       throw new Error(`Unexpected url: ${url}`);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(
       api('/mutate', {
@@ -192,7 +193,7 @@ describe('api transport and centralized CSRF', () => {
         }
         throw new Error(`Unexpected call: ${url}`);
       });
-      globalThis.fetch = fetchMock;
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       await expect(
         api('/mutate', {
@@ -213,7 +214,7 @@ describe('api transport and centralized CSRF', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(api('/test-rate-limit')).rejects.toMatchObject({
       status: 429,
@@ -236,7 +237,7 @@ describe('api transport and centralized CSRF', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(
       api('/test', {
@@ -260,7 +261,7 @@ describe('api transport and centralized CSRF', () => {
         },
       });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const res = await apiAudio('/voice/transactions/txn_public_1');
     expect(requestedUrl).toBe('/api/public/v1/voice/transactions/txn_public_1');
@@ -283,7 +284,7 @@ describe('api transport and centralized CSRF', () => {
         },
       });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const res = await apiAudio('/voice/test', {
       method: 'POST',

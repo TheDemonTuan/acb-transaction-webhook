@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { canonicalPaymentRedirect, clearGuestPaymentIntent, GUEST_PAYMENT_INTENT_KEY, loadGuestPaymentIntent, saveGuestPaymentIntent } from '../src/features/payment-qr/guest-payment-intent';
 
 const key = '3e628a46-7db9-4f7b-a95f-d9763e2af3de';

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, setSystemTime } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from '../../tests/test-globals';
 import { RealtimeClient } from './realtime.client';
 
 class FakeEventSource {
@@ -36,23 +37,24 @@ describe('RealtimeClient lifecycle', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     FakeEventSource.instances = [];
-    vi.stubGlobal('window', {
+    setTestGlobal('window', {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       location: { origin: 'http://localhost' },
     });
-    vi.stubGlobal('document', {
+    setTestGlobal('document', {
       visibilityState: 'visible',
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     });
-    vi.stubGlobal('EventSource', FakeEventSource);
+    setTestGlobal('EventSource', FakeEventSource);
   });
 
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
-    vi.unstubAllGlobals();
+    restoreTestGlobals();
+    setSystemTime();
   });
 
   it('reconnects after an effect cleanup without accepting events from the old source', () => {
@@ -204,7 +206,7 @@ describe('RealtimeClient lifecycle', () => {
 
   it('reconnects when browser comes back online', () => {
     const listeners: Record<string, () => void> = {};
-    vi.stubGlobal('window', {
+    setTestGlobal('window', {
       addEventListener: (evt: string, cb: () => void) => {
         listeners[evt] = cb;
       },
@@ -253,7 +255,7 @@ describe('RealtimeClient lifecycle', () => {
     expect(client.getLastHeartbeatAt()).not.toBeNull();
 
     // Advance system time by 60s (laptop sleep, timers frozen)
-    vi.setSystemTime(Date.now() + 60000);
+    setSystemTime(Date.now() + 60000);
 
     // Wake / hard reconnect
     client.hardReconnect();

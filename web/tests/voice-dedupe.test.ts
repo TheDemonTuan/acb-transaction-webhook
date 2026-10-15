@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { VoiceDedupe } from '../src/features/voice-announcements/voice-dedupe';
 
 describe('VoiceDedupe', () => {

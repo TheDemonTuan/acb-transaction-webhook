@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { VoiceEngine, VoiceInfo, VoiceMessage } from '../src/features/voice-announcements/voice-engine';
 import { VoiceQueue } from '../src/features/voice-announcements/voice-queue';
 

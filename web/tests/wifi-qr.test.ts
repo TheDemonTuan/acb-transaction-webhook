@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import {
   escapeWifiString,
   buildWifiQRString,
@@ -13,7 +14,7 @@ describe('WiFi QR Utilities', () => {
 
   beforeEach(() => {
     store = {};
-    (globalThis as unknown as { window: unknown }).window = {
+    setTestGlobal('window', {
       localStorage: {
         getItem: (k: string) => store[k] ?? null,
         setItem: (k: string, v: string) => {
@@ -23,7 +24,11 @@ describe('WiFi QR Utilities', () => {
           delete store[k];
         },
       },
-    };
+    });
+  });
+
+  afterEach(() => {
+    restoreTestGlobals();
   });
   describe('escapeWifiString', () => {
     it('escapes backslash, semicolon, comma, colon, and quotes per ZXing spec', () => {

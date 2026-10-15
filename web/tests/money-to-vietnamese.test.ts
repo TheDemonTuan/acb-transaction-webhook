@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { speakVnd } from '../src/features/voice-announcements/money-to-vietnamese';
 import fixtures from '../../internal/voicecopy/catalog/amount-fixtures.v1.json';
 

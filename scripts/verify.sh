@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/verify.sh
 # Canonical verification entrypoint across the entire repository.
-# Executes local/CI verification gates: Go tests, Go vet, web build/typecheck/vitest,
+# Executes local/CI verification gates: Go tests, Go vet, web build/bun check/bun test,
 # Playwright E2E suite, Python tests, shell syntax, and deployment failure drill suites.
 set -euo pipefail
 
@@ -94,22 +94,22 @@ fi
 
 # 4. Web typecheck, build, and unit tests
 log_header "Gate 4: Web Application Suite"
-if (cd web && bunx --bun tsc --noEmit); then
-  record_pass "web tsc --noEmit passed"
+if (cd web && bun run typecheck); then
+  record_pass "web bun check passed"
 else
-  record_fail "web tsc --noEmit failed"
+  record_fail "web bun check failed"
 fi
 
-if (cd web && bunx --bun vite build); then
-  record_pass "web vite build passed"
+if (cd web && bun scripts/build.ts); then
+  record_pass "web build passed"
 else
-  record_fail "web vite build failed"
+  record_fail "web build failed"
 fi
 
 if (cd web && bun run test); then
-  record_pass "web vitest suite passed"
+  record_pass "web bun test suite passed"
 else
-  record_fail "web vitest suite failed"
+  record_fail "web bun test suite failed"
 fi
 
 # 5. Playwright E2E browser regression suite

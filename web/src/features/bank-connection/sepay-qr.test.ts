@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { extractSePayQRReceiver, validateSePayQRPayload } from './sepay-qr';
 
 const transferFixture = (bin = '970436', account = '0000000000'): string => {

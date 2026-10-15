@@ -1,9 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-vi.mock('../src/app/runtime-mode', () => ({ isPublicViewerHost: vi.fn(() => false) }));
-
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'bun:test';
+import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import { api, invalidateCsrfToken, publicApi } from '../src/api';
-import { isPublicViewerHost } from '../src/app/runtime-mode';
+import * as runtimeMode from '../src/app/runtime-mode';
 import {
   cancelPaymentOrder,
   confirmPaymentWebhook,
@@ -23,27 +21,31 @@ const order = {
   id,
   orderCode: '100000000001',
   amountVnd: 50_000,
-  origin: 'STATIC_URL',
-  status: 'PENDING',
+  origin: 'STATIC_URL' as const,
+  status: 'PENDING' as const,
   createdAt: '2026-10-08T00:00:00Z',
   expiresAt: '2026-10-08T00:30:00Z',
 };
 
 let requests: { url: string; init?: RequestInit }[];
+let isPublicViewerHostSpy: Mock<typeof runtimeMode.isPublicViewerHost>;
+let fetchMock: Mock<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>;
 
 beforeEach(() => {
   invalidateCsrfToken();
-  vi.mocked(isPublicViewerHost).mockReturnValue(false);
+  isPublicViewerHostSpy = vi.spyOn(runtimeMode, 'isPublicViewerHost').mockReturnValue(false);
   requests = [];
-  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
-    requests.push({ url, init });
-    const body = url === '/api/v1/csrf' ? { token: 'csrf-test-token' } : order;
+  fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: String(url), init });
+    const body = String(url) === '/api/v1/csrf' ? { token: 'csrf-test-token' } : order;
     return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-  }));
+  });
+  setTestGlobal('fetch', fetchMock);
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  restoreTestGlobals();
+  vi.restoreAllMocks();
   invalidateCsrfToken();
 });
 
@@ -77,7 +79,7 @@ describe('public payment HTTP client', () => {
       await expect(publicApi(path, { method })).rejects.toMatchObject({ status: 405, code: 'PUBLIC_READ_ONLY' });
     }
     expect(requests).toHaveLength(0);
-    vi.mocked(isPublicViewerHost).mockReturnValue(true);
+    isPublicViewerHostSpy.mockReturnValue(true);
     await expect(api(`/payments/${id}/cancel`, { method: 'POST' })).rejects.toMatchObject({ status: 405 });
     await api('/payments', { method: 'POST', body: '{}' });
     expect(requests.map((request) => request.url)).toEqual(['/api/public/v1/payments']);
@@ -92,10 +94,10 @@ describe('public payment HTTP client', () => {
   });
 
   it('preserves the same key and amount when an explicit caller retries after a network loss', async () => {
-    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('network unavailable'));
+    fetchMock.mockRejectedValueOnce(new TypeError('network unavailable'));
     await expect(createPublicPaymentOrder(50_000, 'OPERATOR_DYNAMIC', key)).rejects.toThrow();
     await createPublicPaymentOrder(50_000, 'OPERATOR_DYNAMIC', key);
-    const calls = vi.mocked(fetch).mock.calls;
+    const calls = fetchMock.mock.calls;
     expect(calls).toHaveLength(2);
     expect(new Headers(calls[0][1]?.headers).get('Idempotency-Key')).toBe(key);
     expect(new Headers(calls[1][1]?.headers).get('Idempotency-Key')).toBe(key);
@@ -103,11 +105,11 @@ describe('public payment HTTP client', () => {
   });
 
   it('surfaces sanitized server conflict codes without generating another request', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Intent conflict', code: 'IDEMPOTENCY_CONFLICT' }), {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Intent conflict', code: 'IDEMPOTENCY_CONFLICT' }), {
       status: 409, headers: { 'Content-Type': 'application/json' },
     }));
     await expect(createPublicPaymentOrder(50_000, 'STATIC_URL', key)).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
-    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
