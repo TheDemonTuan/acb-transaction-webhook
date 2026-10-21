@@ -73,6 +73,18 @@
       "pinDigests": true
     },
     {
+      "description": "Bypass release-age delay for Dockerfile patch and digest security rebuilds.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["patch", "digest"],
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "Bypass release-age delay for Go, Python, and Node runtime patch releases.",
+      "matchPackageNames": ["go", "actions/go-versions", "actions/python-versions", "actions/node-versions"],
+      "matchUpdateTypes": ["patch"],
+      "minimumReleaseAge": null
+    },
+    {
       "description": "Keep all Bun version declarations in one PR.",
       "matchPackageNames": ["bun", "@types/bun"],
       "groupName": "Bun toolchain",
