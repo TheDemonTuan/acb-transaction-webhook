@@ -1,0 +1,76 @@
+import json
+import re
+import unittest
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class DependencyUpdateTests(unittest.TestCase):
+    def test_pr_gate_requires_reusable_ci_without_deployment(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/pull-request.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(triggers['pull_request']['branches'], ['main'])
+        self.assertNotIn('pull_request_target', triggers)
+        self.assertIn('merge_group', triggers)
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        jobs = workflow['jobs']
+        self.assertEqual(jobs['verify']['uses'], './.github/workflows/ci.yml')
+        self.assertNotIn('secrets', jobs['verify'])
+        gate = jobs['dependency-update-gate']
+        self.assertEqual(gate['name'], 'Dependency Update Gate')
+        self.assertEqual(gate['if'], 'always()')
+        self.assertEqual(gate['needs'], ['verify'])
+        self.assertEqual(gate['steps'][0]['env']['RESULT'], '${{ needs.verify.result }}')
+        self.assertEqual(gate['steps'][0]['run'], 'test "$RESULT" = success')
+        self.assertNotIn('deploy', jobs)
+
+    def test_python_lock_outputs_are_managed_together_with_sources(self):
+        config = json.loads((ROOT / '.github/renovate.json').read_text())
+        self.assertIn('pip-compile', config['enabledManagers'])
+        self.assertNotIn('pip_requirements', config['enabledManagers'])
+        pattern = config['pip-compile']['managerFilePatterns'][0][1:-1]
+        for suffix in ['', '-dev']:
+            filename = f'tts-gateway/requirements{suffix}.lock'
+            self.assertRegex(filename, pattern)
+            header = '\n'.join((ROOT / filename).read_text().splitlines()[:2])
+            self.assertIn('uv pip compile --universal --generate-hashes --python-version=3.13', header)
+            self.assertIn(f'--output-file={filename}', header)
+            self.assertIn(f'tts-gateway/requirements{suffix}.txt', header)
+
+    def test_all_runtime_images_are_scanned_on_arm_before_merge(self):
+        ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+        jobs = ci['jobs']
+        gateway = jobs['docker-smoke-gateway']
+        self.assertEqual(gateway['runs-on'], 'ubuntu-24.04-arm')
+        scan = next(step['run'] for step in gateway['steps']
+                    if step.get('name') == 'Scan all Go runtime images before merge')
+        self.assertIn('for component in gateway worker dbtool', scan)
+        self.assertIn('--platform linux/arm64', scan)
+        self.assertIn('--exit-code 1 --severity HIGH,CRITICAL', scan)
+        self.assertIn('deploy/validate-cve-allowlist.sh', scan)
+        tts = jobs['docker-smoke-tts-gateway']
+        self.assertEqual(tts['runs-on'], 'ubuntu-24.04-arm')
+        self.assertTrue(any('--severity HIGH,CRITICAL' in step.get('run', '')
+                            for step in tts['steps']))
+        self.assertEqual(set(jobs['production-contract']['needs']),
+                         {'verify', 'docker-smoke-gateway', 'docker-smoke-tts-gateway'})
+
+    def test_ci_validates_renovate_and_action_pins(self):
+        ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+        commands = '\n'.join(step.get('run', '') for step in ci['jobs']['verify']['steps'])
+        self.assertRegex(commands, r'renovate@\d+\.\d+\.\d+')
+        self.assertIn('renovate-config-validator --strict .github/renovate.json', commands)
+        self.assertIn('node scripts/verify-renovate-policy.mjs', commands)
+        self.assertIn('bash scripts/verify-actions-pinned.sh', commands)
+        for filename in ['ci.yml', 'pull-request.yml']:
+            text = (ROOT / '.github/workflows' / filename).read_text()
+            for action in re.findall(r'uses:\s*([^\s]+)', text):
+                self.assertTrue(action.startswith('./') or re.search(r'@[a-f0-9]{40}$', action), action)
+
+
+if __name__ == '__main__':
+    unittest.main()

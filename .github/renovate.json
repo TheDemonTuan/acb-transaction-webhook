@@ -1,0 +1,122 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "security:gomodIndirectSecurityUpdates"
+  ],
+  "enabledManagers": [
+    "bun",
+    "docker-compose",
+    "dockerfile",
+    "github-actions",
+    "gomod",
+    "pip-compile",
+    "custom.regex"
+  ],
+  "timezone": "Asia/Ho_Chi_Minh",
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "minimumReleaseAge": "3 days",
+  "separateMinorPatch": true,
+  "automerge": false,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "platformAutomerge": false,
+  "ignoreTests": false,
+  "rebaseWhen": "behind-base-branch",
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "vulnerabilityFixStrategy": "lowest",
+    "minimumReleaseAge": null,
+    "schedule": []
+  },
+  "postUpdateOptions": ["gomodTidy"],
+  "pip-compile": {
+    "managerFilePatterns": ["/^tts-gateway/requirements(?:-dev)?\\.lock$/"]
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": false,
+    "schedule": ["before 6am on monday"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^web/\\.bun-version$/"],
+      "matchStrings": ["^(?<currentValue>\\d+\\.\\d+\\.\\d+)\\s*$"],
+      "depNameTemplate": "bun",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": ["TRIVY_VERSION: (?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "aquasecurity/trivy",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Merge low-risk version updates only after all PR checks pass.",
+      "matchUpdateTypes": ["patch", "minor", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Track immutable Docker digests, including non-versioned base tags.",
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
+      "description": "Keep all Bun version declarations in one PR.",
+      "matchPackageNames": ["bun", "@types/bun"],
+      "groupName": "Bun toolchain",
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Require review for Docker minor releases and runtime line changes.",
+      "matchDatasources": ["docker", "golang-version"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "Python changes can alter native-wheel and runtime compatibility.",
+      "matchManagers": ["pip-compile"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "Review new Bun and scanner minor versions.",
+      "matchPackageNames": ["bun", "@types/bun", "aquasecurity/trivy"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "A minor release of a pre-1.0 dependency may break compatibility.",
+      "matchCurrentVersion": "/^0\\./",
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "Edge infrastructure and mutable latest tags require operator review.",
+      "matchManagers": ["docker-compose"],
+      "automerge": false
+    },
+    {
+      "description": "Digest changes of non-versioned tags cannot prove compatibility.",
+      "matchDatasources": ["docker"],
+      "matchCurrentValue": "/^(latest|nonroot)$/",
+      "automerge": false
+    },
+    {
+      "description": "Never automatically merge major upgrades, including security fixes.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ]
+}
