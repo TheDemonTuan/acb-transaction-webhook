@@ -9,11 +9,9 @@ There is no self-hosted bot, scheduled Renovate workflow, or repository PAT.
 2. Wait for `Dependency Update Gate` to succeed. In GitHub's `main` branch protection, require this exact check, select GitHub Actions as its source, and require the branch to be up to date. Keep the existing administrator enforcement, linear history, and conversation-resolution protections. Do not add a Renovate bypass.
 3. Merge the setup pull request only after review. A merge into `main` invokes the existing build and automatic production deployment pipeline; this setup does not bypass it.
 4. Install or configure the Renovate App for **only** `TheDemonTuan/acb-transaction-webhook`. Confirm its requested repository permissions, including read access to Dependabot alerts. Use GitHub's installation screen; never put browser credentials or a PAT in the Renovate config.
-5. Keep the dependency graph and Dependabot alerts enabled. Once Renovate's Dependency Dashboard confirms extraction of Go, Bun, Docker and Python lockfiles, remove `.github/dependabot.yml` and disable Dependabot security updates to avoid duplicate updater PRs. Retain Dependabot alerts. Existing Dependabot PRs may be closed after checking that Renovate covers them.
+5. Keep the dependency graph and Dependabot alerts enabled. `.github/dependabot.yml` has been removed and Dependabot security updates are disabled so Mend Renovate is the sole dependency updater PR source.
 
 Do not activate Renovate automerge before the required PR gate is enforced. Native GitHub auto-merge is not required: `platformAutomerge: false` makes Renovate merge PRs itself after passing checks. Renovate uses squash merges and rebases branches behind `main`.
-
-The setup intentionally retains Dependabot until the App is installed and verified. An OAuth token used by `gh` cannot install a third-party GitHub App through the REST API. Installing the App may require the repository owner's interactive GitHub login.
 
 ## Update policy
 

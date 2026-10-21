@@ -71,6 +71,7 @@ class DependencyUpdateTests(unittest.TestCase):
 
     def test_ci_validates_renovate_and_action_pins(self):
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+        self.assertFalse((ROOT / '.github/dependabot.yml').exists())
         commands = '\n'.join(step.get('run', '') for step in ci['jobs']['verify']['steps'])
         self.assertRegex(commands, r'renovate@\d+\.\d+\.\d+')
         self.assertIn('renovate-config-validator --strict .github/renovate.json', commands)
