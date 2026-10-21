@@ -16,6 +16,14 @@ jobs:
           fetch-depth: 0
       - name: Check generated source and whitespace
         run: git diff --check
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.18.0'
+      - name: Validate Renovate configuration and automerge policy
+        run: |
+          npx --yes --package renovate@44.173.0 -c 'renovate-config-validator --strict .github/renovate.json && node scripts/verify-renovate-policy.mjs'
+      - name: Verify GitHub Actions are pinned
+        run: bash scripts/verify-actions-pinned.sh
       - name: Verify deployment and platform script syntax
         run: |
           mapfile -t scripts < <(git ls-files '*.sh')
@@ -101,9 +109,9 @@ jobs:
 
   docker-smoke-gateway:
     name: Docker smoke test (gateway)
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
@@ -131,6 +139,37 @@ jobs:
           done
           echo 'Gateway boot/storage health timeout (no provider request or confirmation performed)' >&2
           exit 1
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: 0.74.0
+        run: |
+          set -euo pipefail
+          archive="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl --fail --location --retry 3 --output "$archive" "$base/$archive"
+          curl --fail --location --retry 3 --output trivy-checksums.txt "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep "  $archive$" trivy-checksums.txt | sha256sum --check -
+          tar -xzf "$archive" trivy
+          install -m 0755 trivy "$RUNNER_TEMP/trivy"
+          printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Scan all Go runtime images before merge
+        run: |
+          set -euo pipefail
+          for component in gateway worker dbtool; do
+            image="acb-${component}:security-test"
+            if [[ "$component" == gateway ]]; then
+              docker tag acb-transaction-webhook:smoke-test "$image"
+            else
+              docker build --target "$component" --tag "$image" .
+            fi
+            bash deploy/validate-cve-allowlist.sh \
+              --file deploy/cve-allowlist.json \
+              --component "$component" \
+              --output-ignorefile ".trivyignore-${component}"
+            trivy image --platform linux/arm64 --scanners vuln \
+              --exit-code 1 --severity HIGH,CRITICAL \
+              --ignorefile ".trivyignore-${component}" "$image"
+          done
 
   docker-smoke-tts-gateway:
     name: Docker smoke test (tts-gateway)
