@@ -41,6 +41,16 @@ class DependencyUpdateTests(unittest.TestCase):
             self.assertIn(f'--output-file={filename}', header)
             self.assertIn(f'tts-gateway/requirements{suffix}.txt', header)
 
+    def test_development_lock_follows_runtime_constraints(self):
+        runtime = (ROOT / 'tts-gateway/requirements.lock').read_text()
+        development = (ROOT / 'tts-gateway/requirements-dev.lock').read_text()
+        self.assertIn('--constraint=tts-gateway/requirements.lock', development.splitlines()[1])
+        pattern = r'^([A-Za-z0-9_.-]+)==([^\s\\]+)'
+        runtime_versions = dict(re.findall(pattern, runtime, re.MULTILINE))
+        development_versions = dict(re.findall(pattern, development, re.MULTILINE))
+        for package in runtime_versions.keys() & development_versions.keys():
+            self.assertEqual(runtime_versions[package], development_versions[package], package)
+
     def test_all_runtime_images_are_scanned_on_arm_before_merge(self):
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         jobs = ci['jobs']
