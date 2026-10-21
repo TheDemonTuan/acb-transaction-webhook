@@ -3,7 +3,7 @@ module github.com/thedemontuan/acb-transaction-webhook
 go 1.27.2
 
 require (
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/payOSHQ/payos-lib-golang/v2 v2.0.1
 	golang.org/x/sys v0.48.0
