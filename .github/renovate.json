@@ -85,6 +85,12 @@
       "automerge": false
     },
     {
+      "description": "Review CI runtime line changes independently of action updates.",
+      "matchPackageNames": ["actions/go-versions", "actions/python-versions", "actions/node-versions"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
       "description": "Python changes can alter native-wheel and runtime compatibility.",
       "matchManagers": ["pip-compile"],
       "matchUpdateTypes": ["minor"],
