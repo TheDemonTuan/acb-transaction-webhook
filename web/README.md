@@ -12,6 +12,8 @@ bun run e2e
 
 `bun check` checks source, unit tests, Vite configuration and `scripts/` without emitting JavaScript. Unit tests use `bun:test`; `bunfig.toml` excludes Playwright E2E specs. Tests replacing browser globals must use `tests/test-globals.ts` and restore them after each test.
 
+Voice-profile tests must import `VoiceProviderMode` with `import type` (or a named `type` import); test-only type references are checked by the production build too.
+
 ## Development and production
 
 `bun run dev` runs the locked Vite CLI on Bun at `127.0.0.1:5173`, preserving React Fast Refresh, CSP headers and gateway proxies at port 18081. Vite is not used for production builds.

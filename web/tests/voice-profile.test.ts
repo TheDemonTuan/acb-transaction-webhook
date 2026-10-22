@@ -3,6 +3,7 @@ import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import {
   DEFAULT_VOICE_PROFILE, EDGE_VOICE_IDS, PIPER_VOICE_ID,
   fetchVoiceProfile, validateVoiceProfile,
+  type VoiceProviderMode,
 } from '../src/features/voice-announcements/voice-profile';
 
 const piperProfile = { ...DEFAULT_VOICE_PROFILE, providerMode: 'PIPER_ONLY' as const, voiceId: PIPER_VOICE_ID, rate: 1.25, synthesisKey: 'a'.repeat(64) };
