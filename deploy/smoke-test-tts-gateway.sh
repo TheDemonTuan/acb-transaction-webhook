@@ -169,7 +169,7 @@ def request(path, text):
     connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
     try:
         connection.request("POST", path, json.dumps({
-            "text": text, "voice": VOICE, "rate": "+25%", "pitch": "+0Hz",
+            "text": text, "voice": PIPER_VOICE, "rate": "+25%", "pitch": "+0Hz",
             "provider_mode": "PIPER_ONLY", "cacheable": False, "timeout_ms": 8000,
         }, ensure_ascii=False).encode(), {
             "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
@@ -185,7 +185,7 @@ def request(path, text):
             raise AssertionError(f"Synthesis HTTP {response.status}")
         assert response.getheader("Content-Type", "").split(";")[0] == "audio/mpeg", "Not MPEG content type"
         assert response.getheader("X-TTS-Provider") == "piper", "Unexpected provider/fallback"
-        assert response.getheader("X-TTS-Voice") == VOICE, "Effective voice mismatch"
+        assert response.getheader("X-TTS-Voice") == PIPER_VOICE, "Effective voice mismatch"
         assert response.getheader("X-TTS-Cached") == "false", "Smoke must exercise real synthesis"
         assert response.getheader("X-TTS-Fallback") == "false", "Fallback not permitted"
         return connection, response
@@ -219,7 +219,8 @@ try:
     health_data = json.loads(health_connection.getresponse().read())
     health_connection.close()
     expected_workers = int(os.environ.get("PIPER_WORKERS", "1"))
-    assert health_data["primary"] == "piper" and health_data["piper"]["available"], "Piper not ready"
+    assert health_data["primary"] == "vieneu" and health_data["vieneu"]["available"], "VieNeu not ready"
+    assert health_data["piper"]["available"], "Piper not ready"
     assert health_data["piper"]["workerCount"] == expected_workers, f"Expected {expected_workers} workers, got {health_data['piper'].get('workerCount')}"
     buffered()
     connection, response = request("/synthesize/stream", CORE)
@@ -235,7 +236,7 @@ try:
         connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
         connection.request("POST", "/synthesize/stream", json.dumps({
             "text": (CORE + " Cảm ơn bạn đã ghé quầy. ") * 8 + str(index),
-            "voice": VOICE, "provider_mode": "PIPER_ONLY", "cacheable": False,
+            "voice": PIPER_VOICE, "provider_mode": "PIPER_ONLY", "cacheable": False,
             "rate": "+25%", "pitch": "+0Hz", "timeout_ms": 8000,
         }, ensure_ascii=False).encode(), {
             "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
@@ -258,7 +259,7 @@ try:
         try:
             text = ((CORE + " ") * 25)[:599] + str(index)
             connection.request("POST", "/synthesize", json.dumps({
-                "text": text, "voice": VOICE, "provider_mode": "PIPER_ONLY",
+                "text": text, "voice": PIPER_VOICE, "provider_mode": "PIPER_ONLY",
                 "rate": "+25%", "cacheable": False, "timeout_ms": 8000,
             }, ensure_ascii=False).encode(), {
                 "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
@@ -286,7 +287,7 @@ except RuntimeError as error:
 except AssertionError as error:
     print(f"SYNTHESIS_CONTRACT_FAILURE: {error}", file=sys.stderr)
     sys.exit(1)
-print("Real fixed Piper 500,000 VND buffered/stream MPEG headers passed; 3 in-flight disconnects reaped workers and subsequent synthesis succeeded at 0.50 CPU/384MiB.")
+print("Real fixed VieNeu synthesis and Piper 500,000 VND buffered/stream MPEG headers passed; 3 in-flight disconnects reaped Piper workers and subsequent synthesis succeeded.")
 PY
 
 echo "TTS-gateway smoke test PASSED successfully."

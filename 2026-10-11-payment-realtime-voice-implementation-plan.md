@@ -287,3 +287,9 @@ Không dùng chime thay firstMeaningfulSpeech. Ghi amountStartedAt riêng để 
 - Smoke sau rollout: authenticated uncached Piper câu “Đã nhận năm trăm nghìn đồng.” ở rate+25%; buffered HTTP200/9.792bytes/0,528s và streaming HTTP200/9.408bytes/0,505s, MPEG frame hợp lệ, đúng voice/provider, fallbackfalse. Health sau hai request: availabletrue, active0/idle1. Fixture chạy probe thật: healthy exit0; unavailable, HTTP503, JSON lỗi và connection refused đều exit1. Không coi smoke MPEG là human listening.
 - Mẫu sau warmup 180,100s: chỉ sáu GET `/health`, container 0,7731% theo một core, Uvicorn0,0999%, Piper0%; healthy/failingStreak0/restartCount0. So với mẫu trước, CPU trung bình giảm72,96%. Quy đổi trên hai CPU logic: 1,4295% xuống0,3865% toàn VPS; đây không phải xác nhận công thức dashboard. Mức tức thời vẫn có spike mỗi probe và khi synth thật.
 
+## VieNeu release gates — 2026-10-22
+
+- Codec downloads must use each codec file's pinned hash and size, never the last backbone entry. The local HTTP regression exercises distinct codec files and rejects corrupted bytes without publishing the destination or leaving temporary files.
+- The container smoke requires VieNeu as primary and both local providers available. Piper requests and response checks use `PIPER_VOICE`; VieNeu remains a separate explicit synthesis request. Resource limits come from `TTS_CPUS` / `TTS_MEMORY_LIMIT`, not the former Piper-only caps.
+- Frontend build and all 233 unit tests passed with pinned Bun 1.4.3. Local Docker is unavailable; ARM64 inference, cancellation and container resource proof remain required GitHub Actions gates, not a local success claim.
+

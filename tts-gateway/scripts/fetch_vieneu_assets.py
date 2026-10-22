@@ -200,6 +200,7 @@ def fetch_all(manifest: dict, out_dir: Path, update_manifest: bool = False) -> d
     for rel_path in manifest["codec"]["file_list"]:
         dest = codec_snapshot_dir / rel_path
         url = f"https://huggingface.co/{codec_repo}/resolve/{codec_rev}/{rel_path}"
+        expected_meta = manifest["codec"].get("files", {}).get(rel_path) if not update_manifest else None
         expected_hash = expected_meta["sha256"] if expected_meta else None
         expected_bytes = expected_meta["bytes"] if expected_meta else None
 
