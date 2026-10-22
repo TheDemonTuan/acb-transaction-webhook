@@ -25,6 +25,7 @@ type SendRequest struct {
 	Target        storage.DeliveryTarget
 	EventPayload  []byte
 	AttemptNumber int
+	SePayDetails *storage.SePayNotificationDetails `json:"-"`
 }
 
 type SendResult struct {

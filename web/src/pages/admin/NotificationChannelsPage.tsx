@@ -41,6 +41,15 @@ const sanitizeBarkIcon = (value: string | null | undefined): string => {
   return encodeURI(candidate);
 };
 
+const BarkIconPreview: React.FC<{ icon?: string; className: string; label?: string }> = ({ icon, className, label = 'Icon' }) => {
+  const [failedIcon, setFailedIcon] = useState<string | null>(null);
+  const source = sanitizeBarkIcon(icon);
+  if (!source || failedIcon === source) {
+    return <div role="img" aria-label={source ? 'Không tải được icon preview' : 'Chưa đặt icon thông báo'} className={`${className} flex items-center justify-center bg-stone-100 text-stone-400`}><Smartphone className="w-4 h-4" /></div>;
+  }
+  return <img src={source} alt={label} className={`${className} object-contain bg-white`} onError={() => setFailedIcon(source)} />;
+};
+
 export const NotificationChannelsPage: React.FC = () => {
   const queryClient = useQueryClient();
 
@@ -54,12 +63,11 @@ export const NotificationChannelsPage: React.FC = () => {
   const [showDeviceKey, setShowDeviceKey] = useState(false);
 
   // Bark config form
-  const [barkGroup, setBarkGroup] = useState('PAYOS');
+  const [barkGroup, setBarkGroup] = useState('Giao dịch');
   const [barkLevel, setBarkLevel] = useState<'passive' | 'active' | 'timeSensitive'>('timeSensitive');
   const [barkSound, setBarkSound] = useState('shake');
   const [barkIcon, setBarkIcon] = useState(DEFAULT_BARK_ICON);
-  const [failedBarkIcon, setFailedBarkIcon] = useState<string | null>(null);
-  const [includeBalance, setIncludeBalance] = useState(false);
+  const [includeBalance, setIncludeBalance] = useState(true);
   const [includeDescription, setIncludeDescription] = useState(true);
   const [dashboardLink, setDashboardLink] = useState(true);
   const [showAdvancedBark, setShowAdvancedBark] = useState(false);
@@ -83,11 +91,11 @@ export const NotificationChannelsPage: React.FC = () => {
   const [editName, setEditName] = useState('');
   const [editUrl, setEditUrl] = useState('');
   const [editBarkConfig, setEditBarkConfig] = useState<BarkConfig>({
-    group: 'PAYOS',
+    group: 'Giao dịch',
     level: 'timeSensitive',
     sound: 'shake',
     icon: DEFAULT_BARK_ICON,
-    includeBalance: false,
+    includeBalance: true,
     includeDescription: true,
     dashboardLink: true,
   });
@@ -185,7 +193,7 @@ export const NotificationChannelsPage: React.FC = () => {
           name: name.trim(),
           deviceKey: deviceKey.trim(),
           barkConfig: {
-            group: barkGroup.trim() || 'PAYOS',
+            group: barkGroup.trim() || 'Giao dịch',
             level: barkLevel,
             sound: barkSound.trim() || 'shake',
             icon: sanitizeBarkIcon(barkIcon),
@@ -195,6 +203,13 @@ export const NotificationChannelsPage: React.FC = () => {
           },
         });
         setNotice('Đã tạo kênh Bark iPhone ở trạng thái DISABLED. Hãy bấm "Gửi thử" trước khi bật.');
+        setBarkGroup('Giao dịch');
+        setBarkLevel('timeSensitive');
+        setBarkSound('shake');
+        setBarkIcon(DEFAULT_BARK_ICON);
+        setIncludeBalance(true);
+        setIncludeDescription(true);
+        setDashboardLink(true);
       }
 
       setName('');
@@ -248,11 +263,11 @@ export const NotificationChannelsPage: React.FC = () => {
       setEditBarkConfig({ ...ch.barkConfig });
     } else {
       setEditBarkConfig({
-        group: 'PAYOS',
+        group: 'Giao dịch',
         level: 'timeSensitive',
         sound: 'shake',
         icon: DEFAULT_BARK_ICON,
-        includeBalance: false,
+        includeBalance: true,
         includeDescription: true,
         dashboardLink: true,
       });
@@ -334,7 +349,7 @@ export const NotificationChannelsPage: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-stone-900">Kênh thông báo</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Quản lý các đích nhận thông báo giao dịch payOS / KienlongBank và lịch sử (Bark cho iPhone & Webhook tùy chỉnh)
+            Quản lý thông báo giao dịch qua Bark cho iPhone và Webhook tùy chỉnh.
           </p>
         </div>
         <button
@@ -599,7 +614,7 @@ export const NotificationChannelsPage: React.FC = () => {
                       type="text"
                       value={barkGroup}
                       onChange={(e) => setBarkGroup(e.target.value)}
-                      placeholder="PAYOS"
+                      placeholder="Giao dịch"
                       className="w-full px-3 py-2 rounded-lg border border-stone-200 text-xs bg-white focus:outline-none"
                     />
                   </div>
@@ -645,22 +660,7 @@ export const NotificationChannelsPage: React.FC = () => {
                       Icon thông báo (URL ảnh hiển thị trên iPhone)
                     </label>
                     <div className="flex items-center gap-2.5">
-                      {!sanitizeBarkIcon(barkIcon) || failedBarkIcon === sanitizeBarkIcon(barkIcon) ? (
-                        <div
-                          role="img"
-                          aria-label={sanitizeBarkIcon(barkIcon) ? 'Không tải được icon preview' : 'Chưa đặt icon thông báo'}
-                          className="w-8 h-8 rounded-lg border border-stone-200 bg-stone-100 shrink-0 flex items-center justify-center text-stone-400"
-                        >
-                          <Smartphone className="w-4 h-4" />
-                        </div>
-                      ) : (
-                        <img
-                          src={sanitizeBarkIcon(barkIcon)}
-                          alt="Icon preview"
-                          className="w-8 h-8 rounded-lg border border-stone-200 object-contain bg-white shrink-0 p-0.5 shadow-2xs"
-                          onError={() => setFailedBarkIcon(sanitizeBarkIcon(barkIcon))}
-                        />
-                      )}
+                      <BarkIconPreview icon={barkIcon} label="Icon preview" className="w-8 h-8 rounded-lg border border-stone-200 shrink-0 p-0.5 shadow-2xs" />
                       <input
                         id="bark-icon"
                         type="url"
@@ -683,15 +683,19 @@ export const NotificationChannelsPage: React.FC = () => {
                       <span>Hiển thị nội dung chuyển khoản</span>
                     </label>
 
-                    <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={includeBalance}
-                        onChange={(e) => setIncludeBalance(e.target.checked)}
-                        className="rounded border-stone-300 text-stone-900 focus:ring-stone-900"
-                      />
-                      <span>Hiển thị số dư tài khoản sau giao dịch</span>
-                    </label>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={includeBalance}
+                          onChange={(e) => setIncludeBalance(e.target.checked)}
+                          className="rounded border-stone-300 text-stone-900 focus:ring-stone-900"
+                          aria-describedby="bark-balance-help"
+                        />
+                        <span>Hiển thị số dư tài khoản sau giao dịch</span>
+                      </label>
+                      <p id="bark-balance-help" className="max-w-xl text-2xs leading-relaxed text-stone-500">Số dư do SePay cung cấp tại giao dịch; có thể chưa có dữ liệu. Bật xem trước trên iPhone có thể hiển thị số dư và nội dung trên màn hình khóa.</p>
+                    </div>
 
                     <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
                       <input
@@ -750,12 +754,7 @@ export const NotificationChannelsPage: React.FC = () => {
                   <div className="space-y-1.5 max-w-xl">
                     <div className="flex flex-wrap items-center gap-2">
                       {isBark && (
-                        <img
-                          src={sanitizeBarkIcon(ch.barkConfig?.icon)}
-                          alt="Icon"
-                          className="w-5 h-5 rounded-md border border-stone-200 object-contain bg-white shrink-0"
-                          onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BARK_ICON; }}
-                        />
+                        <BarkIconPreview icon={ch.barkConfig?.icon} className="w-5 h-5 rounded-md border border-stone-200 shrink-0" />
                       )}
                       <span className="font-bold text-sm text-stone-900">{ch.name}</span>
 
@@ -909,6 +908,7 @@ export const NotificationChannelsPage: React.FC = () => {
                       type="text"
                       value={editBarkConfig.group || ''}
                       onChange={(e) => setEditBarkConfig({ ...editBarkConfig, group: e.target.value })}
+                      placeholder="Giao dịch"
                       className="w-full px-3 py-1.5 rounded-lg border border-stone-200 text-xs focus:outline-none"
                     />
                   </div>
@@ -944,12 +944,7 @@ export const NotificationChannelsPage: React.FC = () => {
                   <div className="col-span-2">
                     <label className="block text-2xs font-semibold text-stone-700 mb-1">Icon thông báo (URL ảnh)</label>
                     <div className="flex items-center gap-2">
-                      <img
-                        src={sanitizeBarkIcon(editBarkConfig.icon)}
-                        alt="Icon"
-                        className="w-7 h-7 rounded-md border border-stone-200 object-contain bg-white shrink-0 p-0.5"
-                        onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BARK_ICON; }}
-                      />
+                      <BarkIconPreview icon={editBarkConfig.icon} className="w-7 h-7 rounded-md border border-stone-200 shrink-0 p-0.5" />
                       <input
                         type="url"
                         value={editBarkConfig.icon || ''}
@@ -975,9 +970,11 @@ export const NotificationChannelsPage: React.FC = () => {
                         type="checkbox"
                         checked={editBarkConfig.includeBalance}
                         onChange={(e) => setEditBarkConfig({ ...editBarkConfig, includeBalance: e.target.checked })}
+                        aria-describedby="edit-bark-balance-help"
                       />
                       <span>Hiển thị số dư sau giao dịch</span>
                     </label>
+                    <p id="edit-bark-balance-help" className="text-2xs leading-relaxed text-stone-500">Số dư do SePay cung cấp tại giao dịch; có thể chưa có dữ liệu. Bật xem trước trên iPhone có thể hiển thị số dư và nội dung trên màn hình khóa.</p>
                   </div>
                 </div>
               )}

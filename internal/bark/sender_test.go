@@ -76,9 +76,6 @@ func TestBarkSenderHappyPath(t *testing.T) {
 	if receivedPayload.DeviceKey != "test_device_key_abc" {
 		t.Fatalf("expected device key received, got: %s", receivedPayload.DeviceKey)
 	}
-	if receivedPayload.Icon != "https://api.vietqr.io/img/ACB.png" {
-		t.Fatalf("expected default ACB icon, got: %s", receivedPayload.Icon)
-	}
 	if receivedPayload.IsArchive != "1" {
 		t.Fatalf("expected isArchive to be 1, got: %s", receivedPayload.IsArchive)
 	}
@@ -170,5 +167,55 @@ func TestBarkSenderServerErrorRetries(t *testing.T) {
 
 	if res.Outcome != notification.OutcomeRetry {
 		t.Fatalf("expected OutcomeRetry for 502, got: %+v", res)
+	}
+}
+
+func TestBarkSenderSePaySnapshotOverrideIsRequestLocal(t *testing.T) {
+	for _, scenario := range []string{"snapshot", "missing", "disabled", "other-provider"} {
+		t.Run(scenario, func(t *testing.T) {
+			var received pushPayload
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+					t.Error(err)
+				}
+				_, _ = io.WriteString(w, `{"code":200,"message":"success"}`)
+			}))
+			defer ts.Close()
+			cfg := storage.DefaultBarkConfig()
+			cfg.IncludeBalance, cfg.IncludeDescription = scenario != "disabled", scenario != "disabled"
+			provider := "SEPAY"
+			if scenario == "other-provider" {
+				provider = "PAYOS"
+			}
+			payload, _ := json.Marshal(map[string]any{"provider": provider, "credit": "150000", "balance": "9876543", "description": "stale public description"})
+			original := string(payload)
+			balance := int64(2350000)
+			details := &storage.SePayNotificationDetails{BalanceVND: &balance, Description: "private snapshot memo"}
+			if scenario == "missing" {
+				details = nil
+			}
+			res := NewSender(Config{ServerURL: ts.URL, Timeout: time.Second}, ts.Client(), "").Send(context.Background(), notification.SendRequest{Target: storage.DeliveryTarget{Secret: []byte("fixture-device"), BarkConfig: &cfg}, EventPayload: payload, SePayDetails: details})
+			if res.Outcome != notification.OutcomeSuccess {
+				t.Fatalf("send=%+v", res)
+			}
+			if string(payload) != original {
+				t.Fatal("sender mutated shared event bytes")
+			}
+			var expected map[string]any
+			if err := json.Unmarshal(payload, &expected); err != nil {
+				t.Fatal(err)
+			}
+			if provider == "SEPAY" {
+				delete(expected, "balance")
+				expected["description"] = ""
+				if scenario == "snapshot" {
+					expected["balance"], expected["description"] = "2350000", "private snapshot memo"
+				}
+			}
+			title, subtitle, body, _, _, _, _, _ := FormatTransactionNotification(expected, cfg, "")
+			if received.Title != title || received.Subtitle != subtitle || received.Body != body {
+				t.Fatalf("snapshot mapping wrong: %+v", received)
+			}
+		})
 	}
 }

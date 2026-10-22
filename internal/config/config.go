@@ -205,7 +205,7 @@ func Load() (Config, error) {
 		}
 		barkTimeoutMs = ms
 	}
-	barkGroup := value("BARK_DEFAULT_GROUP", "ACB")
+	barkGroup := value("BARK_DEFAULT_GROUP", "Giao dịch")
 	barkLevel := value("BARK_DEFAULT_LEVEL", "timeSensitive")
 	barkSound := value("BARK_DEFAULT_SOUND", "shake")
 

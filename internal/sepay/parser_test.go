@@ -95,3 +95,21 @@ func TestParseNotificationTrimsHeadersOnly(t *testing.T) {
 		t.Fatal("CRLF template rejected")
 	}
 }
+
+func TestParseNotificationOptionalBalanceAndOpaqueMemo(t *testing.T) {
+	for _, tc := range []struct { raw string; want int64 }{
+		{"2,350,000", 2350000}, {"2.350.000", 2350000}, {" -2,350,000 ", -2350000}, {"9007199254740991", 9007199254740991},
+		{"", 0}, {"0", 0}, {"{{accumulated}}", 0}, {"9007199254740992", 0}, {"9223372036854775808", 0}, {"2.35", 0}, {"+1", 0}, {"--1", 0}, {"1,00", 0}, {"text", 0},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			text := strings.Replace(fixtureNotification, "content=", "balance="+tc.raw+"\ncontent=", 1)
+			text += "\nbalance=999\namount=999"
+			n, err := ParseNotification(text)
+			if err != nil || n.AmountVND != 50000 || !strings.HasSuffix(n.Description, "\nbalance=999\namount=999") { t.Fatalf("notification=%+v err=%v", n, err) }
+			if tc.want == 0 && n.BalanceVND != nil || tc.want != 0 && (n.BalanceVND == nil || *n.BalanceVND != tc.want) { t.Fatalf("balance=%v want=%d", n.BalanceVND, tc.want) }
+		})
+	}
+	for _, replacement := range []string{"balance=1\nbalance=2\ncontent=", "balance=1", "amount=1\ncontent="} {
+		if _, err := ParseNotification(strings.Replace(fixtureNotification, "content=", replacement, 1)); !errors.Is(err, ErrInvalidTemplate) { t.Fatalf("malformed balance header accepted: %q %v", replacement, err) }
+	}
+}

@@ -64,11 +64,11 @@ type DeliveryTarget struct {
 
 func DefaultBarkConfig() BarkConfig {
 	return BarkConfig{
-		Group:              "ACB",
+		Group:              "Giao dịch",
 		Level:              "timeSensitive",
 		Sound:              "shake",
-		Icon:               "https://api.vietqr.io/img/ACB.png",
-		IncludeBalance:     false,
+		Icon:               "",
+		IncludeBalance:     true,
 		IncludeDescription: true,
 		DashboardLink:      true,
 	}

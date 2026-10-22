@@ -32,6 +32,7 @@ var (
 
 type Notification struct {
 	AmountVND     int64
+	BalanceVND    *int64
 	AccountNumber string
 	BankName      string
 	Reference     string
@@ -62,7 +63,15 @@ func ParseNotification(text string) (Notification, error) {
 			return Notification{}, ErrInvalidTemplate
 		}
 	}
-	if !strings.HasPrefix(lines[7], "content=") {
+	content := lines[7]
+	var balance *int64
+	if strings.HasPrefix(content, "balance=") {
+		header, rest, ok := strings.Cut(content, "\n")
+		if !ok { return Notification{}, ErrInvalidTemplate }
+		balance = parseBalanceVND(strings.TrimPrefix(header, "balance="))
+		content = rest
+	}
+	if !strings.HasPrefix(content, "content=") {
 		return Notification{}, ErrInvalidTemplate
 	}
 	if values[0] == "ra" {
@@ -85,8 +94,18 @@ func ParseNotification(text string) (Notification, error) {
 	return Notification{
 		AmountVND: amount, AccountNumber: values[2], BankName: values[3],
 		Reference: values[5], TransactionAt: transactionAt,
-		Description: strings.TrimPrefix(lines[7], "content="),
+		Description: strings.TrimPrefix(content, "content="), BalanceVND: balance,
 	}, nil
+}
+
+func parseBalanceVND(raw string) *int64 {
+	raw = strings.TrimSpace(raw)
+	negative := strings.HasPrefix(raw, "-")
+	if negative { raw = strings.TrimPrefix(raw, "-") }
+	value, err := parseAmountVND(raw)
+	if err != nil { return nil }
+	if negative { value = -value }
+	return &value
 }
 
 func parseAmountVND(raw string) (int64, error) {

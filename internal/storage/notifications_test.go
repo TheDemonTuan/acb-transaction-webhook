@@ -142,6 +142,55 @@ func TestBarkChannelUpdateAndRevisionConflict(t *testing.T) {
 	}
 }
 
+func TestBarkChannelSelectedUpdatePreservesPrivacyAndRevisions(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setupTestStoreWithKeyring(t)
+	defer store.Close()
+
+	legacy := DefaultBarkConfig()
+	legacy.Group = "Private group"
+	legacy.Icon = "https://example.test/custom.png"
+	legacy.IncludeBalance = false
+	legacy.IncludeDescription = false
+	selected, err := store.CreateBarkChannel(ctx, "Selected iPhone", "selected-key", &legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateBarkChannel(ctx, "Other iPhone", "other-key", &legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updatedConfig := legacy
+	updatedConfig.Group = "SePay"
+	updatedConfig.Icon = ""
+	updatedConfig.IncludeBalance = true
+	updatedConfig.IncludeDescription = true
+	updated, err := store.UpdateChannel(ctx, selected.ID, selected.Revision, selected.Name, "", &updatedConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != selected.Revision+1 || updated.Status != "DISABLED" || updated.BarkConfig == nil || *updated.BarkConfig != updatedConfig {
+		t.Fatalf("selected channel update lost config or enabled channel: %+v", updated)
+	}
+	untouched, err := store.NotificationChannelByID(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Revision != other.Revision || untouched.Status != "DISABLED" || untouched.BarkConfig == nil || *untouched.BarkConfig != legacy {
+		t.Fatalf("other channel privacy config changed: %+v", untouched)
+	}
+	for _, channel := range []NotificationChannel{selected, other} {
+		target, err := store.DeliveryTargetForDelivery(ctx, Delivery{EndpointID: channel.ID, EndpointRevision: 1, KeyID: "k1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target.BarkConfig == nil || *target.BarkConfig != legacy {
+			t.Fatalf("saved revision privacy settings changed: %+v", target.BarkConfig)
+		}
+	}
+}
+
 func TestBarkDeviceKeyRotation(t *testing.T) {
 	ctx := context.Background()
 	store, _ := setupTestStoreWithKeyring(t)

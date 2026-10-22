@@ -50,7 +50,7 @@ func sepayTestCount(t *testing.T, s *Store, table string, expected int) {
 
 func sepayTestFinancialCounts(t *testing.T, s *Store, expected int) {
 	t.Helper()
-	for _, table := range []string{"transactions", "sepay_receipts", "events", "deliveries", "event_journal"} {
+	for _, table := range []string{"transactions", "sepay_receipts", "sepay_notification_details", "events", "deliveries", "event_journal"} {
 		sepayTestCount(t, s, table, expected)
 	}
 	for _, table := range []string{"payment_orders", "payment_receipts"} {
@@ -768,4 +768,108 @@ func TestSePayReviewCursorOrdersTimestampBeforeTelegramIDs(t *testing.T) {
 	if err != nil || len(last.Items) != 1 || last.Items[0].SourceID != "900003:99" || last.NextCursor != "" {
 		t.Fatalf("cross-timestamp cursor: %+v err=%v", last, err)
 	}
+}
+
+func TestSePayNotificationSnapshotPrivateImmutableAndReopened(t *testing.T) {
+	ctx := context.Background()
+	s := sepayTestStore(t)
+	settlementTestEndpoint(t, s)
+	in := sepayTestInput(1, 10, "snapshot-reference")
+	balance := int64(2350000)
+	in.Credit.NotificationDetails = SePayNotificationDetails{BalanceVND: &balance, Description: "private customer transfer memo"}
+	r, err := s.IngestSePayNotification(ctx, in)
+	if err != nil { t.Fatal(err) }
+	var envelope []byte
+	if err := s.DB().QueryRow(`SELECT details_envelope FROM sepay_notification_details WHERE transaction_id=?`, r.Event.TransactionID).Scan(&envelope); err != nil { t.Fatal(err) }
+	for _, secret := range []string{"private customer transfer memo", "2350000"} {
+		if bytes.Contains(envelope, []byte(secret)) || bytes.Contains(r.Event.Payload, []byte(secret)) { t.Fatal("private details leaked") }
+	}
+	if _, err := s.sepayDecrypt(envelope, []byte("sepay-notification:another-transaction")); err == nil { t.Fatal("snapshot accepted wrong AAD") }
+	in.UpdateID++
+	in.MessageID++
+	in.Credit.NotificationDetails = SePayNotificationDetails{Description: "replacement must not win"}
+	sepayTestPayload(&in, "replacement must not win")
+	if replay, err := s.IngestSePayNotification(ctx, in); err != nil || !replay.Duplicate { t.Fatalf("replay=%+v err=%v", replay, err) }
+	var dbPath string
+	var seq int
+	var name string
+	if err := s.DB().QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &dbPath); err != nil { t.Fatal(err) }
+	keyring := s.keyring
+	if err := s.Close(); err != nil { t.Fatal(err) }
+	reopened, err := Open(ctx, dbPath)
+	if err != nil { t.Fatal(err) }
+	defer reopened.Close()
+	reopened.WithKeyring(keyring)
+	details, err := reopened.SePayNotificationDetailsForEvent(ctx, r.Event.EventID)
+	if err != nil || details == nil || details.BalanceVND == nil || *details.BalanceVND != balance || details.Description != "private customer transfer memo" { t.Fatalf("snapshot=%+v err=%v", details, err) }
+	sepayTestFinancialCounts(t, reopened, 1)
+	if details, err := reopened.SePayNotificationDetailsForEvent(ctx, "missing-event"); err != nil || details != nil { t.Fatalf("missing=%+v err=%v", details, err) }
+	reopened.WithKeyring(nil)
+	if _, err := reopened.SePayNotificationDetailsForEvent(ctx, r.Event.EventID); err == nil { t.Fatal("missing keyring accepted") }
+}
+
+func TestSePayNotificationSnapshotInsertRollback(t *testing.T) {
+	s := sepayTestStore(t)
+	settlementTestEndpoint(t, s)
+	if _, err := s.DB().Exec(`CREATE TRIGGER fail_snapshot BEFORE INSERT ON sepay_notification_details BEGIN SELECT RAISE(ABORT,'private customer transfer memo'); END`); err != nil { t.Fatal(err) }
+	r, err := s.IngestSePayNotification(context.Background(), sepayTestInput(1, 10, "snapshot-rollback"))
+	if err == nil || r.Event != nil || bytes.Contains([]byte(err.Error()), []byte("private customer transfer memo")) { t.Fatalf("rollback=%+v err=%v", r, err) }
+	sepayTestFinancialCounts(t, s, 0)
+	sepayTestCount(t, s, "sepay_telegram_inbox", 0)
+}
+
+func TestSePayNotificationSnapshotCorruptionIsSanitized(t *testing.T) {
+	ctx := context.Background()
+	s := sepayTestStore(t)
+	r, err := s.IngestSePayNotification(ctx, sepayTestInput(1, 10, "snapshot-corruption"))
+	if err != nil { t.Fatal(err) }
+	for _, corruption := range []string{"envelope", "aad", "json"} {
+		t.Run(corruption, func(t *testing.T) {
+			blob := []byte("private memo 2350000")
+			if corruption == "aad" { blob, err = s.sepayEncrypt([]byte(`{"description":"private memo 2350000"}`), []byte("sepay-notification:wrong")) }
+			if corruption == "json" { blob, err = s.sepayEncrypt([]byte("private memo 2350000"), []byte("sepay-notification:"+r.Event.TransactionID)) }
+			if err != nil { t.Fatal(err) }
+			if _, err := s.DB().Exec(`UPDATE sepay_notification_details SET details_envelope=?`, blob); err != nil { t.Fatal(err) }
+			if details, err := s.SePayNotificationDetailsForEvent(ctx, r.Event.EventID); err == nil || details != nil || bytes.Contains([]byte(err.Error()), []byte("private memo")) || bytes.Contains([]byte(err.Error()), []byte("2350000")) { t.Fatalf("unsafe corruption result=%+v err=%v", details, err) }
+		})
+	}
+	if _, err := s.DB().Exec(`UPDATE events SET event_type='bank.transaction.debit'`); err != nil { t.Fatal(err) }
+	if details, err := s.SePayNotificationDetailsForEvent(ctx, r.Event.EventID); err != nil || details != nil { t.Fatalf("noncredit lookup=%+v err=%v", details, err) }
+}
+
+func TestSePayNotificationMigrationPreservesVersion21(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v21.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)")
+	if err != nil { t.Fatal(err) }
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,checksum TEXT NOT NULL,applied_at TEXT NOT NULL)`); err != nil { t.Fatal(err) }
+	for _, migration := range migrations {
+		if migration.version >= 22 { break }
+		if _, err := db.Exec(migration.sql); err != nil { t.Fatal(err) }
+		if _, err := db.Exec(`INSERT INTO schema_migrations VALUES(?,?,?)`, migration.version, migration.checksum, "2026-10-21T00:00:00Z"); err != nil { t.Fatal(err) }
+	}
+	for _, statement := range []string{
+		`INSERT INTO connections(id,bank_code,created_at,updated_at) VALUES('sepay-store:old','VCB','2026-10-21','2026-10-21')`,
+		`INSERT INTO transactions(id,connection_id,semantic_key,canonical_hash,transaction_date,effective_date,credit,parser_version,first_seen_at) VALUES('old-txn','sepay-store:old','old-key','old-hash','2026-10-21','2026-10-21',150000,'sepay-native-v1','2026-10-21T00:00:00Z')`,
+		`INSERT INTO events(id,transaction_id,event_type,payload,payload_hash,created_at) VALUES('old-event','old-txn','bank.transaction.credit',X'7B7D','old-event-hash','2026-10-21T00:00:00Z')`,
+		`INSERT INTO webhook_endpoints(id,name,status,current_revision,created_at,updated_at) VALUES('old-channel','retained','DISABLED',1,'2026-10-21','2026-10-21')`,
+		`INSERT INTO endpoint_versions(endpoint_id,revision,url,filters_json,created_at) VALUES('old-channel',1,'https://example.com/hook','[]','2026-10-21')`,
+	} { if _, err := db.Exec(statement); err != nil { t.Fatal(err) } }
+	if err := db.Close(); err != nil { t.Fatal(err) }
+	s, err := Open(ctx, path)
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+	var amount int64
+	var payload, status, url string
+	if err := s.DB().QueryRow(`SELECT credit FROM transactions WHERE id='old-txn'`).Scan(&amount); err != nil || amount != 150000 { t.Fatalf("historic amount=%d %v", amount, err) }
+	if err := s.DB().QueryRow(`SELECT payload FROM events WHERE id='old-event'`).Scan(&payload); err != nil || payload != "{}" { t.Fatalf("historic event=%s %v", payload, err) }
+	if err := s.DB().QueryRow(`SELECT e.status,v.url FROM webhook_endpoints e JOIN endpoint_versions v ON v.endpoint_id=e.id WHERE e.id='old-channel'`).Scan(&status, &url); err != nil || status != "DISABLED" || url != "https://example.com/hook" { t.Fatalf("historic channel=%s %s %v", status,url,err) }
+	sepayTestCount(t, s, "sepay_notification_details", 0)
+	if details, err := s.SePayNotificationDetailsForEvent(ctx, "old-event"); err != nil || details != nil { t.Fatalf("historic snapshot=%+v %v", details, err) }
+	keyring, err := security.NewKeyring(make([]byte, 32))
+	if err != nil { t.Fatal(err) }
+	s.WithKeyring(keyring)
+	r, err := s.IngestSePayNotification(ctx, sepayTestInput(1,10,"after-v22-migration"))
+	if err != nil { t.Fatal(err) }
+	if details, err := s.SePayNotificationDetailsForEvent(ctx, r.Event.EventID); err != nil || details == nil { t.Fatalf("new snapshot=%+v %v", details, err) }
 }
