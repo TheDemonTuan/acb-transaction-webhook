@@ -22,12 +22,13 @@ const (
 	ColdRequestTimeoutMs    = 8000
 	ProviderModeEdgeOnly    = "EDGE_ONLY"
 	ProviderModePiperOnly   = "PIPER_ONLY"
+	ProviderModeVieneuOnly  = "VIENEU_ONLY"
 	ProviderModeBrowserOnly = "BROWSER_ONLY"
 	VoiceIDHoaiMy           = "vi-VN-HoaiMyNeural"
 	VoiceIDNamMinh          = "vi-VN-NamMinhNeural"
 	VoiceIDPiperVais1000    = "vi-VN-vais1000-medium"
+	VoiceIDVieneuMaiAnh     = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
 )
-
 type AmountBand struct {
 	ID      string  `json:"id"`
 	FromVND string  `json:"fromVnd"`
@@ -83,6 +84,8 @@ func ComputeSynthesisKey(voiceID string, rate float64, pitchHz int) string {
 	provider := "edge"
 	if voiceID == VoiceIDPiperVais1000 {
 		provider = "piper"
+	} else if voiceID == VoiceIDVieneuMaiAnh {
+		provider = "vieneu"
 	}
 	raw := fmt.Sprintf("%s|%s|%.2f|%d|money-vi-v1|pack-schema-2", provider, voiceID, rate, pitchHz)
 	h := sha256.Sum256([]byte(raw))
@@ -94,6 +97,8 @@ func (p VoiceProfile) SynthesisProvider() string {
 	switch p.ProviderMode {
 	case ProviderModePiperOnly:
 		return "piper"
+	case ProviderModeVieneuOnly:
+		return "vieneu"
 	case ProviderModeEdgeOnly:
 		return "edge"
 	case ProviderModeBrowserOnly:
@@ -105,9 +110,9 @@ func (p VoiceProfile) SynthesisProvider() string {
 
 var DefaultVoiceProfile = VoiceProfile{
 	Revision:             1,
-	ProviderMode:         ProviderModePiperOnly,
-	VoiceID:              VoiceIDPiperVais1000,
-	Rate:                 1.25,
+	ProviderMode:         ProviderModeVieneuOnly,
+	VoiceID:              VoiceIDVieneuMaiAnh,
+	Rate:                 1.00,
 	PitchHz:              0,
 	AmountBands:          defaultAmountBands(),
 	ChimeEnabled:         true,
@@ -116,9 +121,9 @@ var DefaultVoiceProfile = VoiceProfile{
 	IncludeDescription:   false,
 	CustomTemplate:       "",
 	CatalogVersion:       CatalogVersionV1,
-	SynthesisKey:         ComputeSynthesisKey(VoiceIDPiperVais1000, 1.25, 0),
+	SynthesisKey:         ComputeSynthesisKey(VoiceIDVieneuMaiAnh, 1.00, 0),
 	ColdRequestTimeoutMs: ColdRequestTimeoutMs,
-	UpdatedAt:            "2026-10-11T00:00:00Z",
+	UpdatedAt:            "2026-10-22T00:00:00Z",
 }
 
 var placeholderRegex = regexp.MustCompile(`\{([^}]+)\}`)
@@ -129,18 +134,21 @@ func ValidateVoiceProfileInput(in *VoiceSettingsInput) error {
 		if in.VoiceID != VoiceIDPiperVais1000 || in.PitchHz != 0 {
 			return errors.New("PIPER_ONLY requires vi-VN-vais1000-medium and pitchHz 0")
 		}
+	case ProviderModeVieneuOnly:
+		if in.VoiceID != VoiceIDVieneuMaiAnh || in.Rate != 1.00 || in.PitchHz != 0 {
+			return errors.New("VIENEU_ONLY requires vi-VN-vieneu-v3-turbo-mai-anh-v1, rate 1.00 and pitchHz 0")
+		}
 	case ProviderModeEdgeOnly:
 		if in.VoiceID != VoiceIDHoaiMy && in.VoiceID != VoiceIDNamMinh {
 			return errors.New("EDGE_ONLY requires an approved Edge voiceId")
 		}
 	case ProviderModeBrowserOnly:
-		if in.VoiceID != VoiceIDHoaiMy && in.VoiceID != VoiceIDNamMinh && in.VoiceID != VoiceIDPiperVais1000 {
+		if in.VoiceID != VoiceIDHoaiMy && in.VoiceID != VoiceIDNamMinh && in.VoiceID != VoiceIDPiperVais1000 && in.VoiceID != VoiceIDVieneuMaiAnh {
 			return errors.New("invalid voiceId")
 		}
 	default:
-		return errors.New("invalid providerMode: must be PIPER_ONLY, EDGE_ONLY or BROWSER_ONLY")
+		return errors.New("invalid providerMode: must be PIPER_ONLY, VIENEU_ONLY, EDGE_ONLY or BROWSER_ONLY")
 	}
-
 	if math.IsNaN(in.Rate) || math.IsInf(in.Rate, 0) || in.Rate < 0.75 || in.Rate > 2.00 {
 		return errors.New("invalid rate: must be between 0.75 and 2.00")
 	}

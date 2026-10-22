@@ -3,16 +3,17 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 PIPER_VOICE = "vi-VN-vais1000-medium"
+VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
 EDGE_VOICES = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"}
 
 
 class SynthesizeRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=600)
-    voice: Literal["vi-VN-vais1000-medium", "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"] = PIPER_VOICE
+    voice: Literal["vi-VN-vais1000-medium", "vi-VN-vieneu-v3-turbo-mai-anh-v1", "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"] = PIPER_VOICE
     rate: str = Field("+0%", pattern=r"^[+-][0-9]{1,3}%$")
     pitch: str = Field("+0Hz", pattern=r"^[+-][0-9]{1,2}Hz$")
     cacheable: bool = True
-    provider_mode: Literal["PIPER_ONLY", "EDGE_ONLY"] = "PIPER_ONLY"
+    provider_mode: Literal["PIPER_ONLY", "VIENEU_ONLY", "EDGE_ONLY"] = "PIPER_ONLY"
     timeout_ms: int = Field(8000, ge=1, le=8000, strict=True)
 
     @model_validator(mode="after")
@@ -22,6 +23,9 @@ class SynthesizeRequest(BaseModel):
         if self.provider_mode == "PIPER_ONLY":
             if self.voice != PIPER_VOICE or int(self.pitch[:-2]) != 0:
                 raise ValueError("Piper requires its fixed voice and zero pitch")
+        elif self.provider_mode == "VIENEU_ONLY":
+            if self.voice != VIENEU_VOICE or int(self.rate[:-1]) != 0 or int(self.pitch[:-2]) != 0:
+                raise ValueError("VieNeu requires its fixed voice, +0% rate and +0Hz pitch")
         elif self.voice not in EDGE_VOICES:
             raise ValueError("Edge requires an Edge voice")
         return self
@@ -45,7 +49,7 @@ class HealthResponse(BaseModel):
     primary: str
     edge: ProviderHealth
     piper: ProviderHealth
-
+    vieneu: ProviderHealth
 
 class ErrorResponse(BaseModel):
     code: str

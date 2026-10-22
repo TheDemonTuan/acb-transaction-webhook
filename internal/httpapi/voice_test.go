@@ -84,7 +84,7 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &settings); err != nil {
 		t.Fatalf("unmarshal settings: %v", err)
 	}
-	if settings.Revision != 1 || settings.ProviderMode != "PIPER_ONLY" || settings.VoiceID != storage.VoiceIDPiperVais1000 {
+	if settings.Revision != 1 || settings.ProviderMode != storage.ProviderModeVieneuOnly || settings.VoiceID != storage.VoiceIDVieneuMaiAnh {
 		t.Errorf("unexpected settings: %+v", settings)
 	}
 
@@ -409,8 +409,8 @@ func TestSynthesizeTransactionAudioPolicies(t *testing.T) {
 	if wRT.Header().Get("Content-Type") != "audio/mpeg" {
 		t.Errorf("expected Content-Type audio/mpeg, got %s", wRT.Header().Get("Content-Type"))
 	}
-	if wRT.Header().Get("X-TTS-Provider") != "piper" {
-		t.Errorf("expected X-TTS-Provider piper, got %s", wRT.Header().Get("X-TTS-Provider"))
+	if wRT.Header().Get("X-TTS-Provider") != "vieneu" {
+		t.Errorf("expected X-TTS-Provider vieneu, got %s", wRT.Header().Get("X-TTS-Provider"))
 	}
 
 	// 4. Replay CATCH_UP transaction -> 200 OK (manual replay allowed!)

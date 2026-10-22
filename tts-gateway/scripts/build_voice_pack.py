@@ -43,8 +43,15 @@ def load_inputs(path):
         raise InvalidPack("Pack amounts cannot exceed 128")
     if any(set(mapping["classic"]) != {f"classic-{i:03d}" for i in range(1, 7)} for mapping in data["amounts"].values()):
         raise InvalidPack("Initial pack must contain all six classic phrases per amount")
-    if sum(clip["kind"] == "tail-fragment" for clip in data["clips"]) != 600:
-        raise InvalidPack("Initial pack must contain all 600 catalog fragments")
+    is_vieneu = data.get("voiceId") == "vi-VN-vieneu-v3-turbo-mai-anh-v1"
+    if not is_vieneu:
+        if sum(clip["kind"] == "tail-fragment" for clip in data["clips"]) != 600:
+            raise InvalidPack("Initial pack must contain all 600 catalog fragments")
+    else:
+        if any(clip["kind"] in ("tail-fragment", "amount-segment") for clip in data["clips"]):
+            raise InvalidPack("VieNeu pack must contain only whole utterances (no tail-fragment or amount-segment)")
+        if len(data["clips"]) != len(actual_amounts) * 7:
+            raise InvalidPack("VieNeu pack must contain exactly 7 whole clips per amount (1 standard + 6 classic)")
     return data
 
 def require_rights(path):
@@ -67,6 +74,21 @@ def require_piper_license(path):
     if b"https://creativecommons.org/licenses/by/4.0/" not in card or b"vais1000" not in card.lower():
         raise InvalidPack("Piper model card does not grant the fixed voice license")
 
+
+def require_vieneu_license(path):
+    if path is None:
+        raise InvalidPack("VieNeu license gate: --model-card required")
+    card = read_bounded(Path(path), 64 * 1024)
+    prov_path = Path(__file__).resolve().parents[1] / "assets" / "models" / "vieneu" / "provenance.json"
+    if not prov_path.exists():
+        raise InvalidPack("VieNeu provenance.json missing")
+    with prov_path.open("r", encoding="utf-8") as f:
+        prov = json.load(f)
+    expected_hash = prov["backbone"]["files"]["README.md"]["sha256"]
+    if hashlib.sha256(card).hexdigest() != expected_hash:
+        raise InvalidPack("VieNeu model card differs from pinned upstream README.md")
+    if b"VieNeu-TTS" not in card:
+        raise InvalidPack("VieNeu model card does not match VieNeu-TTS")
 def run_media(arguments):
     try:
         result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=120)
@@ -198,13 +220,20 @@ def verify_output(root, inputs=None):
 
 
 async def build(inputs, root):
-    from app.providers.piper import PiperTTSProvider, VOICE_ID
-    is_piper = inputs["voiceId"] == VOICE_ID
+    from app.providers.piper import PiperTTSProvider, VOICE_ID as PIPER_VOICE_ID
+    from app.providers.vieneu import VieneuTTSProvider, VOICE_ID as VIENEU_VOICE_ID
+    is_piper = inputs["voiceId"] == PIPER_VOICE_ID
+    is_vieneu = inputs["voiceId"] == VIENEU_VOICE_ID
     if is_piper:
         provider = PiperTTSProvider()
+        concurrency = 2
+    elif is_vieneu:
+        provider = VieneuTTSProvider(threads=2)
+        concurrency = 1
     else:
         from app.providers.edge import EdgeTTSProvider
         provider = EdgeTTSProvider()
+        concurrency = 2
     directory = root / inputs["synthesisKey"]
     if (directory / "manifest.json").exists():
         verify_output(root, inputs)
@@ -230,7 +259,7 @@ async def build(inputs, root):
             except InvalidPack:
                 continue
             completed[clip["clipId"]] = saved
-    semaphore = asyncio.Semaphore(2)
+    semaphore = asyncio.Semaphore(concurrency)
     progress_lock = asyncio.Lock()
 
     async def create(clip):
@@ -278,13 +307,13 @@ async def build(inputs, root):
                 raise InvalidPack(f"Clip {clip['clipId']} ({clip['transcript']!r}): {failure_details(exc)}") from exc
 
     try:
-        if is_piper:
+        if is_piper or is_vieneu:
             await provider.start()
         async with asyncio.TaskGroup() as group:
-            for _ in range(2):
+            for _ in range(concurrency):
                 group.create_task(worker())
     finally:
-        if is_piper:
+        if is_piper or is_vieneu:
             import anyio
             with anyio.CancelScope(shield=True):
                 await provider.close()
@@ -378,6 +407,8 @@ def main():
                 raise InvalidPack("--inputs required for --publish")
             if inputs["voiceId"] == "vi-VN-vais1000-medium":
                 require_piper_license(args.model_card)
+            elif inputs["voiceId"] == "vi-VN-vieneu-v3-turbo-mai-anh-v1":
+                require_vieneu_license(args.model_card)
             else:
                 require_rights(args.rights_evidence)
             if not shutil.which("ffprobe"):
@@ -388,6 +419,8 @@ def main():
                 raise InvalidPack("--inputs required for generation")
             if inputs["voiceId"] == "vi-VN-vais1000-medium":
                 require_piper_license(args.model_card)
+            elif inputs["voiceId"] == "vi-VN-vieneu-v3-turbo-mai-anh-v1":
+                require_vieneu_license(args.model_card)
             else:
                 require_rights(args.rights_evidence)
             if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):

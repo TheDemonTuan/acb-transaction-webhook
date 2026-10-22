@@ -10,10 +10,21 @@ def _parse_piper_workers() -> int:
     except ValueError:
         pass
     raise ValueError(f"PIPER_WORKERS must be 1 or 2, got: {raw!r}")
+def _parse_vieneu_threads() -> int:
+    raw = os.getenv("TTS_VIENEU_THREADS", "2").strip()
+    try:
+        val = int(raw)
+        if 1 <= val <= 4:
+            return val
+    except ValueError:
+        pass
+    raise ValueError(f"TTS_VIENEU_THREADS must be an integer between 1 and 4, got: {raw!r}")
+
 
 
 class Config(BaseModel):
     piper_workers: int = _parse_piper_workers()
+    vieneu_threads: int = _parse_vieneu_threads()
     host: str = os.getenv("TTS_HOST", "0.0.0.0")
     port: int = int(os.getenv("TTS_PORT", "8081"))
     internal_token: str = os.getenv("TTS_INTERNAL_TOKEN", "")

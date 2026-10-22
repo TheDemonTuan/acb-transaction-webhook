@@ -120,7 +120,7 @@ async def test_real_piper_http_buffer_stream_and_same_voice(monkeypatch):
         assert provider.available
         async with AsyncClient(transport=ASGITransport(app=gateway.app), base_url="http://test") as client:
             health = (await client.get("/health")).json()
-            assert health["primary"] == "piper" and health["piper"]["available"]
+            assert health["primary"] == "vieneu" and health["piper"]["available"]
             for route in ("/synthesize", "/synthesize/stream"):
                 response = await client.post(route, json={"text": "Đã nhận năm trăm nghìn đồng.", "cacheable": False})
                 assert response.status_code == 200

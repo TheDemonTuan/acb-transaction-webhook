@@ -10,6 +10,8 @@ import {
   DEFAULT_AMOUNT_BANDS,
   PIPER_VOICE_ID,
   PIPER_VOICE_LABEL,
+  VIENEU_VOICE_ID,
+  VIENEU_VOICE_LABEL,
   EDGE_VOICE_IDS,
   type VoiceProviderMode,
   type VoiceProfile,
@@ -324,11 +326,14 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                           const providerMode = e.target.value as VoiceProviderMode;
                           setFormDraft((p) => p ? { ...p, providerMode,
                             voiceId: providerMode === 'PIPER_ONLY' ? PIPER_VOICE_ID
+                              : providerMode === 'VIENEU_ONLY' ? VIENEU_VOICE_ID
                               : providerMode === 'EDGE_ONLY' && !EDGE_VOICE_IDS.some((id) => id === p.voiceId) ? EDGE_VOICE_IDS[0] : p.voiceId,
-                            pitchHz: providerMode === 'PIPER_ONLY' ? 0 : p.pitchHz } : null);
+                            rate: providerMode === 'VIENEU_ONLY' ? 1.0 : p.rate,
+                            pitchHz: providerMode === 'PIPER_ONLY' || providerMode === 'VIENEU_ONLY' ? 0 : p.pitchHz } : null);
                         }}
                         className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800"
                       >
+                        <option value="VIENEU_ONLY">{VIENEU_VOICE_LABEL}</option>
                         <option value="PIPER_ONLY">{PIPER_VOICE_LABEL}</option>
                         <option value="EDGE_ONLY">Giọng máy chủ Edge</option>
                         <option value="BROWSER_ONLY">Giọng trình duyệt</option>
@@ -348,9 +353,11 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                         }
                         className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800 disabled:bg-stone-100"
                       >
-                        {formDraft.providerMode !== 'EDGE_ONLY' && formDraft.voiceId === PIPER_VOICE_ID &&
+                        {formDraft.voiceId === VIENEU_VOICE_ID &&
+                          <option value={VIENEU_VOICE_ID}>{VIENEU_VOICE_LABEL}</option>}
+                        {formDraft.voiceId === PIPER_VOICE_ID &&
                           <option value={PIPER_VOICE_ID}>{PIPER_VOICE_LABEL}</option>}
-                        {formDraft.providerMode !== 'PIPER_ONLY' && <>
+                        {formDraft.providerMode !== 'PIPER_ONLY' && formDraft.providerMode !== 'VIENEU_ONLY' && <>
                           <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ) · Edge</option>
                           <option value="vi-VN-NamMinhNeural">Nam Minh (Nam) · Edge</option>
                         </>}
@@ -372,32 +379,37 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                         max="2.0"
                         step="0.05"
                         value={formDraft.rate}
+                        disabled={formDraft.providerMode === 'VIENEU_ONLY'}
                         onChange={(e) =>
                           setFormDraft((p) => (p ? { ...p, rate: parseFloat(e.target.value) } : null))
                         }
-                        className="w-full accent-emerald-600"
+                        className="w-full accent-emerald-600 disabled:opacity-50"
                       />
+                      {formDraft.providerMode === 'VIENEU_ONLY' && (
+                        <span className="text-[10px] text-stone-500 block mt-0.5">Tốc độ tự nhiên 1.0x; ưu tiên đọc rõ số tiền</span>
+                      )}
                     </div>
 
                     <div>
                       <div className="flex justify-between mb-1">
-                        <span>Cao độ (Pitch)</span>
-                        <span className="font-semibold">{formDraft.pitchHz} Hz</span>
+                        <span>Cao độ giọng</span>
+                        <span className="font-semibold">{formDraft.pitchHz > 0 ? `+${formDraft.pitchHz}` : formDraft.pitchHz} Hz</span>
                       </div>
                       <input
-                        aria-label="Cao độ (Pitch)"
                         type="range"
+                        aria-label="Cao độ giọng"
                         min="-50"
                         max="50"
                         step="1"
                         value={formDraft.pitchHz}
-                        disabled={formDraft.providerMode === 'PIPER_ONLY'}
+                        disabled={formDraft.providerMode === 'PIPER_ONLY' || formDraft.providerMode === 'VIENEU_ONLY'}
                         onChange={(e) =>
                           setFormDraft((p) => (p ? { ...p, pitchHz: parseInt(e.target.value, 10) } : null))
                         }
-                        className="w-full accent-emerald-600"
+                        className="w-full accent-emerald-600 disabled:opacity-50"
                       />
                     </div>
+
                   </div>
 
                   {/* Audio Features */}

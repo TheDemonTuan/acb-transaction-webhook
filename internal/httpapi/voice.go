@@ -151,17 +151,22 @@ func (s *Server) resolveVoicePhrase(profile storage.VoiceProfile, amount int64, 
 		}
 		return core, nil
 	}
+	isVieneu := profile.ProviderMode == storage.ProviderModeVieneuOnly || profile.VoiceID == storage.VoiceIDVieneuMaiAnh
+	formatTpl := voicecopy.FormatAnnouncementTemplate
+	if isVieneu {
+		formatTpl = voicecopy.FormatSpokenAnnouncementTemplate
+	}
 	if selected.StyleID == "custom" {
 		if part == "tail" {
 			return "", errors.New("VOICE_RECIPE_MISMATCH")
 		}
-		return voicecopy.FormatAnnouncementTemplate(profile.CustomTemplate, amount, description, profile.IncludeDescription), nil
+		return formatTpl(profile.CustomTemplate, amount, description, profile.IncludeDescription), nil
 	}
 	if template, ok := voicecopy.ClassicTemplate(phraseID); ok {
 		if part == "tail" {
 			return "", errors.New("VOICE_RECIPE_MISMATCH")
 		}
-		return voicecopy.FormatAnnouncementTemplate(template, amount, description, profile.IncludeDescription), nil
+		return formatTpl(template, amount, description, profile.IncludeDescription), nil
 	}
 	tail, _ := voicecopy.RecipeTail(phraseID)
 	if part == "tail" {

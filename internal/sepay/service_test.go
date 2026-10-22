@@ -354,8 +354,12 @@ func TestServiceTelegramPrivateNotificationDetails(t *testing.T) {
 }
 
 func TestServiceNativePrivateContentPrecedence(t *testing.T) {
-	for _, tc := range []struct { content, description, want string }{{"customer memo", "provider description", "customer memo"}, {" \n\t", "fallback description", "fallback description"}, {"", "", ""}} {
-		t.Run(tc.want, func(t *testing.T) {
+	for i, tc := range []struct { name, content, description, want string }{
+		{"memo", "customer memo", "provider description", "customer memo"},
+		{"fallback", " \n\t", "fallback description", "fallback description"},
+		{"empty", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			cfg := protocolConfig(t)
 			cfg.ActiveTransport, cfg.NativeMode, cfg.NativeWebhookSecret = "native", ModeActive, nativeTestSecret
@@ -363,7 +367,9 @@ func TestServiceNativePrivateContentPrecedence(t *testing.T) {
 			var event storage.EventNotification
 			service := NewService(cfg, store, func(e storage.EventNotification) { event = e })
 			balance := int64(2350000)
-			hook := NativeWebhook{ID: 123, TransferAmount: 50000, BalanceVND: &balance, Gateway: cfg.BankName, AccountNumber: cfg.effectiveNotificationAccountNumber(), SubAccount: cfg.NativeSubAccount, TransferType: "in", ReferenceCode: "not-customer-content", Content: tc.content, Description: tc.description, TransactionAt: cfg.ActivationAt.Add(time.Minute), RawPayload: []byte(`{"fixture":true}`)}
+			refs := []string{"ref-a", "ref-b", "ref-c"}
+			cfg.StoreKey = cfg.StoreKey + "-" + refs[i]
+			hook := NativeWebhook{ID: int64(1001 + i), TransferAmount: 50000, BalanceVND: &balance, Gateway: cfg.BankName, AccountNumber: cfg.effectiveNotificationAccountNumber(), SubAccount: cfg.NativeSubAccount, TransferType: "in", ReferenceCode: refs[i], Content: tc.content, Description: tc.description, TransactionAt: cfg.ActivationAt.Add(time.Minute), RawPayload: []byte(`{"fixture":true}`)}
 			if err := service.HandleNativeWebhook(ctx, hook); err != nil { t.Fatal(err) }
 			details, err := store.SePayNotificationDetailsForEvent(ctx, event.EventID)
 			if err != nil || details == nil || details.BalanceVND == nil || *details.BalanceVND != balance || details.Description != tc.want { t.Fatalf("details=%+v err=%v", details, err) }

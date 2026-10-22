@@ -6,6 +6,10 @@ image_ref="${1:-${TTS_GATEWAY_IMAGE:-ghcr.io/thedemontuan/acb-transaction-webhoo
 container_name="${CONTAINER_NAME:-tts-gateway-smoke-$$-${RANDOM}}"
 
 TTS_PORT="${TTS_PORT:-8183}"
+TTS_CPUS="${TTS_CPUS:-2.0}"
+TTS_MEMORY_LIMIT="${TTS_MEMORY_LIMIT:-4G}"
+TTS_VIENEU_THREADS="${TTS_VIENEU_THREADS:-2}"
+TTS_SMOKE_OFFLINE="${TTS_SMOKE_OFFLINE:-0}"
 host="127.0.0.1"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -45,7 +49,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting isolated tts-gateway container ($container_name) from $image_ref..."
+echo "Starting isolated tts-gateway container ($container_name) from $image_ref (cpus: $TTS_CPUS, mem: $TTS_MEMORY_LIMIT, offline: $TTS_SMOKE_OFFLINE)..."
+network_args=()
+if [[ "$TTS_SMOKE_OFFLINE" == "1" ]]; then
+  network_args=(--network none)
+else
+  network_args=(-p "127.0.0.1:${TTS_PORT}:8081")
+fi
 docker run -d \
   --name "$container_name" \
   --init \
@@ -53,17 +63,20 @@ docker run -d \
   --cap-drop ALL \
   --security-opt "no-new-privileges:true" \
   --read-only \
-  --cpus 0.50 \
-  --memory 384m \
+  --cpus "$TTS_CPUS" \
+  --memory "$TTS_MEMORY_LIMIT" \
   --pids-limit 100 \
-  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
-  -p "127.0.0.1:${TTS_PORT}:8081" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  "${network_args[@]}" \
   -v "$token_file:/run/secrets/tts_internal_token:ro" \
   -e "TTS_PORT=8081" \
   -e "TTS_REQUIRE_AUTH=true" \
   -e "TTS_INTERNAL_TOKEN_FILE=/run/secrets/tts_internal_token" \
   -e "PIPER_WORKERS=${PIPER_WORKERS:-1}" \
+  -e "TTS_VIENEU_THREADS=$TTS_VIENEU_THREADS" \
   "$image_ref"
+
+if [[ "$TTS_SMOKE_OFFLINE" != "1" ]]; then
 
 echo "Waiting for tts-gateway container to become ready..."
 ready=0
@@ -100,10 +113,12 @@ if [[ "$http_code" != "200" ]]; then
   echo "Error: expected HTTP 200 with valid token, got $http_code" >&2
   exit 1
 fi
+fi
 
-echo "Verifying real fixed Piper synthesis, streaming, and inference cancellation (no upstream network)..."
+echo "Verifying real fixed Piper and VieNeu synthesis, streaming, and inference cancellation..."
 docker exec -i "$container_name" python - <<'PY'
 import http.client
+import importlib.util
 import json
 from pathlib import Path
 import os
@@ -112,11 +127,14 @@ from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
 
+for unused_module in ("gradio", "PIL"):
+    assert importlib.util.find_spec(unused_module) is None, f"Unused UI/image runtime shipped: {unused_module}"
+
 TOKEN = Path("/run/secrets/tts_internal_token").read_text().strip()
-VOICE = "vi-VN-vais1000-medium"
+PIPER_VOICE = "vi-VN-vais1000-medium"
+VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
 CORE = "Đã nhận năm trăm nghìn đồng."
 LIMIT = 4 * 1024 * 1024
-
 def mpeg_frame(data):
     # Skip optional ID3v2 metadata and require a plausible MPEG audio frame.
     start = 0
@@ -130,12 +148,32 @@ def mpeg_frame(data):
         if a == 255 and b & 224 == 224 and (b >> 3) & 3 != 1 and (b >> 1) & 3 != 0 and (c >> 4) not in (0, 15) and (c >> 2) & 3 != 3:
             return True
     return False
+def vieneu_test():
+    connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
+    try:
+        connection.request("POST", "/synthesize", json.dumps({
+            "text": "Đã nhận một trăm linh năm nghìn đồng.",
+            "voice": VIENEU_VOICE, "provider_mode": "VIENEU_ONLY",
+            "rate": "+0%", "pitch": "+0Hz", "cacheable": False, "timeout_ms": 8000,
+        }).encode(), {
+            "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
+        })
+        response = connection.getresponse()
+        data = response.read(LIMIT + 1)
+        assert response.status == 200, f"VieNeu status {response.status}"
+        assert response.getheader("X-TTS-Provider") == "vieneu"
+        assert response.getheader("X-TTS-Voice") == VIENEU_VOICE
+        assert mpeg_frame(data) and len(data) <= LIMIT
+    finally:
+        connection.close()
+
+vieneu_test()
 
 def request(path, text):
     connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
     try:
         connection.request("POST", path, json.dumps({
-            "text": text, "voice": VOICE, "rate": "+25%", "pitch": "+0Hz",
+            "text": text, "voice": PIPER_VOICE, "rate": "+25%", "pitch": "+0Hz",
             "provider_mode": "PIPER_ONLY", "cacheable": False, "timeout_ms": 8000,
         }, ensure_ascii=False).encode(), {
             "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
@@ -151,7 +189,7 @@ def request(path, text):
             raise AssertionError(f"Synthesis HTTP {response.status}")
         assert response.getheader("Content-Type", "").split(";")[0] == "audio/mpeg", "Not MPEG content type"
         assert response.getheader("X-TTS-Provider") == "piper", "Unexpected provider/fallback"
-        assert response.getheader("X-TTS-Voice") == VOICE, "Effective voice mismatch"
+        assert response.getheader("X-TTS-Voice") == PIPER_VOICE, "Effective voice mismatch"
         assert response.getheader("X-TTS-Cached") == "false", "Smoke must exercise real synthesis"
         assert response.getheader("X-TTS-Fallback") == "false", "Fallback not permitted"
         return connection, response
@@ -185,7 +223,8 @@ try:
     health_data = json.loads(health_connection.getresponse().read())
     health_connection.close()
     expected_workers = int(os.environ.get("PIPER_WORKERS", "1"))
-    assert health_data["primary"] == "piper" and health_data["piper"]["available"], "Piper not ready"
+    assert health_data["primary"] == "vieneu" and health_data["vieneu"]["available"], "VieNeu not ready"
+    assert health_data["piper"]["available"], "Piper not ready"
     assert health_data["piper"]["workerCount"] == expected_workers, f"Expected {expected_workers} workers, got {health_data['piper'].get('workerCount')}"
     buffered()
     connection, response = request("/synthesize/stream", CORE)
@@ -201,7 +240,7 @@ try:
         connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
         connection.request("POST", "/synthesize/stream", json.dumps({
             "text": (CORE + " Cảm ơn bạn đã ghé quầy. ") * 8 + str(index),
-            "voice": VOICE, "provider_mode": "PIPER_ONLY", "cacheable": False,
+            "voice": PIPER_VOICE, "provider_mode": "PIPER_ONLY", "cacheable": False,
             "rate": "+25%", "pitch": "+0Hz", "timeout_ms": 8000,
         }, ensure_ascii=False).encode(), {
             "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
@@ -224,7 +263,7 @@ try:
         try:
             text = ((CORE + " ") * 25)[:599] + str(index)
             connection.request("POST", "/synthesize", json.dumps({
-                "text": text, "voice": VOICE, "provider_mode": "PIPER_ONLY",
+                "text": text, "voice": PIPER_VOICE, "provider_mode": "PIPER_ONLY",
                 "rate": "+25%", "cacheable": False, "timeout_ms": 8000,
             }, ensure_ascii=False).encode(), {
                 "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
@@ -252,7 +291,7 @@ except RuntimeError as error:
 except AssertionError as error:
     print(f"SYNTHESIS_CONTRACT_FAILURE: {error}", file=sys.stderr)
     sys.exit(1)
-print("Real fixed Piper 500,000 VND buffered/stream MPEG headers passed; 3 in-flight disconnects reaped workers and subsequent synthesis succeeded at 0.50 CPU/384MiB.")
+print("Real fixed VieNeu synthesis and Piper 500,000 VND buffered/stream MPEG headers passed; 3 in-flight disconnects reaped Piper workers and subsequent synthesis succeeded.")
 PY
 
 echo "TTS-gateway smoke test PASSED successfully."

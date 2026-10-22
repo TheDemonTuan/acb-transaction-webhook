@@ -214,17 +214,23 @@ func exportQualityCorpus(outputPath string) error {
 		}
 	}
 
-	// 4. Custom and description sanitized fixtures
+	// 4. Custom and description sanitized fixtures formatted via spoken template helper
 	cases = append(cases, QualityCase{
 		ID:         "quality-custom-500k",
 		AmountVND:  "500000",
-		Transcript: "Đã nhận 500.000 đồng qua chuyển khoản cửa hàng.",
+		Transcript: voicecopy.FormatSpokenAnnouncementTemplate("Đã nhận {amount_raw} đồng qua chuyển khoản cửa hàng.", 500000, "", false),
 		Kind:       "full",
 	})
 	cases = append(cases, QualityCase{
 		ID:         "quality-desc-100k",
 		AmountVND:  "100000",
-		Transcript: "Đã nhận 100.000 đồng từ NGUYEN VAN A.",
+		Transcript: voicecopy.FormatSpokenAnnouncementTemplate("Đã nhận {amount} từ {description}.", 100000, "NGUYEN VAN A", true),
+		Kind:       "full",
+	})
+	cases = append(cases, QualityCase{
+		ID:         "quality-raw-template-105k",
+		AmountVND:  "105000",
+		Transcript: voicecopy.FormatSpokenAnnouncementTemplate("Đã nhận {amount_raw} đồng.", 105000, "", false),
 		Kind:       "full",
 	})
 
@@ -355,11 +361,12 @@ func readProfile(path string) (voicecopy.AudioInputProfile, string, error) {
 	if err := decodeJSON(raw, &profile); err != nil {
 		return voicecopy.AudioInputProfile{}, "", err
 	}
-	if profile.ProviderMode != "" && profile.ProviderMode != "EDGE_ONLY" && profile.ProviderMode != "PIPER_ONLY" {
-		return voicecopy.AudioInputProfile{}, "", errors.New("audio packs require PIPER_ONLY or EDGE_ONLY")
+	if profile.ProviderMode != "" && profile.ProviderMode != "EDGE_ONLY" && profile.ProviderMode != "PIPER_ONLY" && profile.ProviderMode != "VIENEU_ONLY" {
+		return voicecopy.AudioInputProfile{}, "", errors.New("audio packs require PIPER_ONLY, VIENEU_ONLY or EDGE_ONLY")
 	}
 	if (profile.ProviderMode == "PIPER_ONLY" && profile.VoiceID != "vi-VN-vais1000-medium") ||
-		(profile.ProviderMode == "EDGE_ONLY" && profile.VoiceID == "vi-VN-vais1000-medium") {
+		(profile.ProviderMode == "VIENEU_ONLY" && profile.VoiceID != "vi-VN-vieneu-v3-turbo-mai-anh-v1") ||
+		(profile.ProviderMode == "EDGE_ONLY" && (profile.VoiceID == "vi-VN-vais1000-medium" || profile.VoiceID == "vi-VN-vieneu-v3-turbo-mai-anh-v1")) {
 		return voicecopy.AudioInputProfile{}, "", errors.New("providerMode and voiceId disagree")
 	}
 	if profile.CatalogVersion != "" && profile.CatalogVersion != voicecopy.CatalogVersion {

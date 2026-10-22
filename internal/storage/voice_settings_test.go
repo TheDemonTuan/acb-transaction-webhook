@@ -26,14 +26,14 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 	if profile.Revision != 1 {
 		t.Errorf("expected revision 1, got %d", profile.Revision)
 	}
-	if profile.ProviderMode != ProviderModePiperOnly {
-		t.Errorf("expected %s, got %s", ProviderModePiperOnly, profile.ProviderMode)
+	if profile.ProviderMode != ProviderModeVieneuOnly {
+		t.Errorf("expected %s, got %s", ProviderModeVieneuOnly, profile.ProviderMode)
 	}
-	if profile.VoiceID != VoiceIDPiperVais1000 {
-		t.Errorf("expected %s, got %s", VoiceIDPiperVais1000, profile.VoiceID)
+	if profile.VoiceID != VoiceIDVieneuMaiAnh {
+		t.Errorf("expected %s, got %s", VoiceIDVieneuMaiAnh, profile.VoiceID)
 	}
-	if profile.Rate != 1.25 {
-		t.Errorf("expected rate 1.25, got %f", profile.Rate)
+	if profile.Rate != 1.00 {
+		t.Errorf("expected rate 1.00, got %f", profile.Rate)
 	}
 	if profile.PitchHz != 0 {
 		t.Errorf("expected pitchHz 0, got %d", profile.PitchHz)

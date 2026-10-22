@@ -371,12 +371,22 @@ type AudioInputs struct {
 // ExportAudioInputs uses the production Go formatter; no Python money formatter is needed.
 func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (AudioInputs, error) {
 	provider := "edge"
+	isVieneu := false
 	switch profile.VoiceID {
 	case "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural":
 	case "vi-VN-vais1000-medium":
 		provider = "piper"
 		if profile.PitchHz != 0 {
 			return AudioInputs{}, errors.New("Piper requires pitchHz 0")
+		}
+	case "vi-VN-vieneu-v3-turbo-mai-anh-v1":
+		provider = "vieneu"
+		isVieneu = true
+		if profile.Rate != 1.00 || profile.PitchHz != 0 {
+			return AudioInputs{}, errors.New("VieNeu requires rate 1.00 and pitchHz 0")
+		}
+		if options.IncludeNumberSegments {
+			return AudioInputs{}, errors.New("VieNeu does not support number segments; only whole utterances")
 		}
 	default:
 		return AudioInputs{}, errors.New("unsupported voiceId")
@@ -436,13 +446,19 @@ func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (Au
 		for _, phrase := range classicPhrases {
 			id := phrase.ID + "-" + key
 			entry.Classic[phrase.ID] = id
-			result.Clips = append(result.Clips, AudioInputClip{id, "classic", FormatAnnouncementTemplate(phrase.Template, amount, "", false)})
+			transcript := FormatAnnouncementTemplate(phrase.Template, amount, "", false)
+			if isVieneu {
+				transcript = FormatSpokenAnnouncementTemplate(phrase.Template, amount, "", false)
+			}
+			result.Clips = append(result.Clips, AudioInputClip{id, "classic", transcript})
 		}
 		result.Amounts[key] = entry
 	}
 
-	for _, fragment := range catalog.Fragments {
-		result.Clips = append(result.Clips, AudioInputClip{fragment.ID, "tail-fragment", fragment.Text})
+	if !isVieneu {
+		for _, fragment := range catalog.Fragments {
+			result.Clips = append(result.Clips, AudioInputClip{fragment.ID, "tail-fragment", fragment.Text})
+		}
 	}
 
 	preloadAmounts := options.PreloadAmounts
@@ -462,14 +478,16 @@ func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (Au
 			seenPreloads[a] = true
 		}
 	}
-	seenGroup := make(map[string]bool)
-	for _, fragment := range catalog.Fragments {
-		grp := fragment.StyleID + ":" + fragment.BandID
-		if !seenGroup[grp] {
-			seenGroup[grp] = true
-			result.PreloadClipIDs = append(result.PreloadClipIDs, fragment.ID)
-			if len(seenGroup) == 8 {
-				break
+	if !isVieneu {
+		seenGroup := make(map[string]bool)
+		for _, fragment := range catalog.Fragments {
+			grp := fragment.StyleID + ":" + fragment.BandID
+			if !seenGroup[grp] {
+				seenGroup[grp] = true
+				result.PreloadClipIDs = append(result.PreloadClipIDs, fragment.ID)
+				if len(seenGroup) == 8 {
+					break
+				}
 			}
 		}
 	}
