@@ -6,6 +6,10 @@ image_ref="${1:-${TTS_GATEWAY_IMAGE:-ghcr.io/thedemontuan/acb-transaction-webhoo
 container_name="${CONTAINER_NAME:-tts-gateway-smoke-$$-${RANDOM}}"
 
 TTS_PORT="${TTS_PORT:-8183}"
+TTS_CPUS="${TTS_CPUS:-2.0}"
+TTS_MEMORY_LIMIT="${TTS_MEMORY_LIMIT:-4G}"
+TTS_VIENEU_THREADS="${TTS_VIENEU_THREADS:-2}"
+TTS_SMOKE_OFFLINE="${TTS_SMOKE_OFFLINE:-0}"
 host="127.0.0.1"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -45,7 +49,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting isolated tts-gateway container ($container_name) from $image_ref..."
+echo "Starting isolated tts-gateway container ($container_name) from $image_ref (cpus: $TTS_CPUS, mem: $TTS_MEMORY_LIMIT, offline: $TTS_SMOKE_OFFLINE)..."
+network_args=()
+if [[ "$TTS_SMOKE_OFFLINE" == "1" ]]; then
+  network_args=(--network none)
+else
+  network_args=(-p "127.0.0.1:${TTS_PORT}:8081")
+fi
 docker run -d \
   --name "$container_name" \
   --init \
@@ -53,17 +63,20 @@ docker run -d \
   --cap-drop ALL \
   --security-opt "no-new-privileges:true" \
   --read-only \
-  --cpus 0.50 \
-  --memory 384m \
+  --cpus "$TTS_CPUS" \
+  --memory "$TTS_MEMORY_LIMIT" \
   --pids-limit 100 \
-  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
-  -p "127.0.0.1:${TTS_PORT}:8081" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  "${network_args[@]}" \
   -v "$token_file:/run/secrets/tts_internal_token:ro" \
   -e "TTS_PORT=8081" \
   -e "TTS_REQUIRE_AUTH=true" \
   -e "TTS_INTERNAL_TOKEN_FILE=/run/secrets/tts_internal_token" \
   -e "PIPER_WORKERS=${PIPER_WORKERS:-1}" \
+  -e "TTS_VIENEU_THREADS=$TTS_VIENEU_THREADS" \
   "$image_ref"
+
+if [[ "$TTS_SMOKE_OFFLINE" != "1" ]]; then
 
 echo "Waiting for tts-gateway container to become ready..."
 ready=0
@@ -100,8 +113,9 @@ if [[ "$http_code" != "200" ]]; then
   echo "Error: expected HTTP 200 with valid token, got $http_code" >&2
   exit 1
 fi
+fi
 
-echo "Verifying real fixed Piper synthesis, streaming, and inference cancellation (no upstream network)..."
+echo "Verifying real fixed Piper and VieNeu synthesis, streaming, and inference cancellation..."
 docker exec -i "$container_name" python - <<'PY'
 import http.client
 import json
@@ -113,10 +127,10 @@ import sys
 import time
 
 TOKEN = Path("/run/secrets/tts_internal_token").read_text().strip()
-VOICE = "vi-VN-vais1000-medium"
+PIPER_VOICE = "vi-VN-vais1000-medium"
+VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
 CORE = "Đã nhận năm trăm nghìn đồng."
 LIMIT = 4 * 1024 * 1024
-
 def mpeg_frame(data):
     # Skip optional ID3v2 metadata and require a plausible MPEG audio frame.
     start = 0
@@ -130,6 +144,26 @@ def mpeg_frame(data):
         if a == 255 and b & 224 == 224 and (b >> 3) & 3 != 1 and (b >> 1) & 3 != 0 and (c >> 4) not in (0, 15) and (c >> 2) & 3 != 3:
             return True
     return False
+def vieneu_test():
+    connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
+    try:
+        connection.request("POST", "/synthesize", json.dumps({
+            "text": "Đã nhận một trăm linh năm nghìn đồng.",
+            "voice": VIENEU_VOICE, "provider_mode": "VIENEU_ONLY",
+            "rate": "+0%", "pitch": "+0Hz", "cacheable": False, "timeout_ms": 8000,
+        }).encode(), {
+            "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
+        })
+        response = connection.getresponse()
+        data = response.read(LIMIT + 1)
+        assert response.status == 200, f"VieNeu status {response.status}"
+        assert response.getheader("X-TTS-Provider") == "vieneu"
+        assert response.getheader("X-TTS-Voice") == VIENEU_VOICE
+        assert mpeg_frame(data) and len(data) <= LIMIT
+    finally:
+        connection.close()
+
+vieneu_test()
 
 def request(path, text):
     connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)

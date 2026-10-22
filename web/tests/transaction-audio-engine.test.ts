@@ -21,11 +21,12 @@ class NativeAudio extends EventTarget {
 }
 const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), chimeEnabled: false, funEnabled: false };
 function stubAudioResponse(chosenProfile = profile) {
+  const provider = chosenProfile.providerMode === 'PIPER_ONLY' ? 'piper' : chosenProfile.providerMode === 'VIENEU_ONLY' ? 'vieneu' : 'edge';
   setTestGlobal('fetch', vi.fn(async (url: string) => url.includes('/stream?')
     ? new Response(new Uint8Array([1, 2, 3]), { headers: {
       'X-Voice-Revision': String(chosenProfile.revision), 'X-Voice-Synthesis-Key': chosenProfile.synthesisKey,
       'X-TTS-Voice': chosenProfile.voiceId,
-      'X-TTS-Provider': chosenProfile.providerMode === 'PIPER_ONLY' ? 'piper' : 'edge',
+      'X-TTS-Provider': provider,
     } }) : new Response('', { status: 404 })));
 }
 

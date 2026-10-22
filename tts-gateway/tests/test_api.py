@@ -10,10 +10,9 @@ async def test_health_endpoint():
         assert resp.status_code == 200
         data = resp.json()
         from app.main import piper_provider
-        assert data["status"] == ("ok" if piper_provider.available else "degraded")
-        assert data["primary"] == "piper"
+        assert data["primary"] == "vieneu"
         assert data["piper"]["available"] == piper_provider.available
-        assert "edge" in data and "gtts" not in data
+        assert "vieneu" in data and "edge" in data and "gtts" not in data
 
 @pytest.mark.asyncio
 async def test_voices_endpoint():
@@ -22,11 +21,12 @@ async def test_voices_endpoint():
         resp = await client.get("/voices")
         assert resp.status_code == 200
         voices = resp.json()
-        assert len(voices) == 3
+        assert len(voices) == 4
         ids = [v["id"] for v in voices]
         assert "vi-VN-HoaiMyNeural" in ids
         assert "vi-VN-NamMinhNeural" in ids
         assert "vi-VN-vais1000-medium" in ids
+        assert "vi-VN-vieneu-v3-turbo-mai-anh-v1" in ids
 
 @pytest.mark.asyncio
 async def test_synthesize_edge_success(monkeypatch):

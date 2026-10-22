@@ -104,9 +104,9 @@ describe('server-provider audio preparation', () => {
   afterEach(() => { restoreTestGlobals(); vi.restoreAllMocks(); });
   const profile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64), funEnabled: false };
   const decoded = { duration: 1, length: 24000, numberOfChannels: 1 } as AudioBuffer;
-  const responseHeaders = (provider = 'piper') => ({
-    'Content-Type': 'audio/mpeg', 'X-TTS-Provider': provider, 'X-TTS-Voice': profile.voiceId,
-    'X-Voice-Revision': String(profile.revision), 'X-Voice-Synthesis-Key': profile.synthesisKey,
+  const responseHeaders = (p: typeof profile = profile, provider = 'piper') => ({
+    'Content-Type': 'audio/mpeg', 'X-TTS-Provider': provider, 'X-TTS-Voice': p.voiceId,
+    'X-Voice-Revision': String(p.revision), 'X-Voice-Synthesis-Key': p.synthesisKey,
   });
 
   it.each([
@@ -119,7 +119,7 @@ describe('server-provider audio preparation', () => {
     const decode = vi.fn(async () => decoded);
     Object.assign(f.context, { decodeAudioData: decode });
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), {
-      headers: { ...responseHeaders(chosen.provider), 'X-TTS-Voice': chosen.voiceId },
+      headers: responseHeaders(chosen, chosen.provider),
     }));
     setTestGlobal('fetch', fetcher);
     const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx' }, chosen,
@@ -173,7 +173,7 @@ describe('server-provider audio preparation', () => {
   });
   it('keeps Piper warm fragment joining disabled and requests a single complete tail', async () => {
     setTestGlobal('window', {});
-    const f = fixture(), chosen = { ...profile, funEnabled: true,
+    const f = fixture(), chosen = { ...profile, providerMode: 'PIPER_ONLY' as const, voiceId: 'vi-VN-vais1000-medium', funEnabled: true,
       amountBands: profile.amountBands.map((band) => ({ ...band, styleId: 'cute' as const })) };
     Object.assign(f.context, { decodeAudioData: vi.fn(async () => decoded) });
     vi.spyOn(catalogModule, 'loadVoiceCatalog').mockResolvedValue(null);
@@ -187,7 +187,7 @@ describe('server-provider audio preparation', () => {
       amounts: { '1000': { standard: 'core', classic: {} } } });
     const getDecoded = vi.spyOn(f.options.assets, 'getDecoded').mockResolvedValue(decoded);
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
-      new Response(new Uint8Array([1, 2, 3]), { headers: responseHeaders() }));
+      new Response(new Uint8Array([1, 2, 3]), { headers: responseHeaders(chosen, 'piper') }));
     setTestGlobal('fetch', fetcher);
     const plan = await prepareAnnouncement({ text: '', amountVnd: '1000', transactionId: 'tx', recipe, phraseId: recipe.id },
       chosen, new AbortController().signal, f.options);

@@ -1,4 +1,4 @@
-import type { VoiceProfile } from './voice-profile';
+import { type VoiceProfile, synthesisProvider } from './voice-profile';
 
 const MAX_STREAM_BYTES = 4 * 1024 * 1024;
 
@@ -54,7 +54,7 @@ export async function prepareStreamPlayback(
     if (headers.get('X-Voice-Revision') !== String(profile.revision) ||
         headers.get('X-Voice-Synthesis-Key') !== profile.synthesisKey ||
         headers.get('X-TTS-Voice') !== profile.voiceId ||
-        headers.get('X-TTS-Provider') !== (profile.providerMode === 'PIPER_ONLY' ? 'piper' : 'edge') ||
+        headers.get('X-TTS-Provider') !== synthesisProvider(profile.providerMode) ||
         headers.get('X-TTS-Fallback') === 'true') {
       await response.body?.cancel();
       throw new Error('VOICE_AUDIO_PROFILE_MISMATCH');

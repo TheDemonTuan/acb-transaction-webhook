@@ -93,6 +93,21 @@ func FormatAnnouncementTemplate(template string, amount int64, description strin
 	result = multiDotRegex.ReplaceAllString(result, ".")
 	return strings.TrimSpace(result)
 }
+// FormatSpokenAnnouncementTemplate formats an announcement template specifically for speech synthesis.
+// For spoken output, {amount_raw} is expanded to words without the trailing " đồng" suffix,
+// preventing phrases like "Đã nhận {amount_raw} đồng." from pronouncing raw digits or "đồng đồng".
+func FormatSpokenAnnouncementTemplate(template string, amount int64, description string, includeDescription bool) string {
+	tpl := strings.TrimSpace(template)
+	if tpl == "" {
+		tpl = DefaultAnnouncementTemplate
+	}
+	if strings.Contains(tpl, "{amount_raw}") {
+		spokenWithoutDong := strings.TrimSuffix(SpeakVND(amount), " đồng")
+		tpl = strings.ReplaceAll(tpl, "{amount_raw}", spokenWithoutDong)
+	}
+	return FormatAnnouncementTemplate(tpl, amount, description, includeDescription)
+}
+
 
 // BuildCreditAnnouncement creates a natural Vietnamese announcement phrase for an incoming transaction using the default template.
 func BuildCreditAnnouncement(amount int64, description string, includeDescription bool) string {

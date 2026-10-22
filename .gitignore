@@ -34,4 +34,10 @@ deploy/.previous-slot
 /voicepacks.local/
 /voice-qa.local/
 /.local-qa/
+*.tmp.*
+cv_1789610918831_Link_behance.docx
+warp-terminal_0.2026.09.09.08.26.stable.02_amd64.deb
+tu.md
+/tts-gateway/assets/models/vieneu/backbone/onnx_update/
+/tts-gateway/assets/models/vieneu/hf/
 

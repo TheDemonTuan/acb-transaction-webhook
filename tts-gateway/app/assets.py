@@ -15,7 +15,8 @@ MAX_CLIP_BYTES = 4 * 1024 * 1024
 MAX_PACK_BYTES = 64 * 1024 * 1024
 FORMATTER_VERSION = "money-vi-v1"
 PIPER_VOICE = "vi-VN-vais1000-medium"
-VOICES = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural", PIPER_VOICE}
+VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
+VOICES = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural", PIPER_VOICE, VIENEU_VOICE}
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 AMOUNT = re.compile(r"^[1-9][0-9]*$")
@@ -66,9 +67,16 @@ def synthesis_key(voice, rate, pitch):
         raise InvalidPack("Invalid rate")
     if type(pitch) is not int or not -50 <= pitch <= 50:
         raise InvalidPack("Invalid pitch")
-    provider = "piper" if voice == PIPER_VOICE else "edge"
+    if voice == PIPER_VOICE:
+        provider = "piper"
+    elif voice == VIENEU_VOICE:
+        provider = "vieneu"
+    else:
+        provider = "edge"
     if provider == "piper" and pitch != 0:
         raise InvalidPack("Piper requires zero pitch")
+    if provider == "vieneu" and (rate != 1.0 or pitch != 0):
+        raise InvalidPack("VieNeu requires rate 1.00 and zero pitch")
     source = f"{provider}|{voice}|{rate:.2f}|{pitch}|{FORMATTER_VERSION}|pack-schema-2"
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 

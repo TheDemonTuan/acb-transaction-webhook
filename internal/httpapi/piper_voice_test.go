@@ -21,6 +21,10 @@ func TestVoicePackMetadataMatchesExplicitProvider(t *testing.T) {
 			profile.ProviderMode = provider
 			if provider == storage.ProviderModeEdgeOnly {
 				profile.VoiceID = storage.VoiceIDNamMinh
+				profile.Rate = 1.25
+			} else if provider == storage.ProviderModePiperOnly {
+				profile.VoiceID = storage.VoiceIDPiperVais1000
+				profile.Rate = 1.25
 			}
 			profile.SynthesisKey = storage.ComputeSynthesisKey(profile.VoiceID, profile.Rate, profile.PitchHz)
 			audio := []byte("ID3exact-pack-audio")
@@ -86,7 +90,7 @@ func TestRetiredVoiceFieldIsRejectedRatherThanAliased(t *testing.T) {
 	defer upstream.Close()
 	profile := httptest.NewRecorder()
 	server.Handler().ServeHTTP(profile, httptest.NewRequest(http.MethodGet, "/api/public/v1/voice/profile", nil))
-	if profile.Code != http.StatusOK || !strings.Contains(profile.Body.String(), `"voiceId":"vi-VN-vais1000-medium"`) || strings.Contains(profile.Body.String(), `"edgeVoice"`) {
+	if profile.Code != http.StatusOK || !strings.Contains(profile.Body.String(), `"voiceId":"`+storage.DefaultVoiceProfile.VoiceID+`"`) || strings.Contains(profile.Body.String(), `"edgeVoice"`) {
 		t.Fatalf("incorrect public profile: %s", profile.Body.String())
 	}
 	request := prepareAuthedRequest(httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/test", strings.NewReader(`{"edgeVoice":"vi-VN-HoaiMyNeural"}`)), cookie, token)

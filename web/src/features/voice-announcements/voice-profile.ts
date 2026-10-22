@@ -7,11 +7,25 @@ export interface AmountBand {
   styleId: 'classic' | 'cute' | 'funny' | 'custom';
 }
 
-export type VoiceProviderMode = 'PIPER_ONLY' | 'EDGE_ONLY' | 'BROWSER_ONLY';
+export type VoiceProviderMode = 'PIPER_ONLY' | 'VIENEU_ONLY' | 'EDGE_ONLY' | 'BROWSER_ONLY';
 export const PIPER_VOICE_ID = 'vi-VN-vais1000-medium';
 export const PIPER_VOICE_LABEL = 'Piper Việt · miễn phí, chạy tại máy chủ';
+export const VIENEU_VOICE_ID = 'vi-VN-vieneu-v3-turbo-mai-anh-v1';
+export const VIENEU_VOICE_LABEL = 'Mai Anh · nữ miền Bắc · VieNeu local';
 export const EDGE_VOICE_IDS = ['vi-VN-HoaiMyNeural', 'vi-VN-NamMinhNeural'] as const;
 
+export function synthesisProvider(mode: VoiceProviderMode): 'piper' | 'vieneu' | 'edge' | 'browser' {
+  switch (mode) {
+    case 'PIPER_ONLY':
+      return 'piper';
+    case 'VIENEU_ONLY':
+      return 'vieneu';
+    case 'EDGE_ONLY':
+      return 'edge';
+    case 'BROWSER_ONLY':
+      return 'browser';
+  }
+}
 export interface VoiceProfile {
   revision: number;
   providerMode: VoiceProviderMode;
@@ -53,9 +67,9 @@ export const DEFAULT_AMOUNT_BANDS: AmountBand[] = [
 
 export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
   revision: 1,
-  providerMode: 'PIPER_ONLY',
-  voiceId: PIPER_VOICE_ID,
-  rate: 1.25,
+  providerMode: 'VIENEU_ONLY',
+  voiceId: VIENEU_VOICE_ID,
+  rate: 1.00,
   pitchHz: 0,
   amountBands: DEFAULT_AMOUNT_BANDS,
   chimeEnabled: true,
@@ -66,15 +80,16 @@ export const DEFAULT_VOICE_PROFILE: VoiceProfile = {
   catalogVersion: 'v1',
   synthesisKey: '',
   coldRequestTimeoutMs: 8000,
-  updatedAt: '2026-10-11T00:00:00Z',
+  updatedAt: '2026-10-22T00:00:00Z',
 };
 
 export function validateVoiceProfile(value: unknown): VoiceProfile {
   if (!value || typeof value !== 'object') throw new Error('VOICE_PROFILE_INVALID');
   const p = value as Record<string, unknown>;
-  if (!Number.isSafeInteger(p.revision) || Number(p.revision) <= 0 || !['PIPER_ONLY', 'EDGE_ONLY', 'BROWSER_ONLY'].includes(String(p.providerMode)) ||
+  if (!Number.isSafeInteger(p.revision) || Number(p.revision) <= 0 || !['PIPER_ONLY', 'VIENEU_ONLY', 'EDGE_ONLY', 'BROWSER_ONLY'].includes(String(p.providerMode)) ||
       (p.providerMode === 'PIPER_ONLY' ? p.voiceId !== PIPER_VOICE_ID || p.pitchHz !== 0
-        : ![PIPER_VOICE_ID, ...EDGE_VOICE_IDS].includes(String(p.voiceId)) ||
+        : p.providerMode === 'VIENEU_ONLY' ? p.voiceId !== VIENEU_VOICE_ID || p.rate !== 1.00 || p.pitchHz !== 0
+        : ![PIPER_VOICE_ID, VIENEU_VOICE_ID, ...EDGE_VOICE_IDS].includes(String(p.voiceId)) ||
           (p.providerMode === 'EDGE_ONLY' && !EDGE_VOICE_IDS.some((id) => id === p.voiceId))) ||
       typeof p.rate !== 'number' || p.rate < 0.75 || p.rate > 2 || Math.abs(p.rate * 100 - Math.round(p.rate * 100)) > 1e-8 ||
       typeof p.pitchHz !== 'number' || !Number.isInteger(p.pitchHz) || p.pitchHz < -50 || p.pitchHz > 50 ||

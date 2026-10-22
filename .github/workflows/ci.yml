@@ -79,10 +79,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ffmpeg
-      - name: Test TTS Gateway
+      - name: Fetch and verify VieNeu model assets
         working-directory: tts-gateway
         run: |
           pip install -r requirements.lock -r requirements-dev.lock
+          python scripts/fetch_vieneu_assets.py --output assets/models/vieneu --verify-only || python scripts/fetch_vieneu_assets.py --output assets/models/vieneu
+          python scripts/fetch_vieneu_assets.py --output assets/models/vieneu --verify-only
+      - name: Test TTS Gateway
+        working-directory: tts-gateway
+        run: |
           pytest -v
       - name: Test failover controller
         run: |

@@ -1,5 +1,5 @@
 import { getCsrfToken, parseApiError } from '../../api';
-import type { VoiceProfile } from './voice-profile';
+import { type VoiceProfile, synthesisProvider } from './voice-profile';
 import type { VoiceMessage, VoiceTelemetry } from './voice-engine';
 import { AudioAssets } from './audio-assets';
 import { loadVoiceCatalog, readBounded, throwIfAborted } from './voice-catalog';
@@ -77,7 +77,7 @@ async function coldBuffer(message: VoiceMessage, profile: Readonly<VoiceProfile>
     if (response.headers.get('X-Voice-Revision') !== String(profile.revision) ||
         response.headers.get('X-Voice-Synthesis-Key') !== profile.synthesisKey ||
         response.headers.get('X-TTS-Voice') !== profile.voiceId ||
-        response.headers.get('X-TTS-Provider') !== (profile.providerMode === 'PIPER_ONLY' ? 'piper' : 'edge')) {
+        response.headers.get('X-TTS-Provider') !== synthesisProvider(profile.providerMode)) {
       await response.body?.cancel(); throw new Error('VOICE_AUDIO_PROFILE_MISMATCH');
     }
     const bytes = await readBounded(response, 4 * 1024 * 1024, controller.signal);
@@ -171,7 +171,9 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
       return { ...common, kind: 'browser', text: message.text, voiceURI: message.voiceURI || '', audioPath: 'browser' };
     }
     const context = options.context;
-    const manifest = !custom && !profile.includeDescription && amount && !message.summaryTransactionIds
+    const isVieneu = profile.providerMode === 'VIENEU_ONLY';
+    const allowPackForVieneu = amountOnly || (!amountOnly && message.recipe?.styleId === 'classic');
+    const manifest = !custom && !profile.includeDescription && amount && !message.summaryTransactionIds && (!isVieneu || allowPackForVieneu)
       ? await options.assets.getManifest(profile, signal) : null;
     throwIfAborted(signal);
     const mapping = amount && manifest ? manifest.amounts[amount] : undefined;
@@ -180,7 +182,7 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
     const clipId = needsClassicFull ? classicId : mapping?.standard;
     const clip = manifest?.clips.find((entry) => entry.clipId === clipId);
     if (clip && amount && clip.transcript !== (classicId ? message.text : `Đã nhận ${speakVnd(amount)}.`)) throw new Error('VOICE_ASSET_TRANSCRIPT_MISMATCH');
-    if (clip && context) {
+    if (clip && context && (!isVieneu || amountOnly || classicId)) {
       const buffer = await options.assets.getDecoded(clip, profile, context, owner, signal);
       if (buffer) {
         options.onStatus?.('ready', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế' : undefined);

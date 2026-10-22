@@ -4,6 +4,12 @@ Piper text-to-speech 1.8.0 (OHF-Voice/piper1-gpl) is GPL-3.0-or-later.
 The fixed voice model is separately licensed CC-BY-4.0: see
 /app/assets/models/MODEL_CARD, NOTICE.txt and provenance.json.
 
+VieNeu v3 Turbo (pnnbao-ump/VieNeu-TTS-v3-Turbo) model weights, presets, and
+audio outputs are licensed for commercial use per its official model card.
+MOSS-Audio-Tokenizer-Nano-ONNX (OpenMOSS-Team) codec weights and architecture
+are Apache-2.0. SEA-G2P phonemizer is MIT. Presets and offline assets are
+pinned and verified in /app/assets/models/vieneu/provenance.json.
+
 This TTS Python component is conveyed as part of a GPL-3.0-or-later-compatible
 combined runtime with Piper. Its original MIT copyright and permission notice
 is preserved in application-MIT.txt; this does not relicense independent Go or

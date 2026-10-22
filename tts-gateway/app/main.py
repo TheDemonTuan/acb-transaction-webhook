@@ -21,7 +21,8 @@ from app.cache import TTSCache
 from app.admission import AdmissionController, remaining, timeout_error
 from app.assets import AssetStore
 from app.providers.edge import EdgeTTSProvider
-from app.providers.piper import PiperTTSProvider, VOICE_ID
+from app.providers.piper import PiperTTSProvider, VOICE_ID as PIPER_VOICE_ID
+from app.providers.vieneu import VieneuTTSProvider, VOICE_ID as VIENEU_VOICE_ID
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tts-gateway")
@@ -41,15 +42,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Fixed Piper provider unavailable; no provider fallback")
     try:
+        await vieneu_provider.start()
+    except Exception:
+        logger.exception("Fixed VieNeu provider unavailable; no provider fallback")
+    try:
         yield
     finally:
         with anyio.CancelScope(shield=True):
+            await vieneu_provider.close()
             await piper_provider.close()
-
 app = FastAPI(title="TTS Gateway", version="2.0.0", lifespan=lifespan)
 
 edge_provider = EdgeTTSProvider()
 piper_provider = PiperTTSProvider(worker_count=config.piper_workers)
+vieneu_provider = VieneuTTSProvider(threads=config.vieneu_threads)
 edge_circuit = CircuitBreaker(
     failure_threshold=config.edge_circuit_failure_threshold,
     reset_timeout=config.edge_circuit_reset_timeout,
@@ -60,7 +66,7 @@ cache = TTSCache(
     ttl_seconds=config.cache_ttl_seconds,
 )
 admission = AdmissionController(
-    max_active=config.piper_workers,
+    max_active=1,
     max_waiting=16,
     max_total_waiters=64,
 )
@@ -125,9 +131,10 @@ def voice_clip(sha256: str, x_internal_tts_token: Optional[str] = Header(None)):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
+    status_ok = vieneu_provider.available and piper_provider.available
     return HealthResponse(
-        status="ok" if piper_provider.available else "degraded",
-        primary="piper",
+        status="ok" if status_ok else "degraded",
+        primary="vieneu",
         edge=ProviderHealth(available=edge_circuit.can_attempt()),
         piper=ProviderHealth(
             available=piper_provider.available,
@@ -135,13 +142,20 @@ async def health():
             activeWorkers=piper_provider.active_count,
             idleWorkers=piper_provider.idle_count,
         ),
+        vieneu=ProviderHealth(
+            available=vieneu_provider.available,
+            workerCount=vieneu_provider.worker_count,
+            activeWorkers=vieneu_provider.active_count,
+            idleWorkers=vieneu_provider.idle_count,
+        ),
     )
 
 @app.get("/voices", response_model=List[VoiceItem])
 async def list_voices(x_internal_tts_token: Optional[str] = Header(None)):
     verify_token(x_internal_tts_token)
     return [
-        VoiceItem(id=VOICE_ID, name="VAIS 1000 (Piper tiếng Việt)", gender="unspecified", provider="piper"),
+        VoiceItem(id=VIENEU_VOICE_ID, name="Mai Anh · nữ miền Bắc · VieNeu local", gender="female", provider="vieneu"),
+        VoiceItem(id=PIPER_VOICE_ID, name="VAIS 1000 (Piper tiếng Việt)", gender="unspecified", provider="piper"),
         VoiceItem(
             id="vi-VN-HoaiMyNeural",
             name="Hoài My",
@@ -156,10 +170,19 @@ async def list_voices(x_internal_tts_token: Optional[str] = Header(None)):
         ),
     ]
 
-def audio_headers(voice, cached=False):
+def audio_headers(voice, cached=False, provider=None):
+    if provider is None:
+        if voice == PIPER_VOICE_ID:
+            provider = "piper"
+        elif voice == VIENEU_VOICE_ID:
+            provider = "vieneu"
+        else:
+            provider = "edge"
     return {
-        "X-TTS-Provider": "piper" if voice == VOICE_ID else "edge", "X-TTS-Voice": voice,
-        "X-TTS-Fallback": "false", "X-TTS-Cached": str(cached).lower(),
+        "X-TTS-Provider": provider,
+        "X-TTS-Voice": voice,
+        "X-TTS-Fallback": "false",
+        "X-TTS-Cached": str(cached).lower(),
     }
 
 
@@ -229,8 +252,11 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
         cached = await cache.get(key)
         if cached:
             return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
-    if req.provider_mode == "PIPER_ONLY":
-        if piper_provider._closed:
+    if req.provider_mode in ("PIPER_ONLY", "VIENEU_ONLY"):
+        is_piper = req.provider_mode == "PIPER_ONLY"
+        provider = piper_provider if is_piper else vieneu_provider
+        provider_name = "piper" if is_piper else "vieneu"
+        if provider._closed:
             raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
 
         deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
@@ -260,7 +286,7 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
                 candidate = admission.acquire_slot(remaining(deadline))
                 await candidate.__aenter__()
                 slot = candidate
-                generator = piper_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
+                generator = provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
                 first = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
             if not first or len(first) > MAX_AUDIO_BYTES:
                 raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
@@ -284,7 +310,7 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
                             break
                     remaining(deadline)
                     if collected is not None:
-                        await cache.set(key, bytes(collected), "piper", voice)
+                        await cache.set(key, bytes(collected), provider_name, voice)
                 finally:
                     if collected is not None:
                         collected.clear()
@@ -304,6 +330,8 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
             if not transferred:
                 with anyio.CancelScope(shield=True):
                     await cleanup()
+    elif req.provider_mode != "EDGE_ONLY":
+        raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
     if not edge_circuit.can_attempt():
         raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
 
@@ -394,12 +422,23 @@ async def synthesize(req: SynthesizeRequest, x_internal_tts_token: Optional[str]
         cached = await cache.get(key)
         if cached:
             return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
-    is_piper = req.provider_mode == "PIPER_ONLY"
-    if (is_piper and piper_provider._closed) or (not is_piper and not edge_circuit.can_attempt()):
+    if req.provider_mode == "PIPER_ONLY":
+        provider = piper_provider
+        provider_name = "piper"
+        if provider._closed:
+            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
+    elif req.provider_mode == "VIENEU_ONLY":
+        provider = vieneu_provider
+        provider_name = "vieneu"
+        if provider._closed:
+            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
+    elif req.provider_mode == "EDGE_ONLY":
+        provider = edge_provider
+        provider_name = "edge"
+        if not edge_circuit.can_attempt():
+            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
+    else:
         raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
-    provider = piper_provider if is_piper else edge_provider
-    provider_name = "piper" if is_piper else "edge"
-
     deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
 
     async def execute():
@@ -408,7 +447,7 @@ async def synthesize(req: SynthesizeRequest, x_internal_tts_token: Optional[str]
             if not audio or len(audio) > MAX_AUDIO_BYTES:
                 raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
             remaining(deadline)
-            if not is_piper:
+            if provider_name == "edge":
                 edge_circuit.record_success()
             if req.cacheable:
                 await cache.set(key, audio, provider_name, voice)
@@ -418,7 +457,7 @@ async def synthesize(req: SynthesizeRequest, x_internal_tts_token: Optional[str]
         except HTTPException:
             raise
         except Exception:
-            if not is_piper:
+            if provider_name == "edge":
                 edge_circuit.record_failure()
             raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
 
