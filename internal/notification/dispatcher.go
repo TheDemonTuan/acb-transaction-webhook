@@ -248,7 +248,20 @@ func (d *Dispatcher) DispatchOne(ctx context.Context) (bool, error) {
 	}
 
 	start := time.Now()
-	res := sender.Send(ctx, req)
+	var res SendResult
+	var detailsErr error
+	if target.Provider == ProviderBark {
+		cfg := storage.DefaultBarkConfig()
+		if target.BarkConfig != nil { cfg = *target.BarkConfig }
+		if cfg.IncludeBalance || cfg.IncludeDescription {
+			req.SePayDetails, detailsErr = d.store.SePayNotificationDetailsForEvent(ctx, delivery.EventID)
+		}
+	}
+	if detailsErr != nil {
+		res = SendResult{Outcome: OutcomeRetry, ProviderErrorCode: "SEPAY_NOTIFICATION_DETAILS_UNAVAILABLE", SanitizedError: "SePay notification details unavailable"}
+	} else {
+		res = sender.Send(ctx, req)
+	}
 	duration := time.Since(start)
 
 	telemetry.Default.RecordNotification(target.Provider, duration, res.Outcome == OutcomeSuccess)

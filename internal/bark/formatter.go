@@ -1,12 +1,12 @@
 package bark
 
 import (
-	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
 )
@@ -53,65 +53,59 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 	if creditStr == "" {
 		creditStr = "0"
 	}
-	formattedAmount := FormatVND(creditStr)
-
-	source, _ := eventData["source"].(string)
-	isCatchUp := source == "CATCH_UP"
-
-	if isCatchUp {
-		title = fmt.Sprintf("🕓 ACB +%s (bù dữ liệu)", formattedAmount)
-	} else {
-		title = fmt.Sprintf("💰 ACB +%s", formattedAmount)
+	title = "+" + FormatVND(creditStr)
+	if eventData["source"] == "CATCH_UP" {
+		title += " · Giao dịch cũ"
 	}
-
-	accMasked, _ := eventData["account"].(string)
-	if accMasked == "" {
-		accMasked, _ = eventData["accountMasked"].(string)
+	if cfg.IncludeBalance {
+		subtitle = "Số dư: chưa có dữ liệu"
+		balance, _ := eventData["balance"].(string)
+		if _, err := strconv.ParseInt(strings.TrimSpace(balance), 10, 64); err == nil {
+			subtitle = "Số dư: " + FormatVND(balance)
+		}
 	}
-	if accMasked != "" {
-		subtitle = fmt.Sprintf("Tài khoản %s • Biến động số dư", accMasked)
-	} else {
-		subtitle = "Biến động số dư tài khoản"
-	}
-
 	var bodyLines []string
-
 	if cfg.IncludeDescription {
 		desc, _ := eventData["description"].(string)
-		desc = strings.TrimSpace(desc)
-		if desc != "" {
-			masked := maskSensitiveNumbers(desc)
-			if len([]rune(masked)) > 300 {
-				masked = string([]rune(masked)[:300]) + "..."
+		desc = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return ' '
 			}
-			bodyLines = append(bodyLines, fmt.Sprintf("Mô tả: %s", masked))
+			return r
+		}, desc)
+		desc = maskSensitiveNumbers(strings.Join(strings.Fields(desc), " "))
+		if runes := []rune(desc); len(runes) > 300 {
+			desc = string(runes[:300]) + "..."
+		}
+		if desc == "" {
+			desc = "chưa có nội dung"
+		}
+		bodyLines = append(bodyLines, "ND: "+desc)
+	}
+	provider, _ := eventData["provider"].(string)
+	switch strings.ToUpper(provider) {
+	case "SEPAY":
+		provider = "SePay"
+	case "PAYOS":
+		provider = "payOS"
+	}
+	bank, _ := eventData["bank"].(string)
+	var context []string
+	for _, part := range []string{provider, bank} {
+		if part = strings.TrimSpace(part); part != "" {
+			context = append(context, part)
 		}
 	}
-
-	if cfg.IncludeBalance {
-		balStr, _ := eventData["balance"].(string)
-		balStr = strings.TrimSpace(balStr)
-		if balStr != "" {
-			bodyLines = append(bodyLines, fmt.Sprintf("Số dư: %s", FormatVND(balStr)))
-		}
-	}
-
-	// Transaction Date/Time
 	txDateRaw, _ := eventData["transactionDate"].(string)
-	if txDateRaw != "" {
-		if t, err := time.Parse(time.RFC3339, txDateRaw); err == nil {
-			loc, err := time.LoadLocation("Asia/Ho_Chi_Minh")
-			if err == nil {
-				t = t.In(loc)
-			}
-			bodyLines = append(bodyLines, fmt.Sprintf("Thời gian: %s", t.Format("02/01/2006 15:04")))
-		} else {
-			bodyLines = append(bodyLines, fmt.Sprintf("Thời gian: %s", txDateRaw))
+	if t, err := time.Parse(time.RFC3339, txDateRaw); err == nil {
+		loc, err := time.LoadLocation("Asia/Ho_Chi_Minh")
+		if err == nil {
+			t = t.In(loc)
 		}
+		context = append(context, t.Format("02/01 15:04"))
 	}
-
-	if isCatchUp {
-		bodyLines = append(bodyLines, "Giao dịch được phát hiện trong chu kỳ đồng bộ bù.")
+	if len(context) > 0 {
+		bodyLines = append(bodyLines, strings.Join(context, " · "))
 	}
 
 	body = strings.Join(bodyLines, "\n")
@@ -124,7 +118,7 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 
 	group = cfg.Group
 	if group == "" {
-		group = "ACB"
+		group = "Giao dịch"
 	}
 
 	sound = cfg.Sound
@@ -138,9 +132,6 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 	}
 
 	icon = cfg.Icon
-	if icon == "" {
-		icon = "https://api.vietqr.io/img/ACB.png"
-	}
 
 	if cfg.DashboardLink && publicOrigin != "" {
 		origin, err := url.Parse(publicOrigin)
@@ -163,29 +154,10 @@ func FormatTransactionNotification(eventData map[string]any, cfg storage.BarkCon
 }
 
 func FormatTestNotification(cfg storage.BarkConfig) (title, subtitle, body, group, sound, level, icon string) {
-	title = "✅ Bark đã kết nối"
-	subtitle = "ACB Transaction Gateway"
-	body = "Hệ thống đã kết nối thành công và có thể gửi thông báo biến động số dư tới iPhone này."
-
-	group = cfg.Group
-	if group == "" {
-		group = "ACB"
-	}
-
-	sound = cfg.Sound
-	if sound == "" {
-		sound = "shake"
-	}
-
-	level = cfg.Level
-	if level == "" {
-		level = "timeSensitive"
-	}
-
-	icon = cfg.Icon
-	if icon == "" {
-		icon = "https://api.vietqr.io/img/ACB.png"
-	}
-
-	return title, subtitle, body, group, sound, level, icon
+	title, subtitle, body, group, sound, level, icon, _ = FormatTransactionNotification(map[string]any{
+		"credit": "150000", "balance": "2350000", "description": "THỬ BARK - kiểm tra hiển thị", "provider": "SEPAY", "bank": "VCB",
+	}, cfg, "")
+	title += " · THỬ"
+	body += "\nDữ liệu mẫu, không phải giao dịch thật."
+	return
 }

@@ -54,3 +54,24 @@ func TestNativeVerificationExactBytesAndTypes(t *testing.T) {
 		if _,err := VerifyNativeWebhook(raw,nativeHeaders(raw,nativeTestSecret,now.Unix()),nativeTestSecret,now); !errors.Is(err,ErrInvalidNativeWebhook) { t.Fatalf("invalid body accepted: %s (%v)",body,err) }
 	}
 }
+
+func TestNativeOptionalBalanceDoesNotRejectCredit(t *testing.T) {
+	now := time.Date(2026,10,10,3,5,0,0,time.UTC)
+	for _, tc := range []struct { raw string; want int64 }{
+		{"2350000", 2350000}, {"-2350000", -2350000}, {"9007199254740991", 9007199254740991}, {"-9007199254740991", -9007199254740991},
+		{"", 0}, {"null", 0}, {"0", 0}, {`"2350000"`, 0}, {"true", 0}, {"1.5", 0}, {"1e3", 0}, {"9007199254740992", 0}, {"-9007199254740992", 0}, {"9223372036854775808", 0},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			body := strings.Replace(nativeTestBody, `"accumulated":200000,`, "", 1)
+			if tc.raw != "" { body = strings.Replace(nativeTestBody, `"accumulated":200000`, `"accumulated":`+tc.raw, 1) }
+			raw := []byte(body)
+			hook, err := VerifyNativeWebhook(raw, nativeHeaders(raw,nativeTestSecret,now.Unix()), nativeTestSecret, now)
+			if err != nil || hook.TransferAmount != 200000 { t.Fatalf("credit rejected: %+v %v", hook, err) }
+			if tc.want == 0 && hook.BalanceVND != nil || tc.want != 0 && (hook.BalanceVND == nil || *hook.BalanceVND != tc.want) { t.Fatalf("balance=%v want=%d", hook.BalanceVND, tc.want) }
+		})
+	}
+	for _, value := range []string{`{}`, `[]`, `1,"accumulated":2`} {
+		raw := []byte(strings.Replace(nativeTestBody, `"accumulated":200000`, `"accumulated":`+value, 1))
+		if _, err := VerifyNativeWebhook(raw, nativeHeaders(raw,nativeTestSecret,now.Unix()), nativeTestSecret, now); !errors.Is(err, ErrInvalidNativeWebhook) { t.Fatalf("invalid balance structure accepted: %s", value) }
+	}
+}

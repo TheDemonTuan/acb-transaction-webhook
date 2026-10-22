@@ -54,6 +54,19 @@ async function upload(page: Page, payload: string) {
   await page.getByTestId('sepay-qr-upload').setInputFiles({ name: 'store.png', mimeType: 'image/png', buffer: await QRCode.toBuffer(payload, { width: 640, margin: 4 }) });
 }
 
+test('offers an optional transaction balance header without changing source setup', async ({ page }) => {
+  const api = await fixture(page);
+  await page.goto('/admin/connection');
+  await page.getByText('Hướng dẫn BotFather, mẫu tin và kiểm tra nguồn', { exact: true }).click();
+  const help = section(page).locator('details').filter({ has: page.getByText('Hướng dẫn BotFather, mẫu tin và kiểm tra nguồn', { exact: true }) });
+  await expect(help.locator('pre')).toContainText('reference={{reference_number}}\nbalance={{accumulated}}\ncontent={{transaction_content}}');
+  await expect(help).toContainText('Số dư không phải điều kiện bắt buộc để ghi nhận tiền.');
+  await expect(help).toContainText('bỏ cả dòng balance');
+  await expect(help).toContainText('Native webhook không cần đổi mẫu Telegram.');
+  await expect(field(page, 'activeTransport')).toHaveValue('telegram');
+  expect(api.saves).toHaveLength(0);
+});
+
 test('owner decodes locally without BarcodeDetector, saves exact payload and string IDs, activates and registers write-only token', async ({ page }) => {
   const api = await fixture(page);
   await page.addInitScript(() => { Object.defineProperty(window, 'BarcodeDetector', { value: undefined, configurable: true }); });

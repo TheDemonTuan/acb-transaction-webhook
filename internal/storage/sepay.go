@@ -33,10 +33,16 @@ type SePayNotificationInput struct {
 	Credit                                                *SePayCredit
 }
 
+type SePayNotificationDetails struct {
+	BalanceVND *int64 `json:"balanceVnd,omitempty"`
+	Description string `json:"description"`
+}
+
 type SePayCredit struct {
 	AmountVND     int64
 	Reference     string
 	TransactionAt time.Time
+	NotificationDetails SePayNotificationDetails
 }
 
 type SePayIngestResult struct {
@@ -299,7 +305,7 @@ func (s *Store) IngestSePayNotification(ctx context.Context, in SePayNotificatio
 		if !in.MessageAt.IsZero() && age >= -30*time.Second && age <= 120*time.Second {
 			source = "REALTIME"
 		}
-		transactionID, event, err := s.insertSePayCreditTx(ctx, tx, sepayAcceptedCredit{StoreKey: in.StoreKey, BankCode: in.BankCode, AccountNumber: in.AccountNumber, SemanticKey: "SEPAY:"+in.StoreKey+":"+credit.Reference, CanonicalHash: hash, Reference: credit.Reference, Source: source, ParserVersion: "sepay-telegram-v1", AmountVND: credit.AmountVND, TransactionAt: credit.TransactionAt, ReceivedAt: receivedAt})
+		transactionID, event, err := s.insertSePayCreditTx(ctx, tx, sepayAcceptedCredit{StoreKey: in.StoreKey, BankCode: in.BankCode, AccountNumber: in.AccountNumber, SemanticKey: "SEPAY:"+in.StoreKey+":"+credit.Reference, CanonicalHash: hash, Reference: credit.Reference, Source: source, ParserVersion: "sepay-telegram-v1", AmountVND: credit.AmountVND, TransactionAt: credit.TransactionAt, ReceivedAt: receivedAt, NotificationDetails: credit.NotificationDetails})
 		if err != nil { return err }
 		res.Event = event
 		if _, err := tx.ExecContext(ctx, `INSERT INTO sepay_receipts(store_key,bank_code,account_number,reference,canonical_hash,transaction_id,message_id,received_at) VALUES(?,?,?,?,?,?,?,?)`, in.StoreKey, in.BankCode, in.AccountNumber, credit.Reference, hash, transactionID, in.MessageID, receivedAt); err != nil {
@@ -324,6 +330,7 @@ type sepayAcceptedCredit struct {
 	AmountVND int64
 	TransactionAt time.Time
 	ReceivedAt string
+	NotificationDetails SePayNotificationDetails
 }
 
 func (s *Store) insertSePayCreditTx(ctx context.Context, tx *sql.Tx, in sepayAcceptedCredit) (string, *EventNotification, error) {
@@ -333,10 +340,33 @@ func (s *Store) insertSePayCreditTx(ctx context.Context, tx *sql.Tx, in sepayAcc
 	const description = "Thanh toán QR cửa hàng"
 	_, err := tx.ExecContext(ctx, `INSERT INTO transactions(id,connection_id,semantic_key,canonical_hash,transaction_date,effective_date,debit,credit,balance,description_envelope,parser_version,baseline_state,first_seen_at,transaction_at_iso,transaction_day,date_precision,ingest_source) VALUES(?,?,?,?,?,?,0,?,NULL,?,?,'NONE',?,?,?,'datetime',?)`, transactionID, "sepay-store:"+in.StoreKey, in.SemanticKey, in.CanonicalHash, iso, iso, in.AmountVND, []byte(description), in.ParserVersion, in.ReceivedAt, iso, day, in.Source)
 	if err != nil { return "", nil, err }
+	details, err := json.Marshal(in.NotificationDetails)
+	if err != nil { return "", nil, errors.New("encode SePay notification details failed") }
+	envelope, err := s.sepayEncrypt(details, []byte("sepay-notification:"+transactionID))
+	if err != nil { return "", nil, errors.New("encrypt SePay notification details failed") }
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sepay_notification_details(transaction_id,details_envelope) VALUES(?,?)`, transactionID, envelope); err != nil {
+		return "", nil, errors.New("store SePay notification details failed")
+	}
 	data := map[string]any{"bank": in.BankCode, "provider": "SEPAY", "transactionId": transactionID, "transactionNumber": in.Reference, "credit": strconv.FormatInt(in.AmountVND,10), "debit":"0", "currency":"VND", "transactionDate":iso, "transactionDay":day, "datePrecision":"datetime", "source":in.Source, "description":description, "detectedAt":in.ReceivedAt}
 	event, err := s.emitTransactionEventTx(ctx,tx,transactionID,"bank.transaction.credit","sepay-store:"+in.StoreKey,in.SemanticKey,data,in.ReceivedAt)
 	if err == nil && event == nil { err = errors.New("new SePay transaction did not produce an event") }
 	return transactionID,event,err
+}
+
+// SePayNotificationDetailsForEvent reads only the private snapshot associated
+// with a credit event. Shared event payloads never contain these details.
+func (s *Store) SePayNotificationDetailsForEvent(ctx context.Context, eventID string) (*SePayNotificationDetails, error) {
+	var transactionID string
+	var envelope []byte
+	err := s.db.QueryRowContext(ctx, `SELECT e.transaction_id,d.details_envelope FROM events e JOIN sepay_notification_details d ON d.transaction_id=e.transaction_id WHERE e.id=? AND e.event_type='bank.transaction.credit'`, eventID).Scan(&transactionID, &envelope)
+	if errors.Is(err, sql.ErrNoRows) { return nil, nil }
+	if err != nil { return nil, errors.New("read SePay notification details failed") }
+	if s.keyring == nil { return nil, errors.New("SePay notification details keyring unavailable") }
+	plain, err := s.sepayDecrypt(envelope, []byte("sepay-notification:"+transactionID))
+	if err != nil { return nil, errors.New("decrypt SePay notification details failed") }
+	var details SePayNotificationDetails
+	if err := json.Unmarshal(plain, &details); err != nil { return nil, errors.New("decode SePay notification details failed") }
+	return &details, nil
 }
 
 // LastSePayMessageAt counts valid Telegram notifications only. Native webhook
@@ -504,6 +534,7 @@ type SePayWebhookInput struct {
 	TransactionAt              time.Time
 	RawPayload                 []byte
 	NativeReferenceVerified    bool
+	NotificationDetails SePayNotificationDetails
 }
 
 func (s *Store) IngestSePayWebhook(ctx context.Context, in SePayWebhookInput) (SePayIngestResult, error) {
@@ -640,6 +671,7 @@ func (s *Store) IngestSePayWebhook(ctx context.Context, in SePayWebhookInput) (S
 			SemanticKey: semanticKey, CanonicalHash: canonicalHash, Reference: in.Reference,
 			Source: source, ParserVersion: "sepay-native-v1", AmountVND: in.AmountVND,
 			TransactionAt: in.TransactionAt, ReceivedAt: receivedAt,
+			NotificationDetails: in.NotificationDetails,
 		})
 		if err != nil {
 			return err

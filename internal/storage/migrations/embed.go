@@ -71,3 +71,8 @@ var SePayNativeSQL string
 //
 //go:embed 021_piper_voice.sql
 var PiperVoiceSQL string
+
+// SePayNotificationDetailsSQL embeds schema version 22 private notification snapshots.
+//
+//go:embed 022_sepay_notification_details.sql
+var SePayNotificationDetailsSQL string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/thedemontuan/acb-transaction-webhook/internal/storage"
@@ -98,6 +99,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update TelegramUpdate) error
 			in.Credit = &storage.SePayCredit{
 				AmountVND: notification.AmountVND, Reference: notification.Reference,
 				TransactionAt: notification.TransactionAt,
+				NotificationDetails: storage.SePayNotificationDetails{BalanceVND: notification.BalanceVND, Description: notification.Description},
 			}
 		}
 	}
@@ -129,6 +131,8 @@ func (s *Service) HandleNativeWebhook(ctx context.Context, hook NativeWebhook) e
 	if mode == "" || mode == ModeDisabled {
 		return ErrUnavailable
 	}
+	description := hook.Content
+	if strings.TrimSpace(description) == "" { description = hook.Description }
 	in := storage.SePayWebhookInput{
 		StoreKey:                   s.cfg.StoreKey,
 		BankCode:                   s.cfg.BankCode,
@@ -146,6 +150,7 @@ func (s *Service) HandleNativeWebhook(ctx context.Context, hook NativeWebhook) e
 		TransactionAt:              hook.TransactionAt,
 		RawPayload:                 hook.RawPayload,
 		NativeReferenceVerified:    s.cfg.NativeReferenceVerified,
+		NotificationDetails: storage.SePayNotificationDetails{BalanceVND: hook.BalanceVND, Description: description},
 	}
 	if hook.TransferType != "in" {
 		in.ReviewReason = "OUTGOING"

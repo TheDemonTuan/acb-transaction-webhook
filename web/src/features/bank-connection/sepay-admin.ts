@@ -54,6 +54,7 @@ account={{account_number}}
 bank={{bank_name}}
 time={{transaction_date}}
 reference={{reference_number}}
+balance={{accumulated}}
 content={{transaction_content}}`;
 
 export const sepayModeLabel = (mode?: string): string =>

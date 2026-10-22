@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,6 +87,16 @@ func (s *Sender) Send(ctx context.Context, req notification.SendRequest) notific
 			Outcome:           notification.OutcomeTerminalFailure,
 			ProviderErrorCode: "MALFORMED_EVENT_PAYLOAD",
 			SanitizedError:    "failed to parse event payload JSON",
+		}
+	}
+	if eventData["provider"] == "SEPAY" {
+		delete(eventData, "balance")
+		eventData["description"] = ""
+		if req.SePayDetails != nil {
+			if cfg.IncludeBalance && req.SePayDetails.BalanceVND != nil {
+				eventData["balance"] = strconv.FormatInt(*req.SePayDetails.BalanceVND, 10)
+			}
+			if cfg.IncludeDescription { eventData["description"] = req.SePayDetails.Description }
 		}
 	}
 

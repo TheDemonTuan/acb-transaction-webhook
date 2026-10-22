@@ -70,6 +70,47 @@ test.describe('Notification Channels & Bark Provider E2E', () => {
     await expect(updatedChannelRow.getByText('Tạm tắt')).toBeVisible();
   });
 
+  test('preserves hidden metadata and safely renders empty or failed channel icons', async ({ page }, testInfo) => {
+    const name = `Private iPhone ${testInfo.project.name}`;
+    let failedImageRequests = 0;
+    await page.route('https://images.example.test/missing.png', route => {
+      failedImageRequests++;
+      return route.fulfill({ status: 404, body: '' });
+    });
+    await page.goto('/admin/notifications');
+    await page.getByRole('button', { name: /Tùy chỉnh thông báo/ }).click();
+    await expect(page.getByLabel('Hiển thị số dư tài khoản sau giao dịch')).toBeChecked();
+    await expect(page.getByLabel('Hiển thị nội dung chuyển khoản', { exact: true })).toBeChecked();
+    await page.getByLabel('Hiển thị số dư tài khoản sau giao dịch').uncheck();
+    await page.getByLabel('Hiển thị nội dung chuyển khoản', { exact: true }).uncheck();
+    await page.getByLabel('Tên thiết bị / iPhone').fill(name);
+    await page.getByLabel('Bark Device Key').fill('private-fixture-device-key');
+    await page.getByRole('button', { name: 'Tạo kênh Bark (iPhone)' }).click();
+    const row = page.getByTestId('channel-row').filter({ hasText: name });
+    await expect(row.getByRole('img', { name: 'Chưa đặt icon thông báo' })).toBeVisible();
+    await row.getByRole('button', { name: 'Sửa', exact: true }).click();
+    const form = page.locator('form').filter({ has: page.locator('#edit-channel-name') });
+    await expect(form.getByLabel('Hiển thị số dư sau giao dịch', { exact: true })).not.toBeChecked();
+    await expect(form.getByLabel('Hiển thị nội dung chuyển khoản', { exact: true })).not.toBeChecked();
+    await expect(form.getByRole('img', { name: 'Chưa đặt icon thông báo' })).toBeVisible();
+    await form.locator('input[type="url"]').fill('https://images.example.test/missing.png');
+    await expect(form.getByRole('img', { name: 'Không tải được icon preview' })).toBeVisible();
+    await form.getByRole('button', { name: 'Lưu thay đổi' }).click();
+    await expect(row.getByRole('img', { name: 'Không tải được icon preview' })).toBeVisible();
+    await row.getByRole('button', { name: 'Sửa', exact: true }).click();
+    await expect(form.getByRole('img', { name: 'Không tải được icon preview' })).toBeVisible();
+    await expect(form.getByLabel('Hiển thị số dư sau giao dịch', { exact: true })).not.toBeChecked();
+    await form.locator('input[type="url"]').fill('');
+    await form.getByRole('button', { name: 'Lưu thay đổi' }).click();
+    await page.reload();
+    await expect(row.getByRole('img', { name: 'Chưa đặt icon thông báo' })).toBeVisible();
+    await row.getByRole('button', { name: 'Sửa', exact: true }).click();
+    await expect(form.getByLabel('Hiển thị số dư sau giao dịch', { exact: true })).not.toBeChecked();
+    await expect(form.getByLabel('Hiển thị nội dung chuyển khoản', { exact: true })).not.toBeChecked();
+    expect(failedImageRequests).toBeLessThanOrEqual(3);
+    await expect(page.locator('img[src=""]')).toHaveCount(0);
+  });
+
   test('creates Webhook channel and displays one-time secret dialog', async ({ page }, testInfo) => {
     const hookName = `Slack Bot ${testInfo.project.name}`;
 

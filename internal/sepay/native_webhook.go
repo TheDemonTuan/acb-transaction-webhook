@@ -23,6 +23,7 @@ var ErrInvalidNativeWebhook = errors.New("invalid SePay webhook")
 type NativeWebhook struct {
 	ID int64
 	TransferAmount int64
+	BalanceVND *int64
 	Gateway, AccountNumber, SubAccount, ReferenceCode, Content, Description, TransferType string
 	Code *string
 	TransactionAt time.Time
@@ -73,7 +74,7 @@ func VerifyNativeWebhook(rawBody []byte, headers http.Header, secret string, now
 		if _, exists := fields[name]; exists { return fail, ErrInvalidNativeWebhook }
 		value, err := dec.Token()
 		if err != nil { return fail, ErrInvalidNativeWebhook }
-		if _, nested := value.(json.Delim); nested || value == nil && name != "code" { return fail, ErrInvalidNativeWebhook }
+		if _, nested := value.(json.Delim); nested || value == nil && name != "code" && name != "accumulated" { return fail, ErrInvalidNativeWebhook }
 		fields[name] = value
 	}
 	if token, err = dec.Token(); err != nil || token != json.Delim('}') { return fail, ErrInvalidNativeWebhook }
@@ -88,6 +89,11 @@ func VerifyNativeWebhook(rawBody []byte, headers http.Header, secret string, now
 		*field.target = value
 	}
 	if out.TransferAmount > 9007199254740991 { return fail, ErrInvalidNativeWebhook }
+	if number, ok := fields["accumulated"].(json.Number); ok {
+		if value, err := strconv.ParseInt(string(number), 10, 64); err == nil && value != 0 && value >= -maxAmountVND && value <= maxAmountVND {
+			out.BalanceVND = &value
+		}
+	}
 	for _, field := range []struct { name string; target *string }{
 		{"gateway", &out.Gateway}, {"accountNumber", &out.AccountNumber}, {"subAccount", &out.SubAccount},
 		{"referenceCode", &out.ReferenceCode}, {"content", &out.Content}, {"description", &out.Description}, {"transferType", &out.TransferType},
