@@ -291,5 +291,6 @@ Không dùng chime thay firstMeaningfulSpeech. Ghi amountStartedAt riêng để 
 
 - Codec downloads must use each codec file's pinned hash and size, never the last backbone entry. The local HTTP regression exercises distinct codec files and rejects corrupted bytes without publishing the destination or leaving temporary files.
 - The container smoke requires VieNeu as primary and both local providers available. Piper requests and response checks use `PIPER_VOICE`; VieNeu remains a separate explicit synthesis request. Resource limits come from `TTS_CPUS` / `TTS_MEMORY_LIMIT`, not the former Piper-only caps.
+- Independent VieNeu inference calls are not a bit-exact audio contract. Buffered and streamed outputs must independently be MPEG audio within the response limit; tests must not compare encoded bytes or sizes between separate syntheses.
 - Frontend build and all 233 unit tests passed with pinned Bun 1.4.3. Local Docker is unavailable; ARM64 inference, cancellation and container resource proof remain required GitHub Actions gates, not a local success claim.
 
