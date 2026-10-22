@@ -4,10 +4,13 @@ WORKDIR /app
 COPY requirements.lock ./
 COPY scripts/fetch_vieneu_assets.py ./scripts/
 COPY assets/models/vieneu/provenance.json ./assets/models/vieneu/
+# The SDK's Gradio demo is not served by this headless sidecar. Remove the
+# actual UI/image packages after extracting model assets, not scanner metadata.
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --only-binary=:all: --no-cache-dir --require-hashes -r requirements.lock && \
     /opt/venv/bin/python ./scripts/fetch_vieneu_assets.py --output /app/assets/models/vieneu && \
     /opt/venv/bin/python ./scripts/fetch_vieneu_assets.py --output /app/assets/models/vieneu --verify-only && \
+    /opt/venv/bin/pip uninstall --yes gradio pillow && \
     rm -rf /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.13 /opt/venv/lib/python3.13/site-packages/pip /opt/venv/lib/python3.13/site-packages/pip-*.dist-info
 
 FROM python:3.13.16-slim-trixie@sha256:cf50a4f6ac4f026458b08d5222023d700ac806410dff5e9ca8728fa44f2b850f

@@ -118,6 +118,7 @@ fi
 echo "Verifying real fixed Piper and VieNeu synthesis, streaming, and inference cancellation..."
 docker exec -i "$container_name" python - <<'PY'
 import http.client
+import importlib.util
 import json
 from pathlib import Path
 import os
@@ -125,6 +126,9 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
+
+for unused_module in ("gradio", "PIL"):
+    assert importlib.util.find_spec(unused_module) is None, f"Unused UI/image runtime shipped: {unused_module}"
 
 TOKEN = Path("/run/secrets/tts_internal_token").read_text().strip()
 PIPER_VOICE = "vi-VN-vais1000-medium"
