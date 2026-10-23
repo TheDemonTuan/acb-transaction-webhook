@@ -3,7 +3,7 @@ import { readFile, realpath, access } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const config = JSON.parse(await readFile('.github/renovate.json', 'utf8'));
+const config = JSON.parse(await readFile('.github/renovate-oss.json', 'utf8'));
 let renovateRoot;
 for (const directory of process.env.PATH.split(delimiter)) {
   const binary = join(directory, 'renovate-config-validator');

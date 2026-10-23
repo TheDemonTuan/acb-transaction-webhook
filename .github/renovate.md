@@ -1,6 +1,6 @@
 # Renovate dependency updates
 
-The repository configuration is compatible with the existing hosted bot and the new unmodified Renovate OSS runner in [TheDemonTuan/renovate-control](https://github.com/TheDemonTuan/renovate-control). The fleet runner is not considered connected until its private GitHub App is installed, its installation token works, and its ACB dry-run completes. Never run both bots against this repository during the write cutover.
+The active policy is `.github/renovate-oss.json`, read by the unmodified Renovate OSS runner in [TheDemonTuan/renovate-control](https://github.com/TheDemonTuan/renovate-control) through the administrator's `configFileNames` setting. `.github/renovate.json` contains only `enabled: false`: it disables the previous Mend-hosted bot and prevents re-onboarding. Do not delete this opt-out while the old GitHub App remains installed. The new App is `thedemontuan-renovate-oss`; it uses the separate `rcc/` branch namespace so hosted cleanup cannot touch its dependency branches.
 
 ## Update policy
 
@@ -19,7 +19,7 @@ The local Dockerfile patch/digest release-age exception is not evidence that eve
 
 1. Review this configuration PR and require `Dependency Update Gate` from GitHub Actions, strict/up-to-date branch protection and administrator enforcement. Do not grant the bot a branch-protection bypass.
 2. Install the private fleet GitHub App and complete an ACB dry-run before enabling write runs.
-3. Disable the Mend Renovate installation for ACB before the first OSS write run. Inventory existing bot PRs/branches and check the first new run for duplicates; do not blindly delete branches or close unrelated PRs.
+3. Keep the hosted opt-out disabled before the first OSS write run. Close only the previous `renovate[bot]` PRs/branches and its Dependency Dashboard after review. Removing the old App's repository access in GitHub installation settings is optional additional permission cleanup; a repository config does not revoke its permissions.
 4. Keep dependency graph and Dependabot alerts enabled. Keep duplicate Dependabot version/security PR automation disabled; alerts are a separate feature.
 5. Run Renovate OSS through the central workflow and verify its real PR, lockfile and full CI results. Dispatch acceptance alone is not successful dependency updating.
 
@@ -36,8 +36,10 @@ Edge Compose changes are proposals; merging them does not deploy the edge stack.
 From the repository root:
 
 ```bash
-npx --yes --package renovate@44.178.5 -c 'renovate-config-validator --strict .github/renovate.json && node scripts/verify-renovate-policy.mjs'
+npx --yes --package renovate@44.178.5 -c 'renovate-config-validator --strict .github/renovate.json .github/renovate-oss.json && node scripts/verify-renovate-policy.mjs'
 bash scripts/verify-actions-pinned.sh
 ```
 
 The verifier uses Renovate's actual package-rule matcher/forced merge to check ordinary/security updates, release-age exceptions, operator-only merging, and preservation of `engines.bun`. The validator version in CI is itself tracked by a Renovate regex manager. The central runner has its own pinned-engine safety tests.
+
+The App-authenticated [ACB dry-run](https://github.com/TheDemonTuan/renovate-control/actions/runs/39926740102) extracted 237 dependency declarations across seven managers before cutover. After splitting the configs, a local engine run selected `.github/renovate-oss.json`, found the Bun 1.4.4 updates and kept `engines.bun` disabled. The same engine without the custom filename returned `disabled-by-config`, exercising the hosted opt-out. Neither dry-run is evidence that a dependency PR has merged or a CVE has been resolved.
