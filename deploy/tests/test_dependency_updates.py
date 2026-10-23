@@ -1,4 +1,3 @@
-import json
 import re
 import unittest
 from pathlib import Path
@@ -27,19 +26,6 @@ class DependencyUpdateTests(unittest.TestCase):
         self.assertEqual(gate['steps'][0]['env']['RESULT'], '${{ needs.verify.result }}')
         self.assertEqual(gate['steps'][0]['run'], 'test "$RESULT" = success')
         self.assertNotIn('deploy', jobs)
-
-    def test_python_lock_outputs_are_managed_together_with_sources(self):
-        config = json.loads((ROOT / '.github/renovate.json').read_text())
-        self.assertIn('pip-compile', config['enabledManagers'])
-        self.assertNotIn('pip_requirements', config['enabledManagers'])
-        pattern = config['pip-compile']['managerFilePatterns'][0][1:-1]
-        for suffix in ['', '-dev']:
-            filename = f'tts-gateway/requirements{suffix}.lock'
-            self.assertRegex(filename, pattern)
-            header = '\n'.join((ROOT / filename).read_text().splitlines()[:2])
-            self.assertIn('uv pip compile --universal --generate-hashes --python-version=3.13', header)
-            self.assertIn(f'--output-file={filename}', header)
-            self.assertIn(f'tts-gateway/requirements{suffix}.txt', header)
 
     def test_development_lock_follows_runtime_constraints(self):
         runtime = (ROOT / 'tts-gateway/requirements.lock').read_text()

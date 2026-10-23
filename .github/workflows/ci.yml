@@ -21,7 +21,7 @@ jobs:
           node-version: '24.18.0'
       - name: Validate Renovate configuration and automerge policy
         run: |
-          npx --yes --package renovate@44.173.0 -c 'renovate-config-validator --strict .github/renovate.json && node scripts/verify-renovate-policy.mjs'
+          npx --yes --package renovate@44.178.5 -c 'renovate-config-validator --strict .github/renovate.json .github/renovate-oss.json && node scripts/verify-renovate-policy.mjs'
       - name: Verify GitHub Actions are pinned
         run: bash scripts/verify-actions-pinned.sh
       - name: Verify deployment and platform script syntax
