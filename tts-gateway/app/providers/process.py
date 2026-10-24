@@ -1,6 +1,7 @@
 """Shared subprocess pool with framed binary IPC and cancellation shielding."""
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 import struct
@@ -10,6 +11,7 @@ from typing import AsyncGenerator
 import anyio
 
 MAX_AUDIO_BYTES = 4 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class ProcessTTSProvider:
@@ -36,6 +38,7 @@ class ProcessTTSProvider:
         self._workers = [None] * worker_count
         self._idle = asyncio.Queue(maxsize=worker_count)
         self._closed = True
+        self._maintenance: set[asyncio.Task] = set()
 
     @property
     def idle_count(self) -> int:
@@ -47,7 +50,7 @@ class ProcessTTSProvider:
 
     @property
     def available(self) -> bool:
-        return not self._closed and all(
+        return not self._closed and not self._maintenance and all(
             worker is not None and worker.returncode is None for worker in self._workers
         )
 
@@ -106,28 +109,49 @@ class ProcessTTSProvider:
             raise
 
     async def _stop(self, index: int, propagate_cancel: bool = True) -> None:
+        """Kill, close all pipes, and reap before releasing the worker slot."""
         worker = self._workers[index]
-        if worker is not None:
-            if getattr(worker, "returncode", None) is None:
-                kill_fn = getattr(worker, "kill", None)
-                if callable(kill_fn):
-                    try:
-                        kill_fn()
-                    except ProcessLookupError:
-                        pass
-            wait_fn = getattr(worker, "wait", None)
-            if callable(wait_fn):
-                reaped = asyncio.create_task(wait_fn())
-                cancelled = False
-                while not reaped.done():
-                    try:
-                        await asyncio.shield(reaped)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                reaped.result()
-            self._workers[index] = None
-            if cancelled and propagate_cancel:
-                raise asyncio.CancelledError
+        if worker is None:
+            return
+        if worker.returncode is None:
+            try:
+                worker.kill()
+            except ProcessLookupError:
+                pass
+
+        async def cleanup() -> None:
+            # communicate closes stdin and drains stdout so a full pipe cannot
+            # stall reaping. An exited process can still have pending pipe closes.
+            await worker.communicate()
+            if worker.stdin is not None:
+                try:
+                    await worker.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    # The killed worker may have closed its read end first.
+                    pass
+
+        reaped = asyncio.create_task(cleanup())
+        cancelled = False
+        while not reaped.done():
+            try:
+                await asyncio.shield(reaped)
+            except asyncio.CancelledError:
+                cancelled = True
+        reaped.result()
+        self._workers[index] = None
+        if cancelled and propagate_cancel:
+            raise asyncio.CancelledError
+
+    async def _replace(self, index: int, spawn_impl) -> None:
+        """Warm a replacement independently of the failed request's deadline."""
+        try:
+            await spawn_impl(index)
+        except Exception:
+            logger.exception("Process worker replacement failed for slot %s", index)
+        finally:
+            if not self._closed:
+                self._idle.put_nowait(index)
+
     async def start(self) -> None:
         if not self._closed:
             return
@@ -143,6 +167,20 @@ class ProcessTTSProvider:
 
     async def close(self) -> None:
         self._closed = True
+        # A replacement owns its slot until READY or failed startup cleanup.
+        # Join cancellation before stopping workers so pipe readers never race.
+        maintenance = tuple(self._maintenance)
+        for task in maintenance:
+            task.cancel()
+        if maintenance:
+            joined = asyncio.gather(*maintenance, return_exceptions=True)
+            while not joined.done():
+                try:
+                    await asyncio.shield(joined)
+                except asyncio.CancelledError:
+                    pass
+            joined.result()
+            self._maintenance.difference_update(maintenance)
         for index in range(len(self._workers)):
             await self._stop(index, propagate_cancel=False)
         while not self._idle.empty():
@@ -172,6 +210,7 @@ class ProcessTTSProvider:
             raise RuntimeError("Process provider closed while waiting for worker")
 
         healthy = False
+        inference_started = False
         received_data = False
         total_bytes = 0
 
@@ -186,6 +225,7 @@ class ProcessTTSProvider:
                 await asyncio.wait_for(spawn_impl(index), timeout=remaining())
                 worker = self._workers[index]
 
+            inference_started = True
             req_line = json.dumps(request, ensure_ascii=False) + "\n"
             worker.stdin.write(req_line.encode("utf-8"))
             await asyncio.wait_for(worker.stdin.drain(), timeout=remaining())
@@ -212,4 +252,11 @@ class ProcessTTSProvider:
                 if not healthy:
                     await stop_impl(index, propagate_cancel=False)
                 if not self._closed:
-                    self._idle.put_nowait(index)
+                    if not healthy and inference_started:
+                        # Cleanup above must reap the old worker before either
+                        # releasing admission or starting its replacement.
+                        task = asyncio.create_task(self._replace(index, spawn_impl))
+                        self._maintenance.add(task)
+                        task.add_done_callback(self._maintenance.discard)
+                    else:
+                        self._idle.put_nowait(index)

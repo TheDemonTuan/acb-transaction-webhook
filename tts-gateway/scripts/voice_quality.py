@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Blind-listening preparation, rate validation, and comparison render runner."""
+"""Prepare and validate human listening evidence for fixed-profile VieNeu audio."""
 import argparse
 import asyncio
 import hashlib
 import json
 from datetime import datetime
 import html
-import math
 from pathlib import Path
 import random
 import statistics
@@ -14,7 +13,6 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.assets import canonical_json, manifest_inputs, read_clip, validate_inputs
-from app.providers.piper import PiperTTSProvider, VOICE_ID as PIPER_VOICE_ID
 from app.providers.vieneu import VieneuTTSProvider, VOICE_ID as VIENEU_VOICE_ID
 
 CANONICAL_AMOUNTS_50 = [
@@ -37,15 +35,11 @@ async def run_prepare(args):
     with corpus_path.open("r", encoding="utf-8") as f:
         corpus = json.load(f)
 
-    if args.provider not in ("piper", "vieneu"):
-        raise ValueError("Provider must be 'piper' or 'vieneu'")
+    if args.provider != "vieneu":
+        raise ValueError("Provider must be 'vieneu'")
     rates = [float(r.strip()) for r in args.rates.split(",") if r.strip()]
-    if args.provider == "vieneu":
-        if rates != [1.0]:
-            raise ValueError("VieNeu only supports rate 1.0")
-    else:
-        if not rates or len(set(rates)) != len(rates) or any(not math.isfinite(r) or not 0.8 <= r <= 1.5 for r in rates):
-            raise ValueError("Rates must be unique finite Piper rates in [0.8, 1.5]")
+    if rates != [1.0]:
+        raise ValueError("VieNeu only supports rate 1.0")
     all_cases = corpus["cases"]
     amount_cases = [c for c in all_cases if c["kind"] == "amount"]
     if len(amount_cases) != 50 or {str(c.get("amountVnd")) for c in amount_cases} != set(CANONICAL_AMOUNTS_50):
@@ -56,12 +50,8 @@ async def run_prepare(args):
         raise ValueError("Refusing to overwrite existing listening evidence; choose a fresh output directory")
 
     cases_to_use = all_cases if getattr(args, "all_cases", False) else amount_cases
-    if args.provider == "piper":
-        provider = PiperTTSProvider()
-        active_voice = PIPER_VOICE_ID
-    else:
-        provider = VieneuTTSProvider(threads=2)
-        active_voice = VIENEU_VOICE_ID
+    provider = VieneuTTSProvider(threads=2)
+    active_voice = VIENEU_VOICE_ID
     await provider.start()
 
     tasks_to_generate = []
@@ -86,7 +76,7 @@ async def run_prepare(args):
     try:
         for idx, item in enumerate(tasks_to_generate):
             test_id = f"blind-{idx+1:03d}"
-            rate_str = "+0%" if args.provider == "vieneu" else f"{int(round((item['rate'] - 1) * 100)):+d}%"
+            rate_str = "+0%"
             audio_file = audio_dir / f"{test_id}.mp3"
             if audio_file.exists() and audio_file.stat().st_size > 0:
                 audio_bytes = audio_file.read_bytes()
@@ -128,7 +118,7 @@ async def run_prepare(args):
     with mapping_path.open("w", encoding="utf-8") as f:
         json.dump({
             "schemaVersion": 2,
-            "providerMode": "VIENEU_ONLY" if args.provider == "vieneu" else "PIPER_ONLY",
+            "providerMode": "VIENEU_ONLY",
             "voiceId": active_voice,
             "runtimeManifestSha256": runtime_sha,
             "rates": rates,
@@ -199,6 +189,10 @@ def run_validate(args):
 
     with mapping_path.open("r", encoding="utf-8") as f:
         sealed = json.load(f)
+    if (sealed.get("schemaVersion") != 2 or sealed.get("providerMode") != "VIENEU_ONLY"
+            or sealed.get("voiceId") != VIENEU_VOICE_ID or sealed.get("rates") != [1.0]
+            or any(type(item.get("rate")) not in (int, float) or item["rate"] != 1.0 for item in sealed["items"])):
+        raise ValueError("Listening evidence must use the fixed VieNeu profile at rate 1.0")
 
     mapping_by_id = {item["testId"]: item for item in sealed["items"]}
     if review_data.get("status") == "INVALID":
@@ -317,39 +311,17 @@ def run_validate(args):
         print("No rates passed the strict quality acceptance criteria!", file=sys.stderr)
         sys.exit(2)
 
-    # Select best rate according to tie-breaking rules
     override = review_data.get("overrideRate")
-    if override is not None:
-        # An override may select among passing rates, never bypass quality gates.
-        override_st = rates_stats.get(float(override))
-        if not override_st or not override_st["passed"]:
-            print(f"Override rate {override} failed quality acceptance gates!", file=sys.stderr)
-            sys.exit(3)
-        selected_rate = float(override)
-        print(f"Using approved user override rate: {selected_rate}")
-    else:
-        # Sort by:
-        # 1. median naturalness descending
-        # 2. mean readability descending
-        # 3. distance to 1.10 ascending
-        # 4. rate value ascending
-        passing_rates.sort(key=lambda r: (
-            -rates_stats[r]["median_naturalness"],
-            -rates_stats[r]["mean_readability"],
-            abs(r - 1.10),
-            r,
-        ))
-        selected_rate = passing_rates[0]
-        print(f"Automatically selected best rate: {selected_rate}")
-    schema_version = sealed.get("schemaVersion", 1)
-    is_vieneu = sealed.get("providerMode") == "VIENEU_ONLY"
-    provider_mode = sealed.get("providerMode", "PIPER_ONLY")
-    voice_id = sealed.get("voiceId", PIPER_VOICE_ID if provider_mode == "PIPER_ONLY" else VIENEU_VOICE_ID)
-
+    if override is not None and (type(override) not in (int, float) or override != 1.0):
+        raise ValueError("VieNeu only supports rate 1.0")
+    if 1.0 not in passing_rates:
+        print("VieNeu rate 1.0 failed quality acceptance gates!", file=sys.stderr)
+        sys.exit(3)
+    selected_rate = 1.0
     # Output profile
     profile = {
-        "providerMode": provider_mode,
-        "voiceId": voice_id,
+        "providerMode": "VIENEU_ONLY",
+        "voiceId": VIENEU_VOICE_ID,
         "rate": selected_rate,
         "pitchHz": 0,
         "catalogVersion": "v1",
@@ -434,6 +406,7 @@ def run_prepare_pack_review(args):
         "sampleSetSha256": hashlib.sha256(canonical_json(corpus)).hexdigest(),
         "reviewer": "",
         "reviewedAt": "",
+        "amountAccuracy": {"correct": None, "total": None},
         "reviews": review_items,
     }
     (out_dir / "review.json").write_text(json.dumps(review_template, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -460,8 +433,11 @@ def run_validate_pack_review(args):
     heard_clip_ids = []
     clips_evidence = []
 
-    amount_correct = 0
-    amount_total = 0
+    accuracy = review_data.get("amountAccuracy")
+    if (not isinstance(accuracy, dict) or set(accuracy) != {"correct", "total"}
+            or type(accuracy["correct"]) is not int or type(accuracy["total"]) is not int
+            or accuracy["total"] < 50 or accuracy["correct"] != accuracy["total"]):
+        raise ValueError("Explicit human amount review requires zero errors across at least 50 cases")
 
     for r in reviews:
         cid = r["clipId"]
@@ -487,9 +463,6 @@ def run_validate_pack_review(args):
             "speechStartMs": None,
             "amountStartMs": None,
         })
-        if r.get("kind") == "amount":
-            amount_total += 1
-            amount_correct += 1
 
     median_nat = statistics.median(naturalness_scores) if naturalness_scores else 0
     if median_nat < 4:
@@ -506,7 +479,7 @@ def run_validate_pack_review(args):
         "clips": clips_evidence,
         "heardClipIds": heard_clip_ids,
         "heardRecipePairIds": [],
-        "amountAccuracy": {"correct": 50, "total": 50},
+        "amountAccuracy": accuracy,
         "readabilityMedian": float(median_read),
         "naturalnessMedian": float(median_nat),
         "joinFailures": [],
@@ -613,55 +586,6 @@ def run_benchmark(args):
     print(f"Saved benchmark report to {out_file}")
 
 
-def run_render_comparisons(args):
-    pack_root = Path(args.pack).resolve()
-    corpus_path = Path(args.corpus)
-    out_dir = Path(args.output)
-    candidates = list(pack_root.glob("*/manifest.candidate.json"))
-    if (pack_root / "manifest.candidate.json").exists():
-        candidates.append(pack_root / "manifest.candidate.json")
-    if len(candidates) != 1:
-        raise ValueError("Require exactly one candidate manifest; choose an unambiguous pack directory")
-    manifest = json.loads(candidates[0].read_text(encoding="utf-8"))
-    inputs = manifest_inputs(manifest)
-    validate_inputs(inputs)
-    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
-    audio_root = pack_root if (pack_root / "clips").is_dir() else pack_root.parent
-    cards = []
-    for clip in manifest["clips"]:
-        read_clip(audio_root, clip)
-        audio_uri = (audio_root / "clips" / (clip["sha256"] + ".mp3")).as_uri()
-        cards.append(f'<p>{html.escape(clip["clipId"])}: {html.escape(clip["transcript"])}</p>'
-                     f'<audio controls preload="none" src="{html.escape(audio_uri, quote=True)}"></audio>')
-    evidence = {
-        "schemaVersion": 1,
-        "synthesisKey": manifest["synthesisKey"],
-        "inputHash": hashlib.sha256(canonical_json(inputs)).hexdigest(),
-        "reviewer": "", "reviewedAt": "", "decision": "pending",
-        "clips": [{"clipId": c["clipId"], "sha256": c["sha256"], "speechStartMs": None, "amountStartMs": None} for c in manifest["clips"]],
-        "heardClipIds": [], "heardRecipePairIds": [],
-        "amountAccuracy": {"correct": None, "total": None},
-        "readabilityMedian": None, "naturalnessMedian": None,
-        "joinFailures": [], "rejectedClipIds": [],
-        "candidateDecisions": {"tail": "pending", "numbers": "pending"},
-        "tailMode": None, "numberMode": None, "selectedRate": manifest["rate"],
-        "sampleSetSha256": hashlib.sha256(canonical_json(corpus)).hexdigest(),
-    }
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if (out_dir / "quality.json").exists() or (out_dir / "candidate-player.html").exists():
-        raise ValueError("Refusing to overwrite existing review artifacts; choose a fresh output directory")
-    (out_dir / "quality.json").write_text(json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8")
-    (out_dir / "candidate-player.html").write_text(
-        '<!doctype html><html lang="vi"><meta charset="utf-8"><title>Unreviewed candidate clips</title>'
-        '<h1>Candidate clips — not approved</h1><p>Clip inventory only; whole-vs-composed comparisons have NOT been rendered. '
-        'No listening, onset or quality assessment is inferred from playback controls.</p>' + ''.join(cards) + '</html>',
-        encoding="utf-8",
-    )
-    print(f"Wrote hash-checked clip player and pending review template in {out_dir}")
-    raise RuntimeError(
-        "BLOCKED: real whole-vs-fragment/number comparison rendering is not implemented. "
-        "Template and clip player are not comparison evidence; require real comparison audio and human review."
-    )
 
 
 def main():
@@ -670,8 +594,8 @@ def main():
 
     prep = subparsers.add_parser("prepare")
     prep.add_argument("--corpus", required=True, help="Path to quality-corpus.json")
-    prep.add_argument("--provider", default="piper")
-    prep.add_argument("--rates", default="1.0,1.1,1.15,1.25")
+    prep.add_argument("--provider", choices=("vieneu",), default="vieneu")
+    prep.add_argument("--rates", default="1.0")
     prep.add_argument("--all-cases", action="store_true", help="Render all cases in corpus, not only amount")
     prep.add_argument("--output", required=True, help="Directory for output")
 
@@ -679,10 +603,6 @@ def main():
     val.add_argument("--review", required=True, help="Path to completed review.json")
     val.add_argument("--profile-output", required=True, help="Path to output profile.json")
 
-    comp = subparsers.add_parser("render-comparisons")
-    comp.add_argument("--pack", required=True, help="Directory of candidate voice pack")
-    comp.add_argument("--corpus", required=True, help="Path to quality-corpus.json")
-    comp.add_argument("--output", required=True, help="Output directory")
 
     pack_prep = subparsers.add_parser("prepare-pack-review")
     pack_prep.add_argument("--pack", required=True, help="Directory of candidate whole-only voice pack")
@@ -706,8 +626,6 @@ def main():
         asyncio.run(run_prepare(args))
     elif args.subcommand == "validate":
         run_validate(args)
-    elif args.subcommand == "render-comparisons":
-        run_render_comparisons(args)
     elif args.subcommand == "prepare-pack-review":
         run_prepare_pack_review(args)
     elif args.subcommand == "validate-pack-review":

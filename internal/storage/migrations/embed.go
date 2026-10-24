@@ -76,3 +76,8 @@ var PiperVoiceSQL string
 //
 //go:embed 022_sepay_notification_details.sql
 var SePayNotificationDetailsSQL string
+
+// VieneuOnlySQL embeds schema version 23 fixed VieNeu profile cutover.
+//
+//go:embed 023_vieneu_only.sql
+var VieneuOnlySQL string

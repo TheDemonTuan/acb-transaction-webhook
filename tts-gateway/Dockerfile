@@ -1,4 +1,4 @@
-# Piper/ONNX and lameenc publish glibc manylinux wheels, including ARM64.
+# VieNeu ONNX and lameenc publish glibc manylinux wheels, including ARM64.
 FROM python:3.13.16-slim-trixie@sha256:cf50a4f6ac4f026458b08d5222023d700ac806410dff5e9ca8728fa44f2b850f AS builder
 WORKDIR /app
 COPY requirements.lock ./
@@ -34,7 +34,7 @@ RUN apt-get update && \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/assets/models/vieneu ./assets/models/vieneu
 COPY app ./app
-COPY assets ./assets
+COPY assets/voicepacks ./assets/voicepacks
 COPY licenses ./licenses
 COPY Dockerfile requirements.txt requirements.lock requirements-dev.txt requirements-dev.lock /app/licenses/application/
 COPY scripts /app/licenses/application/scripts
@@ -51,5 +51,5 @@ RUN dpkg --purge --force-depends --force-remove-essential --force-remove-protect
 USER appuser
 EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 --start-period=120s --start-interval=5s \
-    CMD python -c "import json,http.client; c=http.client.HTTPConnection('127.0.0.1',8081,timeout=2); c.request('GET','/health'); r=c.getresponse(); assert r.status==200; d=json.loads(r.read()); c.close(); assert d.get('vieneu', {}).get('available') and d.get('piper', {}).get('available'), 'Required providers unavailable'"
+    CMD python -c "import json,http.client; c=http.client.HTTPConnection('127.0.0.1',8081,timeout=2); c.request('GET','/health'); r=c.getresponse(); assert r.status==200; d=json.loads(r.read()); c.close(); assert set(d)=={'status','primary','vieneu'} and d['status']=='ok' and d['primary']=='vieneu' and d['vieneu']['available'] is True and d['vieneu']['workerCount']==1, 'VieNeu unavailable'"
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8081", "--workers", "1"]

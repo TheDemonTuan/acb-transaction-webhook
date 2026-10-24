@@ -1,12 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'bun:test';
 import { setTestGlobal, restoreTestGlobals } from './test-globals';
 import {
-  DEFAULT_VOICE_PROFILE, EDGE_VOICE_IDS, PIPER_VOICE_ID,
-  fetchVoiceProfile, validateVoiceProfile,
-  type VoiceProviderMode,
+  DEFAULT_VOICE_PROFILE, VIENEU_VOICE_ID, VIENEU_VOICE_LABEL,
+  fetchVoiceProfile, saveVoiceSettingsServer, validateVoiceProfile,
 } from '../src/features/voice-announcements/voice-profile';
 
-const piperProfile = { ...DEFAULT_VOICE_PROFILE, providerMode: 'PIPER_ONLY' as const, voiceId: PIPER_VOICE_ID, rate: 1.25, synthesisKey: 'a'.repeat(64) };
 const defaultProfile = { ...DEFAULT_VOICE_PROFILE, synthesisKey: 'a'.repeat(64) };
 
 describe('resolved server voice profile', () => {
@@ -18,27 +16,19 @@ describe('resolved server voice profile', () => {
     });
   });
 
-  it.each([0.75, 1, 1.25, 2])('accepts Piper rate %s without altering the resolved profile', (rate) => {
-    const resolved = { ...piperProfile, rate };
-    expect(validateVoiceProfile(resolved)).toBe(resolved);
-  });
-
   it.each([
-    { pitchHz: 1 }, { pitchHz: -1 }, { voiceId: EDGE_VOICE_IDS[0] },
-    { voiceId: EDGE_VOICE_IDS[1] }, { voiceId: 'unpublished-piper-voice' },
-    { rate: 0.74 }, { rate: 2.01 }, { rate: 1.251 },
-  ])('rejects unsupported Piper settings %j', (override) => {
-    expect(() => validateVoiceProfile({ ...piperProfile, ...override })).toThrow('VOICE_PROFILE_INVALID');
+    { providerMode: 'PIPER_ONLY' }, { providerMode: 'EDGE_ONLY' },
+    { providerMode: 'BROWSER_ONLY' }, { providerMode: 'ONLINE_AUTO' },
+    { pitchHz: 1 }, { pitchHz: -1 }, { voiceId: 'vi-VN-HoaiMyNeural' },
+    { voiceId: 'vi-VN-NamMinhNeural' }, { voiceId: 'vi-VN-vais1000-medium' },
+    { voiceId: '' }, { rate: 0.75 }, { rate: 1.25 }, { rate: 2 }, { rate: Number.NaN },
+  ])('rejects any non-VieNeu or non-neutral profile %j', (override) => {
+    expect(() => validateVoiceProfile({ ...defaultProfile, ...override })).toThrow('VOICE_PROFILE_INVALID');
   });
 
-  it.each(EDGE_VOICE_IDS)('keeps %s explicitly selectable only in Edge mode', (voiceId) => {
-    expect(validateVoiceProfile({ ...defaultProfile, providerMode: 'EDGE_ONLY', voiceId, pitchHz: 25 })).toMatchObject({ voiceId, pitchHz: 25 });
-    expect(() => validateVoiceProfile({ ...defaultProfile, providerMode: 'EDGE_ONLY', voiceId: PIPER_VOICE_ID })).toThrow('VOICE_PROFILE_INVALID');
-  });
-
-  it('keeps device voice selection separate in explicit browser mode', () => {
-    expect(validateVoiceProfile({ ...defaultProfile, providerMode: 'BROWSER_ONLY', pitchHz: -25 })).toMatchObject({ providerMode: 'BROWSER_ONLY', pitchHz: -25 });
-    expect(() => validateVoiceProfile({ ...defaultProfile, providerMode: 'ONLINE_AUTO' as unknown as VoiceProviderMode })).toThrow('VOICE_PROFILE_INVALID');
+  it('publishes the fixed voice identity', () => {
+    expect(VIENEU_VOICE_ID).toBe('vi-VN-vieneu-v3-turbo-mai-anh-v1');
+    expect(VIENEU_VOICE_LABEL).toBe('VieNeu · Mai Anh · nữ miền Bắc');
   });
 
 
@@ -47,5 +37,22 @@ describe('resolved server voice profile', () => {
     setTestGlobal('fetch', fetcher);
     expect(await fetchVoiceProfile(true)).toEqual(defaultProfile);
     expect(fetcher).toHaveBeenCalledWith('/api/public/v1/voice/profile', expect.objectContaining({ cache: 'no-store' }));
+  });
+
+  it('preserves authenticated revision-CAS saves and surfaces conflicts', async () => {
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/csrf')) return new Response(JSON.stringify({ token: 'voice-csrf' }));
+      expect(url).toBe('/api/v1/voice/settings');
+      expect(init?.credentials).toBe('same-origin');
+      expect(init?.method).toBe('PUT');
+      expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(true);
+      expect(JSON.parse(String(init?.body))).toMatchObject({ revision: defaultProfile.revision,
+        providerMode: 'VIENEU_ONLY', voiceId: VIENEU_VOICE_ID, rate: 1, pitchHz: 0 });
+      return new Response(JSON.stringify({ error: 'conflict' }), {
+        status: 409, headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    setTestGlobal('fetch', fetcher);
+    await expect(saveVoiceSettingsServer(defaultProfile)).rejects.toThrow('VOICE_SETTINGS_CONFLICT');
   });
 });

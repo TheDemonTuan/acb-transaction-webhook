@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8"><title>Real VieNeu browser audio evidence</title></head>
+  <body>
+    <button id="run" type="button">Run real browser audio</button>
+    <p>Uses the committed VieNeu MP3 pack through transport-only Playwright fixtures; audio nodes, codecs and media events are native Chromium.</p>
+    <p>From web: <code>bunx playwright test e2e/voice-real-audio.spec.ts --project=desktop</code>. Inspect the JSON and RMS attachments for all 140 pack clips and the retained 16 MiB compressed playback pin.</p>
+    <output id="result" aria-live="polite">Ready</output>
+    <script type="module" src="./voice-audio-harness.ts"></script>
+  </body>
+</html>

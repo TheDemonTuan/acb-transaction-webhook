@@ -2,7 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"reflect"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -119,12 +120,12 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 	if err := voicecopy.CheckAmountFixtures(); err != nil {
 		t.Fatal(err)
 	}
-	profile := voicecopy.AudioInputProfile{VoiceID: "vi-VN-NamMinhNeural", Rate: 1.25, PitchHz: 0}
+	profile := voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDVieneuMaiAnh, Rate: 1.00, PitchHz: 0}
 	inputs, err := voicecopy.ExportAudioInputs(profile, voicecopy.AudioInputOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputs.SchemaVersion != 2 || inputs.FormatterVersion != "money-vi-v1" || inputs.CatalogVersion != "v1" || len(inputs.Amounts) < 20 {
+	if inputs.SchemaVersion != 2 || inputs.FormatterVersion != "money-vi-v1" || inputs.CatalogVersion != "v1" || len(inputs.Amounts) != 20 || inputs.SynthesisKey != storage.ComputeSynthesisKey(profile.VoiceID, profile.Rate, profile.PitchHz) {
 		t.Fatalf("unexpected input metadata/counts")
 	}
 	seen := map[string]voicecopy.AudioInputClip{}
@@ -136,7 +137,7 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 		seen[clip.ClipID] = clip
 		kinds[clip.Kind]++
 	}
-	if kinds["amount"] < 20 || kinds["classic"] < 120 || kinds["tail-fragment"] != 600 {
+	if kinds["amount"] != 20 || kinds["classic"] != 120 || len(kinds) != 2 || len(inputs.Clips) != 140 {
 		t.Fatalf("wrong kinds: %v", kinds)
 	}
 	entry := inputs.Amounts["500000"]
@@ -146,32 +147,31 @@ func TestAmountFixturesAndAudioInputContract(t *testing.T) {
 	catalog := compileSource(t)
 	for _, phrase := range catalog.Classic {
 		clip := seen[entry.Classic[phrase.ID]]
-		if clip.Transcript != voicecopy.FormatAnnouncementTemplate(phrase.Template, 500000, "", false) {
+		if clip.Transcript != voicecopy.FormatSpokenAnnouncementTemplate(phrase.Template, 500000, "", false) {
 			t.Fatalf("classic transcript changed: %s", phrase.ID)
 		}
 	}
-	other, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: "vi-VN-HoaiMyNeural", Rate: 1.25, PitchHz: 0}, voicecopy.AudioInputOptions{})
+	if len(inputs.PreloadClipIDs) != 6 {
+		t.Fatalf("expected six whole-utterance preloads, got %d", len(inputs.PreloadClipIDs))
+	}
+	for _, id := range inputs.PreloadClipIDs {
+		if seen[id].Kind != "amount" {
+			t.Fatalf("preload %s is not a whole amount announcement", id)
+		}
+	}
+	raw, err := voicecopy.MarshalCatalog(inputs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputs.SynthesisKey == other.SynthesisKey {
-		t.Fatal("different voices share synthesis key")
-	}
-	piper, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 0}, voicecopy.AudioInputOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if piper.VoiceID != storage.VoiceIDPiperVais1000 || piper.SynthesisKey != storage.ComputeSynthesisKey(storage.VoiceIDPiperVais1000, 1.25, 0) ||
-		piper.SchemaVersion != 2 || !reflect.DeepEqual(piper.Clips, inputs.Clips) || !reflect.DeepEqual(piper.Amounts, inputs.Amounts) {
-		t.Fatal("Piper pack must export the same exact Go transcripts under its own synthesis key")
-	}
-	if _, err := voicecopy.ExportAudioInputs(voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25, PitchHz: 1}, voicecopy.AudioInputOptions{}); err == nil {
-		t.Fatal("Piper pitch override accepted")
+	for _, field := range []string{"numberSegments", "numberPrefix", "numberSuffix"} {
+		if strings.Contains(string(raw), `"`+field+`"`) {
+			t.Fatalf("whole-utterance export contains %s", field)
+		}
 	}
 }
 
 func TestAudioInputAmountCapPreservesBaseAndRanking(t *testing.T) {
-	profile := voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDPiperVais1000, Rate: 1.25}
+	profile := voicecopy.AudioInputProfile{VoiceID: storage.VoiceIDVieneuMaiAnh, Rate: 1.00}
 	base, err := voicecopy.ExportAudioInputs(profile, voicecopy.AudioInputOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -216,5 +216,64 @@ func TestClassicValidationDoesNotDependOnNewCatalogApproval(t *testing.T) {
 	}
 	if err := voicecopy.ValidateRecipe("classic-001", "classic", "unknown"); err == nil {
 		t.Fatal("unknown band accepted")
+	}
+}
+
+func TestReadProfileRequiresFixedVieneuProfile(t *testing.T) {
+	valid := map[string]any{
+		"providerMode":         "VIENEU_ONLY",
+		"voiceId":              storage.VoiceIDVieneuMaiAnh,
+		"rate":                 1.00,
+		"pitchHz":              0,
+		"synthesisKey":         storage.ComputeSynthesisKey(storage.VoiceIDVieneuMaiAnh, 1.00, 0),
+		"catalogVersion":       voicecopy.CatalogVersion,
+		"revision":             3,
+		"coldRequestTimeoutMs": 8000,
+	}
+	for _, tc := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "fixed profile"},
+		{name: "missing provider", field: "providerMode", value: ""},
+		{name: "retired Edge", field: "providerMode", value: "EDGE_ONLY"},
+		{name: "retired Piper", field: "providerMode", value: "PIPER_ONLY"},
+		{name: "retired browser", field: "providerMode", value: "BROWSER_ONLY"},
+		{name: "retired voice", field: "voiceId", value: "vi-VN-vais1000-medium"},
+		{name: "changed rate", field: "rate", value: 1.25},
+		{name: "changed pitch", field: "pitchHz", value: 1},
+		{name: "unsupported catalog", field: "catalogVersion", value: "v2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := make(map[string]any, len(valid))
+			for key, value := range valid {
+				fixture[key] = value
+			}
+			if tc.field != "" {
+				fixture[tc.field] = tc.value
+			}
+			raw, err := json.Marshal(fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "profile.json")
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			profile, key, err := readProfile(path)
+			if tc.field != "" {
+				if err == nil {
+					t.Fatal("unsupported profile accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profile.VoiceID != storage.VoiceIDVieneuMaiAnh || profile.Rate != 1.00 || profile.PitchHz != 0 || key != valid["synthesisKey"] {
+				t.Fatalf("resolved profile changed: %+v, key %s", profile, key)
+			}
+		})
 	}
 }

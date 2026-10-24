@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { TransactionAudioEngine } from './transaction-audio-engine';
 import { MultiTabLeader } from './multi-tab-leader';
 import { VoiceDedupe } from './voice-dedupe';
-import type { VoiceEngine, VoiceInfo, VoiceMessage, VoiceTelemetry } from './voice-engine';
+import type { VoiceEngine, VoiceMessage, VoiceTelemetry } from './voice-engine';
 import { recordVoiceTelemetry } from './voice-telemetry';
 import { VoiceQueue } from './voice-queue';
 import { loadVoiceSettings, saveVoiceSettings, type VoiceSettings } from './voice-settings';
@@ -21,7 +21,6 @@ export interface VoiceAnnouncementContextValue {
   isLeader: boolean;
   isSpeaking: boolean;
   audioUnlocked: boolean;
-  voices: VoiceInfo[];
   profile?: VoiceProfile;
   profileOffline: boolean;
   voiceState: 'ready' | 'cold' | 'unavailable';
@@ -50,7 +49,6 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
   const [isLeader, setIsLeader] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [audioUnlocked, setAudioUnlocked] = useState(false);
-  const [voices, setVoices] = useState<VoiceInfo[]>([]);
   const [lastTelemetry, setLastTelemetry] = useState<VoiceTelemetry | null>(null);
   const [voiceState, setVoiceState] = useState<'ready' | 'cold' | 'unavailable'>('unavailable');
   const [voiceDetail, setVoiceDetail] = useState<string>();
@@ -76,19 +74,23 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
   useEffect(() => {
     let live = true;
     const engine = injectedEngine || new TransactionAudioEngine({ isPublic, onProfileChanged: () => refreshProfile(),
-      onStatus: (state, detail) => { if (live) { setVoiceState(state); setVoiceDetail(detail); } } });
+      onStatus: (state, detail) => {
+        if (!live) return;
+        if (detail === 'AUDIO_CONTEXT_NOT_RUNNING') {
+          unlocked.current = false;
+          setAudioUnlocked(false);
+          setVoiceState('unavailable');
+        } else setVoiceState(state);
+        setVoiceDetail(detail);
+      } });
     const queue = new VoiceQueue(engine, (state) => {
       if (live) { setIsSpeaking(state === 'speaking'); setPendingCount(queue.getPendingCount()); }
     }, { getProfile: () => profileRef.current });
     const next = { engine, queue };
     ownerRef.current = next; setOwner(next); unlocked.current = false;
     setAudioUnlocked(false);
-    const refreshVoices = () => { void engine.getVoices().then((items) => { if (live) setVoices(items); }); };
-    refreshVoices();
-    window.speechSynthesis?.addEventListener('voiceschanged', refreshVoices);
     return () => {
       live = false; ownerRef.current = null; unlocked.current = false;
-      window.speechSynthesis?.removeEventListener('voiceschanged', refreshVoices);
       // Injected engines have external ownership. Production owners are fresh on
       // each effect setup, including React StrictMode's setup-cleanup-setup cycle.
       if (injectedEngine) queue.cancel(); else queue.dispose();
@@ -99,7 +101,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     if (!owner || !profileQuery.data) return;
     if (owner.engine instanceof TransactionAudioEngine) owner.engine.setProfile(profileQuery.data);
     owner.queue.refreshPendingProfile();
-    setVoiceState(profileQuery.data.providerMode === 'BROWSER_ONLY' ? 'ready' : 'cold');
+    setVoiceState('cold');
   }, [owner, profileQuery.data]);
 
   useEffect(() => {
@@ -145,7 +147,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       receivedMonotonicAt: envelope.receivedMonotonicAt, queuedAt: Date.now(),
       sseToQueueMs: envelope.receivedMonotonicAt === undefined ? undefined : performance.now() - envelope.receivedMonotonicAt };
     const message: VoiceMessage = { text: '', amountVnd: amount.toString(), description: data.description,
-      volume: settings.volume, voiceURI: settings.browserVoiceURI, transactionId: data.transactionId, chime: true, telemetry,
+      volume: settings.volume, transactionId: data.transactionId, chime: true, telemetry,
       onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
       onSuccess: () => {
         dedupe.commit(keys);
@@ -194,7 +196,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       amountVnd: '500000',
       isTest: true,
       volume: settings.volume,
-      voiceURI: settings.browserVoiceURI,
+      chime: true,
       telemetry,
       onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
       onSuccess: () => {
@@ -210,7 +212,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         setLastTelemetry({ ...telemetry });
       },
     });
-  }, [settings.volume, settings.browserVoiceURI]);
+  }, [settings.volume]);
   const replayVoice = useCallback(async (transactionId: string) => {
     const active = ownerRef.current;
     if (!active || !profileRef.current) throw new Error('VOICE_PROFILE_UNAVAILABLE');
@@ -230,7 +232,6 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
       transactionId,
       isReplay: true,
       volume: settings.volume,
-      voiceURI: settings.browserVoiceURI,
       telemetry,
       onStart: (sample) => { if (sample) setLastTelemetry({ ...sample }); },
       onSuccess: () => {
@@ -246,7 +247,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
         setLastTelemetry({ ...telemetry });
       },
     });
-  }, [settings.volume, settings.browserVoiceURI]);
+  }, [settings.volume]);
   const unlockAudio = useCallback(async () => {
     const active = ownerRef.current;
     if (!active || !profileRef.current) return false;
@@ -260,7 +261,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
   }, []);
   const cancelVoice = useCallback(() => { ownerRef.current?.queue.cancel(); setPendingCount(0); }, []);
   const value: VoiceAnnouncementContextValue = {
-    settings, updateSettings, isSupported: owner?.engine.isSupported() ?? false, isLeader, isSpeaking, audioUnlocked, voices,
+    settings, updateSettings, isSupported: owner?.engine.isSupported() ?? false, isLeader, isSpeaking, audioUnlocked,
     profile: profileQuery.data, profileOffline: profileQuery.isError, voiceState, voiceDetail, pendingCount, skippedCount,
     recentSkipped, lastTelemetry, refreshProfile, handleCreditEvent, testVoice, replayVoice, unlockAudio, cancelVoice,
   };

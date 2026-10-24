@@ -81,7 +81,6 @@ services:
       PORT: 8081
       TZ: Asia/Ho_Chi_Minh
       TTS_INTERNAL_TOKEN_FILE: /run/secrets/tts_internal_token
-      PIPER_WORKERS: ${PIPER_WORKERS:-1}
       TTS_VIENEU_THREADS: ${TTS_VIENEU_THREADS:-2}
     expose:
       - "8081"
@@ -95,7 +94,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,http.client; c=http.client.HTTPConnection('127.0.0.1',8081,timeout=2); c.request('GET','/health'); r=c.getresponse(); assert r.status==200; d=json.loads(r.read()); c.close(); assert d.get('vieneu', {}).get('available') and d.get('piper', {}).get('available'), 'Required providers unavailable'"]
+      test: ["CMD", "python", "-c", "import json,http.client; c=http.client.HTTPConnection('127.0.0.1',8081,timeout=2); c.request('GET','/health'); r=c.getresponse(); assert r.status==200; d=json.loads(r.read()); c.close(); assert set(d)=={'status','primary','vieneu'} and d['status']=='ok' and d['primary']=='vieneu' and d['vieneu']['available'] is True and d['vieneu']['workerCount']==1, 'VieNeu unavailable'"]
       interval: 30s
       timeout: 3s
       retries: 3

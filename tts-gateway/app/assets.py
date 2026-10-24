@@ -1,7 +1,6 @@
 """Read-only, manifest-authorized voice packs. No runtime synthesis or writes."""
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 import hashlib
 import json
 import math
@@ -14,13 +13,11 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_CLIP_BYTES = 4 * 1024 * 1024
 MAX_PACK_BYTES = 64 * 1024 * 1024
 FORMATTER_VERSION = "money-vi-v1"
-PIPER_VOICE = "vi-VN-vais1000-medium"
 VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
-VOICES = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural", PIPER_VOICE, VIENEU_VOICE}
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 AMOUNT = re.compile(r"^[1-9][0-9]*$")
-KINDS = {"amount", "classic", "tail-fragment", "tail-full", "amount-segment", "amount-prefix", "amount-suffix"}
+KINDS = {"amount", "classic", "tail-full"}
 
 class InvalidPack(ValueError):
     pass
@@ -61,23 +58,11 @@ def _fields(value, expected):
 
 
 def synthesis_key(voice, rate, pitch):
-    if not isinstance(voice, str) or voice not in VOICES or isinstance(rate, bool) or not isinstance(rate, (int, float)):
-        raise InvalidPack("Unsupported voice/rate")
-    if not math.isfinite(rate) or not 0.75 <= rate <= 2 or Decimal(str(rate)) * 100 != (Decimal(str(rate)) * 100).to_integral_value():
-        raise InvalidPack("Invalid rate")
-    if type(pitch) is not int or not -50 <= pitch <= 50:
-        raise InvalidPack("Invalid pitch")
-    if voice == PIPER_VOICE:
-        provider = "piper"
-    elif voice == VIENEU_VOICE:
-        provider = "vieneu"
-    else:
-        provider = "edge"
-    if provider == "piper" and pitch != 0:
-        raise InvalidPack("Piper requires zero pitch")
-    if provider == "vieneu" and (rate != 1.0 or pitch != 0):
+    if voice != VIENEU_VOICE or isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        raise InvalidPack("Unsupported VieNeu voice/rate")
+    if rate != 1.0 or type(pitch) is not int or pitch != 0:
         raise InvalidPack("VieNeu requires rate 1.00 and zero pitch")
-    source = f"{provider}|{voice}|{rate:.2f}|{pitch}|{FORMATTER_VERSION}|pack-schema-2"
+    source = f"vieneu|{voice}|{rate:.2f}|{pitch}|{FORMATTER_VERSION}|pack-schema-2"
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
@@ -105,21 +90,8 @@ def _validate_schema2_inputs(data, ids):
     for cid in preloads:
         if cid not in ids:
             raise InvalidPack(f"Preload clip {cid} not found in clips")
-    num_segs = data.get("numberSegments")
-    if num_segs is not None:
-        if not isinstance(num_segs, dict) or len(num_segs) > 128:
-            raise InvalidPack("Invalid numberSegments map")
-        for group, cid in num_segs.items():
-            if not isinstance(group, str) or not group.strip() or not isinstance(cid, str) or cid not in ids or ids[cid]["kind"] != "amount-segment" or ids[cid]["transcript"] != group:
-                raise InvalidPack(f"Invalid number segment mapping: {group}")
-    prefix = data.get("numberPrefix")
-    if prefix is not None:
-        if not isinstance(prefix, str) or prefix not in ids or ids[prefix]["kind"] != "amount-prefix":
-            raise InvalidPack("Invalid numberPrefix")
-    suffix = data.get("numberSuffix")
-    if suffix is not None:
-        if not isinstance(suffix, str) or suffix not in ids or ids[suffix]["kind"] != "amount-suffix":
-            raise InvalidPack("Invalid numberSuffix")
+    if any(data.get(field) is not None for field in ("numberSegments", "numberPrefix", "numberSuffix")):
+        raise InvalidPack("VieNeu packs require whole utterances without number composition")
 
 def _validate_common(data):
     if type(data["schemaVersion"]) is not int or data["schemaVersion"] != 2 or data["formatterVersion"] != FORMATTER_VERSION or data["catalogVersion"] != "v1":
@@ -168,7 +140,7 @@ def validate_clip_metadata(clip):
         if val is not None:
             if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or val < 0 or val >= clip["durationMs"]:
                 raise InvalidPack(f"Invalid onset timestamp for {onset}")
-    if clip["kind"] in ("tail-fragment", "tail-full") and clip["amountStartMs"] is not None:
+    if clip["kind"] == "tail-full" and clip["amountStartMs"] is not None:
         raise InvalidPack("Tail clips cannot have an amount onset")
 
 def validate_manifest(data):
@@ -181,8 +153,8 @@ def validate_manifest(data):
     if not isinstance(quality_evidence, str) or not HASH.fullmatch(quality_evidence):
         raise InvalidPack("Invalid quality evidence hash")
     comp = data.get("composition")
-    if not isinstance(comp, dict) or set(comp.keys()) != {"tail", "numbers"} or comp["tail"] not in ("whole", "fragments") or comp["numbers"] not in ("whole", "segments"):
-        raise InvalidPack("Invalid composition modes")
+    if comp != {"tail": "whole", "numbers": "whole"}:
+        raise InvalidPack("VieNeu packs require whole utterance composition")
     version = data["packVersion"]
     unsigned = {k: v for k, v in data.items() if k != "packVersion"}
     if not isinstance(version, str) or not HASH.fullmatch(version) or hashlib.sha256(canonical_json(unsigned)).hexdigest() != version:
@@ -199,8 +171,6 @@ def validate_manifest(data):
         raise InvalidPack("Pack exceeds limit")
     _validate_amounts(data["amounts"], ids)
     _validate_schema2_inputs(data, ids)
-    if comp["numbers"] == "segments" and (not data.get("numberSegments") or data.get("numberPrefix") is None or data.get("numberSuffix") is None):
-        raise InvalidPack("Segment composition requires number clips, prefix and suffix")
     return data
 
 
@@ -257,15 +227,10 @@ def validate_quality_evidence(evidence, manifest):
     _fields(decisions, ("tail", "numbers"))
     if any(value not in ("approved", "rejected") for value in decisions.values()):
         raise InvalidPack("Invalid candidate decisions")
-    if evidence["tailMode"] not in ("whole", "fragments") or evidence["numberMode"] not in ("whole", "segments"):
-        raise InvalidPack("Invalid reviewed composition modes")
+    if evidence["tailMode"] != "whole" or evidence["numberMode"] != "whole":
+        raise InvalidPack("VieNeu quality review requires whole utterance composition")
     if manifest["composition"] != {"tail": evidence["tailMode"], "numbers": evidence["numberMode"]}:
         raise InvalidPack("Quality composition mismatch")
-    for role, mode in (("tail", evidence["tailMode"]), ("numbers", evidence["numberMode"])):
-        if mode in ("fragments", "segments") and (decisions[role] != "approved" or evidence["joinFailures"]):
-            raise InvalidPack("Unapproved joins cannot be enabled")
-    if evidence["tailMode"] == "fragments" and (sum(clip["kind"] == "tail-fragment" for clip in manifest["clips"]) != 600 or len(evidence["heardRecipePairIds"]) < 80):
-        raise InvalidPack("Fragment composition requires all 600 clips and 80 reviewed pairs")
     reviews = evidence["clips"]
     if not isinstance(reviews, list) or len(reviews) != len(clip_ids):
         raise InvalidPack("Quality clip review must cover the exact clip set")

@@ -1,15 +1,6 @@
 """Configuration for TTS Gateway sidecar."""
 import os
-from pydantic import BaseModel
-def _parse_piper_workers() -> int:
-    raw = os.getenv("PIPER_WORKERS", "1").strip()
-    try:
-        val = int(raw)
-        if val in (1, 2):
-            return val
-    except ValueError:
-        pass
-    raise ValueError(f"PIPER_WORKERS must be 1 or 2, got: {raw!r}")
+from pydantic import BaseModel, Field
 def _parse_vieneu_threads() -> int:
     raw = os.getenv("TTS_VIENEU_THREADS", "2").strip()
     try:
@@ -20,11 +11,8 @@ def _parse_vieneu_threads() -> int:
         pass
     raise ValueError(f"TTS_VIENEU_THREADS must be an integer between 1 and 4, got: {raw!r}")
 
-
-
 class Config(BaseModel):
-    piper_workers: int = _parse_piper_workers()
-    vieneu_threads: int = _parse_vieneu_threads()
+    vieneu_threads: int = Field(default_factory=_parse_vieneu_threads, ge=1, le=4, strict=True)
     host: str = os.getenv("TTS_HOST", "0.0.0.0")
     port: int = int(os.getenv("TTS_PORT", "8081"))
     internal_token: str = os.getenv("TTS_INTERNAL_TOKEN", "")
@@ -34,10 +22,6 @@ class Config(BaseModel):
     cache_max_items: int = 256
     cache_max_bytes: int = int(os.getenv("TTS_CACHE_MAX_BYTES", str(32 * 1024 * 1024)))  # 32MB default
     cache_ttl_seconds: int = 600  # 10 minutes
-    edge_circuit_failure_threshold: int = 3
-    edge_circuit_reset_timeout: float = 45.0  # seconds
-    edge_stream_initial_timeout: float = float(os.getenv("TTS_EDGE_INITIAL_TIMEOUT", "4.0"))
-    edge_stream_idle_timeout: float = float(os.getenv("TTS_EDGE_IDLE_TIMEOUT", "5.0"))
 
     def get_token(self) -> str:
         if self.internal_token:

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 image_ref="${1:-${TTS_GATEWAY_IMAGE:-ghcr.io/thedemontuan/acb-transaction-webhook-tts-gateway:latest}}"
 container_name="${CONTAINER_NAME:-tts-gateway-smoke-$$-${RANDOM}}"
 
@@ -10,7 +9,6 @@ TTS_CPUS="${TTS_CPUS:-2.0}"
 TTS_MEMORY_LIMIT="${TTS_MEMORY_LIMIT:-4G}"
 TTS_VIENEU_THREADS="${TTS_VIENEU_THREADS:-2}"
 TTS_SMOKE_OFFLINE="${TTS_SMOKE_OFFLINE:-0}"
-host="127.0.0.1"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Error: Docker CLI is required for the tts-gateway smoke test." >&2
@@ -72,226 +70,219 @@ docker run -d \
   -e "TTS_PORT=8081" \
   -e "TTS_REQUIRE_AUTH=true" \
   -e "TTS_INTERNAL_TOKEN_FILE=/run/secrets/tts_internal_token" \
-  -e "PIPER_WORKERS=${PIPER_WORKERS:-1}" \
   -e "TTS_VIENEU_THREADS=$TTS_VIENEU_THREADS" \
   "$image_ref"
 
-if [[ "$TTS_SMOKE_OFFLINE" != "1" ]]; then
-
-echo "Waiting for tts-gateway container to become ready..."
-ready=0
-for i in {1..60}; do
-  if curl --silent --fail "http://${host}:${TTS_PORT}/health" >/dev/null 2>&1; then
-    ready=1
-    break
-  fi
-  sleep 1
-done
-
-if [[ $ready -ne 1 ]]; then
-  echo "Error: tts-gateway failed to respond on /health within 60s" >&2
-  exit 1
-fi
-
-echo "Verifying unauthorized request returns 401..."
-http_code="$(curl -s -o /dev/null -w "%{http_code}" "http://${host}:${TTS_PORT}/voices")"
-if [[ "$http_code" != "401" ]]; then
-  echo "Error: expected HTTP 401 without auth token, got $http_code" >&2
-  exit 1
-fi
-
-echo "Verifying invalid token returns 401..."
-http_code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Internal-TTS-Token: invalid" "http://${host}:${TTS_PORT}/voices")"
-if [[ "$http_code" != "401" ]]; then
-  echo "Error: expected HTTP 401 with invalid token, got $http_code" >&2
-  exit 1
-fi
-
-echo "Verifying valid token returns 200..."
-http_code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Internal-TTS-Token: ${secret_token}" "http://${host}:${TTS_PORT}/voices")"
-if [[ "$http_code" != "200" ]]; then
-  echo "Error: expected HTTP 200 with valid token, got $http_code" >&2
-  exit 1
-fi
-fi
-
-echo "Verifying real fixed Piper and VieNeu synthesis, streaming, and inference cancellation..."
+echo "Verifying VieNeu readiness, authentication, real decoded synthesis, and inference cancellation..."
+# Both published-port and network-none containers use the same bounded loopback
+# readiness/auth/inference checks inside the immutable runtime image.
 docker exec -i "$container_name" python - <<'PY'
 import http.client
 import importlib.util
+import io
 import json
-from pathlib import Path
+import math
 import os
+from pathlib import Path
 import signal
 from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
 
+import numpy as np
+import soundfile as sf
+
 for unused_module in ("gradio", "PIL"):
     assert importlib.util.find_spec(unused_module) is None, f"Unused UI/image runtime shipped: {unused_module}"
 
 TOKEN = Path("/run/secrets/tts_internal_token").read_text().strip()
-PIPER_VOICE = "vi-VN-vais1000-medium"
-VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
+VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
 CORE = "Đã nhận năm trăm nghìn đồng."
 LIMIT = 4 * 1024 * 1024
-def mpeg_frame(data):
-    # Skip optional ID3v2 metadata and require a plausible MPEG audio frame.
-    start = 0
-    if data.startswith(b"ID3") and len(data) >= 10:
-        if any(value & 128 for value in data[6:10]):
-            return False
-        size = sum(value << shift for value, shift in zip(data[6:10], (21, 14, 7, 0)))
-        start = 10 + size + (10 if data[5] & 16 else 0)
-    for index in range(start, min(len(data) - 3, start + 4096)):
-        a, b, c = data[index:index + 3]
-        if a == 255 and b & 224 == 224 and (b >> 3) & 3 != 1 and (b >> 1) & 3 != 0 and (c >> 4) not in (0, 15) and (c >> 2) & 3 != 3:
-            return True
-    return False
-def vieneu_test():
-    connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
+HEADERS = {"Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN}
+
+
+def health(timeout=2):
+    connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=timeout)
     try:
-        connection.request("POST", "/synthesize", json.dumps({
-            "text": "Đã nhận một trăm linh năm nghìn đồng.",
-            "voice": VIENEU_VOICE, "provider_mode": "VIENEU_ONLY",
-            "rate": "+0%", "pitch": "+0Hz", "cacheable": False, "timeout_ms": 8000,
-        }).encode(), {
-            "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
-        })
+        connection.request("GET", "/health")
         response = connection.getresponse()
-        data = response.read(LIMIT + 1)
-        assert response.status == 200, f"VieNeu status {response.status}"
-        assert response.getheader("X-TTS-Provider") == "vieneu"
-        assert response.getheader("X-TTS-Voice") == VIENEU_VOICE
-        assert mpeg_frame(data) and len(data) <= LIMIT
+        assert response.status == 200, f"Health HTTP {response.status}"
+        data = json.loads(response.read(LIMIT + 1))
+        assert set(data) == {"status", "primary", "vieneu"}, "Retired provider in health"
+        assert data["primary"] == "vieneu", "Unexpected primary provider"
+        assert data["vieneu"]["workerCount"] == 1, "Expected one VieNeu worker"
+        return data
     finally:
         connection.close()
 
-vieneu_test()
 
-def request(path, text):
+def wait_ready():
+    deadline = time.monotonic() + 150
+    last_error = "VieNeu unavailable"
+    while time.monotonic() < deadline:
+        try:
+            data = health(timeout=min(2, deadline - time.monotonic()))
+            if (data["status"] == "ok" and data["vieneu"]["available"] is True
+                    and data["vieneu"]["activeWorkers"] == 0
+                    and data["vieneu"]["idleWorkers"] == 1):
+                return
+            last_error = str(data)
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            last_error = str(error)
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise AssertionError(f"VieNeu not ready within 150s: {last_error}")
+
+
+def payload(text=CORE, **changes):
+    data = {
+        "text": text, "voice": VOICE, "rate": "+0%", "pitch": "+0Hz",
+        "provider_mode": "VIENEU_ONLY", "cacheable": False, "timeout_ms": 8000,
+    }
+    data.update(changes)
+    return data
+
+
+def read_eof(response):
+    data = bytearray()
+    while True:
+        chunk = response.read(16384)
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+        assert len(data) <= LIMIT, "Audio over limit"
+
+
+def decode_audio(data):
+    assert 0 < len(data) <= LIMIT, "Audio empty/over limit"
+    samples, sample_rate = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
+    assert sample_rate == 24000, f"Unexpected sample rate {sample_rate}"
+    assert samples.dtype == np.float32 and samples.ndim == 2 and samples.shape[1] == 1, "Expected float32 mono"
+    duration = len(samples) / sample_rate
+    assert math.isfinite(duration) and duration > 0, "Empty/invalid duration"
+    assert np.isfinite(samples).all(), "Non-finite audio samples"
+    energy = float(np.mean(np.square(samples, dtype=np.float64)))
+    assert math.isfinite(energy) and energy > 1e-8, f"No speech energy: {energy}"
+
+
+def audio_headers(response, cached="false"):
+    assert response.getheader("Content-Type", "").split(";")[0] == "audio/mpeg", "Not MPEG content type"
+    assert response.getheader("X-TTS-Provider") == "vieneu", "Unexpected provider"
+    assert response.getheader("X-TTS-Voice") == VOICE, "Effective voice mismatch"
+    assert response.getheader("X-TTS-Cached") == cached, "Unexpected cache result"
+    assert response.getheader("X-TTS-Fallback") == "false", "Fallback not permitted"
+
+
+def synthesize(path="/synthesize", data=None, cached="false", allow_timeout=False):
     connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
+    started = time.monotonic()
     try:
-        connection.request("POST", path, json.dumps({
-            "text": text, "voice": PIPER_VOICE, "rate": "+25%", "pitch": "+0Hz",
-            "provider_mode": "PIPER_ONLY", "cacheable": False, "timeout_ms": 8000,
-        }, ensure_ascii=False).encode(), {
-            "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
-        })
+        connection.request("POST", path, json.dumps(data or payload(), ensure_ascii=False).encode(), HEADERS)
         response = connection.getresponse()
-        if response.status == 502:
-            raise RuntimeError("PIPER_UNAVAILABLE: fixed local synthesis failed; no fallback accepted")
-        if response.status == 504:
-            raise RuntimeError("TTS_TIMEOUT: total synthesis budget exhausted (admission/upstream); no fallback accepted")
-        if response.status == 503:
-            raise AssertionError("TTS_OVERLOADED: isolated smoke admission unavailable after disconnect")
-        if response.status != 200:
-            raise AssertionError(f"Synthesis HTTP {response.status}")
-        assert response.getheader("Content-Type", "").split(";")[0] == "audio/mpeg", "Not MPEG content type"
-        assert response.getheader("X-TTS-Provider") == "piper", "Unexpected provider/fallback"
-        assert response.getheader("X-TTS-Voice") == PIPER_VOICE, "Effective voice mismatch"
-        assert response.getheader("X-TTS-Cached") == "false", "Smoke must exercise real synthesis"
-        assert response.getheader("X-TTS-Fallback") == "false", "Fallback not permitted"
-        return connection, response
-    except BaseException:
-        connection.close()
-        raise
-
-def buffered():
-    connection, response = request("/synthesize", CORE)
-    try:
-        data = response.read(LIMIT + 1)
-        assert 0 < len(data) <= LIMIT, "Audio empty/over limit"
-        assert mpeg_frame(data), "Response is not MPEG audio"
+        body = read_eof(response)
+        if allow_timeout and response.status == 504:
+            assert json.loads(body)["detail"] == "TTS_TIMEOUT"
+            assert time.monotonic() - started < 10, "Unbounded synthesis deadline"
+            return response.status
+        assert response.status == 200, f"Synthesis HTTP {response.status}: {body[:256]!r}"
+        audio_headers(response, cached)
+        decode_audio(body)
+        return response.status
     finally:
-        response.close()
         connection.close()
+
+
+def auth_and_catalog():
+    for token, expected_status in ((None, 401), ("invalid", 401), (TOKEN, 200)):
+        connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=2)
+        try:
+            connection.request("GET", "/voices", headers={} if token is None else {"X-Internal-TTS-Token": token})
+            response = connection.getresponse()
+            body = response.read(LIMIT + 1)
+            assert response.status == expected_status, f"Catalog auth HTTP {response.status}, expected {expected_status}"
+            if expected_status == 200:
+                voices = json.loads(body)
+                assert len(voices) == 1 and voices[0]["id"] == VOICE and voices[0]["provider"] == "vieneu", "Unexpected voice catalog"
+        finally:
+            connection.close()
+    for path in ("/synthesize", "/synthesize/stream"):
+        for retired_mode in ("PIPER_ONLY", "EDGE_ONLY", "BROWSER_ONLY", "HYBRID"):
+            connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=2)
+            try:
+                connection.request("POST", path, json.dumps(payload(provider_mode=retired_mode)).encode(), HEADERS)
+                response = connection.getresponse()
+                response.read(LIMIT + 1)
+                assert response.status == 422, f"Retired mode {retired_mode} accepted by {path}: {response.status}"
+            finally:
+                connection.close()
+
 
 def worker_pids():
     pids = set()
     for path in Path("/proc").glob("[0-9]*/cmdline"):
         try:
-            if b"app.providers.piper_worker" in path.read_bytes():
-                pids.add(path.parent.name)
+            if b"app.providers.vieneu_worker" in path.read_bytes():
+                pids.add(int(path.parent.name))
         except (FileNotFoundError, PermissionError):
             pass
     return pids
 
+
 try:
-    health_connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=3)
-    health_connection.request("GET", "/health")
-    health_data = json.loads(health_connection.getresponse().read())
-    health_connection.close()
-    expected_workers = int(os.environ.get("PIPER_WORKERS", "1"))
-    assert health_data["primary"] == "vieneu" and health_data["vieneu"]["available"], "VieNeu not ready"
-    assert health_data["piper"]["available"], "Piper not ready"
-    assert health_data["piper"]["workerCount"] == expected_workers, f"Expected {expected_workers} workers, got {health_data['piper'].get('workerCount')}"
-    buffered()
-    connection, response = request("/synthesize/stream", CORE)
-    assert mpeg_frame(response.read(LIMIT + 1)), "Stream is not real MPEG"
-    response.close()
-    connection.close()
-    # Disconnect BEFORE headers while real inference is running. Reaped worker
-    # PIDs, followed by real successful synthesis, prove cancellation ownership.
+    wait_ready()
+    auth_and_catalog()
+    synthesize()
+    synthesize("/synthesize/stream")
+    # Pause the real worker before headers, prove the request owns inference,
+    # then disconnect. The worker must be killed/reaped, not returned to the pool.
+    # Retrying the exact cacheable payload must synthesize, never serve partial data.
     for index in range(3):
+        wait_ready()
         before = worker_pids()
-        for pid in before:
-            os.kill(int(pid), signal.SIGSTOP)
-        connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
-        connection.request("POST", "/synthesize/stream", json.dumps({
-            "text": (CORE + " Cảm ơn bạn đã ghé quầy. ") * 8 + str(index),
-            "voice": PIPER_VOICE, "provider_mode": "PIPER_ONLY", "cacheable": False,
-            "rate": "+25%", "pitch": "+0Hz", "timeout_ms": 8000,
-        }, ensure_ascii=False).encode(), {
-            "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
-        })
-        time.sleep(0.05)
-        connection.close()
-        deadline = time.monotonic() + 3
-        while before <= worker_pids() and time.monotonic() < deadline:
-            time.sleep(0.025)
-        assert before - worker_pids(), "Disconnected inference worker was not killed/reaped"
-        for pid in worker_pids():
-            os.kill(int(pid), signal.SIGCONT)
-        assert len(worker_pids()) <= expected_workers, "Unbounded inference workers"
-        buffered()
-        buffered()
-    # Exercise maximum accepted text on both slots under production caps.
-    # A bounded 504 is truthful degraded service; OOM/provider crash is not.
-    def long_request(index):
+        assert len(before) == 1, f"Unexpected VieNeu workers: {before}"
+        data = payload(CORE + " Cảm ơn quý khách. " + ("Một.", "Hai.", "Ba.")[index], cacheable=True)
         connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=12)
         try:
-            text = ((CORE + " ") * 25)[:599] + str(index)
-            connection.request("POST", "/synthesize", json.dumps({
-                "text": text, "voice": PIPER_VOICE, "provider_mode": "PIPER_ONLY",
-                "rate": "+25%", "cacheable": False, "timeout_ms": 8000,
-            }, ensure_ascii=False).encode(), {
-                "Content-Type": "application/json", "X-Internal-TTS-Token": TOKEN,
-            })
-            response = connection.getresponse()
-            data = response.read(LIMIT + 1)
-            assert response.status in (200, 504), f"Maximum-text request failed HTTP {response.status}"
-            if response.status == 200:
-                assert mpeg_frame(data) and len(data) <= LIMIT
+            for pid in before:
+                os.kill(pid, signal.SIGSTOP)
+            connection.request("POST", "/synthesize/stream", json.dumps(data, ensure_ascii=False).encode(), HEADERS)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if health()["vieneu"]["activeWorkers"] == 1:
+                    break
+                time.sleep(0.025)
             else:
-                assert json.loads(data)["detail"] == "TTS_TIMEOUT"
-            return response.status
+                raise AssertionError("Disconnected request never entered VieNeu inference")
         finally:
             connection.close()
+        deadline = time.monotonic() + 3
+        while before & worker_pids() and time.monotonic() < deadline:
+            time.sleep(0.025)
+        assert not before & worker_pids(), "Disconnected VieNeu worker was not killed/reaped"
+        assert len(worker_pids()) <= 1, "Unbounded inference workers"
+        wait_ready()
+        synthesize(data=data)
+        synthesize(data=data, cached="true")
+        synthesize()
+
+    # Exercise the maximum text and two admitted callers under production caps.
+    # A bounded 504 is truthful degraded service; OOM/provider crash is not.
+    def long_request(index):
+        text = ((CORE + " ") * 25)[:599] + str(index)
+        return synthesize(data=payload(text), allow_timeout=True)
+
     with ThreadPoolExecutor(max_workers=2) as workers:
         print("Maximum-text two-slot resource smoke:", list(workers.map(long_request, range(2))))
-    buffered()
-    buffered()
+    wait_ready()
+    synthesize()
+    synthesize("/synthesize/stream")
 except (OSError, TimeoutError, http.client.HTTPException) as error:
-    print(f"PIPER_FAILURE: local stream interrupted: {type(error).__name__}; no fallback accepted", file=sys.stderr)
-    sys.exit(2)
-except RuntimeError as error:
-    print(str(error), file=sys.stderr)
+    print(f"VIENEU_FAILURE: local stream interrupted: {type(error).__name__}; no fallback accepted", file=sys.stderr)
     sys.exit(2)
 except AssertionError as error:
     print(f"SYNTHESIS_CONTRACT_FAILURE: {error}", file=sys.stderr)
     sys.exit(1)
-print("Real fixed VieNeu synthesis and Piper 500,000 VND buffered/stream MPEG headers passed; 3 in-flight disconnects reaped Piper workers and subsequent synthesis succeeded.")
+print("Real fixed VieNeu buffered/stream EOF decoded to finite 24kHz mono speech; auth, retired-mode rejection, 3 inference cancellations, cache safety, and recovery passed.")
 PY
 
 echo "TTS-gateway smoke test PASSED successfully."

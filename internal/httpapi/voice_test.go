@@ -110,8 +110,8 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 
 	// 2. PUT /api/v1/voice/settings
 	input := storage.VoiceSettingsInput{
-		Revision: settings.Revision, ProviderMode: storage.ProviderModeEdgeOnly,
-		VoiceID: storage.VoiceIDNamMinh, Rate: settings.Rate, PitchHz: settings.PitchHz,
+		Revision: settings.Revision, ProviderMode: storage.ProviderModeVieneuOnly,
+		VoiceID: storage.VoiceIDVieneuMaiAnh, Rate: settings.Rate, PitchHz: settings.PitchHz,
 		AmountBands: settings.AmountBands, ChimeEnabled: settings.ChimeEnabled,
 		LoadingSoundEnabled: settings.LoadingSoundEnabled, FunEnabled: settings.FunEnabled,
 		IncludeDescription: settings.IncludeDescription, CustomTemplate: settings.CustomTemplate,
@@ -130,7 +130,7 @@ func TestVoiceSettingsEndpoints(t *testing.T) {
 	}
 	var updated storage.VoiceProfile
 	_ = json.Unmarshal(putW.Body.Bytes(), &updated)
-	if updated.Revision != 2 || updated.VoiceID != "vi-VN-NamMinhNeural" {
+	if updated.Revision != 2 || updated.ProviderMode != storage.ProviderModeVieneuOnly || updated.VoiceID != storage.VoiceIDVieneuMaiAnh || updated.Rate != 1 || updated.PitchHz != 0 {
 		t.Errorf("unexpected updated settings: %+v", updated)
 	}
 }
@@ -467,7 +467,7 @@ func TestSynthesizeSummaryAudio(t *testing.T) {
 	}
 }
 
-func TestVoiceRateAndPitchPropagation(t *testing.T) {
+func TestVoiceFixedRateAndPitchPropagation(t *testing.T) {
 	ctx := context.Background()
 	dbDir := t.TempDir()
 	dbPath := filepath.Join(dbDir, "test_rate_pitch.db")
@@ -523,14 +523,14 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 		t.Fatalf("expected 400 for override, got %d: %s", badTestW.Code, badTestW.Body.String())
 	}
 
-	// 2. Configure profile with rate 1.25 and pitchHz 5
+	// 2. Persist the fixed VieNeu profile and propagate its neutral controls.
 	prof, _ := store.GetVoiceProfile(ctx)
 	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
 		Revision:     prof.Revision,
-		ProviderMode: "EDGE_ONLY",
-		VoiceID:      "vi-VN-HoaiMyNeural",
-		Rate:         1.25,
-		PitchHz:      5,
+		ProviderMode: storage.ProviderModeVieneuOnly,
+		VoiceID:      storage.VoiceIDVieneuMaiAnh,
+		Rate:         1,
+		PitchHz:      0,
 		AmountBands:  prof.AmountBands,
 		ChimeEnabled: true,
 	})
@@ -548,14 +548,17 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	if testW.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", testW.Code, testW.Body.String())
 	}
-	if lastTTSReq.Rate != "+25%" {
-		t.Errorf("expected rate +25%%, got %q", lastTTSReq.Rate)
+	if lastTTSReq.ProviderMode != storage.ProviderModeVieneuOnly || lastTTSReq.Voice != storage.VoiceIDVieneuMaiAnh {
+		t.Errorf("unexpected synthesis identity: %+v", lastTTSReq)
 	}
-	if lastTTSReq.Pitch != "+5Hz" {
-		t.Errorf("expected pitch +5Hz, got %q", lastTTSReq.Pitch)
+	if lastTTSReq.Rate != "+0%" {
+		t.Errorf("expected rate +0%%, got %q", lastTTSReq.Rate)
+	}
+	if lastTTSReq.Pitch != "+0Hz" {
+		t.Errorf("expected pitch +0Hz, got %q", lastTTSReq.Pitch)
 	}
 
-	// 3. Synthesize transaction audio with slowed profile rate 0.8 -> "-20%"
+	// 3. Transaction synthesis must use the same fixed neutral controls.
 	connID := "conn_rate_pitch_test"
 	_, _ = store.DB().ExecContext(ctx, `
 		INSERT INTO connections(id, state, generation, account_masked, created_at, updated_at)
@@ -570,32 +573,18 @@ func TestVoiceRateAndPitchPropagation(t *testing.T) {
 	}
 	txnID := rtRes.NewEvents[0].TransactionID
 
-	prof, _ = store.GetVoiceProfile(ctx)
-	_, err = store.SaveVoiceProfile(ctx, storage.VoiceSettingsInput{
-		Revision:     prof.Revision,
-		ProviderMode: "EDGE_ONLY",
-		VoiceID:      "vi-VN-HoaiMyNeural",
-		Rate:         0.80,
-		PitchHz:      0,
-		AmountBands:  prof.AmountBands,
-		ChimeEnabled: true,
-	})
-	if err != nil {
-		t.Fatalf("save slow profile: %v", err)
-	}
-
-	txReqSlow := prepareAuthedRequest(
+	txReq := prepareAuthedRequest(
 		httptest.NewRequest(http.MethodPost, "http://example.test/api/v1/voice/transactions/"+txnID, bytes.NewReader([]byte(`{}`))),
 		cookie,
 		token,
 	)
-	txWSlow := httptest.NewRecorder()
-	server.Handler().ServeHTTP(txWSlow, txReqSlow)
-	if txWSlow.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", txWSlow.Code, txWSlow.Body.String())
+	txW := httptest.NewRecorder()
+	server.Handler().ServeHTTP(txW, txReq)
+	if txW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", txW.Code, txW.Body.String())
 	}
-	if lastTTSReq.Rate != "-20%" {
-		t.Errorf("expected rate -20%%, got %q", lastTTSReq.Rate)
+	if lastTTSReq.Rate != "+0%" {
+		t.Errorf("expected rate +0%%, got %q", lastTTSReq.Rate)
 	}
 	if lastTTSReq.Pitch != "+0Hz" {
 		t.Errorf("expected pitch +0Hz, got %q", lastTTSReq.Pitch)

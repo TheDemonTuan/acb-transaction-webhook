@@ -1,4 +1,4 @@
-"""Fixed-provider TTS with bounded admission and immutable local Piper models."""
+"""VieNeu-only TTS with bounded admission and immutable local voice packs."""
 import asyncio
 from contextlib import asynccontextmanager
 import logging
@@ -16,12 +16,9 @@ from app.schemas import (
     HealthResponse,
     ProviderHealth,
 )
-from app.circuit import CircuitBreaker
 from app.cache import TTSCache
 from app.admission import AdmissionController, remaining, timeout_error
 from app.assets import AssetStore
-from app.providers.edge import EdgeTTSProvider
-from app.providers.piper import PiperTTSProvider, VOICE_ID as PIPER_VOICE_ID
 from app.providers.vieneu import VieneuTTSProvider, VOICE_ID as VIENEU_VOICE_ID
 
 logging.basicConfig(level=logging.INFO)
@@ -38,10 +35,6 @@ async def lifespan(app: FastAPI):
                 "TTS_REQUIRE_AUTH is enabled but internal token is missing, unreadable, or empty"
             )
     try:
-        await piper_provider.start()
-    except Exception:
-        logger.exception("Fixed Piper provider unavailable; no provider fallback")
-    try:
         await vieneu_provider.start()
     except Exception:
         logger.exception("Fixed VieNeu provider unavailable; no provider fallback")
@@ -50,16 +43,9 @@ async def lifespan(app: FastAPI):
     finally:
         with anyio.CancelScope(shield=True):
             await vieneu_provider.close()
-            await piper_provider.close()
 app = FastAPI(title="TTS Gateway", version="2.0.0", lifespan=lifespan)
 
-edge_provider = EdgeTTSProvider()
-piper_provider = PiperTTSProvider(worker_count=config.piper_workers)
 vieneu_provider = VieneuTTSProvider(threads=config.vieneu_threads)
-edge_circuit = CircuitBreaker(
-    failure_threshold=config.edge_circuit_failure_threshold,
-    reset_timeout=config.edge_circuit_reset_timeout,
-)
 cache = TTSCache(
     max_items=config.cache_max_items,
     max_bytes=config.cache_max_bytes,
@@ -131,17 +117,10 @@ def voice_clip(sha256: str, x_internal_tts_token: Optional[str] = Header(None)):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    status_ok = vieneu_provider.available and piper_provider.available
+    status_ok = vieneu_provider.available
     return HealthResponse(
         status="ok" if status_ok else "degraded",
         primary="vieneu",
-        edge=ProviderHealth(available=edge_circuit.can_attempt()),
-        piper=ProviderHealth(
-            available=piper_provider.available,
-            workerCount=piper_provider.worker_count,
-            activeWorkers=piper_provider.active_count,
-            idleWorkers=piper_provider.idle_count,
-        ),
         vieneu=ProviderHealth(
             available=vieneu_provider.available,
             workerCount=vieneu_provider.worker_count,
@@ -155,31 +134,11 @@ async def list_voices(x_internal_tts_token: Optional[str] = Header(None)):
     verify_token(x_internal_tts_token)
     return [
         VoiceItem(id=VIENEU_VOICE_ID, name="Mai Anh · nữ miền Bắc · VieNeu local", gender="female", provider="vieneu"),
-        VoiceItem(id=PIPER_VOICE_ID, name="VAIS 1000 (Piper tiếng Việt)", gender="unspecified", provider="piper"),
-        VoiceItem(
-            id="vi-VN-HoaiMyNeural",
-            name="Hoài My",
-            gender="female",
-            provider="edge",
-        ),
-        VoiceItem(
-            id="vi-VN-NamMinhNeural",
-            name="Nam Minh",
-            gender="male",
-            provider="edge",
-        ),
     ]
 
-def audio_headers(voice, cached=False, provider=None):
-    if provider is None:
-        if voice == PIPER_VOICE_ID:
-            provider = "piper"
-        elif voice == VIENEU_VOICE_ID:
-            provider = "vieneu"
-        else:
-            provider = "edge"
+def audio_headers(voice, cached=False):
     return {
-        "X-TTS-Provider": provider,
+        "X-TTS-Provider": "vieneu",
         "X-TTS-Voice": voice,
         "X-TTS-Fallback": "false",
         "X-TTS-Cached": str(cached).lower(),
@@ -192,7 +151,7 @@ def synthesis_parameters(req):
         raise HTTPException(status_code=400, detail="INVALID_TTS_TEXT")
     voice = req.voice
     rate, pitch = req.rate, req.pitch
-    key = cache.make_key(text, voice, rate, pitch, False, req.provider_mode)
+    key = cache.make_key(text, voice, rate, pitch)
     return text, voice, rate, pitch, key
 
 
@@ -252,87 +211,7 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
         cached = await cache.get(key)
         if cached:
             return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
-    if req.provider_mode in ("PIPER_ONLY", "VIENEU_ONLY"):
-        is_piper = req.provider_mode == "PIPER_ONLY"
-        provider = piper_provider if is_piper else vieneu_provider
-        provider_name = "piper" if is_piper else "vieneu"
-        if provider._closed:
-            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
-
-        deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
-        await admission.register_waiter()
-        slot = None
-        generator = None
-        transferred = False
-        cleaned = False
-
-        async def cleanup():
-            nonlocal cleaned
-            if cleaned:
-                return
-            cleaned = True
-            try:
-                if generator is not None:
-                    await generator.aclose()
-            finally:
-                try:
-                    if slot is not None:
-                        await slot.__aexit__(None, None, None)
-                finally:
-                    await admission.unregister_waiter()
-
-        try:
-            async with preheaders_disconnect_guard(request):
-                candidate = admission.acquire_slot(remaining(deadline))
-                await candidate.__aenter__()
-                slot = candidate
-                generator = provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
-                first = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
-            if not first or len(first) > MAX_AUDIO_BYTES:
-                raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
-
-            async def stream_and_tee():
-                collected = bytearray() if req.cacheable else None
-                total = 0
-                chunk = first
-                try:
-                    while True:
-                        remaining(deadline)
-                        total += len(chunk)
-                        if total > MAX_AUDIO_BYTES:
-                            raise RuntimeError("TTS_AUDIO_TOO_LARGE")
-                        if collected is not None:
-                            collected.extend(chunk)
-                        yield chunk
-                        try:
-                            chunk = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
-                        except StopAsyncIteration:
-                            break
-                    remaining(deadline)
-                    if collected is not None:
-                        await cache.set(key, bytes(collected), provider_name, voice)
-                finally:
-                    if collected is not None:
-                        collected.clear()
-                    with anyio.CancelScope(shield=True):
-                        await cleanup()
-
-            response = OwnedStreamingResponse(stream_and_tee(), cleanup, deadline, media_type="audio/mpeg", headers=audio_headers(voice))
-            transferred = True
-            return response
-        except TimeoutError:
-            raise timeout_error() from None
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
-        finally:
-            if not transferred:
-                with anyio.CancelScope(shield=True):
-                    await cleanup()
-    elif req.provider_mode != "EDGE_ONLY":
-        raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
-    if not edge_circuit.can_attempt():
+    if vieneu_provider._closed:
         raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
 
     deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
@@ -362,8 +241,8 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
             candidate = admission.acquire_slot(remaining(deadline))
             await candidate.__aenter__()
             slot = candidate
-            generator = edge_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch)
-            first = await asyncio.wait_for(anext(generator), min(config.edge_stream_initial_timeout, remaining(deadline)))
+            generator = vieneu_provider.stream(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
+            first = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
         if not first or len(first) > MAX_AUDIO_BYTES:
             raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
 
@@ -379,19 +258,14 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
                         raise RuntimeError("TTS_AUDIO_TOO_LARGE")
                     if collected is not None:
                         collected.extend(chunk)
-                    # First yield is inside the same ownership finally as all later yields.
                     yield chunk
                     try:
-                        chunk = await asyncio.wait_for(anext(generator), min(config.edge_stream_idle_timeout, remaining(deadline)))
+                        chunk = await asyncio.wait_for(anext(generator), timeout=remaining(deadline))
                     except StopAsyncIteration:
                         break
                 remaining(deadline)
-                edge_circuit.record_success()
                 if collected is not None:
-                    await cache.set(key, bytes(collected), "edge", voice)
-            except Exception:
-                edge_circuit.record_failure()
-                raise
+                    await cache.set(key, bytes(collected), "vieneu", voice)
             finally:
                 if collected is not None:
                     collected.clear()
@@ -406,7 +280,6 @@ async def synthesize_stream(req: SynthesizeRequest, x_internal_tts_token: Option
     except HTTPException:
         raise
     except Exception:
-        edge_circuit.record_failure()
         raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
     finally:
         if not transferred:
@@ -422,43 +295,24 @@ async def synthesize(req: SynthesizeRequest, x_internal_tts_token: Optional[str]
         cached = await cache.get(key)
         if cached:
             return Response(content=cached[0], media_type="audio/mpeg", headers=audio_headers(cached[2], True))
-    if req.provider_mode == "PIPER_ONLY":
-        provider = piper_provider
-        provider_name = "piper"
-        if provider._closed:
-            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
-    elif req.provider_mode == "VIENEU_ONLY":
-        provider = vieneu_provider
-        provider_name = "vieneu"
-        if provider._closed:
-            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
-    elif req.provider_mode == "EDGE_ONLY":
-        provider = edge_provider
-        provider_name = "edge"
-        if not edge_circuit.can_attempt():
-            raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
-    else:
+    if vieneu_provider._closed:
         raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE")
     deadline = asyncio.get_running_loop().time() + req.timeout_ms / 1000
 
     async def execute():
         try:
-            audio = await provider.synthesize(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
+            audio = await vieneu_provider.synthesize(text=text, voice=voice, rate=rate, pitch=pitch, timeout_seconds=remaining(deadline))
             if not audio or len(audio) > MAX_AUDIO_BYTES:
                 raise HTTPException(status_code=502, detail="TTS_AUDIO_TOO_LARGE")
             remaining(deadline)
-            if provider_name == "edge":
-                edge_circuit.record_success()
             if req.cacheable:
-                await cache.set(key, audio, provider_name, voice)
-            return audio, provider_name, voice
+                await cache.set(key, audio, "vieneu", voice)
+            return audio, "vieneu", voice
         except TimeoutError:
             raise timeout_error() from None
         except HTTPException:
             raise
         except Exception:
-            if provider_name == "edge":
-                edge_circuit.record_failure()
             raise HTTPException(status_code=502, detail="TTS_UNAVAILABLE") from None
 
     audio, _, actual_voice = await admission.run_singleflight(key, execute, remaining(deadline), request.is_disconnected if request is not None else None)

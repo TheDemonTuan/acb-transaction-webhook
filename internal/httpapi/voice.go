@@ -151,22 +151,17 @@ func (s *Server) resolveVoicePhrase(profile storage.VoiceProfile, amount int64, 
 		}
 		return core, nil
 	}
-	isVieneu := profile.ProviderMode == storage.ProviderModeVieneuOnly || profile.VoiceID == storage.VoiceIDVieneuMaiAnh
-	formatTpl := voicecopy.FormatAnnouncementTemplate
-	if isVieneu {
-		formatTpl = voicecopy.FormatSpokenAnnouncementTemplate
-	}
 	if selected.StyleID == "custom" {
 		if part == "tail" {
 			return "", errors.New("VOICE_RECIPE_MISMATCH")
 		}
-		return formatTpl(profile.CustomTemplate, amount, description, profile.IncludeDescription), nil
+		return voicecopy.FormatSpokenAnnouncementTemplate(profile.CustomTemplate, amount, description, profile.IncludeDescription), nil
 	}
 	if template, ok := voicecopy.ClassicTemplate(phraseID); ok {
 		if part == "tail" {
 			return "", errors.New("VOICE_RECIPE_MISMATCH")
 		}
-		return formatTpl(template, amount, description, profile.IncludeDescription), nil
+		return voicecopy.FormatSpokenAnnouncementTemplate(template, amount, description, profile.IncludeDescription), nil
 	}
 	tail, _ := voicecopy.RecipeTail(phraseID)
 	if part == "tail" {
@@ -231,7 +226,7 @@ func (s *Server) updateVoiceSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) voiceStatus(w http.ResponseWriter, r *http.Request) {
 	profile, _ := s.store.GetVoiceProfile(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"available":    s.ttsClient != nil && profile.SynthesisProvider() != "browser",
+		"available":    s.ttsClient != nil,
 		"primary":      profile.SynthesisProvider(),
 		"providerMode": profile.ProviderMode,
 		"voiceId":      profile.VoiceID,
@@ -316,11 +311,6 @@ func (s *Server) testVoiceAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
-		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
-		return
-	}
-
 	testAmount := int64(500000)
 	identity, _ := auth.FromContext(r.Context())
 	if req.AmountVND != "" {
@@ -399,11 +389,6 @@ func (s *Server) publicTestVoiceAudio(w http.ResponseWriter, r *http.Request) {
 
 	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
 		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
-		return
-	}
-
-	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
-		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
 		return
 	}
 
@@ -516,11 +501,6 @@ func (s *Server) synthesizeTransactionAudioInternal(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
-		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
-		return
-	}
-
 	phrase, err := s.resolveVoicePhrase(profile, item.Credit, item.Description, req.PhraseID, req.Part)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "VOICE_RECIPE_MISMATCH")
@@ -599,11 +579,6 @@ func (s *Server) replayTransactionAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
-		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
-		return
-	}
-
 	phrase, err := s.resolveVoicePhrase(profile, item.Credit, item.Description, req.PhraseID, req.Part)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "VOICE_RECIPE_MISMATCH")
@@ -667,11 +642,6 @@ func (s *Server) synthesizeSummaryAudio(w http.ResponseWriter, r *http.Request) 
 
 	if req.ProfileRevision != nil && *req.ProfileRevision != profile.Revision {
 		writeError(w, http.StatusConflict, "VOICE_PROFILE_CHANGED")
-		return
-	}
-
-	if profile.ProviderMode == storage.ProviderModeBrowserOnly {
-		writeError(w, http.StatusUnprocessableEntity, "provider_mode_browser_only")
 		return
 	}
 

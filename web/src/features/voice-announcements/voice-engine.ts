@@ -1,13 +1,6 @@
 import type { VoiceProfile } from './voice-profile';
 import type { AnnouncementRecipe } from './voice-copy';
 
-export interface VoiceInfo {
-  uri: string;
-  name: string;
-  lang: string;
-  isDefault: boolean;
-}
-
 export interface VoiceTelemetry {
   detectedAt?: string;
   sseReceivedAt?: number;
@@ -26,9 +19,9 @@ export interface VoiceTelemetry {
   speechEndedMonotonicAt?: number;
   sseToChimeMs?: number;
   sseToAmountMs?: number;
-  audioPath?: 'decoded-pack' | 'compressed-pack' | 'network-pack' | 'cold-stream' | 'cold-buffer' | 'browser';
-  startEvidence?: 'audio-clock' | 'media-playing' | 'speech-onstart';
-  amountEvidence?: 'reviewed-offset' | 'segment-boundary' | 'speech-boundary' | 'unavailable';
+  audioPath?: 'decoded-pack' | 'compressed-pack' | 'network-pack' | 'cold-stream' | 'cold-buffer';
+  startEvidence?: 'audio-clock' | 'media-playing';
+  amountEvidence?: 'reviewed-offset' | 'segment-boundary' | 'unavailable';
   outcome?: 'completed' | 'failed' | 'interrupted' | 'overflow' | 'expired' | 'cancelled';
   isTest?: boolean;
   isReplay?: boolean;
@@ -37,8 +30,6 @@ export interface VoiceTelemetry {
 export interface VoiceMessage {
   text: string;
   volume?: number;
-  voiceURI?: string;
-  lang?: string;
   transactionId?: string;
   summaryTransactionIds?: string[];
   isTest?: boolean;
@@ -59,7 +50,6 @@ export interface VoiceMessage {
 
 export interface VoiceEngine {
   isSupported(): boolean;
-  getVoices(): Promise<VoiceInfo[]>;
   speak(message: VoiceMessage): Promise<void>;
   prefetch(message: VoiceMessage, signal: AbortSignal): Promise<void>;
   cancel(): void;

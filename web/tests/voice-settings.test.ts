@@ -12,11 +12,12 @@ describe('device voice preferences', () => {
   afterEach(() => restoreTestGlobals());
   it('defaults to disabled and never stores a server voice/rate/template locally', () => {
     expect(loadVoiceSettings()).toEqual(DEFAULT_VOICE_SETTINGS);
-    saveVoiceSettings({ enabled: true, volume: 0.8, browserVoiceURI: 'selected-vi' });
+    saveVoiceSettings({ enabled: true, volume: 0.8, announceWhenHidden: false });
     const loaded = loadVoiceSettings();
-    expect(loaded).toMatchObject({ enabled: true, volume: 0.8, browserVoiceURI: 'selected-vi', schemaVersion: 2 });
+    expect(loaded).toMatchObject({ enabled: true, volume: 0.8, announceWhenHidden: false, schemaVersion: 2 });
     expect(loaded).not.toHaveProperty('rate');
     expect(loaded).not.toHaveProperty('voiceURI');
+    expect(loaded).not.toHaveProperty('browserVoiceURI');
   });
   it('preserves mute volume zero and clamps bounds', () => {
     expect(saveVoiceSettings({ volume: 0 }).volume).toBe(0);
@@ -28,10 +29,23 @@ describe('device voice preferences', () => {
       voiceURI: 'old-edge', rate: 2, pitch: 1.2, announcementTemplate: 'Nhận {amount}', includeDescription: true });
     const migrated = loadVoiceSettings();
     expect(migrated).toMatchObject({ schemaVersion: 2, enabled: true, volume: 0, announceWhenHidden: false,
-      legacySnapshot: { voiceURI: 'old-edge', rate: 2, pitch: 1.2, announcementTemplate: 'Nhận {amount}', includeDescription: true } });
-    expect(migrated.browserVoiceURI).toBeUndefined();
+      legacySnapshot: { rate: 2, pitch: 1.2, announcementTemplate: 'Nhận {amount}', includeDescription: true } });
+    expect(migrated).not.toHaveProperty('browserVoiceURI');
+    expect(migrated.legacySnapshot).not.toHaveProperty('voiceURI');
     expect(JSON.parse(store['acb.voice.settings.v1'])).not.toHaveProperty('rate');
     saveVoiceSettings({ legacySnapshot: undefined });
     expect(loadVoiceSettings().legacySnapshot).toBeUndefined();
+  });
+  it('scrubs browser voice fields from current schema storage while preserving template snapshots', () => {
+    store['acb.voice.settings.v1'] = JSON.stringify({ schemaVersion: 2, enabled: true, volume: 0.35,
+      announceWhenHidden: false, browserVoiceURI: 'selected-vi', voiceURI: 'old-root',
+      legacySnapshot: { voiceURI: 'old-vi', rate: 1.3, pitch: 1.1,
+        announcementTemplate: 'Cảm ơn {amount}', includeDescription: false } });
+
+    const loaded = loadVoiceSettings();
+    expect(loaded).toEqual({ schemaVersion: 2, enabled: true, volume: 0.35, announceWhenHidden: false,
+      legacySnapshot: { rate: 1.3, pitch: 1.1, announcementTemplate: 'Cảm ơn {amount}', includeDescription: false } });
+    expect(JSON.parse(store['acb.voice.settings.v1'])).toEqual(loaded);
+    expect(saveVoiceSettings({ volume: 0.5 }).legacySnapshot).toEqual(loaded.legacySnapshot);
   });
 });

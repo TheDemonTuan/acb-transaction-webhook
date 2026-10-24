@@ -1,95 +1,40 @@
-import { afterEach, describe, expect, it, vi } from 'bun:test';
-import { setTestGlobal, restoreTestGlobals } from './test-globals';
-import { BrowserSpeechEngine } from '../src/features/voice-announcements/browser-speech-engine';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { markSpeechStarted } from '../src/features/voice-announcements/announcement-plan';
 import type { VoiceMessage, VoiceTelemetry } from '../src/features/voice-announcements/voice-engine';
-import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 import { clearVoiceTelemetry, exportVoiceTelemetry, recordVoiceTelemetry } from '../src/features/voice-announcements/voice-telemetry';
 describe('voice-telemetry', () => {
   afterEach(() => {
-    restoreTestGlobals();
+    clearVoiceTelemetry();
   });
 
-  it('populates timestamp breakdown from detectedAt -> SSE -> queue -> speak onstart', async () => {
-    class MockUtterance {
-      text: string;
-      lang = 'vi-VN';
-      voice: SpeechSynthesisVoice | null = null;
-      rate = 1;
-      onstart: ((ev: Event) => void) | null = null;
-      onend: ((ev: Event) => void) | null = null;
-      constructor(text: string) {
-        this.text = text;
-      }
-    }
-
-    const mockSynth = {
-      paused: false,
-      speaking: false,
-      getVoices: () => [
-        {
-          default: true,
-          lang: 'vi-VN',
-          name: 'Microsoft Hoai My',
-          voiceURI: 'vi-vn-hoaimy',
-        },
-      ],
-      speak: vi.fn((utt: unknown) => {
-        if (utt && typeof utt === 'object' && 'onstart' in utt && 'onend' in utt) {
-          const startCb = utt.onstart;
-          const endCb = utt.onend;
-          queueMicrotask(() => {
-            if (typeof startCb === 'function') {
-              startCb(new Event('start'));
-            }
-            if (typeof endCb === 'function') {
-              endCb(new Event('end'));
-            }
-          });
-        }
-      }),
-      cancel: vi.fn(),
-      resume: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    };
-
-    setTestGlobal('window', {
-      speechSynthesis: mockSynth,
-      SpeechSynthesisUtterance: MockUtterance,
-    });
-
-    const engine = new BrowserSpeechEngine();
-
-    const detectedAt = new Date(Date.now() - 1200).toISOString();
-    const sseReceivedAt = Date.now() - 50;
+  it('populates timing from SSE and queue to confirmed audio-clock playback', () => {
     const queuedAt = Date.now() - 20;
-
     const telemetry: VoiceTelemetry = {
-      detectedAt,
-      sseReceivedAt,
+      detectedAt: new Date(Date.now() - 1200).toISOString(),
+      sseReceivedAt: Date.now() - 50,
       queuedAt,
-      sseToQueueMs: queuedAt - sseReceivedAt,
-      receivedMonotonicAt: performance.now() - 50,
+      sseToQueueMs: 30,
+      receivedMonotonicAt: 950,
     };
-
     let receivedTelemetry: VoiceTelemetry | undefined;
     const message: VoiceMessage = {
-      text: 'Đa tạ quý khách vì mười nghìn đồng.',
-      profile: { ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY' },
-      voiceURI: 'vi-vn-hoaimy',
-      queuedMonotonicAt: performance.now() - 20,
+      text: 'Đã nhận mười nghìn đồng.',
+      queuedMonotonicAt: 980,
       telemetry,
-      onStart: (t) => {
-        receivedTelemetry = t;
-      },
+      onStart: (sample) => { receivedTelemetry = sample; },
     };
 
-    await engine.speak(message);
+    markSpeechStarted(message, { monotonicNow: 1000, startEvidence: 'audio-clock',
+      amountOffsetMs: 120, amountEvidence: 'reviewed-offset', audioPath: 'decoded-pack' });
 
-    expect(receivedTelemetry).toBeDefined();
-    expect(receivedTelemetry?.speechStartedAt).toBeGreaterThanOrEqual(queuedAt);
-    expect(receivedTelemetry?.queueToSpeakMs).toBeGreaterThanOrEqual(0);
-    expect(receivedTelemetry?.sseToSpeakMs).toBeGreaterThanOrEqual(0);
+    expect(receivedTelemetry).toBe(telemetry);
+    expect(telemetry.speechStartedAt).toBeGreaterThanOrEqual(queuedAt);
+    expect(telemetry.queueToSpeakMs).toBe(20);
+    expect(telemetry.sseToSpeakMs).toBe(50);
+    expect(telemetry.sseToAmountMs).toBe(170);
+    expect(telemetry.startEvidence).toBe('audio-clock');
+    expect(telemetry.amountEvidence).toBe('reviewed-offset');
+    expect(telemetry.audioPath).toBe('decoded-pack');
   });
 
   it('records telemetry in bounded ring buffer without PII', () => {

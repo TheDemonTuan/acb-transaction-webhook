@@ -51,3 +51,36 @@ Balance/content may be visible on the lock screen when iPhone Show Previews is e
 
 For local browser checks, use a newly created temporary data directory with the fixture gateway and Vite development ports documented above. Do not run the default Playwright startup command against existing data: it resets `/tmp/tbg-playwright`. Prefer a separately started isolated fixture and `E2E_SKIP_WEBSERVER=1` when invoking focused E2E tests.
 
+## Transaction voice audio
+
+Voice announcements use only **VieNeu · Mai Anh · nữ miền Bắc**, at rate 1 and pitch 0. Device/browser speech and other provider selectors are removed. Existing enabled, volume, hidden-tab and unprocessed template preferences remain intact; obsolete browser voice identifiers are not saved again. Changing this release does not turn audio on or raise a user's saved volume.
+
+The unlock button creates/resumes the Web Audio context from a user gesture. If the browser suspends it, the current operation stops and the UI asks for another unlock; it does not replay skipped history. Only eligible fresh realtime credits enter the existing FIFO/dedupe flow.
+
+The two-tone chime lasts 850 ms (880 Hz followed by overlapping 1320 Hz), with approximately three times the previous digital amplitude. All speech transports share one 2× input-gain/soft-peak-protection/device-volume graph. This is a digital signal change, not a guarantee of perceived loudness on every speaker; speech near full scale is softly saturated rather than amplified into hard clipping. Mute remains mute.
+
+Stream download completion is separate from `canplay` readiness. Both must complete within the existing preparation budget; a completed body alone does not permit playback. Cold synthesis uses the same VieNeu profile, never a different engine or an automatic retry. The playback watchdog remains 120 seconds.
+
+The focused real-audio browser specs use the retained VieNeu manifest/MP3 clips, actual Web Audio/media decoding, and an OfflineAudioContext waveform harness. They do not establish production deployment health or audible output on an unavailable physical device. Run them against an isolated fixture gateway/Vite instance, never existing application data:
+
+```powershell
+$env:E2E_SKIP_WEBSERVER='1'
+$env:E2E_BASE_URL='http://127.0.0.1:5173'
+bun run e2e -- voice-announcements.spec.ts voice-owner-lifecycle.spec.ts voice-real-audio.spec.ts
+```
+
+`voice-real-audio.spec.ts` attaches JSON waveform/media evidence and RMS logs. It renders the production chime at 48 kHz, exercises gain/volume/mute/soft-peak behavior, decodes every retained pack clip without regenerating it, and forces the compressed-pack route using a pinned 16 MiB decoded buffer. The fixtures read the committed `b5a2b7b8dec26c5ec21c3f8a7d91fa33ee75bcc587b51f444a6dbcb6bb34fcf0` manifest and its SHA-256-addressed MP3 files directly from `tts-gateway/assets/voicepacks/`.
+
+Local Windows verification (2026-10-24, Bun 1.4.4 and Playwright Chromium 153) passed 96 focused unit tests, `bun run typecheck` (111 files), all 260 unit tests, and all 22 desktop/mobile Chromium cases across the three voice specs above. Browser coverage includes native decoded-pack, cold-stream and compressed-pack playback, a suspended context requiring another explicit unlock, realtime dedupe/history exclusion, and rendering all 140 retained clips. Mobile Chromium emulation is not Safari/iPhone verification; no physical speaker/headphone listening or production deployment is claimed.
+
+To retain passing screenshots, telemetry, waveform JSON and RMS logs, use a file-producing reporter (the default terminal reporter does not retain passing in-memory attachments):
+
+```powershell
+$env:PLAYWRIGHT_HTML_OPEN='never'
+$env:PLAYWRIGHT_JSON_OUTPUT_FILE=Join-Path $PWD 'test-results/vieneu-audio-report.json'
+bun run e2e -- voice-announcements.spec.ts voice-owner-lifecycle.spec.ts voice-real-audio.spec.ts --reporter=dot,json,html
+```
+
+Keep the isolated fixture processes running only for the check, then stop those processes. `playwright-report/index.html` holds the settings screenshots and audio evidence; `test-results/vieneu-audio-report.json` is the machine-readable report. The transport fixtures use committed MP3 bytes, not live inference: gateway/model inference remains a separate container smoke gate.
+
+

@@ -165,10 +165,10 @@ func (c *Client) VoiceManifest(ctx context.Context, key string) ([]byte, *AssetM
 
 func validateAssetManifest(manifest AssetManifest) error {
 	invalid := func() error { return fmt.Errorf("invalid voice asset manifest metadata") }
-	if manifest.VoiceID != storage.VoiceIDPiperVais1000 && manifest.VoiceID != storage.VoiceIDHoaiMy && manifest.VoiceID != storage.VoiceIDNamMinh {
+	if manifest.VoiceID != storage.VoiceIDVieneuMaiAnh {
 		return invalid()
 	}
-	if math.IsNaN(manifest.Rate) || math.IsInf(manifest.Rate, 0) || manifest.Rate < 0.75 || manifest.Rate > 2 || math.Abs(manifest.Rate*100-math.Round(manifest.Rate*100)) > 1e-9 || manifest.PitchHz < -50 || manifest.PitchHz > 50 || (manifest.VoiceID == storage.VoiceIDPiperVais1000 && manifest.PitchHz != 0) || storage.ComputeSynthesisKey(manifest.VoiceID, manifest.Rate, manifest.PitchHz) != manifest.SynthesisKey {
+	if manifest.Rate != 1.00 || manifest.PitchHz != 0 || storage.ComputeSynthesisKey(manifest.VoiceID, manifest.Rate, manifest.PitchHz) != manifest.SynthesisKey {
 		return invalid()
 	}
 	if (manifest.Composition.Tail != "whole" && manifest.Composition.Tail != "fragments") || (manifest.Composition.Numbers != "whole" && manifest.Composition.Numbers != "segments") || len(manifest.Clips) == 0 || len(manifest.Clips) > 20000 {

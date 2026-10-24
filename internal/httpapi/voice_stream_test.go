@@ -19,10 +19,10 @@ func TestAudioStreamUpstreamInterruptionIsNotSuccessfulEOF(t *testing.T) {
 			name = "interrupted"
 		}
 		t.Run(name, func(t *testing.T) {
-			profile := storage.VoiceProfile{VoiceID: storage.VoiceIDPiperVais1000, ProviderMode: storage.ProviderModePiperOnly}
+			profile := storage.DefaultVoiceProfile
 			firstRead := make(chan struct{})
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("X-TTS-Provider", "piper")
+				w.Header().Set("X-TTS-Provider", "vieneu")
 				w.Header().Set("X-TTS-Voice", profile.VoiceID)
 				_, _ = w.Write([]byte("first sentence"))
 				w.(http.Flusher).Flush()
