@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 import app.main as gateway
 from app.assets import (
     AssetStore, InvalidPack, MAX_CLIP_BYTES, MAX_MANIFEST_BYTES, MAX_PACK_BYTES,
-    canonical_json, manifest_inputs, parse_json, synthesis_key, validate_manifest,
+    VIENEU_VOICE, canonical_json, manifest_inputs, parse_json, synthesis_key, validate_manifest,
 )
 from app.config import config
 
@@ -21,7 +21,7 @@ def sign_manifest(manifest):
     return manifest
 
 
-def publish(root, voice="vi-VN-NamMinhNeural", rate=1.25, pitch=0):
+def publish(root, voice=VIENEU_VOICE, rate=1.0, pitch=0):
     key = synthesis_key(voice, rate, pitch)
     digest = hashlib.sha256(AUDIO).hexdigest()
     evidence = {
@@ -101,7 +101,7 @@ async def test_exact_profile_manifest_etag_and_authorized_clip(published):
         assert clip.content == AUDIO
         assert clip.headers["content-type"] == "audio/mpeg"
         assert clip.headers["cache-control"] == "public,max-age=31536000,immutable"
-        other_profile = synthesis_key("vi-VN-NamMinhNeural", 1.2, 0)
+        other_profile = "0" * 64
         assert (await client.get(f"/assets/profiles/{other_profile}/manifest", headers=headers)).status_code == 404
         assert (await client.get("/assets/clips/" + "A" * 64, headers=headers)).status_code == 404
 
@@ -199,8 +199,8 @@ def test_symlink_asset_not_served(tmp_path):
 
 
 def test_canonical_hash_and_exact_synthesis_key():
-    canonical = "edge|vi-VN-NamMinhNeural|1.25|0|money-vi-v1|pack-schema-2"
-    assert synthesis_key("vi-VN-NamMinhNeural", 1.25, 0) == hashlib.sha256(canonical.encode()).hexdigest()
+    canonical = "vieneu|vi-VN-vieneu-v3-turbo-mai-anh-v1|1.00|0|money-vi-v1|pack-schema-2"
+    assert synthesis_key(VIENEU_VOICE, 1.0, 0) == hashlib.sha256(canonical.encode()).hexdigest()
     assert canonical_json({"z": "đồng", "a": 1}) == '{"a":1,"z":"đồng"}'.encode()
     assert canonical_json({"rate": 1.0}) == b'{"rate":1}'
     for raw in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{} trailing'):
@@ -208,10 +208,10 @@ def test_canonical_hash_and_exact_synthesis_key():
             parse_json(raw)
 
 
-@pytest.mark.parametrize("rate,pitch", [(1.251, 0), (0.74, 0), (2.01, 0), (True, 0), (1.25, True), (1.25, 51)])
+@pytest.mark.parametrize("rate,pitch", [(1.251, 0), (0.74, 0), (2.01, 0), (True, 0), (1.0, True), (1.0, 51), (1.25, 0), (1.0, 1), (float("nan"), 0), (float("inf"), 0)])
 def test_profile_key_rejects_noncanonical_values(rate, pitch):
     with pytest.raises(InvalidPack):
-        synthesis_key("vi-VN-NamMinhNeural", rate, pitch)
+        synthesis_key(VIENEU_VOICE, rate, pitch)
 
 
 @pytest.mark.asyncio
@@ -224,13 +224,40 @@ async def test_asset_auth_remains_required_when_development_synthesis_auth_is_di
         assert (await client.get(f"/assets/clips/{digest}")).status_code == 503
 
 
-def test_piper_exact_profile_manifest_is_published_without_edge_alias(tmp_path):
-    voice = "vi-VN-vais1000-medium"
-    key, digest, manifest = publish(tmp_path, voice=voice)
+def test_vieneu_exact_profile_manifest_is_published(tmp_path):
+    key, digest, manifest = publish(tmp_path)
     store = AssetStore(tmp_path)
     pack = store.manifest(key)
-    assert pack.manifest["voiceId"] == voice
-    assert pack.manifest["synthesisKey"] == synthesis_key(voice, 1.25, 0)
+    assert pack.manifest["voiceId"] == VIENEU_VOICE
+    assert pack.manifest["synthesisKey"] == synthesis_key(VIENEU_VOICE, 1.0, 0)
     assert store.clip(digest) == AUDIO
+
+
+@pytest.mark.parametrize("voice", ["vi-VN-vais1000-medium", "vi-VN-NamMinhNeural", "vi-VN-HoaiMyNeural", "", None])
+def test_retired_voice_profiles_are_rejected(voice):
     with pytest.raises(InvalidPack):
-        synthesis_key(voice, 1.25, 10)
+        synthesis_key(voice, 1.0, 0)
+
+
+@pytest.mark.parametrize("kind", ["tail-fragment", "amount-segment", "amount-prefix", "amount-suffix"])
+def test_composed_clip_kinds_are_rejected(tmp_path, kind):
+    _, _, manifest = publish(tmp_path)
+    manifest["clips"][0]["kind"] = kind
+    with pytest.raises(InvalidPack, match="transcript/kind"):
+        validate_manifest(sign_manifest(manifest))
+
+
+@pytest.mark.parametrize("composition", [{"tail": "fragments", "numbers": "whole"}, {"tail": "whole", "numbers": "segments"}])
+def test_composed_manifest_modes_are_rejected(tmp_path, composition):
+    _, _, manifest = publish(tmp_path)
+    manifest["composition"] = composition
+    with pytest.raises(InvalidPack, match="whole utterance"):
+        validate_manifest(sign_manifest(manifest))
+
+
+@pytest.mark.parametrize("field,value", [("numberSegments", {}), ("numberPrefix", "amount-500000"), ("numberSuffix", "amount-500000")])
+def test_number_composition_metadata_is_rejected(tmp_path, field, value):
+    _, _, manifest = publish(tmp_path)
+    manifest[field] = value
+    with pytest.raises(InvalidPack, match="whole utterance"):
+        validate_manifest(sign_manifest(manifest))

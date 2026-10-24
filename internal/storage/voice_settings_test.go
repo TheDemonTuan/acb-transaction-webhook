@@ -48,12 +48,12 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 	// 2. Save modified settings
 	input := VoiceSettingsInput{
 		Revision:            profile.Revision,
-		ProviderMode:        ProviderModeEdgeOnly,
-		VoiceID:             VoiceIDNamMinh,
-		Rate:                1.50,
-		PitchHz:             10,
+		ProviderMode:        ProviderModeVieneuOnly,
+		VoiceID:             VoiceIDVieneuMaiAnh,
+		Rate:                1.00,
+		PitchHz:             0,
 		AmountBands:         profile.AmountBands,
-		ChimeEnabled:        true,
+		ChimeEnabled:        false,
 		LoadingSoundEnabled: false,
 		FunEnabled:          true,
 		IncludeDescription:  false,
@@ -66,11 +66,14 @@ func TestVoiceProfileLifecycle(t *testing.T) {
 	if saved.Revision != 2 {
 		t.Errorf("expected revision 2, got %d", saved.Revision)
 	}
-	if saved.VoiceID != VoiceIDNamMinh {
-		t.Errorf("expected %s, got %s", VoiceIDNamMinh, saved.VoiceID)
+	if saved.VoiceID != VoiceIDVieneuMaiAnh {
+		t.Errorf("expected %s, got %s", VoiceIDVieneuMaiAnh, saved.VoiceID)
 	}
-	if saved.Rate != 1.50 || saved.PitchHz != 10 {
+	if saved.Rate != 1.00 || saved.PitchHz != 0 {
 		t.Errorf("unexpected rate/pitch: %f / %d", saved.Rate, saved.PitchHz)
+	}
+	if saved.ChimeEnabled {
+		t.Error("updated chime setting was not saved")
 	}
 
 	// 3. Stale revision save should conflict

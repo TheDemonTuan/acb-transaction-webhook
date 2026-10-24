@@ -112,6 +112,52 @@ jobs:
       - name: Test supply-chain validators
         run: bash deploy/test-supply-chain.sh
 
+  voice-browser:
+    name: Voice browser audio (Chromium)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: web/.bun-version
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+      - name: Install frontend dependencies
+        working-directory: web
+        run: bun ci
+      - name: Install Chromium on GitHub runner
+        working-directory: web
+        run: bun ./node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Require unused isolated fixture data directory
+        # The default Playwright webServer owns /tmp/tbg-playwright on this fresh runner.
+        # Refuse an existing path rather than letting fixture startup delete unrelated data.
+        run: test ! -e /tmp/tbg-playwright && test ! -L /tmp/tbg-playwright
+      - name: Run real voice audio and lifecycle browser specs
+        working-directory: web
+        env:
+          # Keep Playwright's default gateway (18081) and Vite (5173) startup enabled.
+          E2E_SKIP_WEBSERVER: ''
+          E2E_BASE_URL: http://127.0.0.1:5173
+          PLAYWRIGHT_HTML_OPEN: never
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/voice-results.json
+        run: bun run e2e -- voice-announcements.spec.ts voice-owner-lifecycle.spec.ts voice-real-audio.spec.ts --reporter=line,html,json --output=test-results/voice
+      - name: Upload voice screenshots, measurements and browser reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: voice-browser-evidence
+          path: |
+            web/playwright-report/
+            web/test-results/voice/
+            web/test-results/voice-results.json
+          if-no-files-found: warn
+          retention-days: 14
+
   docker-smoke-gateway:
     name: Docker smoke test (gateway)
     timeout-minutes: 15
@@ -190,10 +236,10 @@ jobs:
           push: false
           tags: acb-tts-gateway:smoke-test
           load: true
-      - name: Run tts-gateway image smoke test twice
+      - name: Run VieNeu image smoke online and offline
         run: |
           bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
-          bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
+          TTS_SMOKE_OFFLINE=1 bash deploy/smoke-test-tts-gateway.sh acb-tts-gateway:smoke-test
       - name: Install pinned Trivy
         env:
           TRIVY_VERSION: 0.74.0
@@ -225,17 +271,18 @@ jobs:
   production-contract:
     name: Production Contract
     if: always()
-    needs: [verify, docker-smoke-gateway, docker-smoke-tts-gateway]
+    needs: [verify, voice-browser, docker-smoke-gateway, docker-smoke-tts-gateway]
     timeout-minutes: 2
     runs-on: ubuntu-latest
     steps:
       - name: Require every production gate
         env:
           VERIFY: ${{ needs.verify.result }}
+          VOICE_BROWSER: ${{ needs.voice-browser.result }}
           GATEWAY: ${{ needs.docker-smoke-gateway.result }}
           TTS: ${{ needs.docker-smoke-tts-gateway.result }}
         run: |
           set -euo pipefail
-          for result in "$VERIFY" "$GATEWAY" "$TTS"; do
+          for result in "$VERIFY" "$VOICE_BROWSER" "$GATEWAY" "$TTS"; do
             [[ "$result" == "success" ]] || { echo "Required production gate did not succeed: $result" >&2; exit 1; }
           done

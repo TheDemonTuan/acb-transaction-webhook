@@ -16,13 +16,16 @@ func TestVoiceStreamRejectsDifferentVoiceBeforePlayback(t *testing.T) {
 		provider, voice string
 		fallback        bool
 	}{
-		{"edge", storage.VoiceIDNamMinh, false},
-		{"gtts", storage.VoiceIDHoaiMy, false},
-		{"edge", storage.VoiceIDHoaiMy, true},
-		{"edge", storage.VoiceIDPiperVais1000, false},
-		{"piper", storage.VoiceIDHoaiMy, false},
-		{"piper", storage.VoiceIDPiperVais1000, true},
-		{"", storage.VoiceIDPiperVais1000, false},
+		{"edge", "vi-VN-NamMinhNeural", false},
+		{"gtts", "vi-VN-HoaiMyNeural", false},
+		{"edge", "vi-VN-HoaiMyNeural", true},
+		{"edge", "vi-VN-vais1000-medium", false},
+		{"piper", "vi-VN-HoaiMyNeural", false},
+		{"piper", "vi-VN-vais1000-medium", true},
+		{"vieneu", "vi-VN-vais1000-medium", false},
+		{"piper", storage.VoiceIDVieneuMaiAnh, false},
+		{"vieneu", storage.VoiceIDVieneuMaiAnh, true},
+		{"", storage.VoiceIDVieneuMaiAnh, false},
 	} {
 		stream := &ttsclient.StreamResult{Reader: strings.NewReader("must not play"), Closer: io.NopCloser(strings.NewReader("")), Provider: fixture.provider, Voice: fixture.voice, Fallback: fixture.fallback}
 		w := httptest.NewRecorder()
@@ -36,7 +39,7 @@ func TestVoiceStreamRejectsDifferentVoiceBeforePlayback(t *testing.T) {
 func TestVoiceStreamPreservesExplicitProviderMetadata(t *testing.T) {
 	for _, profile := range []storage.VoiceProfile{
 		storage.DefaultVoiceProfile,
-		{Revision: 7, ProviderMode: storage.ProviderModeEdgeOnly, VoiceID: storage.VoiceIDNamMinh, SynthesisKey: storage.ComputeSynthesisKey(storage.VoiceIDNamMinh, 1.25, 0)},
+		{Revision: 7, ProviderMode: storage.ProviderModeVieneuOnly, VoiceID: storage.VoiceIDVieneuMaiAnh, Rate: 1, SynthesisKey: storage.ComputeSynthesisKey(storage.VoiceIDVieneuMaiAnh, 1, 0)},
 	} {
 		stream := &ttsclient.StreamResult{Reader: strings.NewReader("exact audio"), Provider: profile.SynthesisProvider(), Voice: profile.VoiceID, Cached: true}
 		w := httptest.NewRecorder()

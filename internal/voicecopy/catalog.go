@@ -363,50 +363,23 @@ type AudioInputs struct {
 	Clips            []AudioInputClip            `json:"clips"`
 	Amounts          map[string]AudioInputAmount `json:"amounts"`
 	PreloadClipIDs   []string                    `json:"preloadClipIds"`
-	NumberSegments   map[string]string           `json:"numberSegments,omitempty"`
-	NumberPrefix     *string                     `json:"numberPrefix,omitempty"`
-	NumberSuffix     *string                     `json:"numberSuffix,omitempty"`
 }
 
-// ExportAudioInputs uses the production Go formatter; no Python money formatter is needed.
+// ExportAudioInputs exports whole utterances for the fixed VieNeu profile using the production Go formatter.
 func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (AudioInputs, error) {
-	provider := "edge"
-	isVieneu := false
-	switch profile.VoiceID {
-	case "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural":
-	case "vi-VN-vais1000-medium":
-		provider = "piper"
-		if profile.PitchHz != 0 {
-			return AudioInputs{}, errors.New("Piper requires pitchHz 0")
-		}
-	case "vi-VN-vieneu-v3-turbo-mai-anh-v1":
-		provider = "vieneu"
-		isVieneu = true
-		if profile.Rate != 1.00 || profile.PitchHz != 0 {
-			return AudioInputs{}, errors.New("VieNeu requires rate 1.00 and pitchHz 0")
-		}
-		if options.IncludeNumberSegments {
-			return AudioInputs{}, errors.New("VieNeu does not support number segments; only whole utterances")
-		}
-	default:
-		return AudioInputs{}, errors.New("unsupported voiceId")
+	if profile.VoiceID != "vi-VN-vieneu-v3-turbo-mai-anh-v1" {
+		return AudioInputs{}, errors.New("unsupported voiceId; VieNeu Mai Anh is required")
 	}
-	if profile.Rate < .75 || profile.Rate > 2 || profile.PitchHz < -50 || profile.PitchHz > 50 {
-		return AudioInputs{}, errors.New("invalid profile rate or pitch")
+	if profile.Rate != 1.00 || profile.PitchHz != 0 {
+		return AudioInputs{}, errors.New("VieNeu requires rate 1.00 and pitchHz 0")
 	}
-	rateText := strconv.FormatFloat(profile.Rate, 'f', 2, 64)
-	rounded, _ := strconv.ParseFloat(rateText, 64)
-	if rounded != profile.Rate {
-		return AudioInputs{}, errors.New("rate must have at most two decimal places")
+	if options.IncludeNumberSegments {
+		return AudioInputs{}, errors.New("VieNeu does not support number segments; only whole utterances")
 	}
 	if err := CheckAmountFixtures(); err != nil {
 		return AudioInputs{}, err
 	}
-	catalog, err := CompileCatalog(CatalogSourceBytes())
-	if err != nil {
-		return AudioInputs{}, err
-	}
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s|pack-schema-2", provider, profile.VoiceID, rateText, profile.PitchHz, FormatterVersion)))
+	hash := sha256.Sum256([]byte(fmt.Sprintf("vieneu|%s|1.00|0|%s|pack-schema-2", profile.VoiceID, FormatterVersion)))
 	result := AudioInputs{
 		SchemaVersion:    2,
 		SynthesisKey:     hex.EncodeToString(hash[:]),
@@ -416,7 +389,7 @@ func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (Au
 		FormatterVersion: FormatterVersion,
 		CatalogVersion:   CatalogVersion,
 		Amounts:          make(map[string]AudioInputAmount),
-		PreloadClipIDs:   make([]string, 0, 14),
+		PreloadClipIDs:   make([]string, 0, 6),
 	}
 
 	baseAmounts := []int64{1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000, 750000, 1000000, 2000000, 5000000}
@@ -446,19 +419,10 @@ func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (Au
 		for _, phrase := range classicPhrases {
 			id := phrase.ID + "-" + key
 			entry.Classic[phrase.ID] = id
-			transcript := FormatAnnouncementTemplate(phrase.Template, amount, "", false)
-			if isVieneu {
-				transcript = FormatSpokenAnnouncementTemplate(phrase.Template, amount, "", false)
-			}
+			transcript := FormatSpokenAnnouncementTemplate(phrase.Template, amount, "", false)
 			result.Clips = append(result.Clips, AudioInputClip{id, "classic", transcript})
 		}
 		result.Amounts[key] = entry
-	}
-
-	if !isVieneu {
-		for _, fragment := range catalog.Fragments {
-			result.Clips = append(result.Clips, AudioInputClip{fragment.ID, "tail-fragment", fragment.Text})
-		}
 	}
 
 	preloadAmounts := options.PreloadAmounts
@@ -478,73 +442,6 @@ func ExportAudioInputs(profile AudioInputProfile, options AudioInputOptions) (Au
 			seenPreloads[a] = true
 		}
 	}
-	if !isVieneu {
-		seenGroup := make(map[string]bool)
-		for _, fragment := range catalog.Fragments {
-			grp := fragment.StyleID + ":" + fragment.BandID
-			if !seenGroup[grp] {
-				seenGroup[grp] = true
-				result.PreloadClipIDs = append(result.PreloadClipIDs, fragment.ID)
-				if len(seenGroup) == 8 {
-					break
-				}
-			}
-		}
-	}
-
-	if options.IncludeNumberSegments {
-		qaAmounts := []int64{
-			1, 5, 10, 15, 21, 24, 25, 101, 105, 1001, 10005, 49999, 50000, 99999, 100001, 199999, 200000, 999999, 1000000, 1000001, 1010005, 1000000000, 1000000000000, 9007199254740991,
-			1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 75000, 100000, 105000, 127000, 150000, 201000, 215000, 251000, 300000, 368500, 500000, 750000, 1005000, 1015000, 2000000, 5000000, 1000000001,
-		}
-		partCounts := make(map[string]int)
-		for _, a := range selectedAmounts {
-			for _, p := range SpeakVNDParts(a) {
-				partCounts[p]++
-			}
-		}
-		for _, a := range qaAmounts {
-			for _, p := range SpeakVNDParts(a) {
-				if _, ok := partCounts[p]; !ok {
-					partCounts[p] = 1
-				}
-			}
-		}
-
-		type partFreq struct {
-			part  string
-			count int
-		}
-		var rankedParts []partFreq
-		for p, c := range partCounts {
-			rankedParts = append(rankedParts, partFreq{p, c})
-		}
-		slices.SortFunc(rankedParts, func(a, b partFreq) int {
-			if a.count != b.count {
-				return b.count - a.count
-			}
-			return strings.Compare(a.part, b.part)
-		})
-		if len(rankedParts) > 128 {
-			rankedParts = rankedParts[:128]
-		}
-
-		result.NumberSegments = make(map[string]string, len(rankedParts))
-		for _, item := range rankedParts {
-			h := sha256.Sum256([]byte(item.part))
-			cid := "number-" + hex.EncodeToString(h[:])
-			result.NumberSegments[item.part] = cid
-			result.Clips = append(result.Clips, AudioInputClip{ClipID: cid, Kind: "amount-segment", Transcript: item.part})
-		}
-
-		prefixID := "amount-prefix"
-		suffixID := "amount-suffix"
-		result.NumberPrefix = &prefixID
-		result.NumberSuffix = &suffixID
-		result.Clips = append(result.Clips, AudioInputClip{ClipID: prefixID, Kind: "amount-prefix", Transcript: "Đã nhận"})
-		result.Clips = append(result.Clips, AudioInputClip{ClipID: suffixID, Kind: "amount-suffix", Transcript: "đồng."})
-	}
-
 	return result, nil
 }
 

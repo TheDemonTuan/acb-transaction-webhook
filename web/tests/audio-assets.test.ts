@@ -13,7 +13,7 @@ const clip = async (index: number, size = 16): Promise<{ descriptor: VoiceClip; 
 // replacement for the upstream audio/listening acceptance gate.
 const context = (length = 24000) => {
   const decodeAudioData = vi.fn(async () => ({ length, numberOfChannels: 1, duration: length / 24000 } as AudioBuffer));
-  return Object.assign({ decodeAudioData } as unknown as AudioContext, { decodeAudioData });
+  return Object.assign({ state: 'running', decodeAudioData } as unknown as AudioContext, { decodeAudioData });
 };
 
 describe('bounded browser audio assets', () => {
@@ -81,6 +81,32 @@ describe('bounded browser audio assets', () => {
     assets.release(owner); assets.changeProfile('b'.repeat(64));
     expect(assets.getStats().decodedCount).toBe(0);
     assets.dispose();
+  });
+  it('reuses verified active-profile audio without refetch or decode while preserving independent owner pins', async () => {
+    setTestGlobal('caches', undefined);
+    const value = await clip(1), fetcher = vi.fn(async () => new Response(value.bytes));
+    setTestGlobal('fetch', fetcher);
+    const assets = new AudioAssets(true), decoder = context(), firstOwner = {}, nextOwner = {};
+    const first = await assets.getDecoded(value.descriptor, profile, decoder, firstOwner, new AbortController().signal);
+    const next = await assets.getDecoded(value.descriptor, profile, decoder, nextOwner, new AbortController().signal);
+    expect(next).toBe(first); expect(fetcher).toHaveBeenCalledTimes(1); expect(decoder.decodeAudioData).toHaveBeenCalledTimes(1);
+    assets.release(firstOwner); assets.changeProfile('b'.repeat(64));
+    expect(assets.getStats().decodedCount).toBe(1);
+    assets.release(nextOwner); assets.changeProfile('b'.repeat(64));
+    expect(assets.getStats().decodedCount).toBe(0); assets.dispose();
+  });
+  it('rejects already-cancelled cached preparation before fetching, decoding, or retaining another owner', async () => {
+    setTestGlobal('caches', undefined);
+    const value = await clip(1), fetcher = vi.fn(async () => new Response(value.bytes));
+    setTestGlobal('fetch', fetcher);
+    const assets = new AudioAssets(true), decoder = context(), owner = {};
+    await assets.getDecoded(value.descriptor, profile, decoder, owner, new AbortController().signal);
+    assets.release(owner);
+    const controller = new AbortController(); controller.abort();
+    await expect(assets.getDecoded(value.descriptor, profile, decoder, {}, controller.signal)).rejects.toThrow('VOICE_CANCELLED');
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(decoder.decodeAudioData).toHaveBeenCalledTimes(1);
+    assets.changeProfile('b'.repeat(64));
+    expect(assets.getStats().decodedCount).toBe(0); assets.dispose();
   });
   it('rejects packs for another synthesis profile before any clip download', async () => {
     const manifest: VoiceManifest = { schemaVersion: 2, packVersion: 'c'.repeat(64), synthesisKey: 'b'.repeat(64),

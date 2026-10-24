@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app.assets import InvalidPack, canonical_json, synthesis_key, validate_manifest
-from app.providers.edge import EdgeTTSProvider
+from app.assets import InvalidPack, VIENEU_VOICE, canonical_json, synthesis_key, validate_manifest
+from app.providers.vieneu import VieneuTTSProvider
 
 
 SPEC = importlib.util.spec_from_file_location("voice_pack_builder", Path(__file__).parents[1] / "scripts" / "build_voice_pack.py")
@@ -17,8 +17,8 @@ SPEC.loader.exec_module(builder)
 def inputs():
     return {
         "schemaVersion": 2,
-        "synthesisKey": synthesis_key("vi-VN-NamMinhNeural", 1.25, 0),
-        "voiceId": "vi-VN-NamMinhNeural", "rate": 1.25, "pitchHz": 0,
+        "synthesisKey": synthesis_key(VIENEU_VOICE, 1.0, 0),
+        "voiceId": VIENEU_VOICE, "rate": 1.0, "pitchHz": 0,
         "formatterVersion": "money-vi-v1", "catalogVersion": "v1",
         "preloadClipIds": ["amount-1"],
         "numberSegments": None,
@@ -43,7 +43,7 @@ def synthetic_review(data, candidate):
     }
 
 
-def test_no_audio_generation_without_reviewed_rights(tmp_path, monkeypatch):
+def test_no_audio_generation_without_inputs(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["builder", "--output", str(tmp_path)])
     called = False
 
@@ -59,29 +59,84 @@ def test_no_audio_generation_without_reviewed_rights(tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("evidence", [
-    {}, {"authorized": False}, {"authorized": True},
-    {"authorized": True, "deployment": "fixture", "use": " ", "retention": "reviewed", "redistribution": "reviewed", "evidenceReference": "private approval"},
-])
-def test_rights_gate_does_not_accept_missing_scope(tmp_path, evidence):
-    path = tmp_path / "rights.json"
-    path.write_bytes(canonical_json(evidence))
-    with pytest.raises(InvalidPack, match="rights gate"):
-        builder.require_rights(path)
+def test_vieneu_license_gate_requires_pinned_upstream_model_card(tmp_path):
+    card = Path(__file__).parents[1] / "assets" / "models" / "vieneu" / "backbone" / "README.md"
+    builder.require_vieneu_license(card)
+    with pytest.raises(InvalidPack, match="model-card required"):
+        builder.require_vieneu_license(None)
+    forged = tmp_path / "README.md"
+    forged.write_text("VieNeu-TTS authorized=true", encoding="utf-8")
+    with pytest.raises(InvalidPack, match="pinned upstream"):
+        builder.require_vieneu_license(forged)
 
 
-def test_release_owner_attestation_requires_all_scopes(tmp_path):
-    path = tmp_path / "rights.json"
-    path.write_bytes(canonical_json({
-        "authorized": True, "deployment": "isolated fixture", "use": "reviewed permission",
-        "retention": "reviewed permission", "redistribution": "reviewed permission",
-        "evidenceReference": "private release evidence (test fixture only)",
-    }))
-    builder.require_rights(path)
+@pytest.fixture
+def synthetic_provider_lifecycle(monkeypatch):
+    async def idle(self):
+        pass
+    monkeypatch.setattr(VieneuTTSProvider, "start", idle)
+    monkeypatch.setattr(VieneuTTSProvider, "close", idle)
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_generation_and_publication_require_vieneu_license(tmp_path, monkeypatch, publish):
+    arguments = ["builder", "--inputs", "inputs.json", "--output", str(tmp_path)]
+    if publish:
+        arguments.append("--publish")
+    monkeypatch.setattr("sys.argv", arguments)
+    monkeypatch.setattr(builder, "load_inputs", lambda path: inputs())
+    with pytest.raises(SystemExit) as error:
+        builder.main()
+    assert error.value.code == 1
+    assert not list(tmp_path.iterdir())
+
+
+def approved_inputs():
+    data = inputs()
+    data["clips"] = []
+    data["amounts"] = {}
+    for amount in sorted(builder.BASE_APPROVED_AMOUNTS):
+        standard = f"amount-{amount}"
+        data["clips"].append({"clipId": standard, "kind": "amount", "transcript": f"Số tiền {amount} đồng."})
+        classics = {}
+        for index in range(1, 7):
+            phrase = f"classic-{index:03d}"
+            cid = f"{phrase}-{amount}"
+            classics[phrase] = cid
+            data["clips"].append({"clipId": cid, "kind": "classic", "transcript": f"Câu {index}, số tiền {amount} đồng."})
+        data["amounts"][amount] = {"standard": standard, "classic": classics}
+    data["preloadClipIds"] = [data["clips"][0]["clipId"]]
+    return data
+
+
+def test_initial_vieneu_pack_contains_exact_whole_utterances(tmp_path):
+    data = approved_inputs()
+    path = tmp_path / "inputs.json"
+    path.write_bytes(canonical_json(data))
+    assert builder.load_inputs(path) == data
+
+
+@pytest.mark.parametrize("damage", ["classic", "extra", "fragments", "segments", "profile", "schema"])
+def test_initial_vieneu_pack_retains_profile_schema_and_whole_utterance_gates(tmp_path, damage):
+    data = approved_inputs()
+    if damage == "classic":
+        next(iter(data["amounts"].values()))["classic"].pop("classic-006")
+    elif damage == "extra":
+        data["clips"].append({"clipId": "extra", "kind": "tail-full", "transcript": "Cảm ơn."})
+    elif damage in ("fragments", "segments"):
+        data["clips"].append({"clipId": "composed", "kind": "tail-fragment" if damage == "fragments" else "amount-segment", "transcript": "Một."})
+    elif damage == "profile":
+        data["voiceId"] = "vi-VN-NamMinhNeural"
+    else:
+        data["schemaVersion"] = 1
+    path = tmp_path / "inputs.json"
+    path.write_bytes(canonical_json(data))
+    with pytest.raises(InvalidPack):
+        builder.load_inputs(path)
 
 
 @pytest.mark.asyncio
-async def test_exact_profile_build_and_idempotent_resume_use_no_new_synthesis(tmp_path, monkeypatch):
+async def test_exact_profile_build_and_idempotent_resume_use_no_new_synthesis(tmp_path, monkeypatch, synthetic_provider_lifecycle):
     data = inputs()
     calls = []
     audio = b"deterministic-test-not-MPEG"
@@ -90,7 +145,7 @@ async def test_exact_profile_build_and_idempotent_resume_use_no_new_synthesis(tm
         calls.append((text, voice, rate, pitch))
         yield b"synthetic-source"
 
-    monkeypatch.setattr(EdgeTTSProvider, "stream", stream)
+    monkeypatch.setattr(VieneuTTSProvider, "stream", stream)
     monkeypatch.setattr(builder, "normalize_audio", lambda raw, temporary: (audio, 2000))
     monkeypatch.setattr(builder, "audio_metadata", lambda path: 2000)
     await builder.build(data, tmp_path)
@@ -104,7 +159,7 @@ async def test_exact_profile_build_and_idempotent_resume_use_no_new_synthesis(tm
     first = (directory / "manifest.json").read_bytes()
     manifest = validate_manifest(builder.parse_json(first))
     assert manifest["clips"][0]["sha256"] == hashlib.sha256(audio).hexdigest()
-    assert calls == [("Đã nhận một đồng.", "vi-VN-NamMinhNeural", "+25%", "+0Hz")]
+    assert calls == [("Đã nhận một đồng.", VIENEU_VOICE, "+0%", "+0Hz")]
     assert not (directory / ".build-progress.json").exists()
     await builder.build(data, tmp_path)
     assert len(calls) == 1
@@ -112,7 +167,7 @@ async def test_exact_profile_build_and_idempotent_resume_use_no_new_synthesis(tm
     async def forbidden(*args, **kwargs):
         raise AssertionError("Verification contacted upstream")
         yield b""
-    monkeypatch.setattr(EdgeTTSProvider, "stream", forbidden)
+    monkeypatch.setattr(VieneuTTSProvider, "stream", forbidden)
     builder.verify_output(tmp_path, data)
     data["clips"][0]["transcript"] = "Different transcript."
     with pytest.raises(InvalidPack, match="exact input"):
@@ -129,7 +184,7 @@ async def test_checkpoint_resume_requires_exact_input_and_valid_hash(tmp_path, m
     async def forbidden(*args, **kwargs):
         raise AssertionError("Mismatched checkpoint contacted upstream")
         yield b""
-    monkeypatch.setattr(EdgeTTSProvider, "stream", forbidden)
+    monkeypatch.setattr(VieneuTTSProvider, "stream", forbidden)
     with pytest.raises(InvalidPack, match="Resume inputs differ"):
         await builder.build(data, tmp_path)
 
@@ -141,15 +196,6 @@ def test_initial_input_validation_requires_approved_amounts(tmp_path):
         builder.load_inputs(path)
 
 
-def test_piper_license_gate_uses_original_model_card_not_edge_attestation(tmp_path):
-    card = Path(__file__).parents[1] / "assets" / "models" / "MODEL_CARD"
-    builder.require_piper_license(card)
-    with pytest.raises(InvalidPack, match="model-card required"):
-        builder.require_piper_license(None)
-    forged = tmp_path / "MODEL_CARD"
-    forged.write_text("CC-BY-4.0 vais1000 authorized=true", encoding="utf-8")
-    with pytest.raises(InvalidPack, match="pinned upstream"):
-        builder.require_piper_license(forged)
 
 
 def test_build_error_keeps_nested_cause():
@@ -158,13 +204,11 @@ def test_build_error_keeps_nested_cause():
 
 
 @pytest.mark.asyncio
-async def test_real_piper_pack_build_and_verify(tmp_path):
+async def test_real_vieneu_pack_build_and_verify(tmp_path):
     import shutil
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("Build-only ffmpeg/ffprobe required for real normalization")
     data = inputs()
-    data["voiceId"] = "vi-VN-vais1000-medium"
-    data["synthesisKey"] = synthesis_key(data["voiceId"], data["rate"], 0)
     await builder.build(data, tmp_path)
     directory = tmp_path / data["synthesisKey"]
     manifest = builder.parse_json((directory / "manifest.candidate.json").read_bytes())
@@ -207,7 +251,7 @@ def candidate_fixture(root):
     return data, candidate, directory
 
 
-@pytest.mark.parametrize("damage", ["empty-clips", "missing-review", "unheard", "duplicate", "hash", "pending", "scores", "rate", "candidate-input"])
+@pytest.mark.parametrize("damage", ["empty-clips", "missing-review", "unheard", "duplicate", "hash", "pending", "scores", "rate", "candidate-input", "amount-errors", "amount-count", "composed-tail", "composed-numbers"])
 def test_publish_never_approves_incomplete_or_mismatched_review(tmp_path, damage, monkeypatch):
     data, candidate, directory = candidate_fixture(tmp_path)
     evidence = synthetic_review(data, candidate)
@@ -227,6 +271,16 @@ def test_publish_never_approves_incomplete_or_mismatched_review(tmp_path, damage
         evidence["naturalnessMedian"] = None
     elif damage == "rate":
         evidence["selectedRate"] = 1.1
+    elif damage == "amount-errors":
+        evidence["amountAccuracy"]["correct"] = 49
+    elif damage == "amount-count":
+        evidence["amountAccuracy"] = {"correct": 49, "total": 49}
+    elif damage == "composed-tail":
+        evidence["tailMode"] = "fragments"
+        evidence["candidateDecisions"]["tail"] = "approved"
+    elif damage == "composed-numbers":
+        evidence["numberMode"] = "segments"
+        evidence["candidateDecisions"]["numbers"] = "approved"
     else:
         candidate["clips"][0]["transcript"] = "Unreviewed changed text"
         (directory / "manifest.candidate.json").write_bytes(canonical_json(candidate))
@@ -253,3 +307,18 @@ def test_publish_is_idempotent_but_never_overwrites_existing_review(tmp_path, mo
     with pytest.raises(InvalidPack, match="immutable"):
         builder.publish(data, tmp_path, evidence_path)
     assert original == [(directory / name).read_bytes() for name in ("manifest.json", "quality.json")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("voiceId", "vi-VN-NamMinhNeural"), ("voiceId", "vi-VN-vais1000-medium"), ("rate", 1.25), ("pitchHz", 5)])
+async def test_direct_build_rejects_retired_profiles_before_provider_creation(tmp_path, monkeypatch, field, value):
+    data = inputs()
+    data[field] = value
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid profile constructed a synthesis provider")
+
+    monkeypatch.setattr("app.providers.vieneu.VieneuTTSProvider", forbidden)
+    with pytest.raises(InvalidPack):
+        await builder.build(data, tmp_path)
+    assert not list(tmp_path.iterdir())

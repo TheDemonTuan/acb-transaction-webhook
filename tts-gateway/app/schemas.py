@@ -1,33 +1,25 @@
-"""Data models and schemas for fixed-provider TTS."""
+"""Data models and schemas for the fixed local VieNeu profile."""
 from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
-PIPER_VOICE = "vi-VN-vais1000-medium"
 VIENEU_VOICE = "vi-VN-vieneu-v3-turbo-mai-anh-v1"
-EDGE_VOICES = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"}
 
 
 class SynthesizeRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=600)
-    voice: Literal["vi-VN-vais1000-medium", "vi-VN-vieneu-v3-turbo-mai-anh-v1", "vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"] = PIPER_VOICE
+    voice: Literal["vi-VN-vieneu-v3-turbo-mai-anh-v1"] = VIENEU_VOICE
     rate: str = Field("+0%", pattern=r"^[+-][0-9]{1,3}%$")
     pitch: str = Field("+0Hz", pattern=r"^[+-][0-9]{1,2}Hz$")
     cacheable: bool = True
-    provider_mode: Literal["PIPER_ONLY", "VIENEU_ONLY", "EDGE_ONLY"] = "PIPER_ONLY"
+    provider_mode: Literal["VIENEU_ONLY"] = "VIENEU_ONLY"
     timeout_ms: int = Field(8000, ge=1, le=8000, strict=True)
 
     @model_validator(mode="after")
     def validate_profile(self):
-        if not -25 <= int(self.rate[:-1]) <= 100 or not -50 <= int(self.pitch[:-2]) <= 50:
-            raise ValueError("Unsupported rate/pitch")
-        if self.provider_mode == "PIPER_ONLY":
-            if self.voice != PIPER_VOICE or int(self.pitch[:-2]) != 0:
-                raise ValueError("Piper requires its fixed voice and zero pitch")
-        elif self.provider_mode == "VIENEU_ONLY":
-            if self.voice != VIENEU_VOICE or int(self.rate[:-1]) != 0 or int(self.pitch[:-2]) != 0:
-                raise ValueError("VieNeu requires its fixed voice, +0% rate and +0Hz pitch")
-        elif self.voice not in EDGE_VOICES:
-            raise ValueError("Edge requires an Edge voice")
+        if int(self.rate[:-1]) != 0 or int(self.pitch[:-2]) != 0:
+            raise ValueError("VieNeu requires zero rate and pitch")
+        self.rate = "+0%"
+        self.pitch = "+0Hz"
         return self
 
 
@@ -45,10 +37,8 @@ class ProviderHealth(BaseModel):
     idleWorkers: Optional[int] = None
 
 class HealthResponse(BaseModel):
-    status: str
-    primary: str
-    edge: ProviderHealth
-    piper: ProviderHealth
+    status: Literal["ok", "degraded"]
+    primary: Literal["vieneu"]
     vieneu: ProviderHealth
 
 class ErrorResponse(BaseModel):

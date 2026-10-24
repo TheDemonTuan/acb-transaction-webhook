@@ -1,32 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
+import { emitCredit, expectCompleted, installVoiceFixture, telemetry, unlockVoice } from './voice-audio-fixture';
 
 test.beforeEach(async ({ page }) => {
-  await page.route(/\/api\/(?:public\/)?v1\/voice\/profile$/, route => route.fulfill({ json: {
-    ...DEFAULT_VOICE_PROFILE, providerMode: 'BROWSER_ONLY', synthesisKey: 'a'.repeat(64),
-    funEnabled: false, chimeEnabled: false,
-  } }));
-  await page.addInitScript(() => {
-    localStorage.setItem('acb.voice.settings.v1', JSON.stringify({ schemaVersion: 2, enabled: true,
-      volume: 1, announceWhenHidden: true, browserVoiceURI: 'exact-vi' }));
-    const spoken: string[] = [];
-    Object.defineProperty(window, '__ownerSpeech', { value: spoken });
-    class Utterance {
-      text: string;
-      onstart: (() => void) | null = null;
-      onend: (() => void) | null = null;
-      constructor(text: string) { this.text = text; }
-    }
-    Object.defineProperty(window, 'SpeechSynthesisUtterance', { value: Utterance, configurable: true });
-    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
-      paused: false,
-      getVoices: () => [{ lang: 'vi-VN', voiceURI: 'exact-vi', name: 'Exact Vietnamese', default: true }],
-      speak: (utterance: Utterance) => {
-        if (utterance.text.trim()) spoken.push(utterance.text);
-        queueMicrotask(() => { utterance.onstart?.(); utterance.onend?.(); });
-      }, cancel: () => {}, resume: () => {}, addEventListener: () => {}, removeEventListener: () => {},
-    } });
-  });
+  await installVoiceFixture(page, { enabled: true });
 });
 
 test('restored enabled owner exposes locked state and unlocks without first disabling preference', async ({ page }) => {
@@ -60,10 +36,9 @@ test('disable while replay detail is pending prevents late enqueue while later e
   release.resolve(); await response;
   await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc', exact: true }).click();
   await page.getByRole('button', { name: 'Nghe thử', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => {
-    const fixture = window as Window & { __ownerSpeech: string[] };
-    return fixture.__ownerSpeech;
-  })).toEqual(['Đã nhận năm trăm nghìn đồng.']);
+  const [sample] = await expectCompleted(page, 1);
+  expect(sample.isTest).toBe(true);
+  expect(sample.isReplay).not.toBe(true);
   await expect(page.getByRole('alert').filter({ hasText: 'VOICE_CANCELLED' })).toHaveCount(0);
   expect(pageErrors).toEqual([]);
 });
@@ -86,6 +61,47 @@ test('a genuine replay detail failure is visible and handled without an unhandle
   await page.getByRole('button', { name: 'Mở khóa loa', exact: true }).click();
   await page.getByRole('button', { name: 'Đọc lại giao dịch', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText('Không thể tải giao dịch để đọc lại');
-  expect(await page.evaluate(() => (window as Window & { __ownerSpeech: string[] }).__ownerSpeech)).toEqual([]);
+  expect(await telemetry(page)).toEqual([]);
   expect(pageErrors).toEqual([]);
+});
+
+test('client navigation retains one unlocked owner and one realtime subscription', async ({ page }) => {
+  await page.goto('/transactions');
+  await unlockVoice(page);
+  await page.getByRole('button', { name: 'Kết nối ngân hàng' }).first().click();
+  await expect(page).toHaveURL(/\/admin\/connection$/);
+  await expect(page.getByRole('button', { name: 'Giọng đọc: Bật', exact: true })).toBeVisible();
+  await emitCredit(page);
+  await expectCompleted(page, 1);
+  await page.getByRole('button', { name: /Kênh thông báo|Webhooks/ }).first().click();
+  await expect(page.getByRole('heading', { name: 'Kênh thông báo', exact: true })).toBeVisible();
+  await emitCredit(page, { transactionId: 'owner-second', orderCode: '100000556678', transactionNumber: '556678' }, 'owner:2');
+  await expectCompleted(page, 2);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('acb.voice.settings.v1')!).enabled)).toBe(true);
+});
+
+test('a genuinely suspended context requires explicit unlock and then plays again', async ({ page }) => {
+  await page.goto('/transactions');
+  await unlockVoice(page);
+  await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc', exact: true }).click();
+  await page.getByRole('button', { name: 'Nghe thử', exact: true }).click();
+  await expectCompleted(page, 1);
+  await page.getByRole('button', { name: 'Đóng', exact: true }).click();
+  await page.evaluate(async () => {
+    const context = window.__voiceContexts[0];
+    if (!context) throw new Error('No real destination context observed');
+    await context.suspend();
+    if (context.state !== 'suspended') throw new Error('Native context did not suspend');
+  });
+  await emitCredit(page);
+  await expect(page.getByRole('button', { name: 'Mở khóa loa', exact: true })).toBeVisible();
+  await expect.poll(async () => (await telemetry(page)).filter(sample => sample.outcome === 'failed').length).toBe(1);
+  await unlockVoice(page);
+  await page.getByRole('button', { name: 'Tùy chỉnh giọng đọc', exact: true }).click();
+  await page.getByRole('button', { name: 'Nghe thử', exact: true }).click();
+  await expect.poll(async () => (await telemetry(page)).filter(sample => sample.outcome === 'completed').length,
+    { timeout: 20000 }).toBe(2);
+  const samples = await telemetry(page);
+  expect(samples.map(sample => sample.outcome)).toEqual(['completed', 'failed', 'completed']);
+  expect(samples.at(-1)?.audioPath).toBe('decoded-pack');
 });

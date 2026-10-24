@@ -25,8 +25,8 @@ func TestClientSynthesizeSuccess(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
-		w.Header().Set("X-TTS-Voice", "vi-VN-HoaiMyNeural")
+		w.Header().Set("X-TTS-Provider", "vieneu")
+		w.Header().Set("X-TTS-Voice", "vi-VN-vieneu-v3-turbo-mai-anh-v1")
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-TTS-Cached", "true")
 		w.WriteHeader(http.StatusOK)
@@ -36,8 +36,10 @@ func TestClientSynthesizeSuccess(t *testing.T) {
 
 	client := New(ts.URL, "secret-token")
 	res, err := client.Synthesize(context.Background(), SynthesizeRequest{
-		Text:      "Xin chào",
-		Voice:     "vi-VN-HoaiMyNeural",
+		Text:         "Xin chào",
+		Voice:        "vi-VN-vieneu-v3-turbo-mai-anh-v1",
+		ProviderMode: "VIENEU_ONLY",
+		Rate:         "+0%", Pitch: "+0Hz",
 		Cacheable: true,
 	})
 	if err != nil {
@@ -47,7 +49,7 @@ func TestClientSynthesizeSuccess(t *testing.T) {
 	if string(res.Audio) != "fake_mp3_audio_data" {
 		t.Errorf("unexpected audio data: %q", string(res.Audio))
 	}
-	if res.Provider != "edge" {
+	if res.Provider != "vieneu" {
 		t.Errorf("unexpected provider: %q", res.Provider)
 	}
 	if res.Fallback != false {
@@ -70,8 +72,8 @@ func TestClientSynthesizeStream(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
-		w.Header().Set("X-TTS-Voice", "vi-VN-NamMinhNeural")
+		w.Header().Set("X-TTS-Provider", "vieneu")
+		w.Header().Set("X-TTS-Voice", "vi-VN-vieneu-v3-turbo-mai-anh-v1")
 		w.Header().Set("X-TTS-Fallback", "false")
 		w.Header().Set("X-TTS-Cached", "false")
 		w.WriteHeader(http.StatusOK)
@@ -91,19 +93,21 @@ func TestClientSynthesizeStream(t *testing.T) {
 
 	client := New(ts.URL, "secret-token")
 	stream, err := client.SynthesizeStream(context.Background(), SynthesizeRequest{
-		Text:  "Thử nghiệm stream âm thanh",
-		Voice: "vi-VN-NamMinhNeural",
+		Text:         "Thử nghiệm stream âm thanh",
+		Voice:        "vi-VN-vieneu-v3-turbo-mai-anh-v1",
+		ProviderMode: "VIENEU_ONLY",
+		Rate:         "+0%", Pitch: "+0Hz",
 	})
 	if err != nil {
 		t.Fatalf("SynthesizeStream failed: %v", err)
 	}
 	defer stream.Close()
 
-	if stream.Provider != "edge" {
-		t.Errorf("expected provider edge, got %q", stream.Provider)
+	if stream.Provider != "vieneu" {
+		t.Errorf("expected provider vieneu, got %q", stream.Provider)
 	}
-	if stream.Voice != "vi-VN-NamMinhNeural" {
-		t.Errorf("expected voice vi-VN-NamMinhNeural, got %q", stream.Voice)
+	if stream.Voice != "vi-VN-vieneu-v3-turbo-mai-anh-v1" {
+		t.Errorf("expected voice vi-VN-vieneu-v3-turbo-mai-anh-v1, got %q", stream.Voice)
 	}
 
 	allBytes, err := io.ReadAll(stream.Reader)
@@ -134,7 +138,7 @@ func TestClientSynthesizeUnauthorized(t *testing.T) {
 func TestClientSynthesizeStreamSeparatedClientTimeouts(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
-		w.Header().Set("X-TTS-Provider", "edge")
+		w.Header().Set("X-TTS-Provider", "vieneu")
 		w.WriteHeader(http.StatusOK)
 
 		flusher, ok := w.(http.Flusher)

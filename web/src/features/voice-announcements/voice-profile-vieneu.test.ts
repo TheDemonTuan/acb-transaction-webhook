@@ -7,12 +7,9 @@ import {
   type VoiceProfile,
 } from './voice-profile';
 
-describe('VoiceProfile VieNeu extensions', () => {
-  test('synthesisProvider maps provider modes correctly', () => {
-    expect(synthesisProvider('PIPER_ONLY')).toBe('piper');
+describe('VieNeu-only voice profile', () => {
+  test('synthesisProvider resolves the only supported provider', () => {
     expect(synthesisProvider('VIENEU_ONLY')).toBe('vieneu');
-    expect(synthesisProvider('EDGE_ONLY')).toBe('edge');
-    expect(synthesisProvider('BROWSER_ONLY')).toBe('browser');
   });
 
   test('validates valid VIENEU_ONLY profile', () => {

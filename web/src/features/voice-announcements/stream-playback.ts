@@ -29,13 +29,13 @@ export async function prepareStreamPlayback(
   url: string, profile: Readonly<VoiceProfile>, signal: AbortSignal, audio: HTMLAudioElement,
 ): Promise<StreamPlayback> {
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const abort = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
   signal.addEventListener('abort', abort, { once: true });
   if (signal.aborted) abort();
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; abort(); }, profile.coldRequestTimeoutMs);
   let objectURL: string | undefined;
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let released = false;
   const release = () => {
     if (released) return;
@@ -55,7 +55,7 @@ export async function prepareStreamPlayback(
         headers.get('X-Voice-Synthesis-Key') !== profile.synthesisKey ||
         headers.get('X-TTS-Voice') !== profile.voiceId ||
         headers.get('X-TTS-Provider') !== synthesisProvider(profile.providerMode) ||
-        headers.get('X-TTS-Fallback') === 'true') {
+        headers.get('X-TTS-Fallback') !== 'false') {
       await response.body?.cancel();
       throw new Error('VOICE_AUDIO_PROFILE_MISMATCH');
     }
@@ -73,38 +73,56 @@ export async function prepareStreamPlayback(
       try { sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg'); }
       catch { URL.revokeObjectURL(objectURL); objectURL = undefined; mediaSource = undefined; }
     }
-    const playable = sourceBuffer ? waitEvent(audio, 'canplay', controller.signal) : undefined;
-    // Both promises are owned even when preparation fails before returning a plan.
-    void playable?.catch(() => {});
+    const readiness = Promise.withResolvers<void>();
+    let downloadDone = false;
+    let mediaReady = false;
+    const clearWhenReady = () => { if (downloadDone && mediaReady) clearTimeout(timer); };
+    const markReady = () => { mediaReady = true; clearWhenReady(); readiness.resolve(); };
+    const playable = readiness.promise;
+    // Own readiness even if a body failure wins the handoff race.
+    void playable.catch(() => {});
+    if (sourceBuffer) {
+      void waitEvent(audio, 'canplay', controller.signal).then(markReady, readiness.reject);
+    }
     const completed = (async () => {
-      let total = 0;
-      const chunks: Uint8Array<ArrayBuffer>[] = [];
-      while (true) {
-        const { done, value } = await reader!.read();
-        if (done) break;
-        if (!value.byteLength) continue;
-        total += value.byteLength;
-        if (total > MAX_STREAM_BYTES) throw new Error('TTS_STREAM_TOO_LARGE');
-        if (sourceBuffer) {
-          if (sourceBuffer.updating) await waitEvent(sourceBuffer, 'updateend', controller.signal);
-          const updated = waitEvent(sourceBuffer, 'updateend', controller.signal);
-          void updated.catch(() => {});
-          sourceBuffer.appendBuffer(value as Uint8Array<ArrayBuffer>);
-          await updated;
-        } else chunks.push(value as Uint8Array<ArrayBuffer>);
+      try {
+        let total = 0;
+        const chunks: Uint8Array<ArrayBuffer>[] = [];
+        while (true) {
+          if (controller.signal.aborted) throw new Error('VOICE_CANCELLED');
+          const { done, value } = await reader!.read();
+          if (controller.signal.aborted) throw new Error('VOICE_CANCELLED');
+          if (done) break;
+          if (!value.byteLength) continue;
+          total += value.byteLength;
+          if (total > MAX_STREAM_BYTES) throw new Error('TTS_STREAM_TOO_LARGE');
+          if (sourceBuffer) {
+            if (sourceBuffer.updating) await waitEvent(sourceBuffer, 'updateend', controller.signal);
+            const updated = waitEvent(sourceBuffer, 'updateend', controller.signal);
+            void updated.catch(() => {});
+            sourceBuffer.appendBuffer(value as Uint8Array<ArrayBuffer>);
+            await updated;
+          } else chunks.push(value as Uint8Array<ArrayBuffer>);
+        }
+        if (!total) throw new Error('TTS_EMPTY_STREAM');
+        downloadDone = true;
+        clearWhenReady();
+        if (mediaSource) mediaSource.endOfStream();
+        else {
+          objectURL = URL.createObjectURL(new Blob(chunks, { type: 'audio/mpeg' }));
+          const ready = waitEvent(audio, 'canplay', controller.signal);
+          audio.src = objectURL; audio.load();
+          void ready.then(markReady, readiness.reject);
+        }
+      } catch (error) {
+        if (timedOut) throw new Error('TTS_TIMEOUT');
+        if (signal.aborted) throw new Error('VOICE_CANCELLED');
+        throw error;
       }
-      if (!total) throw new Error('TTS_EMPTY_STREAM');
-      if (mediaSource) mediaSource.endOfStream();
-      else {
-        objectURL = URL.createObjectURL(new Blob(chunks, { type: 'audio/mpeg' }));
-        const ready = waitEvent(audio, 'canplay', controller.signal);
-        audio.src = objectURL; audio.load();
-        await ready;
-      }
-      clearTimeout(timer);
     })();
-    void completed.catch(() => { audio.pause(); clearTimeout(timer); controller.abort(); });
-    await (playable ? Promise.race([playable, completed]) : completed);
+    void completed.catch(release);
+    // EOF is not evidence of media readiness. A failed body still rejects promptly.
+    await Promise.race([playable, completed.then(() => playable)]);
     if (controller.signal.aborted) throw new Error(signal.aborted ? 'VOICE_CANCELLED' : 'TTS_TIMEOUT');
     return { audio, completed, release };
   } catch (error) {

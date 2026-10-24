@@ -71,7 +71,7 @@ func (s *Server) voiceAssetClip(w http.ResponseWriter, r *http.Request) {
 // tryVoicePack returns only exact-profile, exact-transcript published audio.
 // A missing or corrupt pack stays on the fixed-voice cold synthesis path.
 func (s *Server) tryVoicePack(w http.ResponseWriter, r *http.Request, profile storage.VoiceProfile, phrase string) bool {
-	if s.ttsClient == nil || phrase == "" || profile.IncludeDescription || profile.ProviderMode == storage.ProviderModeBrowserOnly {
+	if s.ttsClient == nil || phrase == "" || profile.IncludeDescription {
 		return false
 	}
 	_, manifest, status, err := s.ttsClient.VoiceManifest(r.Context(), profile.SynthesisKey)

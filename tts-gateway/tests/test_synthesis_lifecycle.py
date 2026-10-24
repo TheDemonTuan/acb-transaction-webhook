@@ -2,10 +2,11 @@
 import asyncio
 import pytest
 from httpx import AsyncClient, ASGITransport
-from app.main import app, admission, cache, edge_provider
+from app.main import app, admission, cache, vieneu_provider
 
 @pytest.fixture(autouse=True)
-async def reset_state():
+async def reset_state(monkeypatch):
+    monkeypatch.setattr(vieneu_provider, "_closed", False)
     admission.active_count = 0
     admission.waiting_count = 0
     admission.total_waiters = 0
@@ -20,11 +21,11 @@ async def test_admission_overload_cap_matches_configured_workers(monkeypatch):
     block_event = asyncio.Event()
     capacity = admission.max_active + admission.max_waiting
 
-    async def mock_stream(text, voice="vi-VN-HoaiMyNeural", rate="+0%", pitch="+0Hz"):
+    async def mock_stream(text, voice="vi-VN-vieneu-v3-turbo-mai-anh-v1", rate="+0%", pitch="+0Hz", timeout_seconds=8.0):
         await block_event.wait()
         yield b"chunk"
 
-    monkeypatch.setattr(edge_provider, "stream", mock_stream)
+    monkeypatch.setattr(vieneu_provider, "stream", mock_stream)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -32,7 +33,7 @@ async def test_admission_overload_cap_matches_configured_workers(monkeypatch):
         for i in range(capacity):
             # Distinct texts avoid singleflight deduplication.
             t = asyncio.create_task(
-                client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": f"distinct phrase {i}", "cacheable": False}})
+                client.post("/synthesize/stream", json={"voice": "vi-VN-vieneu-v3-turbo-mai-anh-v1", "provider_mode": "VIENEU_ONLY", **{"text": f"distinct phrase {i}", "cacheable": False}})
             )
             tasks.append(t)
 
@@ -43,7 +44,7 @@ async def test_admission_overload_cap_matches_configured_workers(monkeypatch):
         assert admission.waiting_count == admission.max_waiting
 
         # One more distinct request must immediately get 503 TTS_OVERLOADED.
-        resp19 = await client.post("/synthesize/stream", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", "text": "distinct overflow phrase", "cacheable": False})
+        resp19 = await client.post("/synthesize/stream", json={"voice": "vi-VN-vieneu-v3-turbo-mai-anh-v1", "provider_mode": "VIENEU_ONLY", "text": "distinct overflow phrase", "cacheable": False})
         assert resp19.status_code == 503
         assert resp19.headers.get("Retry-After") == "1"
         assert "TTS_OVERLOADED" in resp19.json().get("detail", "")
@@ -57,20 +58,20 @@ async def test_singleflight_waiter_cancellation_does_not_abort_other_waiters(mon
     """When waiter A cancels, waiter B still receives completed audio."""
     synth_event = asyncio.Event()
 
-    async def mock_synth(text, voice="vi-VN-HoaiMyNeural", rate="+0%", pitch="+0Hz", timeout_seconds=4.0):
+    async def mock_synth(text, voice="vi-VN-vieneu-v3-turbo-mai-anh-v1", rate="+0%", pitch="+0Hz", timeout_seconds=4.0):
         await synth_event.wait()
         return b"mocked_audio_bytes"
 
-    monkeypatch.setattr(edge_provider, "synthesize", mock_synth)
+    monkeypatch.setattr(vieneu_provider, "synthesize", mock_synth)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Launch waiter A and waiter B for the SAME text
         task_a = asyncio.create_task(
-            client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "shared phrase", "cacheable": True}})
+            client.post("/synthesize", json={"voice": "vi-VN-vieneu-v3-turbo-mai-anh-v1", "provider_mode": "VIENEU_ONLY", **{"text": "shared phrase", "cacheable": True}})
         )
         task_b = asyncio.create_task(
-            client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "shared phrase", "cacheable": True}})
+            client.post("/synthesize", json={"voice": "vi-VN-vieneu-v3-turbo-mai-anh-v1", "provider_mode": "VIENEU_ONLY", **{"text": "shared phrase", "cacheable": True}})
         )
 
         await asyncio.sleep(0.02)
@@ -91,21 +92,20 @@ async def test_singleflight_waiter_cancellation_does_not_abort_other_waiters(mon
 @pytest.mark.asyncio
 async def test_synthesis_timeout_returns_504(monkeypatch):
     """Slow producer exceeding timeout budget returns 504 TTS_TIMEOUT."""
-    async def mock_synth(text, voice="vi-VN-HoaiMyNeural", rate="+0%", pitch="+0Hz", timeout_seconds=4.0):
+    async def mock_synth(text, voice="vi-VN-vieneu-v3-turbo-mai-anh-v1", rate="+0%", pitch="+0Hz", timeout_seconds=4.0):
         await asyncio.sleep(0.2)
         return b"late_audio"
 
-    monkeypatch.setattr(edge_provider, "synthesize", mock_synth)
+    monkeypatch.setattr(vieneu_provider, "synthesize", mock_synth)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post("/synthesize", json={"voice": "vi-VN-HoaiMyNeural", "provider_mode": "EDGE_ONLY", **{"text": "timeout test", "timeout_ms": 50, "cacheable": False}})
+        resp = await client.post("/synthesize", json={"voice": "vi-VN-vieneu-v3-turbo-mai-anh-v1", "provider_mode": "VIENEU_ONLY", **{"text": "timeout test", "timeout_ms": 50, "cacheable": False}})
         assert resp.status_code == 504
         assert "TTS_TIMEOUT" in resp.json().get("detail", "")
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode,voice", [("PIPER_ONLY", "vi-VN-vais1000-medium"), ("EDGE_ONLY", "vi-VN-HoaiMyNeural")])
-async def test_disconnect_before_first_byte_releases_inference_and_admission(monkeypatch, mode, voice):
+async def test_disconnect_before_first_byte_releases_inference_and_admission(monkeypatch):
     import app.main as main
     from app.schemas import SynthesizeRequest
     entered = asyncio.Event()
@@ -124,12 +124,10 @@ async def test_disconnect_before_first_byte_releases_inference_and_admission(mon
         finally:
             cleaned.set()
 
-    provider = main.piper_provider if mode == "PIPER_ONLY" else main.edge_provider
+    provider = main.vieneu_provider
     monkeypatch.setattr(provider, "stream", blocked_stream)
     monkeypatch.setattr(main, "verify_token", lambda token: None)
-    if mode == "PIPER_ONLY":
-        monkeypatch.setattr(provider, "_closed", False)
-    req = SynthesizeRequest(text="Đã nhận năm trăm nghìn đồng.", voice=voice, provider_mode=mode, cacheable=False)
+    req = SynthesizeRequest(text="Đã nhận năm trăm nghìn đồng.", cacheable=False)
     task = asyncio.create_task(main.synthesize_stream(req, request=DisconnectedRequest()))
     try:
         await asyncio.wait_for(entered.wait(), 1)

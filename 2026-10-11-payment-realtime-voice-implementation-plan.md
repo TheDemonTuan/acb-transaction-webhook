@@ -1,9 +1,83 @@
 # Payment realtime, dọn ACB và voice tiếng Việt nhất quán
 
+## Hợp đồng TTS hiện hành — VieNeu-only
+
+Phần này thay thế các lựa chọn Edge/Piper/browser, rate/pitch và pack schema cũ trong snapshot kế hoạch phía dưới. Runtime chỉ dùng `VIENEU_ONLY`, provider `vieneu`, voice `vi-VN-vieneu-v3-turbo-mai-anh-v1`, rate `1.0` (`+0%`), pitch `0` (`+0Hz`), fallback `false`. Không chuyển giọng/provider khi lỗi. Tổng ngân sách cold request vẫn là **8000 ms**, gồm admission và synthesis/streaming.
+
+### Nghe duyệt và phát hành pack
+
+Chạy các lệnh sau từ root với corpus/profile/input do catalog tooling hiện có xuất. Dùng thư mục output mới; không commit audio hoặc review local như bằng chứng đã nghe. `--provider vieneu` là lựa chọn duy nhất và mặc định; `--rates 1.0` cũng là mặc định, không còn phép thử nhiều tốc độ.
+
+```sh
+python tts-gateway/scripts/voice_quality.py prepare --provider vieneu --rates 1.0 --corpus <quality-corpus.json> --output <listening-directory>
+python tts-gateway/scripts/voice_quality.py validate --review <listening-directory>/review.json --profile-output <approved-profile.json>
+python tts-gateway/scripts/build_voice_pack.py --inputs <audio-inputs.json> --output <pack-directory> --model-card tts-gateway/assets/models/vieneu/backbone/README.md
+python tts-gateway/scripts/voice_quality.py prepare-pack-review --pack <pack-directory>/<synthesisKey> --corpus <quality-corpus.json> --output <pack-review-directory>
+python tts-gateway/scripts/voice_quality.py validate-pack-review --review <pack-review-directory>/review.json --quality-output <quality.json>
+python tts-gateway/scripts/build_voice_pack.py --publish --inputs <audio-inputs.json> --output <pack-directory> --model-card tts-gateway/assets/models/vieneu/backbone/README.md --quality-evidence <quality.json>
+python tts-gateway/scripts/build_voice_pack.py --verify-only --inputs <audio-inputs.json> --output <pack-directory>
+```
+
+Mỗi bước review phải được người nghe thật hoàn tất trước khi chạy validator tương ứng: ghi reviewer, thời điểm có timezone, nghe đủ mẫu và điền số tiền nghe được/điểm/defect checks, không tự điền PASS. Review pack bắt đầu với `amountAccuracy: {"correct": null, "total": null}`; reviewer ghi **số ca thực sự đã nghe**, cần integer `correct == total >= 50`. Không suy ra 50/50 từ số clip, hash hay review text; validator giữ nguyên counts đã duyệt. Mỗi clip phải được approved rõ ràng, không clipping/missing/repeated words, readability ít nhất 4 và median naturalness ít nhất 4. Cả tail và numbers giữ `whole`, không phát hành composition candidates.
+
+Builder cần model card VieNeu upstream đúng bản đã pin cho cả generation và publication. Candidate chỉ tạo `manifest.candidate.json`, không được runtime phục vụ; chỉ publish với evidence gắn input/audio hash mới tạo `manifest.json` và `quality.json`. Publication immutable; không tái dùng Edge/Piper pack hoặc giả mạo rights/license evidence. Giữ nguyên model card upstream đã tải, không sửa nội dung để vượt gate.
+
+### Đo HTTP hiện hành
+
+```sh
+python tts-gateway/scripts/voice_quality.py benchmark --base-url <internal-tts-url> --token-file <internal-token-file> --corpus <quality-corpus.json> --output <benchmark-directory> --repeats 3 --concurrency 1
+```
+
+Lệnh này đo HTTP streaming của đúng VieNeu profile, rate `+0%`, pitch `+0Hz`, `timeout_ms=8000`; không chứng minh quota ARM64, soak hai giờ, chất lượng nghe hoặc worker count production. Local Piper timing runner đã được loại bỏ; không dùng số đo provider cũ để phê duyệt VieNeu. Không có comparison-rendering command; nghe cold/pack qua các player thực do `prepare` và `prepare-pack-review` tạo.
+
+### Go migration và manifest — kiểm chứng local 2026-10-24
+
+Migration `023_vieneu_only.sql` chuyển profile cũ hoặc tuple VieNeu không hợp lệ sang Mai Anh/rate 1/pitch 0/fallback 0 trong transaction và tăng revision đúng một lần. Giữ amount bands, chime, loading sound, fun/custom template và includeDescription; profile canonical không tăng revision, DB thiếu singleton không tạo row. Tên cột lịch sử `edge_voice` được giữ, không còn là lựa chọn Edge. Save vẫn dùng revision-CAS; migration 019/021 không bị sửa.
+
+Go chỉ nhận manifest schema 2 của profile VieNeu chính xác, giữ kiểm canonical hash, synthesis key, metadata/quality evidence và giới hạn clip. Regression `TestRetainedVieneuManifestThroughUpstreamAndGoProxy` đọc manifest b5a2b7… đã commit (140 clips, packVersion `4710505ae4e7d31113d96623d0e3df6471b8c2e3781e00da4778ba79eacea8fd`), fetch qua upstream HTTP có token, rồi kiểm public/private Go proxy trả 200 và conditional 304. Bốn biến thể sai voice/hash/rate/pitch bị từ chối; proxy trả 404, không đổi provider. Regression migration chạy đủ tám fixture từ schema 22, gồm rollback khi lỗi, preservation, idempotence và stale-revision conflict.
+
+Đã chạy `gofmt -w` trên 23 Go files mới/thay đổi. Từ root, Go **1.27.2 windows/amd64**:
+
+```sh
+go test ./internal/storage ./internal/httpapi ./internal/ttsclient ./cmd/voice-catalog ./internal/voicecopy
+go test -race ./...
+```
+
+Kết quả: focused **5/5 packages pass**; full race **26/26 packages có tests pass**, 3 packages không có test files, không có failure/race được báo. Race chạy với `CGO_ENABLED=1`, compiler GCC 16.2.0 từ w64devkit 2.10.1 giải nén trong temp riêng (archive SHA256 `add1edf984ce4d473cfeb7c52e0ab38db73a855bba6c7f564d5e16648eb2896a`), không thay cấu hình runtime. Đây là regression Go/HTTP/SQLite local, **không** phải evidence nghe loa, inference model, ARM64/Linux CI hoặc sửa production.
+
+
+### Python/runtime — kiểm chứng local 2026-10-24
+
+Runtime giữ VieNeu 3.8.3, Mai Anh, CPU ONNX fp32 và threads 2; không đổi checkpoint, tốc độ, gain phía server hoặc tổng synthesis deadline 8 giây. Fetch bằng `scripts/fetch_vieneu_assets.py --output assets/models/vieneu` rồi `--verify-only` đã thành công với toàn bộ byte size/SHA trong provenance đã pin. Không dùng model tải từ revision mới.
+
+Verification dùng CPython **3.13.17 Windows x64** trong temp venv riêng, tạo bằng `uv venv --python 3.13 <temp-venv>`, cài chính xác hai lock bằng `uv pip sync --python <temp-python> --require-hashes tts-gateway/requirements.lock tts-gateway/requirements-dev.lock` từ root. Inventory thực: vieneu 3.8.3, lameenc 1.8.4, onnxruntime 1.31.0, numpy 2.5.4, soundfile 0.14.0; import inventory không còn `piper` hoặc `edge_tts`.
+
+Hai lỗi ownership phát hiện trong kiểm chứng đã sửa: cleanup subprocess nay đóng/drain/join pipes qua API công khai và không thả slot trước reaping; sau inference bị hủy/lỗi, pool sở hữu một replacement warmup riêng, chỉ trả slot khi READY. Không bắt request tiếp theo phải chịu toàn bộ startup trong budget 8 giây, không tự chạy lại câu đọc. Health unavailable trong warmup; close hủy/join maintenance và reaps process, kể cả hủy lặp lại. Consumer bị hủy khi đang recovery không tạo vòng respawn; startup replacement lỗi được ghi log và dọn, không retry.
+
+Từ `tts-gateway/`, lệnh focused cuối cùng:
+
+```sh
+python -m pytest -q -rs tests/test_vieneu.py tests/test_api.py tests/test_assets.py tests/test_synthesis_lifecycle.py tests/test_synthesis_ownership.py tests/test_cache.py tests/test_voice_pack_builder.py tests/test_vieneu_process.py tests/test_process_replacement.py
+python -m pytest -v -rs
+```
+
+Kết quả focused **167 passed, 4 skipped** (99.10 giây); full **248 passed, 4 skipped** (102.68 giây), không warning. Bốn skip là symlink không được Windows cấp quyền, hai SIGSTOP fault-injection chỉ có trên POSIX, và normalization cần build-only FFmpeg/ffprobe. Đã tìm PATH, Program Files/Program Files (x86), user Programs và các vị trí tool phổ biến nhưng không tìm được FFmpeg/ffprobe; normalization **chưa được thực thi**, không tính pass.
+
+Smoke loopback Uvicorn thật, token test ngẫu nhiên và port tạm, không mock inference: `/health` chỉ có status/primary/vieneu, status ok, một worker idle; `/voices` chỉ Mai Anh, thiếu auth 401, bốn retired modes trả 422 trên cả hai routes. Text **“Đã nhận năm trăm nghìn đồng.”** qua `/synthesize` và `/synthesize/stream` nhận exact provider/voice/fallback=false/cached=false và decode toàn bộ EOF bằng soundfile: mỗi response **13,824 bytes**, **41,472 samples**, **24,000 Hz mono**, **1.728 giây**, samples finite, RMS **0.0973721**, peak **0.5409510**; thời gian lần đo tương ứng 3.875/3.804 giây. Đây là digital decode, không phải bằng chứng nghe loa.
+
+Smoke socket thật riêng đã disconnect ba lần khi worker đang inference trước response hoàn tất; cả ba process cũ reaped, readiness tự trở lại bằng replacement mới và lần synthesis tiếp theo trả 200, decode được 41,472 samples. Không còn tình trạng health chờ vô hạn sau cancellation. Uvicorn ghi `CancelledError` cho các request cố ý ngắt; không lọc/suppress log này. Các test cleanup/recovery dùng subprocess framing chỉ chứng minh ownership, không được tính là bằng chứng chất lượng tiếng nói.
+
+Hai lệnh `bash -n deploy/smoke-test-tts-gateway.sh` và `bash -n deploy/backup-secrets.sh` thành công; YAML parse thành công cho compose gốc/prod và CI/deploy workflows; Python nhúng trong container smoke compile thành công. Chưa thể kiểm `docker compose config` hoặc image semantics: không tìm được Docker CLI/service ở PATH hay vị trí cài đặt. Đã thử `docker build -t tbg-vieneu-audio:smoke tts-gateway` (exit 127), online và `TTS_SMOKE_OFFLINE=1` container smoke đều dừng với “Docker CLI is required” (exit 1). **Không có container online/offline, Linux/ARM64 quota, read-only/non-root image hay image inventory PASS local.** Worker local dùng cache model đã pin với `HF_HUB_OFFLINE=1`; điều này không thay thế network-none container. Không tác động production hoặc tạo giao dịch thật.
+
+## Snapshot kế hoạch và kết quả lịch sử
+
+Các phần dưới giữ ngữ cảnh của kế hoạch cũ và evidence lúc đó; tên provider, lựa chọn cấu hình và kết quả test cũ không phải hướng dẫn vận hành hay chứng nhận cho cutover VieNeu. Kết quả Go mới được ghi riêng ở phần hiện hành phía trên; không suy diễn các kết quả lịch sử thành xác nhận audio hoặc production hiện tại.
+
+
 ## Release correction — 2026-10-12
 
 - Báo cáo trước ghi 42/42 hoàn thành không phải evidence phát hành. Metrics A/B được hardcode; điểm nghe/rate/composition được tự điền; chưa chứng minh ARM64 quota, soak hai giờ hay pack được người nghe duyệt. Đã loại bỏ benchmark scaffolds giả và rút các manifest/profile local chưa có review thật. Không commit DB/audio/evidence local.
-- Release mã nguồn này giữ cold synthesis cùng giọng; pack schema 2 chỉ được publish khi có review đầy đủ gắn hash, profile/input và reviewer/time. `build_voice_pack.py --publish` cần `--model-card` cho Piper hoặc `--rights-evidence` cho Edge; candidate không tự trở thành pack phát hành. Publication immutable; thiếu review phải bị từ chối.
+- Release mã nguồn giữ cold synthesis cùng giọng VieNeu; pack schema 2 chỉ được publish khi có review đầy đủ gắn hash, profile/input và reviewer/time. `build_voice_pack.py` cần `--model-card` VieNeu đã pin khi generation và `--publish`, cùng `--quality-evidence` khi publish; candidate không tự trở thành pack phát hành. Publication immutable; thiếu review phải bị từ chối.
 - Worker mặc định vẫn là 1. Worker 2 chỉ là cấu hình khả dụng, chưa có quyết định production dựa trên ARM64 quota.
 - Cold browser playback dùng fetch-owned transport: kiểm tra exact profile headers, giới hạn 4MiB/deadline, MSE khi hỗ trợ hoặc buffered blob cùng request; upstream lỗi không được tính là EOF thành công. CSP chỉ bổ sung `media-src 'self' blob: data:` cho audio local/unlock.
 - ARM64 container gate phát hiện ngắt client trước headers chưa hủy inference. `preheaders_disconnect_guard` hiện sở hữu disconnect trong admission/first-byte cho cả Piper và Edge, dừng/join watcher trước khi chuyển receive cho `OwnedStreamingResponse`; cleanup phải giải phóng lease/worker. Regression lifecycle/ownership 27 tests pass; gate container phải pass trước merge.
@@ -126,17 +200,17 @@ Snapshot nghiên cứu: `54fc43b3fc9b85c4bac8edc45022e228fec1dbf4`, không phả
 ### 8. Asset-first full amount, cache hữu hạn và phát liền mạch
 **Phụ thuộc bước 6–7; quyền phát hành audio là gate bên dưới.** Pack là tối ưu đường thường gặp, không phải prerequisite để nhận tiền.
 
-1. Tạo mới `tts-gateway/scripts/build_voice_pack.py`, `tts-gateway/assets/voicepacks/`, `tts-gateway/app/assets.py`, frontend `audio-assets.ts`; chưa có pipeline tương đương. CLI `python tts-gateway/scripts/build_voice_pack.py --inputs <audio-inputs.json> --output <pack-directory>` chạy từ root, consume transcript Go bước7, gọi Edge concurrency2 ở build environment đã có quyền sử dụng. `--verify-only` kiểm hash/schema/limits không gọi upstream. Output file layout `<output>/<synthesisKey>/manifest.json`, `<output>/clips/<sha256>.mp3`; idempotent resume dùng checksum exact-profile, không overwrite pack khác key. Không sinh asset runtime.
-2. Initial approved amount list cố định (VND): 1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000, 750000, 1000000, 2000000, 5000000. Tạo hai packs Hoài My/Nam Minh ở rate 1.25, pitchHz 0; chỉ selected pack được preload. Với mỗi amount: standard core nguyên câu và sáu classic full phrases; thêm 600 source fragments của catalog. Không sinh 10.000×20 amounts. Profile rate/pitch khác chưa có pack → cold rõ ràng; builder có thể tạo exact-profile pack ở release sau theo cùng command, không auto-transpose audio.
-3. `synthesisKey` = SHA256 của canonical UTF-8 string `edge|<edgeVoice>|<rate fixed 2 decimals>|<pitchHz integer>|money-vi-v1|pack-schema-1`; profile revision không ở key để style/band edit không invalidate cùng giọng. Catalog version được bind ở clip/manifest. Nếu formatter thay phát âm phải tăng formatter version và đổi key.
-4. Manifest schema1: `{schemaVersion,packVersion,synthesisKey,voiceId,rate,pitchHz,formatterVersion,catalogVersion,clips:[{clipId,kind,transcript,durationMs,sampleRate,bytes,sha256}],amounts:{canonicalAmount:{standard:clipId,classic:{phraseId:clipId}}}}`; kind=`amount|classic|tail-fragment|tail-full`. Canonical JSON sorted keys UTF-8, packVersion SHA256(manifest bỏ packVersion), clip sha256 exact bytes; manifest endpoint no-cache+ETag packVersion, clip endpoint immutable. MP3 mono24kHz, −18LUFS, true peak≤−1dBTP, trim silence ngoài lời/fade5ms tại silence; không crossfade phụ âm. Cap64MiB/pack và4MiB/clip; vượt cap build fail, không tự bỏ catalog text.
+1. Dùng `tts-gateway/scripts/build_voice_pack.py`, `tts-gateway/assets/voicepacks/` và `tts-gateway/app/assets.py` hiện có. Chạy `python tts-gateway/scripts/build_voice_pack.py --inputs <audio-inputs.json> --output <pack-directory> --model-card tts-gateway/assets/models/vieneu/backbone/README.md` từ root, consume transcript Go, tổng hợp VieNeu fixed-profile trong build environment. `--verify-only` kiểm hash/schema/limits không gọi inference. Candidate ở `<output>/<synthesisKey>/manifest.candidate.json`, clips ở `<output>/clips/<sha256>.mp3`; chỉ publish bằng lệnh và human evidence nêu ở đầu tài liệu mới tạo manifest runtime. Không sinh asset runtime.
+2. Initial approved amount list cố định (VND): 1000, 2000, 5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000, 750000, 1000000, 2000000, 5000000. Chỉ tạo pack Mai Anh VieNeu ở rate 1.0, pitchHz 0. Với mỗi amount: standard core nguyên câu và sáu classic full phrases; tail chỉ dùng whole utterances đã duyệt. Không sinh 10.000×20 amounts, không transpose audio hoặc ghép số/tail fragments.
+3. `synthesisKey` = SHA256 của canonical UTF-8 string `vieneu|vi-VN-vieneu-v3-turbo-mai-anh-v1|1.00|0|money-vi-v1|pack-schema-2`; profile revision không ở key để style/band edit không invalidate cùng giọng. Catalog version được bind ở clip/manifest. Nếu formatter thay phát âm phải tăng formatter version và đổi key.
+4. Manifest schema 2 được kiểm bởi `app/assets.py`: exact-profile inputs, preload clip IDs, clip hashes/metadata, whole-only composition và hash của quality evidence; không dùng manifest schema 1 hoặc number segments. Canonical JSON sorted keys UTF-8, packVersion SHA256(manifest bỏ packVersion), clip sha256 exact bytes; manifest endpoint no-cache+ETag packVersion, clip endpoint immutable. MP3 mono24kHz, −18LUFS, true peak≤−1dBTP, trim silence ngoài lời/fade5ms tại silence; không crossfade phụ âm. Cap64MiB/pack và4MiB/clip; vượt cap build fail, không tự bỏ catalog text.
 5. Dùng ffmpeg trong **build environment** để normalize/ffprobe duration; không cần giữ ffmpeg runtime khi gTTS đã bỏ. `tts-gateway/Dockerfile` copy approved packs vào image read-only hiện tại. Không thêm volume, không dùng `/data` tiền, không coi `/tmp` tmpfs là storage bền.
 6. TTS internal GET `/assets/profiles/{synthesisKey}/manifest` và `/assets/clips/{sha256}` cần token hiện có. Go public/private proxy tại `/voice/profiles/{synthesisKey}/manifest` và `/voice/assets/{sha256}` chỉ trả published manifest-listed bytes, GET only, path không lấy từ raw user string. Missing →404; corrupt/hash mismatch → pack unavailable, không đổi giọng. Immutable clips cache-control `public,max-age=31536000,immutable`, profile DTO no-store; token không ra browser, không transaction/customer trong manifest.
 7. Transaction audio route part=amount/tail/full: resolver lấy DB amount/validate recipe. Part full có full-phrase clip thì trả exact bytes, nếu thiếu synth một request nguyên câu. Local engine có standard amount clip+tail fragments thì dùng buffers; amount miss dùng cold full announcement một lần. Với quality-gate tail-full mode, amount warm cho một cold part=tail song song; tail tới muộn hơn cuối amount thì abort/bỏ tail, không đọc tiền lại/im chờ. Custom/includeDescription luôn full phrase cold/cache. Giữ accurate X-TTS-Provider/Voice/Cached và thêm X-Voice-Revision/X-Voice-Synthesis-Key. Fetch/buffered paths kiểm metadata trước playback; native HTMLAudioElement không đọc được response headers nên server bind query profileRevision và fail409 trước body nếu stale, không yêu cầu JS kiểm header không truy cập được. Native preparation load media và chờ canplay, không phát trước chime hay chờ ended mới resolve.
 8. Browser compressed cache: CacheStorage LRU max 64MiB/512 clips/7 ngày; decoded AudioBuffer working set max 16MiB/32 buffers. Pin current+next; không vượt cap vì pin—quá lớn thì stream thay vì decode. Manifest/text catalog có cap riêng 1MiB/4MiB. CacheStorage/IndexedDB unavailable/quota error → memory LRU max 8MiB và same-voice cold, UI báo cache hạn chế. Kiểm hash trước decode; xóa entry corrupt và tải lại asset tối đa một lần, không retry synthesis.
 9. Unlock: tạo chime và preload **6 amount core** 20k/50k/100k/200k/500k/1m + tối đa 8 fragments của profile active, concurrency fetch 2. Không preload toàn 10.000 recipes hoặc cả hai voices. Đổi profile abort preload cũ, clear decoded unpinned khác key; compressed LRU tự eviction. Web Audio clock schedule buffers cùng sample timeline; callbacks ended chỉ quản lý lifecycle, không dùng setTimeout để nối MP3.
-10. Quality gate trước phát hành: transcript exact amount; nghe so sánh cold full phrase và cached whole core + hai tail sentence cho cả hai voices, mỗi band/style, rate 1.25/pitch 0; không sai tiền, đổi giọng, clipping hoặc khoảng im bất thường. Nếu nối tail không tự nhiên, giữ amount clip và dùng **một clip tail nguyên hai câu** được cold-cache theo phraseId; không bật number splicing, không kéo dài loading. 10.000 texts vẫn phải đủ; không yêu cầu render sẵn 10.000 whole tails.
-11. Quyền audio: upstream README/license code không đủ chứng minh quyền thương mại/tái phân phối. Trước đưa Edge-generated pack vào image/repository/public cache lâu dài, lưu bằng chứng quyền dùng/retention/redistribution cho deployment này trong release evidence. Nếu chưa có bằng chứng, **không phát hành pack đó**; hoàn tất code/catalog/fixed-voice/chime/bounded lifecycle và kiểm chứng cold path, đánh dấu warm-pack acceptance bị chặn. Không tự mua Azure, tự lấy giọng khác hoặc ghi “asset-first hoàn tất” khi thiếu asset hợp lệ. Chuông tự tạo không phụ thuộc gate này.
+10. Quality gate trước phát hành: nghe đúng Mai Anh VieNeu, rate 1.0/pitch 0 cho từng nhóm tiền/band/style. Transcript và số tiền nghe được phải chính xác; không clipping, missing/repeated words, đổi giọng hoặc khoảng im bất thường. Giữ whole amount/full phrase/whole tail; không bật number hoặc fragment splicing. Counts `amountAccuracy` phải do reviewer ghi sau ít nhất 50 ca nghe thật, không hardcode.
+11. Quyền audio: builder chỉ chấp nhận model card VieNeu upstream đúng bản pin, không chấp nhận tệp tự ghi authorized=true. Lưu thông tin license/provenance và human release evidence tương ứng deployment. Thiếu model card hợp lệ hoặc review thì không phát hành pack; cold path vẫn cùng VieNeu, không đổi sang provider/giọng khác. Chuông tự tạo không phụ thuộc gate pack.
 
 ### 9. SePay native: adapter riêng, disabled mặc định và cutover một authority
 **Sau core; không chặn triển khai bước 1–8.** Telegram tiếp tục hoạt động, không ép nâng gói. Không thêm một generic payment framework.

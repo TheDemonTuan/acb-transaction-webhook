@@ -2,9 +2,7 @@ package storage
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
 	"reflect"
@@ -12,7 +10,7 @@ import (
 )
 
 func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
-	for _, mode := range []string{ProviderModeEdgeOnly, ProviderModeBrowserOnly} {
+	for _, mode := range []string{"EDGE_ONLY", "BROWSER_ONLY"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			store, err := openInternal(ctx, filepath.Join(t.TempDir(), "pre21.db"), OpenOptions{})
@@ -20,6 +18,24 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.Close()
+			// This history regression intentionally stops at schema 21.
+			migrate21 := func() error {
+				return store.withTx(ctx, func(tx *sql.Tx) error {
+					var registered int
+					if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=21`).Scan(&registered); err != nil {
+						return err
+					}
+					if registered != 0 {
+						return nil
+					}
+					m := migrations[20]
+					if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+						return err
+					}
+					_, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations VALUES(?,?,?)`, m.version, m.checksum, "2026-10-11T00:00:00Z")
+					return err
+				})
+			}
 			err = store.withTx(ctx, func(tx *sql.Tx) error {
 				if _, err := tx.ExecContext(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
 					return err
@@ -49,7 +65,7 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = store.db.ExecContext(ctx, `INSERT INTO voice_settings(id,revision,provider_mode,edge_voice,rate,pitch_hz,amount_bands_json,chime_enabled,loading_sound_enabled,fun_enabled,include_description,custom_template,online_fallback,updated_at) VALUES('singleton',17,?,?,1.20,12,?,0,1,0,1,'Cảm ơn {amount}.',0,'2026-10-10T00:00:00Z')`, mode, VoiceIDNamMinh, string(raw))
+			_, err = store.db.ExecContext(ctx, `INSERT INTO voice_settings(id,revision,provider_mode,edge_voice,rate,pitch_hz,amount_bands_json,chime_enabled,loading_sound_enabled,fun_enabled,include_description,custom_template,online_fallback,updated_at) VALUES('singleton',17,?,?,1.20,12,?,0,1,0,1,'Cảm ơn {amount}.',0,'2026-10-10T00:00:00Z')`, mode, "vi-VN-NamMinhNeural", string(raw))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -57,11 +73,11 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode == ProviderModeEdgeOnly {
+			if mode == "EDGE_ONLY" {
 				if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER fail_voice_cutover BEFORE UPDATE ON voice_settings BEGIN SELECT RAISE(ABORT,'injected cutover failure'); END`); err != nil {
 					t.Fatal(err)
 				}
-				if err := store.Migrate(ctx); err == nil {
+				if err := migrate21(); err == nil {
 					t.Fatal("expected migration rollback")
 				}
 				afterFailure, err := store.GetVoiceProfile(ctx)
@@ -76,7 +92,7 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := store.Migrate(ctx); err != nil {
+			if err := migrate21(); err != nil {
 				t.Fatal(err)
 			}
 			after, err := store.GetVoiceProfile(ctx)
@@ -84,9 +100,9 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := before
-			if mode == ProviderModeEdgeOnly {
-				want.ProviderMode = ProviderModePiperOnly
-				want.VoiceID = VoiceIDPiperVais1000
+			if mode == "EDGE_ONLY" {
+				want.ProviderMode = "PIPER_ONLY"
+				want.VoiceID = "vi-VN-vais1000-medium"
 				want.PitchHz = 0
 				want.Revision++
 				want.SynthesisKey = ComputeSynthesisKey(want.VoiceID, want.Rate, 0)
@@ -95,7 +111,7 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 			if !reflect.DeepEqual(want, after) {
 				t.Fatalf("profile not preserved: want=%+v got=%+v", want, after)
 			}
-			if err := store.Migrate(ctx); err != nil {
+			if err := migrate21(); err != nil {
 				t.Fatal(err)
 			}
 			again, err := store.GetVoiceProfile(ctx)
@@ -107,34 +123,5 @@ func TestPiperMigrationPreservesProfileAtomically(t *testing.T) {
 				t.Fatalf("registration: %s %v", checksum, err)
 			}
 		})
-	}
-}
-
-func TestExplicitProviderVoiceValidationAndSynthesisKeys(t *testing.T) {
-	for _, fixture := range []struct {
-		mode, voice string
-		pitch       int
-		valid       bool
-	}{
-		{ProviderModePiperOnly, VoiceIDPiperVais1000, 0, true},
-		{ProviderModePiperOnly, VoiceIDPiperVais1000, 1, false},
-		{ProviderModePiperOnly, VoiceIDHoaiMy, 0, false},
-		{ProviderModeEdgeOnly, VoiceIDPiperVais1000, 0, false},
-		{ProviderModeEdgeOnly, VoiceIDHoaiMy, -10, true},
-		{ProviderModeEdgeOnly, VoiceIDNamMinh, 10, true},
-		{ProviderModeBrowserOnly, VoiceIDPiperVais1000, 10, true},
-		{"ONLINE_AUTO", VoiceIDHoaiMy, 0, false},
-	} {
-		in := VoiceSettingsInput{ProviderMode: fixture.mode, VoiceID: fixture.voice, Rate: 1.25, PitchHz: fixture.pitch, AmountBands: defaultAmountBands()}
-		err := ValidateVoiceProfileInput(&in)
-		if (err == nil) != fixture.valid {
-			t.Errorf("%+v: %v", fixture, err)
-		}
-	}
-	for _, fixture := range []struct{ voice, provider string }{{VoiceIDPiperVais1000, "piper"}, {VoiceIDHoaiMy, "edge"}, {VoiceIDNamMinh, "edge"}} {
-		hash := sha256.Sum256([]byte(fixture.provider + "|" + fixture.voice + "|1.25|0|money-vi-v1|pack-schema-2"))
-		if got := ComputeSynthesisKey(fixture.voice, 1.25, 0); got != hex.EncodeToString(hash[:]) {
-			t.Errorf("wrong synthesis key for %s: %s", fixture.voice, got)
-		}
 	}
 }

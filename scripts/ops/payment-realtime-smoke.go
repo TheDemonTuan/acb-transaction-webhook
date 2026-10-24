@@ -1414,8 +1414,8 @@ func (h *harness) audio() error {
 		return errors.New("local TTS configured but public voice profile unavailable")
 	}
 	expectedProvider := profile.SynthesisProvider()
-	if expectedProvider != "piper" && expectedProvider != "edge" {
-		return errors.New("local TTS smoke requires an explicit server synthesis provider")
+	if expectedProvider != "vieneu" || profile.ProviderMode != storage.ProviderModeVieneuOnly || profile.VoiceID != storage.VoiceIDVieneuMaiAnh || profile.Rate != 1 || profile.PitchHz != 0 || profile.SynthesisKey != storage.ComputeSynthesisKey(storage.VoiceIDVieneuMaiAnh, 1, 0) {
+		return errors.New("local TTS smoke requires the fixed VieNeu Mai Anh profile")
 	}
 	start := time.Now()
 	req, err = http.NewRequestWithContext(h.ctx, "POST", h.baseA+"/api/public/v1/voice/test", bytes.NewReader(encode(map[string]any{"profileRevision": profile.Revision, "part": "full"})))

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { VoiceDedupe } from '../src/features/voice-announcements/voice-dedupe';
 import { VoiceQueue } from '../src/features/voice-announcements/voice-queue';
 import { buildSingleTransactionPhrase } from '../src/features/voice-announcements/voice-copy';
-import type { VoiceEngine, VoiceInfo, VoiceMessage } from '../src/features/voice-announcements/voice-engine';
+import type { VoiceEngine } from '../src/features/voice-announcements/voice-engine';
 
 describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
   let dedupe: VoiceDedupe;
@@ -16,7 +16,6 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
     let cancelReject: ((err: Error) => void) | null = null;
     const engine: VoiceEngine = {
       isSupported: () => true,
-      getVoices: async () => [],
       speak: (_msg) =>
         new Promise<void>((_, reject) => {
           cancelReject = reject;
@@ -77,7 +76,6 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
   it('commits dedupe reservation when playback succeeds', async () => {
     const engine: VoiceEngine = {
       isSupported: () => true,
-      getVoices: async () => [],
       speak: async () => {},
       cancel: () => {},
       prefetch: async () => {},
@@ -106,7 +104,6 @@ describe('Voice Queue Cancellation & Dedupe Lifecycle', () => {
     const spoken: string[] = [];
     const engine: VoiceEngine = {
       isSupported: () => true,
-      getVoices: async () => [],
       speak: async (msg) => {
         spoken.push(msg.text);
       },

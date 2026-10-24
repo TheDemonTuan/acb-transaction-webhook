@@ -5,7 +5,7 @@ import { AudioAssets } from './audio-assets';
 import { loadVoiceCatalog, readBounded, throwIfAborted } from './voice-catalog';
 import { formatAnnouncementTemplate, RecentPhraseRing, selectAnnouncementRecipe, type AnnouncementRecipe } from './voice-copy';
 import { speakVnd } from './money-to-vietnamese';
-import { BrowserSpeechEngine } from './browser-speech-engine';
+import { createSpeechOutput } from './speech-output';
 import { prepareStreamPlayback, type StreamPlayback } from './stream-playback';
 
 interface PlanCommon {
@@ -31,14 +31,12 @@ export interface PreparedSegment {
 export type PreparedAnnouncement = PlanCommon & (
   | { kind: 'buffers'; segments: PreparedSegment[] }
   | { kind: 'stream'; streamUrl: string; audioElement: HTMLAudioElement; completed?: Promise<void> }
-  | { kind: 'browser'; text: string; voiceURI: string }
 );
 export interface PreparationOptions {
   isPublic: boolean;
   context: AudioContext | null;
   assets: AudioAssets;
   recent: RecentPhraseRing;
-  browser: BrowserSpeechEngine;
   onStatus?: (state: 'ready' | 'cold' | 'unavailable', detail?: string) => void;
 }
 
@@ -77,7 +75,8 @@ async function coldBuffer(message: VoiceMessage, profile: Readonly<VoiceProfile>
     if (response.headers.get('X-Voice-Revision') !== String(profile.revision) ||
         response.headers.get('X-Voice-Synthesis-Key') !== profile.synthesisKey ||
         response.headers.get('X-TTS-Voice') !== profile.voiceId ||
-        response.headers.get('X-TTS-Provider') !== synthesisProvider(profile.providerMode)) {
+        response.headers.get('X-TTS-Provider') !== synthesisProvider(profile.providerMode) ||
+        response.headers.get('X-TTS-Fallback') !== 'false') {
       await response.body?.cancel(); throw new Error('VOICE_AUDIO_PROFILE_MISMATCH');
     }
     const bytes = await readBounded(response, 4 * 1024 * 1024, controller.signal);
@@ -132,11 +131,10 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
   let objectURL: string | undefined;
   let native: HTMLAudioElement | undefined;
   let transport: StreamPlayback | undefined;
-  let tailController: AbortController | undefined;
   let released = false;
   const release = () => {
     if (released) return;
-    released = true; options.assets.release(owner); options.recent.release(owner); tailController?.abort();
+    released = true; options.assets.release(owner); options.recent.release(owner);
     transport?.release();
     if (native) { native.pause(); native.removeAttribute('src'); native.load(); }
     if (objectURL) URL.revokeObjectURL(objectURL);
@@ -166,14 +164,9 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
     }
     const common: PlanCommon = { profile, recipe: amountOnly ? undefined : message.recipe, amountVnd: amount,
       transactionId: message.transactionId, volume: Math.max(0, Math.min(1, message.volume ?? 1)), message, release };
-    if (profile.providerMode === 'BROWSER_ONLY') {
-      await options.browser.prefetch({ ...message, profile }, signal);
-      return { ...common, kind: 'browser', text: message.text, voiceURI: message.voiceURI || '', audioPath: 'browser' };
-    }
     const context = options.context;
-    const isVieneu = profile.providerMode === 'VIENEU_ONLY';
     const allowPackForVieneu = amountOnly || (!amountOnly && message.recipe?.styleId === 'classic');
-    const manifest = !custom && !profile.includeDescription && amount && !message.summaryTransactionIds && (!isVieneu || allowPackForVieneu)
+    const manifest = !custom && !profile.includeDescription && amount && !message.summaryTransactionIds && allowPackForVieneu
       ? await options.assets.getManifest(profile, signal) : null;
     throwIfAborted(signal);
     const mapping = amount && manifest ? manifest.amounts[amount] : undefined;
@@ -182,7 +175,7 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
     const clipId = needsClassicFull ? classicId : mapping?.standard;
     const clip = manifest?.clips.find((entry) => entry.clipId === clipId);
     if (clip && amount && clip.transcript !== (classicId ? message.text : `Đã nhận ${speakVnd(amount)}.`)) throw new Error('VOICE_ASSET_TRANSCRIPT_MISMATCH');
-    if (clip && context && (!isVieneu || amountOnly || classicId)) {
+    if (clip && context && (amountOnly || classicId)) {
       const buffer = await options.assets.getDecoded(clip, profile, context, owner, signal);
       if (buffer) {
         options.onStatus?.('ready', options.assets.cacheLimited ? 'Bộ nhớ âm thanh hạn chế' : undefined);
@@ -193,10 +186,6 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
           speechStartMs: clip.speechStartMs ?? 0,
           amountStartMs: clip.amountStartMs ?? (clip.kind === 'amount' ? 400 : 0),
         }];
-        if (!classicId && !amountOnly && message.recipe) {
-          const tailBuffer = await coldBuffer(message, profile, 'tail', options, signal, owner);
-          segments.push({ buffer: tailBuffer, role: 'tail', clipId: message.recipe.id });
-        }
         return { ...common, kind: 'buffers', segments, audioPath: 'decoded-pack' };
       }
     }
@@ -224,10 +213,10 @@ export async function prepareAnnouncement(message: VoiceMessage, profile: Readon
 export function markSpeechStarted(
   message: VoiceMessage,
   options?: {
-    startEvidence?: 'audio-clock' | 'media-playing' | 'speech-onstart';
+    startEvidence?: 'audio-clock' | 'media-playing';
     amountOffsetMs?: number | null;
-    amountEvidence?: 'reviewed-offset' | 'segment-boundary' | 'speech-boundary' | 'unavailable';
-    audioPath?: 'decoded-pack' | 'compressed-pack' | 'network-pack' | 'cold-stream' | 'cold-buffer' | 'browser';
+    amountEvidence?: 'reviewed-offset' | 'segment-boundary' | 'unavailable';
+    audioPath?: 'decoded-pack' | 'compressed-pack' | 'network-pack' | 'cold-stream' | 'cold-buffer';
     monotonicNow?: number;
   }
 ): void {
@@ -262,22 +251,35 @@ export function markSpeechStarted(
 export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSignal, options: PreparationOptions,
     notBefore = 0): Promise<void> {
   throwIfAborted(signal);
-  if (plan.kind === 'browser') {
-    await options.browser.speak({ ...plan.message, profile: plan.profile, text: plan.text, voiceURI: plan.voiceURI });
-    return;
+  const context = options.context;
+  if (!context || context.state !== 'running') {
+    options.onStatus?.('unavailable', 'AUDIO_CONTEXT_NOT_RUNNING');
+    throw Object.assign(new Error('AUDIO_CONTEXT_NOT_RUNNING'), { playbackStarted: false });
   }
   if (plan.kind === 'stream') {
     const audio = plan.audioElement;
-    audio.volume = plan.volume; audio.playbackRate = 1;
-    await new Promise<void>((resolve, reject) => {
+    audio.volume = 1; audio.playbackRate = 1;
+    const output = createSpeechOutput(context, plan.volume);
+    let source: MediaElementAudioSourceNode | undefined;
+    try {
+      source = context.createMediaElementSource(audio);
+      source.connect(output.input);
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
       let started = false, settled = false;
       const finish = (error?: unknown) => {
         if (settled) return;
         settled = true; clearTimeout(timer);
         signal.removeEventListener('abort', aborted);
+        context.removeEventListener('statechange', stateChanged);
         audio.removeEventListener('playing', playing); audio.removeEventListener('ended', ended); audio.removeEventListener('error', failed);
-        if (error) reject(Object.assign(error instanceof Error ? error : new Error(String(error)), { playbackStarted: started }));
-        else resolve();
+        if (error) {
+          const original = error instanceof Error ? error : new Error(String(error));
+          const permissionDenied = error !== null && typeof error === 'object' && 'name' in error && error.name === 'NotAllowedError';
+          const failure = permissionDenied ? new Error('AUDIO_CONTEXT_NOT_RUNNING') : original;
+          if (failure.message === 'AUDIO_CONTEXT_NOT_RUNNING') options.onStatus?.('unavailable', failure.message);
+          audio.pause();
+          reject(Object.assign(failure, { playbackStarted: started }));
+        } else resolve();
       };
       const playing = () => { if (!started) { started = true; markSpeechStarted(plan.message, { startEvidence: 'media-playing', audioPath: plan.audioPath ?? 'cold-stream' }); if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id); } };
       // Native whole-phrase audio has no word-boundary event: completion is the
@@ -285,44 +287,55 @@ export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSign
       const ended = () => { if (plan.recipe && plan.recipe.styleId !== 'classic') plan.message.onTailStart?.(plan.recipe.id); finish(); };
       const aborted = () => { audio.pause(); finish(new Error('VOICE_CANCELLED')); };
       const failed = () => finish(new Error(started ? 'AUDIO_STREAM_INTERRUPTED' : 'AUDIO_PLAYBACK_ERROR'));
+      const stateChanged = () => {
+        if (context.state === 'running' || settled) return;
+        options.onStatus?.('unavailable', 'AUDIO_CONTEXT_NOT_RUNNING');
+        finish(new Error('AUDIO_CONTEXT_NOT_RUNNING'));
+      };
       const timer = setTimeout(() => finish(new Error('AUDIO_PLAYBACK_TIMEOUT')), 120000);
       signal.addEventListener('abort', aborted, { once: true });
+      context.addEventListener('statechange', stateChanged);
       audio.addEventListener('playing', playing); audio.addEventListener('ended', ended); audio.addEventListener('error', failed);
       void plan.completed?.catch((error) => { audio.pause(); finish(error); });
-      if (signal.aborted) { aborted(); return; }
-      try { void audio.play().catch(finish); } catch (error) { finish(error); }
-    });
+      if (context.state !== 'running') stateChanged();
+      else if (signal.aborted) aborted();
+      else { try { void audio.play().catch(finish); } catch (error) { finish(error); } }
+      await promise;
+    } finally { source?.disconnect(); output.disconnect(); }
     return;
   }
-  const context = options.context;
-  if (!context) throw new Error('AUDIO_CONTEXT_UNAVAILABLE');
-  if (context.state === 'suspended') await context.resume();
-  throwIfAborted(signal);
-  await new Promise<void>((resolve, reject) => {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
     const sources: AudioBufferSourceNode[] = [];
-    const gain = context.createGain();
-    gain.gain.setValueAtTime(plan.volume, context.currentTime); gain.connect(context.destination);
+    const output = createSpeechOutput(context, plan.volume);
     let started = false, settled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true; clearTimeout(watchdog); timers.forEach(clearTimeout); signal.removeEventListener('abort', aborted);
+      context.removeEventListener('statechange', stateChanged);
       for (const source of sources) { source.onended = null; try { source.stop(); } catch {} source.disconnect(); }
-      gain.disconnect();
+      output.disconnect();
       if (error) reject(Object.assign(error, { playbackStarted: started })); else resolve();
     };
     const aborted = () => finish(new Error('VOICE_CANCELLED'));
+    const stateChanged = () => {
+      if (context.state === 'running' || settled) return;
+      options.onStatus?.('unavailable', 'AUDIO_CONTEXT_NOT_RUNNING');
+      finish(new Error('AUDIO_CONTEXT_NOT_RUNNING'));
+    };
     const watchdog = setTimeout(() => finish(new Error('AUDIO_PLAYBACK_TIMEOUT')), 120000);
     signal.addEventListener('abort', aborted, { once: true });
+    context.addEventListener('statechange', stateChanged);
     let cursor = Math.max(context.currentTime, notBefore);
     const startAt = cursor;
     const schedule = (buffer: AudioBuffer, end: () => void) => {
       const source = context.createBufferSource(); source.buffer = buffer; source.playbackRate.value = 1;
-      source.connect(gain); source.onended = end; sources.push(source);
+      source.connect(output.input); source.onended = end; sources.push(source);
       source.start(cursor); cursor += buffer.duration;
     };
     try {
-      if (signal.aborted) { aborted(); return; }
+      if (context.state !== 'running') throw new Error('AUDIO_CONTEXT_NOT_RUNNING');
+      throwIfAborted(signal);
       let amountStartCursor: number | null = null;
       let tailStartCursor: number | null = null;
       for (let i = 0; i < plan.segments.length; i++) {
@@ -363,5 +376,5 @@ export async function playPrepared(plan: PreparedAnnouncement, signal: AbortSign
         if (plan.recipe?.styleId === 'classic') plan.message.onTailStart?.(plan.recipe.id);
       }, Math.max(0, (startAt - context.currentTime) * 1000)));
     } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
-  });
+  await promise;
 }

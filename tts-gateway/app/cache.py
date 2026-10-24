@@ -27,10 +27,8 @@ class TTSCache:
         voice: str,
         rate: str,
         pitch: str,
-        allow_fallback: bool = True,
-        provider_mode: str = "ONLINE_AUTO",
     ) -> str:
-        raw = f"{text}|{voice}|{rate}|{pitch}|{allow_fallback}|{provider_mode}"
+        raw = f"VIENEU_ONLY|{text}|{voice}|{rate}|{pitch}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     async def get(self, key: str) -> Optional[Tuple[bytes, str, str]]:

@@ -8,12 +8,7 @@ import { exportVoiceTelemetry } from '../voice-telemetry';
 import {
   saveVoiceSettingsServer,
   DEFAULT_AMOUNT_BANDS,
-  PIPER_VOICE_ID,
-  PIPER_VOICE_LABEL,
-  VIENEU_VOICE_ID,
   VIENEU_VOICE_LABEL,
-  EDGE_VOICE_IDS,
-  type VoiceProviderMode,
   type VoiceProfile,
   type VoiceSettingsInput,
 } from '../voice-profile';
@@ -26,7 +21,7 @@ export interface VoiceSettingsSheetProps {
 
 export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, onClose }) => {
   const queryClient = useQueryClient();
-  const { settings, updateSettings, unlockAudio, audioUnlocked, isSupported, voices, lastTelemetry, profile: activeProfile, voiceState, voiceDetail, profileOffline, recentSkipped, replayVoice } = useVoiceAnnouncements();
+  const { settings, updateSettings, unlockAudio, audioUnlocked, isSupported, lastTelemetry, profile: activeProfile, voiceState, voiceDetail, profileOffline, recentSkipped, replayVoice } = useVoiceAnnouncements();
   const [toggleError, setToggleError] = useState<string | null>(null);
   const [serverSaveError, setServerSaveError] = useState<string | null>(null);
   const [serverSaveSuccess, setServerSaveSuccess] = useState(false);
@@ -72,18 +67,9 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
 
   if (!isOpen) return null;
 
-  const vietnameseVoices = voices.filter((v) => {
-    const l = v.lang.toLowerCase().replace('_', '-');
-    return l === 'vi' || l.startsWith('vi-');
-  });
-
   const handleToggle = async () => {
     setToggleError(null);
     if (!settings.enabled || !audioUnlocked) {
-      if (vietnameseVoices.length === 0 && voices.length > 0 && formDraft?.providerMode === 'BROWSER_ONLY') {
-        setToggleError('Thiết bị chưa có giọng Tiếng Việt. Vui lòng cài đặt giọng tiếng Việt trong hệ thống.');
-        return;
-      }
       try {
         const unlocked = await unlockAudio();
         if (!unlocked) {
@@ -108,7 +94,6 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
       if (!prev) return prev;
       return {
         ...prev,
-        rate: typeof snap.rate === 'number' ? Math.min(2, Math.max(0.75, snap.rate)) : prev.rate,
         customTemplate: snap.announcementTemplate || prev.customTemplate,
         includeDescription: Boolean(snap.includeDescription ?? prev.includeDescription),
       };
@@ -187,30 +172,15 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
           {!isSupported ? (
             <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800 flex items-start gap-2.5">
               <VolumeX className="w-5 h-5 shrink-0 text-amber-600" />
-              <span>Trình duyệt hoặc thiết bị này chưa hỗ trợ đọc bằng âm thanh Web Audio / Speech.</span>
+              <span>Trình duyệt hoặc thiết bị này chưa hỗ trợ phát âm thanh Web Audio.</span>
             </div>
           ) : (
             <>
               {/* Enable Toggle (Local Device) */}
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
-                <p>Giọng hiệu lực: {profile?.providerMode === 'BROWSER_ONLY' ? 'Trình duyệt (đã chọn rõ)' : profile?.providerMode === 'PIPER_ONLY' ? PIPER_VOICE_LABEL : profile?.voiceId || 'Chưa tải hồ sơ'} · {profile?.rate}x · {profile?.pitchHz}Hz</p>
-                {profile?.providerMode === 'PIPER_ONLY' && (
-                  <p className="text-[11px] text-stone-500">
-                    <a href="https://huggingface.co/rhasspy/piper-voices/tree/c10ece1aade47bb51c153c893d14e5bf8e5b7117/vi/vi_VN/vais1000/medium" target="_blank" rel="noopener noreferrer" className="underline">Piper / VAIS-1000</a>
-                    {' · '}
-                    <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="underline">CC BY 4.0</a>
-                  </p>
-                )}
+                <p>Giọng hiệu lực: {VIENEU_VOICE_LABEL} · 1x · 0Hz</p>
                 <p>{voiceState}{profileOffline ? ' · Hồ sơ máy chủ offline, dùng bản đã xác nhận' : ''} {voiceDetail}</p>
                 {settings.enabled && !audioUnlocked && <button type="button" onClick={handleToggle} className="rounded border border-amber-300 bg-amber-50 p-2">Mở khóa loa — cần thao tác trên thiết bị này</button>}
-                {profile?.providerMode === 'BROWSER_ONLY' && (
-                  <label>Giọng Tiếng Việt tại thiết bị
-                    <select value={settings.browserVoiceURI || ''} onChange={(event) => updateSettings({ browserVoiceURI: event.target.value })} className="w-full rounded border p-2">
-                      <option value="">Chọn đúng giọng tại thiết bị</option>
-                      {vietnameseVoices.map((voice) => <option key={voice.uri} value={voice.uri}>{voice.name}</option>)}
-                    </select>
-                  </label>
-                )}
                 {recentSkipped.length > 0 && <details><summary>Giao dịch chưa đọc ({recentSkipped.length} gần nhất)</summary>
                   {recentSkipped.map((item, index) => <div key={`${item.transactionId}:${index}`} className="flex gap-2">
                     <span>{item.reason}</span><button type="button" onClick={() => {
@@ -313,103 +283,9 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                     )}
                   </div>
 
-                  {/* Mode & Voice */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label htmlFor="voice-provider-mode" className="block text-xs font-medium text-stone-700 mb-1">
-                        Chế độ phát
-                      </label>
-                      <select
-                        id="voice-provider-mode"
-                        value={formDraft.providerMode}
-                        onChange={(e) => {
-                          const providerMode = e.target.value as VoiceProviderMode;
-                          setFormDraft((p) => p ? { ...p, providerMode,
-                            voiceId: providerMode === 'PIPER_ONLY' ? PIPER_VOICE_ID
-                              : providerMode === 'VIENEU_ONLY' ? VIENEU_VOICE_ID
-                              : providerMode === 'EDGE_ONLY' && !EDGE_VOICE_IDS.some((id) => id === p.voiceId) ? EDGE_VOICE_IDS[0] : p.voiceId,
-                            rate: providerMode === 'VIENEU_ONLY' ? 1.0 : p.rate,
-                            pitchHz: providerMode === 'PIPER_ONLY' || providerMode === 'VIENEU_ONLY' ? 0 : p.pitchHz } : null);
-                        }}
-                        className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800"
-                      >
-                        <option value="VIENEU_ONLY">{VIENEU_VOICE_LABEL}</option>
-                        <option value="PIPER_ONLY">{PIPER_VOICE_LABEL}</option>
-                        <option value="EDGE_ONLY">Giọng máy chủ Edge</option>
-                        <option value="BROWSER_ONLY">Giọng trình duyệt</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label htmlFor="voice-server-id" className="block text-xs font-medium text-stone-700 mb-1">
-                        Giọng máy chủ
-                      </label>
-                      <select
-                        id="voice-server-id"
-                        value={formDraft.voiceId}
-                        disabled={formDraft.providerMode !== 'EDGE_ONLY'}
-                        onChange={(e) =>
-                          setFormDraft((p) => (p ? { ...p, voiceId: e.target.value } : null))
-                        }
-                        className="w-full text-xs rounded-lg border border-stone-300 p-2 bg-white text-stone-800 disabled:bg-stone-100"
-                      >
-                        {formDraft.voiceId === VIENEU_VOICE_ID &&
-                          <option value={VIENEU_VOICE_ID}>{VIENEU_VOICE_LABEL}</option>}
-                        {formDraft.voiceId === PIPER_VOICE_ID &&
-                          <option value={PIPER_VOICE_ID}>{PIPER_VOICE_LABEL}</option>}
-                        {formDraft.providerMode !== 'PIPER_ONLY' && formDraft.providerMode !== 'VIENEU_ONLY' && <>
-                          <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ) · Edge</option>
-                          <option value="vi-VN-NamMinhNeural">Nam Minh (Nam) · Edge</option>
-                        </>}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Rate & Pitch */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <div className="flex justify-between mb-1">
-                        <span>Tốc độ đọc</span>
-                        <span className="font-semibold">{formDraft.rate}x</span>
-                      </div>
-                      <input
-                        type="range"
-                        aria-label="Tốc độ đọc"
-                        min="0.75"
-                        max="2.0"
-                        step="0.05"
-                        value={formDraft.rate}
-                        disabled={formDraft.providerMode === 'VIENEU_ONLY'}
-                        onChange={(e) =>
-                          setFormDraft((p) => (p ? { ...p, rate: parseFloat(e.target.value) } : null))
-                        }
-                        className="w-full accent-emerald-600 disabled:opacity-50"
-                      />
-                      {formDraft.providerMode === 'VIENEU_ONLY' && (
-                        <span className="text-[10px] text-stone-500 block mt-0.5">Tốc độ tự nhiên 1.0x; ưu tiên đọc rõ số tiền</span>
-                      )}
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between mb-1">
-                        <span>Cao độ giọng</span>
-                        <span className="font-semibold">{formDraft.pitchHz > 0 ? `+${formDraft.pitchHz}` : formDraft.pitchHz} Hz</span>
-                      </div>
-                      <input
-                        type="range"
-                        aria-label="Cao độ giọng"
-                        min="-50"
-                        max="50"
-                        step="1"
-                        value={formDraft.pitchHz}
-                        disabled={formDraft.providerMode === 'PIPER_ONLY' || formDraft.providerMode === 'VIENEU_ONLY'}
-                        onChange={(e) =>
-                          setFormDraft((p) => (p ? { ...p, pitchHz: parseInt(e.target.value, 10) } : null))
-                        }
-                        className="w-full accent-emerald-600 disabled:opacity-50"
-                      />
-                    </div>
-
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 space-y-1">
+                    <p className="font-medium">{VIENEU_VOICE_LABEL}</p>
+                    <p>Tốc độ tự nhiên 1x · Cao độ 0 Hz · Không chuyển sang giọng khác</p>
                   </div>
 
                   {/* Audio Features */}

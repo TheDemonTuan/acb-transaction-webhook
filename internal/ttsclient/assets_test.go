@@ -53,7 +53,7 @@ func TestVoiceClipIntegrityAndAuthentication(t *testing.T) {
 }
 
 func TestVoiceManifestRejectsWrongProfileAndOversizedClips(t *testing.T) {
-	key := storage.ComputeSynthesisKey(storage.VoiceIDPiperVais1000, 1.25, 0)
+	key := storage.ComputeSynthesisKey(storage.VoiceIDVieneuMaiAnh, 1, 0)
 	other := strings.Repeat("b", 64)
 	manifestKey := other
 	clipBytes := int64(1)
@@ -66,7 +66,7 @@ func TestVoiceManifestRejectsWrongProfileAndOversizedClips(t *testing.T) {
 			"formatterVersion":      "money-vi-v1",
 			"catalogVersion":        "v1",
 			"qualityEvidenceSha256": qualitySha,
-			"voiceId":               storage.VoiceIDPiperVais1000, "rate": 1.25, "pitchHz": 0,
+			"voiceId":               storage.VoiceIDVieneuMaiAnh, "rate": 1, "pitchHz": 0,
 			"composition":    map[string]any{"tail": "whole", "numbers": "whole"},
 			"preloadClipIds": []string{"amount-1"},
 			"amounts":        map[string]any{"1": map[string]any{"standard": "amount-1", "classic": map[string]any{}}},
@@ -97,6 +97,10 @@ func TestVoiceManifestRejectsWrongProfileAndOversizedClips(t *testing.T) {
 			manifest["amounts"] = map[string]any{"1": map[string]any{"standard": "missing", "classic": map[string]any{}}}
 		case "profile-rate":
 			manifest["rate"] = 1.1
+		case "profile-voice":
+			manifest["voiceId"] = "vi-VN-vais1000-medium"
+		case "profile-pitch":
+			manifest["pitchHz"] = 5
 		}
 		canonical, _ := json.Marshal(manifest)
 		digest := sha256.Sum256(canonical)
@@ -117,7 +121,7 @@ func TestVoiceManifestRejectsWrongProfileAndOversizedClips(t *testing.T) {
 	if _, _, status, err := client.VoiceManifest(context.Background(), key); err != nil || status != http.StatusOK {
 		t.Fatalf("valid manifest status=%d error=%v", status, err)
 	}
-	for _, name := range []string{"schema1", "empty-clips", "missing-onset", "invalid-onset", "unknown-preload", "incomplete-segments", "missing-amount", "profile-rate"} {
+	for _, name := range []string{"schema1", "empty-clips", "missing-onset", "invalid-onset", "unknown-preload", "incomplete-segments", "missing-amount", "profile-rate", "profile-voice", "profile-pitch"} {
 		damage = name
 		if _, _, _, err := client.VoiceManifest(context.Background(), key); err == nil {
 			t.Fatalf("invalid manifest %s accepted", name)

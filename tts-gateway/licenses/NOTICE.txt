@@ -1,26 +1,14 @@
 TTS runtime redistribution notices
 
-Piper text-to-speech 1.8.0 (OHF-Voice/piper1-gpl) is GPL-3.0-or-later.
-The fixed voice model is separately licensed CC-BY-4.0: see
-/app/assets/models/MODEL_CARD, NOTICE.txt and provenance.json.
-
 VieNeu v3 Turbo (pnnbao-ump/VieNeu-TTS-v3-Turbo) model weights, presets, and
 audio outputs are licensed for commercial use per its official model card.
 MOSS-Audio-Tokenizer-Nano-ONNX (OpenMOSS-Team) codec weights and architecture
 are Apache-2.0. SEA-G2P phonemizer is MIT. Presets and offline assets are
 pinned and verified in /app/assets/models/vieneu/provenance.json.
 
-This TTS Python component is conveyed as part of a GPL-3.0-or-later-compatible
-combined runtime with Piper. Its original MIT copyright and permission notice
-is preserved in application-MIT.txt; this does not relicense independent Go or
-React components. Complete TTS application source is in /app/app. Its exact
-Dockerfile, dependency locks and pack builder are in /app/licenses/application.
-The GPL warranty disclaimer and redistribution terms are in Piper-GPL-3.0.txt.
-Do not describe the Piper runtime as MIT or the model as an Edge voice.
-
-Piper bundles espeak-ng revision 724808c, including ucd-tools and pronunciation
-resources. See the complete corresponding source archive and its COPYING,
-COPYING.APACHE, COPYING.BSD2, COPYING.UCD and other per-file notices.
+This TTS Python component retains its original MIT copyright and permission
+notice in application-MIT.txt. Complete TTS application source is in /app/app;
+its Dockerfile, dependency locks and pack builder are in /app/licenses/application.
 
 lameenc 1.8.4 and the bundled LAME 3.100 encoder are LGPL-3.0-or-later and
 LGPL-2.0-or-later respectively; see their original LICENSE/COPYING files in
@@ -30,12 +18,12 @@ installed under /opt/venv/lib/python3.13/site-packages. Recipients may replace
 or rebuild these modules with modified versions; no signatures enforce originals.
 
 Corresponding sources are included in /app/licenses/source, with exact hashes
-and source URLs in sources.json. Piper includes its CMake build instructions;
-lameenc includes CMakeLists.txt, patch-lame.cmake and wheel build workflows.
+and source URLs in sources.json. lameenc includes CMakeLists.txt,
+patch-lame.cmake and wheel build workflows.
 Model files are not modified; MP3 output is resampled to mono 24 kHz by LAME.
 
 All other Python dependency copyright and license notices are preserved in
 site-packages distribution metadata. Base-image notices remain in their original
 locations. Distribution of this image must include these files and comply with
-GPL/LGPL source access and any applicable application-source requirements.
+LGPL source access and any applicable application-source requirements.
 No purchase, paid service subscription or runtime model download is required.

@@ -1,15 +1,14 @@
-Piper Vietnamese VAIS1000 voice pack
+VieNeu v3 Turbo Mai Anh voice pack
 
-Voice identifier: vi-VN-vais1000-medium. This is not a Microsoft Edge voice.
-Generated from original application transcripts using the rhasspy/Piper VAIS1000 model. Output audio is resampled to mono 24 kHz, exterior-silence trimmed, faded and loudness-normalized; the model itself is unmodified.
+Voice identifier: vi-VN-vieneu-v3-turbo-mai-anh-v1.
+Generated from original application transcripts with the pinned VieNeu v3 Turbo
+model and Mai Anh preset. Audio is resampled to mono 24 kHz, exterior-silence
+trimmed, faded and loudness-normalized; the model and retained clips are unmodified.
 
-Published model card and licensing provenance:
-https://huggingface.co/rhasspy/piper-voices/blob/c10ece1aade47bb51c153c893d14e5bf8e5b7117/vi/vi_VN/vais1000/medium/MODEL_CARD
-The model card identifies the VAIS-1000 dataset under Creative Commons Attribution 4.0 International:
-https://creativecommons.org/licenses/by/4.0/
-VAIS-1000: A Vietnamese Speech Synthesis Corpus (2017), submitted by Truong Do; DOI 10.21227/H2B887.
-https://ieee-dataport.org/documents/vais-1000-vietnamese-speech-synthesis-corpus
-Piper model distribution: rhasspy/piper-voices and contributors. Training note: fine-tuned from the U.S. English lessac medium voice.
+VieNeu model weights, presets and outputs permit commercial use according to
+the official model card: https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo
+MOSS-Audio-Tokenizer-Nano-ONNX is Apache-2.0 and SEA-G2P is MIT.
+Keep the upstream attribution, model card, exact hashes and pinned provenance in
+../models/vieneu/ with redistributed packs. No endorsement is implied.
 
-Retain this attribution with redistributed packs. No endorsement by the dataset/model contributors is implied. Model card, exact hashes and provenance are bundled at ../models/. The dataset/model license evidence is not a claim that the licensor has granted unrelated personality or other third-party rights, nor blanket permission for other providers' generated audio.
-Runtime software notices and corresponding source archives are separately bundled at /app/licenses in the TTS image.
+Runtime software notices and applicable source archives are in /app/licenses.

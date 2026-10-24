@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import type { VoiceEngine, VoiceInfo, VoiceMessage } from '../src/features/voice-announcements/voice-engine';
+import type { VoiceEngine, VoiceMessage } from '../src/features/voice-announcements/voice-engine';
 import { VoiceQueue } from '../src/features/voice-announcements/voice-queue';
 
 class FakeVoiceEngine implements VoiceEngine {
@@ -11,9 +11,6 @@ class FakeVoiceEngine implements VoiceEngine {
 
   isSupported(): boolean {
     return true;
-  }
-  async getVoices(): Promise<VoiceInfo[]> {
-    return [];
   }
   async speak(message: VoiceMessage): Promise<void> {
     if (this.blocker) {

@@ -256,8 +256,8 @@ describe('api transport and centralized CSRF', () => {
         status: 200,
         headers: {
           'Content-Type': 'audio/mpeg',
-          'X-TTS-Provider': 'piper',
-          'X-TTS-Voice': 'vi-VN-vais1000-medium',
+          'X-TTS-Provider': 'vieneu',
+          'X-TTS-Voice': 'vi-VN-vieneu-v3-turbo-mai-anh-v1',
         },
       });
     });
@@ -265,8 +265,8 @@ describe('api transport and centralized CSRF', () => {
 
     const res = await apiAudio('/voice/transactions/txn_public_1');
     expect(requestedUrl).toBe('/api/public/v1/voice/transactions/txn_public_1');
-    expect(res.provider).toBe('piper');
-    expect(res.voice).toBe('vi-VN-vais1000-medium');
+    expect(res.provider).toBe('vieneu');
+    expect(res.voice).toBe('vi-VN-vieneu-v3-turbo-mai-anh-v1');
   });
 
   it('apiAudio routes /voice/test to /api/public/v1/voice/test on public host', async () => {
@@ -279,8 +279,8 @@ describe('api transport and centralized CSRF', () => {
         status: 200,
         headers: {
           'Content-Type': 'audio/mpeg',
-          'X-TTS-Provider': 'edge',
-          'X-TTS-Voice': 'vi-VN-HoaiMyNeural',
+          'X-TTS-Provider': 'vieneu',
+          'X-TTS-Voice': 'vi-VN-vieneu-v3-turbo-mai-anh-v1',
         },
       });
     });
@@ -291,7 +291,7 @@ describe('api transport and centralized CSRF', () => {
       body: JSON.stringify({ profileRevision: 1, part: 'full' }),
     });
     expect(requestedUrl).toBe('/api/public/v1/voice/test');
-    expect(res.provider).toBe('edge');
+    expect(res.provider).toBe('vieneu');
   });
 
   it('apiAudio rejects arbitrary non-voice routes on public host', async () => {
