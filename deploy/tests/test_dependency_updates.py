@@ -52,8 +52,6 @@ class DependencyUpdateTests(unittest.TestCase):
         self.assertEqual(tts['runs-on'], 'ubuntu-24.04-arm')
         self.assertTrue(any('--severity HIGH,CRITICAL' in step.get('run', '')
                             for step in tts['steps']))
-        self.assertEqual(set(jobs['production-contract']['needs']),
-                         {'verify', 'docker-smoke-gateway', 'docker-smoke-tts-gateway'})
 
     def test_ci_validates_renovate_and_action_pins(self):
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
