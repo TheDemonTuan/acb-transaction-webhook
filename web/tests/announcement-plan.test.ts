@@ -25,7 +25,7 @@ const responseHeaders = (p = profile) => ({
 });
 
 function expectSpeechGraph(context: TestAudioContext, input: { connect: { mock: { calls: unknown[][] } } }, volume: number) {
-  const boost = context.gains.find((gain) => gain.gain.value === 2)!;
+  const boost = context.gains.find((gain) => gain.gain.value === 2.5)!;
   const local = context.gains.find((gain) => gain !== boost && gain.gain.value === volume)!;
   expect(boost).toBeDefined(); expect(local).toBeDefined();
   expect(input.connect.mock.calls).toContainEqual([boost]);
@@ -52,11 +52,11 @@ describe('prepared audio timeline', () => {
     const plan: PreparedAnnouncement = { kind: 'buffers', profile, volume: 0.4, recipe,
       segments: [{ buffer: buffer(2), role: 'amount' }, { buffer: buffer(1), role: 'tail' }, { buffer: buffer(0.5), role: 'tail' }],
       message: { text: '', onStart, onTailStart }, release: vi.fn() };
-    const pending = playPrepared(plan, new AbortController().signal, f.options, 10.85);
-    expect(f.sources.map((source) => source.start.mock.calls[0][0])).toEqual([10.85, 12.85, 13.85]);
+    const pending = playPrepared(plan, new AbortController().signal, f.options, 11.2);
+    expect(f.sources.map((source) => source.start.mock.calls[0][0])).toEqual([11.2, 13.2, 14.2]);
     expect(f.sources.every((source) => source.playbackRate.value === 1)).toBe(true);
     expectSpeechGraph(f.context, f.sources[0], 0.4);
-    vi.advanceTimersByTime(851);
+    vi.advanceTimersByTime(1201);
     expect(onStart).toHaveBeenCalledTimes(1); expect(onTailStart).not.toHaveBeenCalled();
     vi.advanceTimersByTime(2000);
     expect(onTailStart).toHaveBeenCalledWith(recipe.id);
@@ -70,7 +70,7 @@ describe('prepared audio timeline', () => {
     const f = fixture(), onStart = vi.fn(), onTailStart = vi.fn(), controller = new AbortController();
     const plan: PreparedAnnouncement = { kind: 'buffers', profile, volume: 1, recipe,
       segments: [{ buffer: buffer(2), role: 'amount' }, { buffer: buffer(1), role: 'tail' }], message: { text: '', onStart, onTailStart }, release: vi.fn() };
-    const pending = playPrepared(plan, controller.signal, f.options, 10.85);
+    const pending = playPrepared(plan, controller.signal, f.options, 11.2);
     controller.abort();
     await expect(pending).rejects.toMatchObject({ message: 'VOICE_CANCELLED', playbackStarted: false });
     vi.advanceTimersByTime(5000);
@@ -83,8 +83,8 @@ describe('prepared audio timeline', () => {
     const f = fixture(), onStart = vi.fn(), onTailStart = vi.fn();
     const plan: PreparedAnnouncement = { kind: 'buffers', profile, volume: 1, recipe,
       segments: [{ buffer: buffer(2), role: 'amount' }, { buffer: buffer(1), role: 'tail' }], message: { text: '', onStart, onTailStart }, release: vi.fn() };
-    const pending = playPrepared(plan, new AbortController().signal, f.options, 10.85);
-    if (started) vi.advanceTimersByTime(851);
+    const pending = playPrepared(plan, new AbortController().signal, f.options, 11.2);
+    if (started) vi.advanceTimersByTime(1201);
     f.context.setState('suspended');
     await expect(pending).rejects.toMatchObject({ message: 'AUDIO_CONTEXT_NOT_RUNNING', playbackStarted: started });
     vi.advanceTimersByTime(10000);

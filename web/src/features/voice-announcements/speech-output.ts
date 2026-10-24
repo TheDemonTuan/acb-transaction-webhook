@@ -13,7 +13,7 @@ export function createSpeechOutput(context: BaseAudioContext, volume: number): {
   const input = context.createGain();
   const protection = context.createWaveShaper();
   const localVolume = context.createGain();
-  input.gain.value = 2;
+  input.gain.value = 2.5;
   protection.curve = CURVE;
   protection.oversample = 'none';
   localVolume.gain.value = Math.max(0, Math.min(1, volume));
