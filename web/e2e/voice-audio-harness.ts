@@ -78,9 +78,10 @@ async function offlineEvidence(context: AudioContext) {
   const chimeMuted = await renderChime(0);
   const chimeRatio = chime.rms / baseline.rms;
   requireEvidence(chime.sampleRate === 48000, 'Chime measurement must render at 48 kHz');
-  requireEvidence(Math.abs(chime.duration - 0.85) <= 1 / CHIME_SAMPLE_RATE, 'Chime duration must be 850ms');
-  requireEvidence(Math.abs(chime.lastActiveSeconds! - chime.end) <= 2 / CHIME_SAMPLE_RATE, 'Chime must end at its scheduled sample');
-  requireEvidence(Math.abs(chimeRatio - 3) <= 0.15, `Chime RMS ratio ${chimeRatio} is not 3x`);
+  requireEvidence(Math.abs(chime.duration - 1.2) <= 1 / CHIME_SAMPLE_RATE, 'Chime duration must be 1200ms');
+  requireEvidence(Math.abs(chime.lastActiveSeconds! - chime.end) <= 1 / CHIME_SAMPLE_RATE, 'Chime must end at its scheduled sample');
+  requireEvidence(Math.abs(chimeRatio - 4) <= 0.20, `Chime RMS ratio ${chimeRatio} is not 4x`);
+  requireEvidence(chime.peak < 1, 'Chime must not clip');
   requireEvidence(Math.abs(chimeHalf.rms / chime.rms - 0.5) < 0.01, 'Chime device volume is not linear');
   requireEvidence(chimeMuted.peak === 0, 'Muted chime is not silent');
 
@@ -90,8 +91,9 @@ async function offlineEvidence(context: AudioContext) {
   const speech = await renderSpeech(sine, 1);
   const speechHalf = await renderSpeech(sine, 0.5);
   const speechMuted = await renderSpeech(sine, 0);
-  requireEvidence(Math.abs(speech.rms / rawSine.rms - 2) < 0.02, 'Unclipped speech must receive 2x gain');
-  requireEvidence(Math.abs(speech.peak - 0.20) <= 0.002, '1 kHz peak 0.10 speech sine must render at peak 0.20');
+  requireEvidence(Math.abs(speech.rms / rawSine.rms - 2.5) < 0.025, 'Unclipped speech must receive 2.5x gain');
+  requireEvidence(Math.abs(speech.peak - 0.25) <= 0.0025, '1 kHz peak 0.10 speech sine must render at peak 0.25');
+  requireEvidence(Math.abs(speechHalf.rms / rawSine.rms - 1.25) < 0.0125, 'Half-volume speech must receive 1.25x gain');
   requireEvidence(Math.abs(speechHalf.rms / speech.rms - 0.5) < 0.001, 'Speech volume is not linear');
   requireEvidence(speechMuted.peak === 0, 'Muted speech is not silent');
   const loudSine = context.createBuffer(1, SAMPLE_RATE, SAMPLE_RATE);
@@ -102,6 +104,7 @@ async function offlineEvidence(context: AudioContext) {
   requireEvidence(protectedSignal.peak <= 0.892 && protectedSignal.fullScaleSamples === 0,
     'Peak 0.8 loud sine must remain finite and below 0.892 without hard clipping');
 
+  requireEvidence(manifest.clips.length === 140, 'Retained VieNeu pack must contain all 140 clips');
   const clips = [];
   for (const clip of manifest.clips) {
     const owner = {};
@@ -111,6 +114,8 @@ async function offlineEvidence(context: AudioContext) {
     const processed = await renderSpeech(decoded, 1);
     requireEvidence(raw.rms > 0.00001 && processed.rms > raw.rms, `Silent or unamplified clip ${clip.clipId}`);
     requireEvidence(processed.peak <= ceiling + 0.000001, `Peak ceiling exceeded: ${clip.clipId}`);
+    requireEvidence(processed.peak <= 0.892 && processed.fullScaleSamples === 0,
+      `Clip must remain finite and below 0.892 without hard clipping: ${clip.clipId}`);
     requireEvidence(processed.sampleCount === decoded.length && processed.duration === decoded.duration &&
       processed.sampleRate === decoded.sampleRate, `Clip timing changed: ${clip.clipId}`);
     clips.push({ clipId: clip.clipId, raw, processed });

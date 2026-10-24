@@ -26,14 +26,17 @@ export function scheduleChime(context: BaseAudioContext, volume: number): { end:
   const nodes: ChimeNode[] = [];
   if (level === 0) return { end: 0, nodes };
   const start = context.currentTime;
+  // Stretch every envelope point equally to retain the two-tone decay shape.
+  const timeScale = 1.2 / 0.85;
   let end = start;
-  for (const [frequency, offset, duration] of [[880, 0, 0.40], [1320, 0.30, 0.55]]) {
+  for (const [frequency, baseOffset, baseDuration] of [[880, 0, 0.40], [1320, 0.30, 0.55]]) {
+    const offset = baseOffset * timeScale, duration = baseDuration * timeScale;
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     oscillator.type = 'sine'; oscillator.frequency.setValueAtTime(frequency, start + offset);
     gain.gain.setValueAtTime(0.0001, start + offset);
-    gain.gain.exponentialRampToValueAtTime(0.225 * level, start + offset + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.060 * level, start + offset + duration * 0.5);
+    gain.gain.exponentialRampToValueAtTime(0.300 * level, start + offset + 0.01 * timeScale);
+    gain.gain.exponentialRampToValueAtTime(0.080 * level, start + offset + duration * 0.5);
     gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration);
     oscillator.connect(gain); gain.connect(context.destination);
     nodes.push({ oscillator, gain });

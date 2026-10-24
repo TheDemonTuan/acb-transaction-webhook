@@ -223,20 +223,43 @@ describe('transaction audio explicit profile ownership', () => {
     engine.dispose(); engine.dispose();
     await expect(engine.speak(next)).rejects.toThrow('VOICE_DISPOSED');
   });
-  it('schedules the 850ms overlapping chime with the approved frequencies and peak', () => {
+  it.each([1, 0.5])('schedules the 1200ms overlapping chime with proportional timing and volume %s', (volume) => {
     const engine = createEngine(); engine.setProfile(profile);
-    expect(engine.playChime(1)).toBeCloseTo(10.85);
-    const context = TestAudioContext.owners[0];
+    expect(engine.playChime(volume)).toBeCloseTo(11.2, 12);
+    const context = TestAudioContext.owners[0], scale = 1200 / 850;
     expect(context.oscillators).toHaveLength(2);
-    expect(context.oscillators[0].frequency.setValueAtTime).toHaveBeenCalledWith(880, 10);
-    expect(context.oscillators[1].frequency.setValueAtTime).toHaveBeenCalledWith(1320, 10.3);
-    expect(context.oscillators[0].start).toHaveBeenCalledWith(10);
-    expect(context.oscillators[0].stop).toHaveBeenCalledWith(10.4);
-    expect(context.oscillators[1].start).toHaveBeenCalledWith(10.3);
-    expect(context.oscillators[1].stop.mock.calls[0][0]).toBeCloseTo(10.85);
-    const ramps = context.gains.flatMap((gain) => gain.gain.exponentialRampToValueAtTime.mock.calls);
-    expect(ramps.filter(([value]) => value === 0.225)).toHaveLength(2);
+    expect(context.gains).toHaveLength(2);
+    for (const [index, [frequency, offset, duration]] of [[880, 0, 0.40], [1320, 0.30, 0.55]].entries()) {
+      const oscillator = context.oscillators[index], gain = context.gains[index];
+      const start = 10 + offset * scale, end = start + duration * scale;
+      expect(oscillator.type).toBe('sine');
+      expect(oscillator.frequency.setValueAtTime).toHaveBeenCalledTimes(1);
+      expect(oscillator.frequency.setValueAtTime.mock.calls[0][0]).toBe(frequency);
+      expect(oscillator.frequency.setValueAtTime.mock.calls[0][1]).toBeCloseTo(start, 12);
+      expect(oscillator.start).toHaveBeenCalledTimes(1);
+      expect(oscillator.start.mock.calls[0][0]).toBeCloseTo(start, 12);
+      expect(oscillator.stop).toHaveBeenCalledTimes(1);
+      expect(oscillator.stop.mock.calls[0][0]).toBeCloseTo(end, 12);
+      expect(gain.gain.setValueAtTime).toHaveBeenCalledTimes(1);
+      expect(gain.gain.setValueAtTime.mock.calls[0][0]).toBe(0.0001);
+      expect(gain.gain.setValueAtTime.mock.calls[0][1]).toBeCloseTo(start, 12);
+      const ramps = gain.gain.exponentialRampToValueAtTime.mock.calls;
+      expect(ramps.map(([value]) => value)).toEqual([0.300 * volume, 0.080 * volume, 0.0001]);
+      expect(ramps[0][1]).toBeCloseTo(start + 0.01 * scale, 12);
+      expect(ramps[1][1]).toBeCloseTo(start + duration * scale * 0.5, 12);
+      expect(ramps[2][1]).toBeCloseTo(end, 12);
+      expect(oscillator.connect).toHaveBeenCalledWith(gain);
+      expect(gain.connect).toHaveBeenCalledWith(context.destination);
+    }
     expect(context.oscillators.every((node) => !node.connect.mock.calls.some(([target]) => target === context.destination))).toBe(true);
+    engine.dispose();
+  });
+  it('creates no chime oscillator or gain when muted', () => {
+    const engine = createEngine(); engine.setProfile(profile);
+    expect(engine.playChime(0)).toBe(0);
+    const context = TestAudioContext.owners[0];
+    expect(context.oscillators).toHaveLength(0);
+    expect(context.gains).toHaveLength(0);
     engine.dispose();
   });
   it('never invents public replay route or sends client voice/text/amount overrides', () => {
