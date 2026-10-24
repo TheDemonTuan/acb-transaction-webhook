@@ -24,7 +24,7 @@ services:
       - bark
 
   bark:
-    image: ghcr.io/finb/bark-server:latest
+    image: ghcr.io/finb/bark-server:latest@sha256:f5d3adcd0c6c2a633a48532a1cb49780fd821c1c717ce734f8fb1888d7a20431
     container_name: acb-bark-dev
     ports:
       - "8080:8080"
