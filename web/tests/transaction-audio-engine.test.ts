@@ -370,7 +370,7 @@ describe('transaction audio explicit profile ownership', () => {
     await Promise.resolve();
     const context = TestAudioContext.owners[0];
     expect(context.sources).toHaveLength(1);
-    vi.advanceTimersByTime(10000);
+    vi.advanceTimersByTime(2000);
     expect(audio.play).not.toHaveBeenCalled(); expect(onStart).not.toHaveBeenCalled();
     context.sources[0].onended?.();
     await played.promise;
