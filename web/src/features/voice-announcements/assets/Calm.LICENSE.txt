@@ -1,0 +1,33 @@
+Calm (WAV/Calm.wav)
+Author: Aarni Koskela (akx)
+Project: akx/Notifications
+
+License selected for this distribution:
+Creative Commons Attribution 3.0 Unported (CC BY 3.0)
+https://creativecommons.org/licenses/by/3.0/
+Legal code: https://creativecommons.org/licenses/by/3.0/legalcode
+
+Pinned source commit: db184d33834a94028b6600d155d312ce7b704e8d
+Source: https://github.com/akx/Notifications/blob/db184d33834a94028b6600d155d312ce7b704e8d/WAV/Calm.wav
+Raw recording: https://raw.githubusercontent.com/akx/Notifications/db184d33834a94028b6600d155d312ce7b704e8d/WAV/Calm.wav
+License evidence: https://raw.githubusercontent.com/akx/Notifications/db184d33834a94028b6600d155d312ce7b704e8d/README.md
+Git blob SHA-1: 0457b8d0d2709bdac76fc339cc76550ce5031e57
+File SHA-256: e59712560d09ebbfa344d06f29cb9310280c6180bbfca0ca15bbcf8be70c0773
+File bytes: 146372
+Encoding: PCM16 WAV, mono, 44100 Hz, 73006 frames (1.6554648526077098 seconds).
+
+Source PCM inspection (not a listening or browser-render result):
+All samples finite; sample peak 0.14459228515625 (-16.7971 dBFS), RMS
+0.026277076920798847. Nonzero sample extent: frames 2 through 67726,
+1.5357142857142858 seconds. Above -60 dBFS: 0.00013605442176870748
+through 1.2775510204081633 seconds (1.277437641723356-second extent).
+
+The creator's README at the pinned commit offers a choice of CC Attribution
+3.0 Unported or CC0 Public Domain. This distribution selects CC BY 3.0.
+
+Changes: None to the distributed recording. Playback applies only volume
+scaling of 4 times the device volume clamped to [0, 1]; mute remains silent.
+The source sample peak of 0.14459228515625 scales to 0.578369140625 at full
+volume, below full scale. This is source PCM arithmetic, not a browser-render
+or listening result. Playback uses the complete recording at its original
+rate, without loops, padding, stretching, or oscillator substitution.

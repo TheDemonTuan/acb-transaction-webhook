@@ -4,6 +4,7 @@ import type { VoiceProfile } from './voice-profile';
 import { AudioAssets } from './audio-assets';
 import { RecentPhraseRing } from './voice-copy';
 import { prepareAnnouncement, playPrepared, type PreparedAnnouncement, type PreparationOptions } from './announcement-plan';
+import { loadChimeRecording } from './chime-recording';
 
 export interface TransactionAudioEngineOptions {
   isPublic?: boolean;
@@ -18,33 +19,28 @@ interface PrefetchedPlan {
   detach: () => void;
 }
 
-interface ChimeNode { oscillator: OscillatorNode; gain: GainNode }
+interface ChimeNode { source: AudioBufferSourceNode; gain: GainNode; disconnect: () => void }
 
-/** Schedule the same chime on realtime or offline Web Audio contexts. */
-export function scheduleChime(context: BaseAudioContext, volume: number): { end: number; nodes: ChimeNode[] } {
+/** Play the complete, unchanged recording with 4× volume scaling on realtime or offline Web Audio contexts. */
+export function scheduleChime(context: BaseAudioContext, volume: number, buffer: AudioBuffer): { end: number; nodes: ChimeNode[] } {
   const level = Math.max(0, Math.min(1, volume));
-  const nodes: ChimeNode[] = [];
-  if (level === 0) return { end: 0, nodes };
+  if (level === 0) return { end: 0, nodes: [] };
+  const source = context.createBufferSource();
+  const gain = context.createGain();
+  source.buffer = buffer;
+  source.playbackRate.value = 1; source.detune.value = 0; source.loop = false;
+  gain.gain.value = 4 * level;
+  source.connect(gain); gain.connect(context.destination);
+  let disconnected = false;
+  const disconnect = () => {
+    if (disconnected) return;
+    disconnected = true;
+    source.disconnect(); gain.disconnect();
+  };
+  source.onended = disconnect;
   const start = context.currentTime;
-  // Stretch every envelope point equally to retain the two-tone decay shape.
-  const timeScale = 1.2 / 0.85;
-  let end = start;
-  for (const [frequency, baseOffset, baseDuration] of [[880, 0, 0.40], [1320, 0.30, 0.55]]) {
-    const offset = baseOffset * timeScale, duration = baseDuration * timeScale;
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = 'sine'; oscillator.frequency.setValueAtTime(frequency, start + offset);
-    gain.gain.setValueAtTime(0.0001, start + offset);
-    gain.gain.exponentialRampToValueAtTime(0.300 * level, start + offset + 0.01 * timeScale);
-    gain.gain.exponentialRampToValueAtTime(0.080 * level, start + offset + duration * 0.5);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration);
-    oscillator.connect(gain); gain.connect(context.destination);
-    nodes.push({ oscillator, gain });
-    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-    oscillator.start(start + offset); oscillator.stop(start + offset + duration);
-    end = Math.max(end, start + offset + duration);
-  }
-  return { end, nodes };
+  source.start(start);
+  return { end: start + buffer.duration, nodes: [{ source, gain, disconnect }] };
 }
 
 export class TransactionAudioEngine implements VoiceEngine {
@@ -57,6 +53,9 @@ export class TransactionAudioEngine implements VoiceEngine {
   private prefetched: PrefetchedPlan | null = null;
   private disposed = false;
   private chimeNodes: ChimeNode[] = [];
+  private chimeBuffer: AudioBuffer | null = null;
+  private chimeLoad: { controller: AbortController; promise: Promise<AudioBuffer> } | null = null;
+  private unlockGeneration = 0;
 
   constructor(private readonly options: TransactionAudioEngineOptions = {}) {
     this.isPublic = options.isPublic ?? (typeof window !== 'undefined' && isPublicViewerHost());
@@ -92,27 +91,56 @@ export class TransactionAudioEngine implements VoiceEngine {
     if (this.disposed || !this.profile) return false;
     const context = this.context();
     if (!context) return false;
-    try { if (context.state === 'suspended') await context.resume(); } catch { return false; }
-    if (context.state !== 'running') return false;
-    void this.assets.preload(this.profile, context).catch(() => {});
-    return true;
+    const generation = this.unlockGeneration;
+    try {
+      if (context.state === 'suspended') await context.resume();
+      if (generation !== this.unlockGeneration || this.disposed) return false;
+      this.requireRunning();
+      if (!this.chimeBuffer) {
+        if (!this.chimeLoad) {
+          const controller = new AbortController();
+          this.chimeLoad = { controller, promise: loadChimeRecording(context, controller.signal) };
+        }
+        const load = this.chimeLoad;
+        const stateChanged = () => { if (context.state !== 'running') load.controller.abort(); };
+        context.addEventListener('statechange', stateChanged);
+        try {
+          const buffer = await load.promise;
+          if (generation !== this.unlockGeneration || this.disposed) return false;
+          if (this.chimeLoad !== load) return this.chimeBuffer === buffer && context.state === 'running';
+          this.requireRunning();
+          this.chimeBuffer = buffer;
+        } finally {
+          context.removeEventListener('statechange', stateChanged);
+          if (this.chimeLoad === load) this.chimeLoad = null;
+        }
+      }
+      void this.assets.preload(this.profile, context).catch(() => {});
+      return true;
+    } catch {
+      if (generation !== this.unlockGeneration || this.disposed) return false;
+      this.options.onStatus?.('unavailable', context.state !== 'running'
+        ? 'AUDIO_CONTEXT_NOT_RUNNING' : 'CHIME_ASSET_UNAVAILABLE');
+      return false;
+    }
   }
   private stopChime(): void {
-    for (const { oscillator, gain } of this.chimeNodes) {
-      oscillator.onended = null;
-      try { oscillator.stop(); } catch {}
-      oscillator.disconnect(); gain.disconnect();
+    for (const node of this.chimeNodes) {
+      node.source.onended = null;
+      try { node.source.stop(); } catch {}
+      node.disconnect();
     }
     this.chimeNodes = [];
   }
   public playChime(volume = 1): number {
     const context = this.audioContext;
-    if (!context || context.state !== 'running') return 0;
-    const chime = scheduleChime(context, volume);
+    if (!context || context.state !== 'running' || volume <= 0) return 0;
+    if (!this.chimeBuffer) throw new Error('CHIME_ASSET_UNAVAILABLE');
+    const chime = scheduleChime(context, volume, this.chimeBuffer);
     for (const node of chime.nodes) {
-      const previous = node.oscillator.onended;
-      node.oscillator.onended = (event) => {
-        previous?.call(node.oscillator, event);
+      const previous = node.source.onended;
+      node.source.onended = (event) => {
+        previous?.call(node.source, event);
         this.chimeNodes = this.chimeNodes.filter((entry) => entry !== node);
       };
     }
@@ -193,6 +221,9 @@ export class TransactionAudioEngine implements VoiceEngine {
       context = this.requireRunning();
       const profile = message.profile || this.profile;
       if (!profile) throw new Error('VOICE_PROFILE_UNAVAILABLE');
+      if (message.chime && profile.chimeEnabled && (message.volume ?? 1) > 0 && !this.chimeBuffer) {
+        throw new Error('CHIME_ASSET_UNAVAILABLE');
+      }
       const prefetch = this.prefetched?.message === message && this.prefetched.revision === profile.revision ? this.prefetched : null;
       controller = prefetch?.controller || new AbortController();
       if (prefetch) { this.prefetched = null; prefetch.detach(); }
@@ -215,9 +246,9 @@ export class TransactionAudioEngine implements VoiceEngine {
           }
           const ended = Promise.withResolvers<void>();
           const last = this.chimeNodes.at(-1)!;
-          const previous = last.oscillator.onended;
-          last.oscillator.onended = (event) => {
-            previous?.call(last.oscillator, event);
+          const previous = last.source.onended;
+          last.source.onended = (event) => {
+            previous?.call(last.source, event);
             if (message.telemetry) message.telemetry.chimeEndedMonotonicAt = performance.now();
             ended.resolve();
           };
@@ -230,7 +261,7 @@ export class TransactionAudioEngine implements VoiceEngine {
       if (controller.signal.aborted) throw new Error('VOICE_CANCELLED');
       const onTailStart = message.onTailStart;
       plan.message.onTailStart = (id) => { this.recent.started(id); onTailStart?.(id); };
-      if (plan.kind === 'stream' && chimeFinished) {
+      if (chimeFinished) {
         const cancelled = Promise.withResolvers<void>();
         const abort = () => cancelled.resolve();
         controller.signal.addEventListener('abort', abort, { once: true });
@@ -259,6 +290,8 @@ export class TransactionAudioEngine implements VoiceEngine {
     }
   }
   public cancel(): void {
+    this.unlockGeneration++;
+    this.chimeLoad?.controller.abort(); this.chimeLoad = null;
     this.currentController?.abort(); this.currentController = null;
     this.assets.cancelPreload();
     this.clearPrefetch(); this.stopChime();
@@ -266,6 +299,7 @@ export class TransactionAudioEngine implements VoiceEngine {
   public dispose(): void {
     if (this.disposed) return;
     this.cancel(); this.disposed = true; this.assets.dispose();
+    this.chimeBuffer = null;
     if (this.audioContext) { void this.audioContext.close().catch(() => {}); this.audioContext = null; }
   }
 }

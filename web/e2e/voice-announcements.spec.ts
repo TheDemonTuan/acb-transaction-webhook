@@ -1,6 +1,10 @@
 import { expect, test } from '@playwright/test';
 import { emitCredit, expectCompleted, installVoiceFixture, manifest, profile, telemetry, unlockVoice } from './voice-audio-fixture';
 
+const CALM_DURATION_MS = 1655.4648526077098;
+// Performance timestamps and the native audio clock are sampled on different scheduling boundaries.
+const NATIVE_AUDIO_SCHEDULING_TOLERANCE_MS = 50;
+
 for (const cold of [false, true]) {
   test(`real VieNeu ${cold ? 'cold stream' : 'decoded pack'} unlock and test playback`, async ({ page }, testInfo) => {
     const requests = await installVoiceFixture(page, { enabled: true, cold });
@@ -16,11 +20,12 @@ for (const cold of [false, true]) {
     const [sample] = await expectCompleted(page, 1, cold ? 'cold-stream' : 'decoded-pack');
     expect(sample.isTest).toBe(true);
     expect(sample.chimeStartedMonotonicAt).toBeDefined();
-    expect(sample.speechStartedMonotonicAt! - sample.chimeStartedMonotonicAt!).toBeGreaterThanOrEqual(1175);
+    expect(sample.speechStartedMonotonicAt! - sample.chimeStartedMonotonicAt!)
+      .toBeGreaterThanOrEqual(CALM_DURATION_MS - NATIVE_AUDIO_SCHEDULING_TOLERANCE_MS);
     expect(requests.filter(url => url.includes('/voice/test/stream'))).toHaveLength(cold ? 1 : 0);
     const signal = await page.evaluate(() => window.__voiceSignal);
     expect(signal.some(frame => frame.at >= sample.chimeStartedMonotonicAt! &&
-      frame.at < sample.chimeStartedMonotonicAt! + 1200 && frame.rms > 0.001)).toBe(true);
+      frame.at < sample.chimeStartedMonotonicAt! + CALM_DURATION_MS && frame.rms > 0.001)).toBe(true);
     expect(signal.some(frame => frame.at >= sample.speechStartedMonotonicAt! && frame.rms > 0.001)).toBe(true);
     await testInfo.attach('vieneu-playback.json', { contentType: 'application/json', body: JSON.stringify({
       profile, manifest: { synthesisKey: manifest.synthesisKey, packVersion: manifest.packVersion }, requests,
@@ -30,7 +35,7 @@ for (const cold of [false, true]) {
   });
 }
 
-test('real chime lasts 1200ms before speech; independent credits speak once while snapshots, duplicate, stale and CATCH_UP remain silent', async ({ page }, testInfo) => {
+test('real recorded Calm chime finishes before speech; independent credits speak once while snapshots, duplicate, stale and CATCH_UP remain silent', async ({ page }, testInfo) => {
   await installVoiceFixture(page, { enabled: true });
   let historyRequests = 0;
   const transactionDate = new Date().toISOString();
@@ -58,10 +63,11 @@ test('real chime lasts 1200ms before speech; independent credits speak once whil
   await emitCredit(page);
   const [first] = await expectCompleted(page, 1);
   expect(first.chimeStartedMonotonicAt).toBeDefined();
-  expect(first.speechStartedMonotonicAt! - first.chimeStartedMonotonicAt!).toBeGreaterThanOrEqual(1175);
+  expect(first.speechStartedMonotonicAt! - first.chimeStartedMonotonicAt!)
+    .toBeGreaterThanOrEqual(CALM_DURATION_MS - NATIVE_AUDIO_SCHEDULING_TOLERANCE_MS);
   const signal = await page.evaluate(() => window.__voiceSignal);
   expect(signal.some(frame => frame.at >= first.chimeStartedMonotonicAt! &&
-    frame.at < first.chimeStartedMonotonicAt! + 1200 && frame.rms > 0.001)).toBe(true);
+    frame.at < first.chimeStartedMonotonicAt! + CALM_DURATION_MS && frame.rms > 0.001)).toBe(true);
   expect(signal.some(frame => frame.at >= first.speechStartedMonotonicAt! && frame.rms > 0.001)).toBe(true);
 
   // Every transport event refetches authoritative history. The refetch itself is never speech.
