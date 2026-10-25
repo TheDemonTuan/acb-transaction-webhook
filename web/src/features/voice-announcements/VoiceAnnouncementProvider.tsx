@@ -76,7 +76,7 @@ export const VoiceAnnouncementProvider: React.FC<VoiceAnnouncementProviderProps>
     const engine = injectedEngine || new TransactionAudioEngine({ isPublic, onProfileChanged: () => refreshProfile(),
       onStatus: (state, detail) => {
         if (!live) return;
-        if (detail === 'AUDIO_CONTEXT_NOT_RUNNING') {
+        if (detail === 'AUDIO_CONTEXT_NOT_RUNNING' || detail === 'CHIME_ASSET_UNAVAILABLE') {
           unlocked.current = false;
           setAudioUnlocked(false);
           setVoiceState('unavailable');

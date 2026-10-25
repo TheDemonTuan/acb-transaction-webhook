@@ -1,5 +1,15 @@
 import { vi } from 'bun:test';
 
+export const CHIME_RECORDING_DURATION = 1.6554648526077098;
+export const chimeRecordingBuffer = {
+  duration: CHIME_RECORDING_DURATION, length: 73006, sampleRate: 44100, numberOfChannels: 1,
+} as AudioBuffer;
+const chimeBytes = new Uint8Array([82, 73, 70, 70, 4, 0, 0, 0, 87, 65, 86, 69]);
+
+export function chimeRecordingResponse() {
+  return new Response(chimeBytes.slice(), { headers: { 'Content-Type': 'audio/wav' } });
+}
+
 export class TestAudioNode {
   connect = vi.fn((target: unknown) => target);
   disconnect = vi.fn();
@@ -16,11 +26,10 @@ class TestWaveShaperNode extends TestAudioNode { curve: Float32Array | null = nu
 class TestBufferSourceNode extends TestAudioNode {
   buffer: AudioBuffer | null = null;
   playbackRate = parameter();
-  start = vi.fn((_time: number) => {}); stop = vi.fn((_time?: number) => {}); onended: (() => void) | null = null;
-}
-class TestOscillatorNode extends TestAudioNode {
-  type = 'sine'; frequency = parameter();
-  start = vi.fn((_time: number) => {}); stop = vi.fn((_time?: number) => {}); onended: ((event: Event) => void) | null = null;
+  loop = false;
+  detune = parameter(0);
+  start = vi.fn((_time: number, _offset?: number, _duration?: number) => {});
+  stop = vi.fn((_time?: number) => {}); onended: (() => void) | null = null;
 }
 
 export class TestAudioContext extends EventTarget {
@@ -32,11 +41,11 @@ export class TestAudioContext extends EventTarget {
   gains: TestGainNode[] = [];
   shapers: TestWaveShaperNode[] = [];
   sources: TestBufferSourceNode[] = [];
-  oscillators: TestOscillatorNode[] = [];
   mediaSources: { audio: HTMLMediaElement; node: TestAudioNode }[] = [];
   resume = vi.fn(async () => this.setState('running'));
   close = vi.fn(async () => { this.state = 'closed'; });
-  decodeAudioData = vi.fn(async () => ({ duration: 1, length: 24000, numberOfChannels: 1 }) as AudioBuffer);
+  decodeAudioData = vi.fn(async (data: ArrayBuffer) => data.byteLength === chimeBytes.byteLength
+    ? chimeRecordingBuffer : ({ duration: 1, length: 24000, numberOfChannels: 1 }) as AudioBuffer);
   constructor() { super(); TestAudioContext.owners.push(this); }
   setState(state: AudioContextState) { this.state = state; this.dispatchEvent(new Event('statechange')); }
   createGain() {
@@ -47,9 +56,6 @@ export class TestAudioContext extends EventTarget {
   }
   createBufferSource() {
     const node = new TestBufferSourceNode(); this.sources.push(node); return node;
-  }
-  createOscillator() {
-    const node = new TestOscillatorNode(); this.oscillators.push(node); return node;
   }
   createMediaElementSource(audio: HTMLMediaElement) {
     const node = new TestAudioNode(); this.mediaSources.push({ audio, node }); return node;

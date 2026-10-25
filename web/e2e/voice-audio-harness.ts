@@ -3,11 +3,14 @@ import { prepareAnnouncement, playPrepared, type PreparationOptions } from '../s
 import { RecentPhraseRing } from '../src/features/voice-announcements/voice-copy';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 import { scheduleChime } from '../src/features/voice-announcements/transaction-audio-engine';
+import { loadChimeRecording } from '../src/features/voice-announcements/chime-recording';
 import { createSpeechOutput } from '../src/features/voice-announcements/speech-output';
 import type { VoiceMessage, VoiceTelemetry } from '../src/features/voice-announcements/voice-engine';
 
 const SAMPLE_RATE = 24000;
-const CHIME_SAMPLE_RATE = 48000;
+const CHIME_SAMPLE_RATE = 44100;
+const CHIME_FRAME_COUNT = 73006;
+const CHIME_DURATION = 1.6554648526077098;
 const profile = { ...DEFAULT_VOICE_PROFILE, funEnabled: false,
   synthesisKey: 'b5a2b7b8dec26c5ec21c3f8a7d91fa33ee75bcc587b51f444a6dbcb6bb34fcf0' };
 function metrics(data: Float32Array) {
@@ -34,37 +37,56 @@ async function renderSpeech(buffer: AudioBuffer, volume: number) {
   return { ...metrics(rendered.getChannelData(0)), sampleCount: rendered.length,
     duration: rendered.duration, sampleRate: rendered.sampleRate };
 }
-async function renderChime(volume: number, baseline = false) {
-  const offline = new OfflineAudioContext(1, CHIME_SAMPLE_RATE * 3, CHIME_SAMPLE_RATE);
-  let start = 0, end = 0;
-  if (baseline) {
-    // Exact pre-change 250ms envelope; never used to replace production playback.
-    for (const [frequency, offset, duration] of [[880, 0, 0.15], [1320, 0.10, 0.15]]) {
-      const oscillator = offline.createOscillator();
-      const gain = offline.createGain();
-      oscillator.frequency.setValueAtTime(frequency, offset);
-      gain.gain.setValueAtTime(0.0001, offset);
-      gain.gain.exponentialRampToValueAtTime(0.075 * volume, offset + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.02 * volume, offset + duration * 0.5);
-      gain.gain.exponentialRampToValueAtTime(0.0001, offset + duration);
-      oscillator.connect(gain); gain.connect(offline.destination);
-      oscillator.start(offset); oscillator.stop(offset + duration);
+function recordingMetrics(buffer: AudioBuffer, from = 0, to = buffer.length) {
+  let energy = 0, peak = 0, fullScaleSamples = 0, firstActiveSample = -1, lastActiveSample = -1;
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const data = buffer.getChannelData(channel).subarray(from, to);
+    const measured = metrics(data);
+    energy += measured.rms ** 2 * data.length;
+    peak = Math.max(peak, measured.peak);
+    fullScaleSamples += measured.fullScaleSamples;
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0) continue;
+      if (firstActiveSample === -1 || i < firstActiveSample) firstActiveSample = i;
+      lastActiveSample = Math.max(lastActiveSample, i);
     }
-    end = 0.25;
-    const rendered = await offline.startRendering();
-    return { ...metrics(rendered.getChannelData(0).slice(0, end * CHIME_SAMPLE_RATE)),
-      start, end, duration: end, sampleRate: rendered.sampleRate };
   }
-  start = offline.currentTime;
-  end = scheduleChime(offline, volume).end;
+  return { rms: Math.sqrt(energy / ((to - from) * buffer.numberOfChannels)), peak, energy, fullScaleSamples,
+    firstActiveSample, lastActiveSample,
+    activeDuration: firstActiveSample === -1 ? 0 : (lastActiveSample - firstActiveSample + 1) / buffer.sampleRate };
+}
+async function renderChime(buffer: AudioBuffer, volume: number) {
+  const offline = new OfflineAudioContext(buffer.numberOfChannels,
+    buffer.length + Math.ceil(buffer.sampleRate * 0.25), buffer.sampleRate);
+  const start = offline.currentTime;
+  const level = Math.max(0, Math.min(1, volume));
+  const { end, nodes } = scheduleChime(offline, volume, buffer);
+  if (level === 0) {
+    requireEvidence(nodes.length === 0 && end === 0, 'Muted recording must not create nodes or delay speech');
+  } else {
+    requireEvidence(nodes.length === 1, 'Recording must use exactly one source and gain');
+    const { source } = nodes[0];
+    requireEvidence(source.buffer === buffer && source.playbackRate.value === 1 && source.detune.value === 0 && !source.loop,
+      'Recording must play once at its original rate without substitution or looping');
+  }
   const rendered = await offline.startRendering();
-  const data = rendered.getChannelData(0);
-  const from = Math.round(start * CHIME_SAMPLE_RATE), to = Math.round(end * CHIME_SAMPLE_RATE);
-  const active = volume > 0 ? data.slice(from, to) : data;
-  let lastActive = -1;
-  for (let i = 0; i < data.length; i++) if (Math.abs(data[i]) > 0.000001) lastActive = i;
-  return { ...metrics(active), start, end, duration: end - start,
-    lastActiveSeconds: (lastActive + 1) / CHIME_SAMPLE_RATE, sampleRate: rendered.sampleRate };
+  requireEvidence(rendered.numberOfChannels === buffer.numberOfChannels, 'Recording channel count changed');
+  let sampleDifferencePeak = 0;
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const original = buffer.getChannelData(channel), actual = rendered.getChannelData(channel);
+    for (let i = 0; i < original.length; i++) {
+      sampleDifferencePeak = Math.max(sampleDifferencePeak, Math.abs(actual[i] - original[i] * 4 * level));
+    }
+  }
+  requireEvidence(sampleDifferencePeak <= 0.0000001, 'Playback changed the recorded waveform beyond 4× clamped volume scaling');
+  const measured = recordingMetrics(rendered, 0, buffer.length);
+  const postEnd = recordingMetrics(rendered, buffer.length);
+  requireEvidence(measured.peak < 1 && measured.fullScaleSamples === 0, 'Recording playback must have no full-scale samples');
+  if (level > 0) requireEvidence(Math.abs(end - start - buffer.duration) <= 1 / buffer.sampleRate,
+    'Scheduled end must equal the complete encoded recording duration');
+  requireEvidence(postEnd.peak === 0 && postEnd.energy === 0, 'Recording must be silent after its encoded end');
+  return { ...measured, start, end, duration: end - start, encodedFrames: buffer.length,
+    sampleDifferencePeak, postEnd, sampleRate: rendered.sampleRate, channels: rendered.numberOfChannels };
 }
 
 async function offlineEvidence(context: AudioContext) {
@@ -72,18 +94,35 @@ async function offlineEvidence(context: AudioContext) {
   const signal = new AbortController().signal;
   const manifest = await assets.getManifest(profile, signal);
   requireEvidence(manifest !== null, 'Committed VieNeu manifest did not validate');
-  const baseline = await renderChime(1, true);
-  const chime = await renderChime(1);
-  const chimeHalf = await renderChime(0.5);
-  const chimeMuted = await renderChime(0);
-  const chimeRatio = chime.rms / baseline.rms;
-  requireEvidence(chime.sampleRate === 48000, 'Chime measurement must render at 48 kHz');
-  requireEvidence(Math.abs(chime.duration - 1.2) <= 1 / CHIME_SAMPLE_RATE, 'Chime duration must be 1200ms');
-  requireEvidence(Math.abs(chime.lastActiveSeconds! - chime.end) <= 1 / CHIME_SAMPLE_RATE, 'Chime must end at its scheduled sample');
-  requireEvidence(Math.abs(chimeRatio - 4) <= 0.20, `Chime RMS ratio ${chimeRatio} is not 4x`);
-  requireEvidence(chime.peak < 1, 'Chime must not clip');
-  requireEvidence(Math.abs(chimeHalf.rms / chime.rms - 0.5) < 0.01, 'Chime device volume is not linear');
-  requireEvidence(chimeMuted.peak === 0, 'Muted chime is not silent');
+  // Decode the production WAV at its native sample rate; never reconstruct its waveform in the harness.
+  const decodingContext = new OfflineAudioContext(1, 1, CHIME_SAMPLE_RATE);
+  const recording = await loadChimeRecording(decodingContext, signal);
+  requireEvidence(recording.sampleRate === CHIME_SAMPLE_RATE && recording.length === CHIME_FRAME_COUNT &&
+    recording.numberOfChannels === 1, 'Bundled Calm.wav encoded format changed');
+  requireEvidence(Math.abs(recording.duration - CHIME_DURATION) <= 1 / CHIME_SAMPLE_RATE,
+    'Bundled Calm.wav encoded duration changed');
+  const recorded = { ...recordingMetrics(recording), duration: recording.duration,
+    sampleCount: recording.length, sampleRate: recording.sampleRate, channels: recording.numberOfChannels };
+  requireEvidence(recorded.peak > 0 && recorded.peak < 1 && recorded.fullScaleSamples === 0,
+    'Calm recording must be audible with headroom and no full-scale samples');
+  requireEvidence(recorded.energy > 0 && recorded.activeDuration >= 1.2 && recorded.activeDuration <= recorded.duration,
+    'Calm recording must contain at least 1.2 seconds of active audio within its encoded duration');
+  const chime = await renderChime(recording, 1);
+  const chimeHalf = await renderChime(recording, 0.5);
+  const chimeMuted = await renderChime(recording, 0);
+  requireEvidence(chime.firstActiveSample === recorded.firstActiveSample && chime.lastActiveSample === recorded.lastActiveSample &&
+    chime.activeDuration === recorded.activeDuration, 'Playback changed the recording active-audio extent');
+  requireEvidence(chime.peak < 1 && chime.fullScaleSamples === 0 && chime.energy > 0,
+    'Recording playback must retain energy and amplitude headroom');
+  requireEvidence(Math.abs(chime.rms / recorded.rms - 4) < 0.000001 &&
+    Math.abs(chime.peak / recorded.peak - 4) < 0.000001, 'Full-volume recording must use 4× amplitude gain');
+  requireEvidence(Math.abs(chimeHalf.rms / chime.rms - 0.5) < 0.000001 &&
+    Math.abs(chimeHalf.peak / chime.peak - 0.5) < 0.000001 &&
+    Math.abs(chimeHalf.energy / chime.energy - 0.25) < 0.000001, 'Recording volume and energy scaling changed');
+  requireEvidence(chimeHalf.firstActiveSample === recorded.firstActiveSample &&
+    chimeHalf.lastActiveSample === recorded.lastActiveSample, 'Half-volume playback changed the recording active duration');
+  requireEvidence(chimeMuted.peak === 0 && chimeMuted.energy === 0 && chimeMuted.activeDuration === 0,
+    'Muted recording must contain no signal or active samples');
 
   const sine = context.createBuffer(1, SAMPLE_RATE, SAMPLE_RATE);
   for (let i = 0; i < sine.length; i++) sine.getChannelData(0)[i] = 0.1 * Math.sin(2 * Math.PI * 1000 * i / SAMPLE_RATE);
@@ -124,7 +163,7 @@ async function offlineEvidence(context: AudioContext) {
   requireEvidence(assets.getStats().decodedBytes <= 16 * 1024 * 1024, 'Decoded cache exceeded 16 MiB');
   const samples = clips.filter(clip => ['amount-1000', 'amount-500000', 'amount-1000000', 'classic-001-500000'].includes(clip.clipId));
   assets.dispose();
-  return { baseline, chime, chimeRatio, chimeHalf, chimeMuted, rawSine, speech, speechHalf, speechMuted,
+  return { recorded, chime, chimeHalf, chimeMuted, rawSine, speech, speechHalf, speechMuted,
     protectedSignal, clipCount: clips.length, samples, clips };
 }
 
@@ -168,7 +207,7 @@ document.querySelector<HTMLButtonElement>('#run')!.addEventListener('click', () 
     requireEvidence(context.state === 'running', 'Real audio context did not unlock');
     const offline = await offlineEvidence(context);
     const compressed = await compressedEvidence(context);
-    console.info('VIENEU_REAL_AUDIO_RMS', JSON.stringify({ chimeRatio: offline.chimeRatio, samples: offline.samples }));
+    console.info('VIENEU_REAL_AUDIO_RMS', JSON.stringify({ chime: offline.chime, samples: offline.samples }));
     result.value = JSON.stringify({ offline, compressed });
     result.dataset.status = 'completed';
   };

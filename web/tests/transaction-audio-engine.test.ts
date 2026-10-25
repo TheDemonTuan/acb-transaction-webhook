@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
 import { setTestGlobal, restoreTestGlobals } from './test-globals';
-import { TestAudioContext, TestNativeAudio, resetAudioTestFixture } from './audio-test-fixture';
-import { TransactionAudioEngine, type TransactionAudioEngineOptions } from '../src/features/voice-announcements/transaction-audio-engine';
+import { TestAudioContext, TestNativeAudio, resetAudioTestFixture, CHIME_RECORDING_DURATION,
+  chimeRecordingBuffer, chimeRecordingResponse } from './audio-test-fixture';
+import { TransactionAudioEngine, scheduleChime, type TransactionAudioEngineOptions } from '../src/features/voice-announcements/transaction-audio-engine';
+import { CHIME_ASSET_URL } from '../src/features/voice-announcements/chime-recording';
 import { DEFAULT_VOICE_PROFILE } from '../src/features/voice-announcements/voice-profile';
 import { voiceRoute } from '../src/features/voice-announcements/announcement-plan';
 import { AudioAssets } from '../src/features/voice-announcements/audio-assets';
@@ -12,7 +14,7 @@ function stubAudioResponse(chosenProfile = profile) {
     ? new Response(new Uint8Array([1, 2, 3]), { headers: {
       'X-Voice-Revision': String(chosenProfile.revision), 'X-Voice-Synthesis-Key': chosenProfile.synthesisKey,
       'X-TTS-Voice': chosenProfile.voiceId, 'X-TTS-Provider': 'vieneu', 'X-TTS-Fallback': 'false',
-    } }) : new Response('', { status: 404 }));
+    } }) : url === CHIME_ASSET_URL ? chimeRecordingResponse() : new Response('', { status: 404 }));
   setTestGlobal('fetch', fetcher); return fetcher;
 }
 
@@ -27,6 +29,7 @@ describe('transaction audio explicit profile ownership', () => {
     resetAudioTestFixture();
     setTestGlobal('window', { Audio: TestNativeAudio, AudioContext: TestAudioContext });
     setTestGlobal('MediaSource', undefined);
+    vi.spyOn(AudioAssets.prototype, 'preload').mockResolvedValue(undefined);
     stubAudioResponse();
   });
   afterEach(() => { vi.useRealTimers(); restoreTestGlobals(); vi.restoreAllMocks(); });
@@ -44,15 +47,106 @@ describe('transaction audio explicit profile ownership', () => {
   });
   it('creates and resumes the context only through unlock before speech can request audio', async () => {
     TestAudioContext.initialState = 'suspended';
-    const preload = vi.spyOn(AudioAssets.prototype, 'preload').mockResolvedValue(undefined);
     const fetcher = stubAudioResponse(), engine = new TransactionAudioEngine({ isPublic: true }); engine.setProfile(profile);
     await expect(engine.speak({ text: '', transactionId: 'tx' })).rejects.toThrow('AUDIO_CONTEXT_NOT_RUNNING');
     expect(TestAudioContext.owners).toHaveLength(0); expect(fetcher).not.toHaveBeenCalled();
     expect(await engine.unlock()).toBe(true);
     expect(TestAudioContext.owners[0].resume).toHaveBeenCalledTimes(1);
-    expect(preload).toHaveBeenCalledTimes(1);
+    expect(TestAudioContext.owners[0].decodeAudioData).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe(CHIME_ASSET_URL);
+    expect(AudioAssets.prototype.preload).toHaveBeenCalledTimes(1);
     await engine.speak({ text: '', transactionId: 'tx' });
-    expect(fetcher).toHaveBeenCalledTimes(1); engine.dispose();
+    expect(fetcher).toHaveBeenCalledTimes(2); engine.dispose();
+  });
+  it('waits for both the bundled WAV response and decode before unlock succeeds', async () => {
+    const response = Promise.withResolvers<Response>(), requested = Promise.withResolvers<void>();
+    const decoded = Promise.withResolvers<AudioBuffer>(), decoding = Promise.withResolvers<void>();
+    const fetcher = vi.fn((_url: string) => { requested.resolve(); return response.promise; });
+    setTestGlobal('fetch', fetcher);
+    const engine = createEngine(); engine.setProfile(profile);
+    const context = TestAudioContext.owners[0], settled = vi.fn();
+    context.decodeAudioData.mockImplementation(() => { decoding.resolve(); return decoded.promise; });
+    const pending = engine.unlock().then((unlocked) => { settled(unlocked); return unlocked; });
+    await requested.promise;
+    expect(fetcher.mock.calls[0][0]).toBe(CHIME_ASSET_URL);
+    expect(context.decodeAudioData).not.toHaveBeenCalled(); expect(settled).not.toHaveBeenCalled();
+    response.resolve(chimeRecordingResponse());
+    await decoding.promise;
+    expect(settled).not.toHaveBeenCalled(); expect(context.sources).toHaveLength(0);
+    decoded.resolve(chimeRecordingBuffer);
+    expect(await pending).toBe(true);
+    expect(settled).toHaveBeenCalledWith(true);
+    expect(await engine.unlock()).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(context.decodeAudioData).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+  it.each(['network', 'http', 'decode'] as const)('reports unavailable after %s failure and retries only on re-unlock', async (failure) => {
+    const onStatus = vi.fn(), engine = createEngine({ onStatus });
+    engine.setProfile({ ...profile, chimeEnabled: true });
+    const context = TestAudioContext.owners[0];
+    const fetcher = vi.fn(async (_url: string) => chimeRecordingResponse());
+    if (failure === 'network') fetcher.mockRejectedValueOnce(new Error('NETWORK_FAILURE'));
+    if (failure === 'http') fetcher.mockResolvedValueOnce(new Response('', { status: 404 }));
+    if (failure === 'decode') context.decodeAudioData.mockRejectedValueOnce(new Error('DECODE_FAILURE'));
+    setTestGlobal('fetch', fetcher);
+    expect(await engine.unlock()).toBe(false);
+    expect(onStatus).toHaveBeenCalledWith('unavailable', 'CHIME_ASSET_UNAVAILABLE');
+    expect(context.sources).toHaveLength(0); expect(context.gains).toHaveLength(0);
+    await expect(engine.speak({ text: '', transactionId: 'tx', chime: true })).rejects.toThrow('CHIME_ASSET_UNAVAILABLE');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(await engine.unlock()).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.every(([url]) => url === CHIME_ASSET_URL)).toBe(true);
+    expect(engine.playChime()).toBeCloseTo(10 + CHIME_RECORDING_DURATION, 12);
+    expect(context.sources[0].buffer).toBe(chimeRecordingBuffer);
+    engine.dispose();
+  });
+  it.each(['cancel', 'dispose'] as const)('%s aborts an in-flight recording fetch and settles unlock false', async (operation) => {
+    const requested = Promise.withResolvers<AbortSignal>();
+    const fetcher = vi.fn((_url: string, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      requested.resolve(signal);
+      const { promise, reject } = Promise.withResolvers<Response>();
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      return promise;
+    });
+    setTestGlobal('fetch', fetcher);
+    const engine = createEngine(); engine.setProfile(profile);
+    const pending = engine.unlock(), signal = await requested.promise;
+    engine[operation]();
+    expect(await pending).toBe(false); expect(signal.aborted).toBe(true);
+    const context = TestAudioContext.owners[0];
+    expect(context.decodeAudioData).not.toHaveBeenCalled(); expect(context.sources).toHaveLength(0);
+    if (operation === 'cancel') {
+      stubAudioResponse();
+      expect(await engine.unlock()).toBe(true);
+    } else expect(await engine.unlock()).toBe(false);
+    engine.dispose();
+  });
+  it('cancels a nonabortable recording decode immediately and ignores its late buffer after retry', async () => {
+    const decoded = Promise.withResolvers<AudioBuffer>(), decoding = Promise.withResolvers<void>();
+    const engine = createEngine(); engine.setProfile(profile);
+    const context = TestAudioContext.owners[0];
+    context.decodeAudioData.mockImplementationOnce(() => { decoding.resolve(); return decoded.promise; });
+    const cancelled = engine.unlock();
+    await decoding.promise; engine.cancel();
+    expect(await cancelled).toBe(false);
+    expect(context.sources).toHaveLength(0);
+    expect(await engine.unlock()).toBe(true);
+    decoded.resolve({ ...chimeRecordingBuffer });
+    await decoded.promise;
+    expect(engine.playChime()).toBeCloseTo(10 + CHIME_RECORDING_DURATION, 12);
+    expect(context.sources).toHaveLength(1);
+    expect(context.sources[0].buffer).toBe(chimeRecordingBuffer);
+    engine.dispose();
+  });
+  it('does not fetch a recording from speech when unlock has not loaded one', async () => {
+    const fetcher = stubAudioResponse(), engine = createEngine();
+    engine.setProfile({ ...profile, chimeEnabled: true });
+    await expect(engine.speak({ text: '', transactionId: 'tx', chime: true })).rejects.toThrow('CHIME_ASSET_UNAVAILABLE');
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(TestAudioContext.owners[0].sources).toHaveLength(0);
+    engine.dispose();
   });
   it.each(['speak', 'prefetch'] as const)('rejects suspended %s without requesting audio or resuming outside unlock', async (operation) => {
     TestAudioContext.initialState = 'suspended';
@@ -139,13 +233,17 @@ describe('transaction audio explicit profile ownership', () => {
     const loaded = Promise.withResolvers<TestNativeAudio>(); TestNativeAudio.onLoaded = loaded.resolve;
     const onStart = vi.fn(), onStatus = vi.fn();
     const engine = createEngine({ onStatus }); engine.setProfile({ ...profile, chimeEnabled: true });
+    expect(await engine.unlock()).toBe(true);
     const pending = engine.speak({ text: '', transactionId: 'tx', chime: true, onStart });
     const observed = pending.catch((error: unknown) => error);
     const audio = await loaded.promise;
     TestAudioContext.owners[0].setState('suspended');
     expect(await observed).toMatchObject({ message: 'AUDIO_CONTEXT_NOT_RUNNING', playbackStarted: false });
     expect(onStart).not.toHaveBeenCalled(); expect(audio.play).not.toHaveBeenCalled();
-    expect(TestAudioContext.owners[0].oscillators.every((node) => node.disconnect.mock.calls.length > 0)).toBe(true);
+    const context = TestAudioContext.owners[0];
+    expect(context.sources).toHaveLength(1);
+    expect(context.sources[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(context.sources[0].stop).toHaveBeenCalledTimes(1);
     expect(onStatus).toHaveBeenCalledWith('unavailable', 'AUDIO_CONTEXT_NOT_RUNNING');
     engine.dispose();
   });
@@ -223,42 +321,92 @@ describe('transaction audio explicit profile ownership', () => {
     engine.dispose(); engine.dispose();
     await expect(engine.speak(next)).rejects.toThrow('VOICE_DISPOSED');
   });
-  it.each([1, 0.5])('schedules the 1200ms overlapping chime with proportional timing and volume %s', (volume) => {
+  it.each([1, 0.5, 2])('owns the complete recording and disconnects its single source at volume %s', async (volume) => {
     const engine = createEngine(); engine.setProfile(profile);
-    expect(engine.playChime(volume)).toBeCloseTo(11.2, 12);
-    const context = TestAudioContext.owners[0], scale = 1200 / 850;
-    expect(context.oscillators).toHaveLength(2);
-    expect(context.gains).toHaveLength(2);
-    for (const [index, [frequency, offset, duration]] of [[880, 0, 0.40], [1320, 0.30, 0.55]].entries()) {
-      const oscillator = context.oscillators[index], gain = context.gains[index];
-      const start = 10 + offset * scale, end = start + duration * scale;
-      expect(oscillator.type).toBe('sine');
-      expect(oscillator.frequency.setValueAtTime).toHaveBeenCalledTimes(1);
-      expect(oscillator.frequency.setValueAtTime.mock.calls[0][0]).toBe(frequency);
-      expect(oscillator.frequency.setValueAtTime.mock.calls[0][1]).toBeCloseTo(start, 12);
-      expect(oscillator.start).toHaveBeenCalledTimes(1);
-      expect(oscillator.start.mock.calls[0][0]).toBeCloseTo(start, 12);
-      expect(oscillator.stop).toHaveBeenCalledTimes(1);
-      expect(oscillator.stop.mock.calls[0][0]).toBeCloseTo(end, 12);
-      expect(gain.gain.setValueAtTime).toHaveBeenCalledTimes(1);
-      expect(gain.gain.setValueAtTime.mock.calls[0][0]).toBe(0.0001);
-      expect(gain.gain.setValueAtTime.mock.calls[0][1]).toBeCloseTo(start, 12);
-      const ramps = gain.gain.exponentialRampToValueAtTime.mock.calls;
-      expect(ramps.map(([value]) => value)).toEqual([0.300 * volume, 0.080 * volume, 0.0001]);
-      expect(ramps[0][1]).toBeCloseTo(start + 0.01 * scale, 12);
-      expect(ramps[1][1]).toBeCloseTo(start + duration * scale * 0.5, 12);
-      expect(ramps[2][1]).toBeCloseTo(end, 12);
-      expect(oscillator.connect).toHaveBeenCalledWith(gain);
-      expect(gain.connect).toHaveBeenCalledWith(context.destination);
-    }
-    expect(context.oscillators.every((node) => !node.connect.mock.calls.some(([target]) => target === context.destination))).toBe(true);
+    expect(await engine.unlock()).toBe(true);
+    const end = engine.playChime(volume);
+    expect(end).toBeCloseTo(10 + CHIME_RECORDING_DURATION, 12);
+    const context = TestAudioContext.owners[0];
+    expect(context.sources).toHaveLength(1); expect(context.gains).toHaveLength(1);
+    const source = context.sources[0], gain = context.gains[0];
+    expect(source.buffer).toBe(chimeRecordingBuffer);
+    expect(source.start.mock.calls).toEqual([[10]]);
+    expect(source.stop).not.toHaveBeenCalled();
+    expect(source.playbackRate.value).toBe(1); expect(source.detune.value).toBe(0);
+    expect(source.loop).toBe(false);
+    expect(source.connect).toHaveBeenCalledWith(gain);
+    expect(gain.connect).toHaveBeenCalledWith(context.destination);
+    expect(context.shapers).toHaveLength(0);
+    source.onended?.();
+    expect(source.disconnect).toHaveBeenCalledTimes(1);
+    expect(gain.disconnect).toHaveBeenCalledTimes(1);
+    engine.dispose();
+    expect(source.disconnect).toHaveBeenCalledTimes(1);
+    expect(gain.disconnect).toHaveBeenCalledTimes(1);
+  });
+  it('schedules the supplied recording at its original rate on a BaseAudioContext', () => {
+    const context = new TestAudioContext();
+    const scheduled = scheduleChime(context as unknown as BaseAudioContext, 0.4, chimeRecordingBuffer);
+    expect(scheduled.end).toBeCloseTo(10 + CHIME_RECORDING_DURATION, 12);
+    expect(scheduled.nodes).toHaveLength(1);
+    expect(scheduled.nodes[0].source).toBe(context.sources[0] as unknown as AudioBufferSourceNode);
+    expect(scheduled.nodes[0].gain).toBe(context.gains[0] as unknown as GainNode);
+    expect(context.sources[0].buffer).toBe(chimeRecordingBuffer);
+    expect(context.sources[0].start.mock.calls).toEqual([[10]]);
+    expect(context.sources[0].playbackRate.value).toBe(1);
+    expect(context.sources[0].loop).toBe(false);
+    context.sources[0].onended?.();
+  });
+  it('prepares during the recording but starts speech only after its source actually ends', async () => {
+    vi.useFakeTimers();
+    const loaded = Promise.withResolvers<TestNativeAudio>(); TestNativeAudio.onLoaded = loaded.resolve;
+    const played = Promise.withResolvers<TestNativeAudio>(); TestNativeAudio.onPlayed = played.resolve;
+    TestNativeAudio.autoEnded = false;
+    const onStart = vi.fn(), settled = vi.fn();
+    const engine = createEngine(); engine.setProfile({ ...profile, chimeEnabled: true });
+    expect(await engine.unlock()).toBe(true);
+    const pending = engine.speak({ text: '', transactionId: 'tx', chime: true, onStart }).then(settled);
+    const audio = await loaded.promise;
+    await Promise.resolve();
+    const context = TestAudioContext.owners[0];
+    expect(context.sources).toHaveLength(1);
+    vi.advanceTimersByTime(10000);
+    expect(audio.play).not.toHaveBeenCalled(); expect(onStart).not.toHaveBeenCalled();
+    context.sources[0].onended?.();
+    await played.promise;
+    expect(audio.play).toHaveBeenCalledTimes(1); expect(onStart).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(10000);
+    expect(settled).not.toHaveBeenCalled();
+    audio.dispatchEvent(new Event('ended'));
+    await pending;
+    expect(audio.play).toHaveBeenCalledTimes(1); expect(onStart).toHaveBeenCalledTimes(1);
     engine.dispose();
   });
-  it('creates no chime oscillator or gain when muted', () => {
+  it('cancels the recording source without starting prepared speech or accepting a late ended event', async () => {
+    const loaded = Promise.withResolvers<TestNativeAudio>(); TestNativeAudio.onLoaded = loaded.resolve;
+    const onStart = vi.fn();
+    const engine = createEngine(); engine.setProfile({ ...profile, chimeEnabled: true });
+    expect(await engine.unlock()).toBe(true);
+    const pending = engine.speak({ text: '', transactionId: 'tx', chime: true, onStart });
+    const observed = pending.catch((error: unknown) => error);
+    const audio = await loaded.promise;
+    const context = TestAudioContext.owners[0], source = context.sources[0], lateEnded = source.onended;
+    engine.cancel();
+    expect(await observed).toMatchObject({ message: 'VOICE_CANCELLED' });
+    lateEnded?.();
+    expect(audio.play).not.toHaveBeenCalled(); expect(onStart).not.toHaveBeenCalled();
+    expect(source.onended).toBeNull(); expect(source.stop).toHaveBeenCalledTimes(1);
+    expect(source.disconnect).toHaveBeenCalledTimes(1);
+    expect(context.gains).toHaveLength(1);
+    expect(context.gains[0].disconnect).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+  it.each([0, -1])('creates no chime source or gain when muted at volume %s', async (volume) => {
     const engine = createEngine(); engine.setProfile(profile);
-    expect(engine.playChime(0)).toBe(0);
+    expect(await engine.unlock()).toBe(true);
+    expect(engine.playChime(volume)).toBe(0);
     const context = TestAudioContext.owners[0];
-    expect(context.oscillators).toHaveLength(0);
+    expect(context.sources).toHaveLength(0);
     expect(context.gains).toHaveLength(0);
     engine.dispose();
   });

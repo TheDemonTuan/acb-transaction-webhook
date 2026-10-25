@@ -301,6 +301,23 @@ export const VoiceSettingsSheet: React.FC<VoiceSettingsSheetProps> = ({ isOpen, 
                       />
                       <span>Phát chuông báo âm thanh trước khi đọc</span>
                     </label>
+                    <p className="pl-6 text-xs text-stone-600">
+                      Calm by Aarni Koskela (akx) ·{' '}
+                      <a
+                        href="https://creativecommons.org/licenses/by/3.0/"
+                        className="underline hover:text-stone-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      >
+                        CC BY 3.0
+                      </a>
+                      {' · '}
+                      <a
+                        href="https://github.com/akx/Notifications/blob/db184d33834a94028b6600d155d312ce7b704e8d/WAV/Calm.wav"
+                        className="underline hover:text-stone-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      >
+                        Nguồn bản ghi Calm (phiên bản cố định)
+                      </a>
+                      . Bản ghi gốc không chỉnh sửa; chỉ điều chỉnh âm lượng khi phát.
+                    </p>
 
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input
