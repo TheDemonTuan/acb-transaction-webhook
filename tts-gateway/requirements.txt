@@ -3,5 +3,5 @@ starlette>=1.6.0
 uvicorn[standard]>=0.52.4
 pydantic>=2.13.5
 vieneu==3.8.3
-msgpack==1.2.1
+msgpack==1.2.3
 lameenc==1.8.4
