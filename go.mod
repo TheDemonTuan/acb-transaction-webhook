@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/go-chi/chi/v5 v5.4.0
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/payOSHQ/payos-lib-golang/v2 v2.0.1
 	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.41.0
