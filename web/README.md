@@ -1,6 +1,6 @@
 # Frontend toolchain
 
-Use Bun **1.4.3**, pinned in `.bun-version`. From `web/`:
+Use Bun **1.4.5**, pinned in `.bun-version`. From `web/`:
 
 ```sh
 bun ci
