@@ -49,7 +49,7 @@ def validate_request(args):
             rf'repos/{re.escape(CENTRAL)}/contents/{re.escape(REGISTRY)}',
             rf'repos/{re.escape(CENTRAL)}/actions/runs/[1-9][0-9]*(?:/artifacts\?per_page=100)?',
             rf'repos/{re.escape(CENTRAL)}/actions/artifacts/[1-9][0-9]*/zip',
-            rf'repos/{re.escape(CENTRAL)}/actions/workflows/cloudflare-deploy\.yml/runs\?status=(?:success|completed)&per_page=100',
+            rf'repos/{re.escape(CENTRAL)}/actions/workflows/cloudflare-deploy\.yml/runs\?status=success&event=workflow_dispatch&per_page=100',
             rf'repos/{re.escape(CENTRAL)}/actions/workflows/cloudflare-deploy\.yml/runs\?event=workflow_dispatch&per_page=100&created=>=[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}',
         ]
         require(any(re.fullmatch(p, endpoint) for p in patterns), 'GitHub API request out of scope')

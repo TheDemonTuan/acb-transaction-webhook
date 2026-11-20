@@ -55,7 +55,7 @@ class GitHubBrokerTests(unittest.TestCase):
             f'repos/{production.CENTRAL}/actions/runs/44',
             f'repos/{production.CENTRAL}/actions/runs/44/artifacts?per_page=100',
             f'repos/{production.CENTRAL}/actions/artifacts/45/zip',
-            f'repos/{production.CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?status=success&per_page=100',
+            f'repos/{production.CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?status=success&event=workflow_dispatch&per_page=100',
             f'repos/{production.CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?event=workflow_dispatch&per_page=100&created=>=2026-10-09',
         ]:
             with self.subTest(endpoint=endpoint):

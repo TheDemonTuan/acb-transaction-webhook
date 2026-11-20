@@ -768,7 +768,8 @@ class Migration:
         return key
 
     def latest_central_publication(self, expected_run=None):
-        runs = self.gh(f'repos/{CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?status=success&per_page=100')['workflow_runs']
+        # Server-side event filter: 5-minute scheduled runs otherwise push the last publication out of the 100-run page.
+        runs = self.gh(f'repos/{CENTRAL}/actions/workflows/cloudflare-deploy.yml/runs?status=success&event=workflow_dispatch&per_page=100')['workflow_runs']
         for run in runs:
             if run.get('event') != 'workflow_dispatch':
                 continue
