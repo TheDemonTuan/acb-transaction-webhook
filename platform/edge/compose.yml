@@ -29,7 +29,7 @@ services:
         max-file: "3"
 
   socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.5.0
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     container_name: edge-docker-socket-proxy
     restart: unless-stopped
     read_only: true
@@ -107,7 +107,7 @@ services:
 
   # Pinned helper probe containers: reach namespaces directly without host ports or allowlist bypass
   probe-traefik:
-    image: curlimages/curl:8.12.1
+    image: curlimages/curl:8.12.1@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6
     container_name: edge-probe-traefik
     network_mode: "container:edge-traefik"
     restart: "no"
@@ -116,7 +116,7 @@ services:
     command: ["-sS", "http://127.0.0.1:18080/readyz", "-H", "Host: acb-blue.internal.invalid"]
 
   probe-cloudflared:
-    image: curlimages/curl:8.12.1
+    image: curlimages/curl:8.12.1@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6
     container_name: edge-probe-cloudflared
     network_mode: "container:edge-cloudflared"
     restart: "no"
