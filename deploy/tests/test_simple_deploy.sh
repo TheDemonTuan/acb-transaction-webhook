@@ -304,8 +304,8 @@ http:
     public-api-inflight-global:
       inFlightReq: {amount: 100}
 EOF
-for file in portfolio bark 9router; do printf '# unrelated fixture %s\n' "$file" > "$root/edge/dynamic/$file.yml"; done
-sha256sum "$root/edge/dynamic/"{middlewares,portfolio,bark,9router}.yml > "$root/unrelated.sha256"
+for file in portfolio bark omniroute; do printf '# unrelated fixture %s\n' "$file" > "$root/edge/dynamic/$file.yml"; done
+sha256sum "$root/edge/dynamic/"{middlewares,portfolio,bark,omniroute}.yml > "$root/unrelated.sha256"
 cat > "$root/edge/traefik.yml" <<'EOF'
 accessLog:
   format: json
