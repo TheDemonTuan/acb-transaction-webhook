@@ -33,7 +33,7 @@ class PublisherTests(unittest.TestCase):
             (self.templates / (slot + '.yml')).write_bytes(data)
         self.destination.write_bytes(self.blue)
         self.destination.chmod(0o644)
-        self.foreign = self.dynamic / '9router.yml'
+        self.foreign = self.dynamic / 'omniroute.yml'
         self.foreign.write_bytes(b'foreign application config must remain unchanged\n')
         self.original_foreign = self.foreign.read_bytes()
         self.original_stat = self.foreign.stat()
@@ -67,7 +67,7 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(list(self.dynamic.glob('.acb-*')), [])
 
     def test_foreign_objects_and_policy_change_refused(self):
-        for data in (self.green.replace(b'acb-deploy-gateway', b'9router-router'),
+        for data in (self.green.replace(b'acb-deploy-gateway', b'omniroute-router'),
                      self.green.replace(b'acb-web-green:8090', b'other-app:8080'),
                      self.green.replace(b'Host(`gateway-deploy.acb.internal.invalid`)', b'Host(`evil.example`)')):
             with self.subTest(data=data):
@@ -227,7 +227,7 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(self.destination.read_bytes(), data)
             self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o644)
         rejected = subprocess.run([runuser, '-u', username, '--', '/usr/bin/sudo', '-n', str(helper)],  # nosec B603 B607
-                                  input=json.dumps(self.envelope(self.green.replace(b'acb-service', b'9router-service'))),
+                                  input=json.dumps(self.envelope(self.green.replace(b'acb-service', b'omniroute-service'))),
                                   capture_output=True, text=True, check=False)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(self.destination.read_bytes(), self.blue)
